@@ -1,5 +1,15 @@
 # Ändringslogg / Changelog
 
+## Ej släppt / Unreleased
+
+### Svenska
+- **Egen loggflik** (🪵 Logg, Ctrl+8) för felsökning: historik från `logs/app.log` även från föregående sessioner, felbanner med genväg till senaste felet, 🔖 markering + kopiera-efter-markering och ett **felsökningspaket** som kopieras med ett klick.
+- **Multi-OS + autostart utan VBS** — appen körs på Windows, macOS och Linux. Ny autostart-metod i Inställningar-menyn: **Direkt** (standard, OS startar Python direkt — ingen VBS/startfil) eller **Startfil** (klassiska `start_hidden`-filen som väntar på disken, för portabla installationer). Windows = register/pythonw, Linux = XDG-autostart, macOS = LaunchAgent.
+
+### English
+- **Dedicated Log tab** (🪵 Log, Ctrl+8) for troubleshooting: history from `logs/app.log` including previous sessions, an error banner with a jump-to-latest-error shortcut, 🔖 markers with copy-after-marker, and a one-click **diagnostics bundle**.
+- **Multi-OS + autostart without VBS** — the app runs on Windows, macOS and Linux. New autostart method choice in the Settings menu: **Direct** (default; the OS starts Python directly — no VBS/launcher file) or **Launcher file** (the classic `start_hidden` file that waits for the disk, for portable installs). Windows = registry/pythonw, Linux = XDG autostart, macOS = LaunchAgent.
+
 ## v1.0.0 — 2026-10-13
 
 Första officiella releasen. / First official release.

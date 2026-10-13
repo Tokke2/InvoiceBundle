@@ -28,6 +28,10 @@ A local app that totals supplier invoices and credit notes into one amount to pa
 Gränssnittet finns på **svenska** (standard) och **engelska**.
 Byt i menyn **🌐 Språk → Svenska / English** eller på fliken **Inställningar** — bytet gäller direkt, utan omstart, och sparas till nästa start.
 
+## Plattformar
+
+Appen körs på **Windows, macOS och Linux** (Python + PySide6). **Autostart** väljer du i Inställningar-menyn med två metoder: **Direkt** (standard — operativsystemet startar Python direkt, helt utan VBS/startfil; Windows: register + pythonw, Linux: XDG `.desktop`, macOS: LaunchAgent) eller **Startfil** (en `start_hidden`-fil i appmappen som väntar tills disken är redo — bra för portabla USB-installationer). Båda startar appen gömd i systemfältet med arbetsmappen satt till appmappen.
+
 ## Gratis — med frivillig donation
 
 Programmet är gratis att använda. En donation krävs inte och låser inte upp något.
@@ -95,6 +99,10 @@ Ingen öppen licens är vald. Fritt att använda. Inte fritt att kopiera, ändra
 
 The interface is available in **Swedish** (default) and **English**.
 Switch via the **🌐 Language** menu or the **Settings** tab — the change applies instantly, needs no restart, and is remembered for the next launch.
+
+## Platforms
+
+The app runs on **Windows, macOS and Linux** (Python + PySide6). **Autostart** is chosen in the Settings menu with two methods: **Direct** (default — the operating system starts Python directly, with no VBS/launcher file at all; Windows: registry + pythonw, Linux: XDG `.desktop`, macOS: LaunchAgent) or **Launcher file** (a `start_hidden` file in the app folder that waits until the disk is ready — good for portable USB installs). Both start the app hidden in the system tray with the working folder set to the app folder.
 
 ## Free — with a voluntary donation
 

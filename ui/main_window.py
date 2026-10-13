@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QHeaderView, QAbstractItemView,
 )
 from PySide6.QtGui import (
+    QActionGroup,
     QAction, QFont, QPalette, QColor, QCursor,
     QIcon, QPixmap, QPainter, QDesktopServices,
     QKeySequence, QShortcut,
@@ -1643,6 +1644,26 @@ class MainWindow(QMainWindow):
         self._act_autostart.triggered.connect(self._toggle_autostart)
         m_set.addAction(self._act_autostart)
 
+        # Autostart-metod: radioval (utan VBS / startfil)
+        self._m_autostart_method = m_set.addMenu(tr("autostart.method"))
+        self._m_autostart_method.setToolTip(tr("autostart.method_tip"))
+        self._autostart_method_actions: dict = {}
+        _method_group = QActionGroup(self)
+        _method_group.setExclusive(True)
+        _current_method = str(
+            self._settings.get("autostart_method", "auto")
+        )
+        for _method in ("auto", "direct", "launcher"):
+            _act = QAction(tr(f"autostart.method_{_method}"), self)
+            _act.setCheckable(True)
+            _act.setChecked(_current_method == _method)
+            _act.triggered.connect(
+                lambda _c=False, m=_method: self._set_autostart_method(m)
+            )
+            _method_group.addAction(_act)
+            self._m_autostart_method.addAction(_act)
+            self._autostart_method_actions[_method] = _act
+
         self._act_close_to_tray = QAction(
             tr("menu.close_to_tray"), self
         )
@@ -2093,11 +2114,18 @@ class MainWindow(QMainWindow):
                     # app.py:s user_message är svenska — bygg EN-text här
                     if actual:
                         plan = mgr.plan()
-                        message = tr(
-                            "main.autostart_on_full",
-                            workdir=plan["working_directory"],
-                            launcher=plan["launcher"],
-                        )
+                        if plan.get("resolved_method") == "direct":
+                            message = tr(
+                                "main.autostart_on_direct",
+                                workdir=plan["working_directory"],
+                                command=plan["os_command"],
+                            )
+                        else:
+                            message = tr(
+                                "main.autostart_on_full",
+                                workdir=plan["working_directory"],
+                                launcher=plan["launcher"],
+                            )
                     else:
                         message = tr("main.autostart_off")
                 self._sync_autostart_checkboxes(actual)
@@ -2113,6 +2141,34 @@ class MainWindow(QMainWindow):
         txt = tr("main.on_check") if actual else tr("main.off")
         self.set_status(tr("main.autostart_status", state=txt), 4000)
         QMessageBox.information(self, tr("main.autostart"), message)
+
+    def _set_autostart_method(self, method: str) -> None:
+        """Byter autostart-metod; registrerar om hos OS om den är på."""
+        ok = True
+        try:
+            self._settings.set("autostart_method", method)
+            if self._app and hasattr(self._app, "settings"):
+                mgr = self._app.settings.get_autostart_manager()
+                if mgr.is_enabled():
+                    ok = bool(mgr.set_enabled(True))
+        except Exception as exc:
+            log.error("_set_autostart_method: %s", exc)
+            ok = False
+        for key, act in self._autostart_method_actions.items():
+            act.setChecked(key == method)
+        self.set_status(
+            tr(
+                "autostart.method_set",
+                method=tr(f"autostart.method_{method}"),
+            ),
+            4000,
+        )
+        if not ok:
+            QMessageBox.warning(
+                self,
+                tr("main.autostart"),
+                tr("autostart.method_failed"),
+            )
 
     def _toggle_close_to_tray(self, checked: bool) -> None:
         """Kryssruta: göm till tray vid kryss."""

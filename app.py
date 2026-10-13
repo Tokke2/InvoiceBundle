@@ -144,6 +144,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "window_maximized": False,
     "font_size":        13,
     "startup":          False,
+    "autostart_method": "auto",
     "start_minimized":  True,
     "close_to_tray":    True,
     "last_opened":      None,
@@ -972,28 +973,39 @@ def _to_float(value: Any, default: float = 0.0) -> float:
 
 class AutostartManager:
     """
-    Hanterar OS-nivå autostart.
+    Hanterar OS-nivå autostart på Windows, macOS och Linux.
 
-    Starten går alltid via en startfil INUTI appmappen
-    (autostart/start_hidden.vbs eller .sh):
+    METODER (settings "autostart_method", väljs i Inställningar-menyn)
+    ─────────────────────────────────────────────────────────────────
+    auto      → direct (standard). OS-posten startar Python direkt.
+                INGEN VBS, ingen startfil. main.py gör själv
+                os.chdir(BASE_DIR) vid start, så arbetsmappen är
+                alltid appmappen även från registret/System32 —
+                VBS-tricket behövs inte längre.
+    direct    → samma som auto.
+    launcher  → klassiska startfilen i appmappen
+                (autostart/start_hidden.vbs på Windows, .sh annars)
+                som dessutom väntar upp till 90 s på att disken
+                (t.ex. E:) ska bli redo. För portabla USB-installationer.
 
-    • Arbetsmapp sätts till appmappen — aldrig C:\\Windows\\System32.
-    • Väntar upp till 90 sekunder om disken inte är redo (t.ex. E:).
-    • Startar gömd (--minimized), utan konsolfönster.
-    • OS-posten (register / .desktop / plist) är bara en pekare.
-      All logg och alla startfiler ligger i appmappen.
+    Båda metoderna startar gömt (--minimized → pythonw på Windows).
 
-    Windows : wscript //B  →  autostart/start_hidden.vbs
-              (registret kan inte sätta arbetsmapp — därför VBS)
-    Linux   : ~/.config/autostart/*.desktop  Path=appmappen
-    macOS   : LaunchAgents-plist med WorkingDirectory
+    Windows : HKCU Run-nyckel (direct: pythonw main.pyw;
+              launcher: wscript → start_hidden.vbs)
+    Linux   : ~/.config/autostart/Fakturabunten.desktop (Path=)
+    macOS   : ~/Library/LaunchAgents/com.fakturabunten.plist
+              (WorkingDirectory)
     """
+
+    #: Giltiga autostart-metoder.
+    METHODS: tuple[str, ...] = ("auto", "direct", "launcher")
 
     _app_name: str = APP_NAME
     _WIN_RUN_KEY: str = r"Software\Microsoft\Windows\CurrentVersion\Run"
     _WAIT_SECONDS: int = 90
 
-    def __init__(self) -> None:
+    def __init__(self, method: str = "auto") -> None:
+        self.method: str = self.normalize_method(method)
         self._python_exe, self._main_py = self._detect_paths()
         log.debug(
             "AutostartManager: python=%s  main=%s  cwd=%s",
@@ -1057,13 +1069,26 @@ class AutostartManager:
     def pins_working_directory(self) -> bool:
         return True
 
+    @staticmethod
+    def normalize_method(method: str) -> str:
+        """Okänd metod → 'auto'."""
+        m = str(method or "auto").strip().lower()
+        return m if m in AutostartManager.METHODS else "auto"
+
+    def resolved_method(self) -> str:
+        """Effektiv metod: 'auto' betyder 'direct' på alla plattformar."""
+        return "launcher" if self.method == "launcher" else "direct"
+
     def build_command(self) -> str:
         """
         Kommandot som skrivs till OS.
 
-        Pekar på startfilen i appmappen — inte på python direkt.
+        direct   → Python direkt (ingen VBS/startfil).
+        launcher → startfilen i appmappen (VBS/.sh).
         Skriver inga filer (det gör set_enabled / verify).
         """
+        if self.resolved_method() == "direct":
+            return self._app_command()
         launcher = self._launcher_path()
         if CURRENT_PLATFORM == "windows":
             return f'"{self._wscript_exe()}" //nologo //B "{launcher}"'
@@ -1076,14 +1101,23 @@ class AutostartManager:
         return self.build_command()
 
     def plan(self) -> dict[str, Any]:
+        resolved = self.resolved_method()
         return {
             "platform": CURRENT_PLATFORM,
+            "method": self.method,
+            "resolved_method": resolved,
+            "uses_launcher": resolved == "launcher",
             "working_directory": str(self.working_directory()),
             "app_command": self._app_command(),
             "os_command": self.build_command(),
-            "launcher": str(self._launcher_path()),
+            "launcher": (
+                str(self._launcher_path())
+                if resolved == "launcher" else ""
+            ),
             "starts_minimized": self.starts_minimized(),
-            "waits_for_drive_seconds": self._WAIT_SECONDS,
+            "waits_for_drive_seconds": (
+                self._WAIT_SECONDS if resolved == "launcher" else 0
+            ),
         }
 
     def user_message(self, enabled: bool) -> str:
@@ -1093,6 +1127,16 @@ class AutostartManager:
                 "Programmet startar inte längre vid inloggning."
             )
         p = self.plan()
+        if p["resolved_method"] == "direct":
+            return (
+                "Autostart är på (direktstart, utan VBS).\n\n"
+                "Vid inloggning:\n"
+                "• OS startar Python direkt — ingen startfil behövs\n"
+                "• startar gömd i systemfältet, utan konsolfönster\n"
+                "• arbetsmapp = appmappen, aldrig System32\n\n"
+                f"Arbetsmapp: {p['working_directory']}\n"
+                f"Kommando: {p['os_command']}"
+            )
         return (
             "Autostart är på.\n\n"
             "Vid inloggning:\n"
@@ -1407,7 +1451,7 @@ class AutostartManager:
     def set_enabled(self, enable: bool) -> bool:
         try:
             self._retire_legacy_autostart()
-            if enable:
+            if enable and self.resolved_method() == "launcher":
                 self._write_launcher()
             if CURRENT_PLATFORM == "windows":
                 ok = self._win_set(enable)
@@ -1569,7 +1613,8 @@ class AutostartManager:
     def _linux_set(self, enable: bool) -> bool:
         p = self._linux_path()
         if enable:
-            self._write_launcher()
+            if self.resolved_method() == "launcher":
+                self._write_launcher()
             _ensure_dir(p.parent)
             icon = BASE_DIR / "app_icon.png"
             icon_line = f"Icon={icon}\n" if icon.exists() else ""
@@ -1610,7 +1655,8 @@ class AutostartManager:
     def _macos_set(self, enable: bool) -> bool:
         p = self._macos_path()
         if enable:
-            self._write_launcher()
+            if self.resolved_method() == "launcher":
+                self._write_launcher()
             _ensure_dir(p.parent)
             launcher = self._launcher_path()
             p.write_text(
@@ -1623,9 +1669,18 @@ class AutostartManager:
                 "  <string>com.fakturabunten</string>\n"
                 "  <key>ProgramArguments</key>\n"
                 "  <array>\n"
-                "    <string>/bin/sh</string>\n"
-                f"    <string>{launcher}</string>\n"
-                "  </array>\n"
+                + (
+                    "    <string>/bin/sh</string>\n"
+                    f"    <string>{launcher}</string>\n"
+                    if self.resolved_method() == "launcher"
+                    else f"    <string>{self._python_exe}</string>\n"
+                    + (
+                        f"    <string>{self._main_py}</string>\n"
+                        if self._main_py else ""
+                    )
+                    + "    <string>--minimized</string>\n"
+                )
+                + "  </array>\n"
                 "  <key>WorkingDirectory</key>\n"
                 f"  <string>{BASE_DIR}</string>\n"
                 "  <key>RunAtLoad</key>\n"
@@ -1701,6 +1756,16 @@ class SettingsManager:
         self._lock = threading.RLock()
         self._autostart = AutostartManager()
         self.load()
+        self._sync_autostart_method()
+
+    def _sync_autostart_method(self) -> None:
+        """Håller AutostartManager.method = settings autostart_method."""
+        try:
+            self._autostart.method = AutostartManager.normalize_method(
+                str(self.get("autostart_method", "auto"))
+            )
+        except Exception:
+            pass
 
     # ── Läs / spara ──────────────────────────────────────────────────────
 
@@ -1869,6 +1934,7 @@ class SettingsManager:
         return bool(self._data.get("close_to_tray", True))
 
     def get_autostart_manager(self) -> AutostartManager:
+        self._sync_autostart_method()
         return self._autostart
 
 

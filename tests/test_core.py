@@ -432,7 +432,16 @@ def test_autostart_command_has_minimized() -> None:
     assert mgr.starts_minimized()
     assert "--minimized" in mgr._app_command()
     assert mgr.working_directory() == appmod.BASE_DIR.resolve()
-    assert "start_hidden" in mgr.build_command().replace("\\", "/")
+    # Standardmetoden är DIREKT (utan VBS/startfil) på alla OS
+    assert mgr.resolved_method() == "direct"
+    assert "start_hidden" not in mgr.build_command()
+    assert "--minimized" in mgr.build_command()
+    # Launcher-metoden pekar fortfarande på startfilen i appmappen
+    launcher_mgr = appmod.AutostartManager(method="launcher")
+    assert launcher_mgr.resolved_method() == "launcher"
+    assert "start_hidden" in launcher_mgr.build_command().replace(
+        "\\", "/"
+    )
 
 
 def test_autostart_launcher_pins_cwd() -> None:
