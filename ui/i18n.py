@@ -60,6 +60,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "tab.import_tab": {"sv": "📥  Import", "en": "📥  Import"},
     "tab.reports": {"sv": "📊  Rapporter", "en": "📊  Reports"},
     "tab.settings_tab": {"sv": "⚙️  Inställningar", "en": "⚙️  Settings"},
+    "tab.log_tab": {"sv": "🪵  Logg", "en": "🪵  Log"},
     "tab.dashboard.sub": {"sv": "Översikt och nyckeltal", "en": "Overview and key figures"},
     "tab.invoices.sub": {"sv": "Hantera inkommande fakturor", "en": "Manage incoming invoices"},
     "tab.suppliers.sub": {"sv": "Leverantörsregister", "en": "Supplier register"},
@@ -67,6 +68,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "tab.import_tab.sub": {"sv": "Importera fakturor via PDF / e-post", "en": "Import invoices via PDF / e-mail"},
     "tab.reports.sub": {"sv": "Månads- och leverantörsrapporter", "en": "Monthly and supplier reports"},
     "tab.settings_tab.sub": {"sv": "Program- och företagsinställningar", "en": "App and company settings"},
+    "tab.log_tab.sub": {"sv": "Systemlogg — hitta fel på sekunder", "en": "System log — find errors in seconds"},
 
     # ── Menyer ───────────────────────────────────────────────────────
     "menu.file": {"sv": "&Arkiv", "en": "&File"},
@@ -331,6 +333,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "shortcut.tab_import": {"sv": "Hoppa till Import", "en": "Go to Import"},
     "shortcut.tab_rapporter": {"sv": "Hoppa till Rapporter", "en": "Go to Reports"},
     "shortcut.tab_installningar": {"sv": "Hoppa till Inställningar", "en": "Go to Settings"},
+    "shortcut.tab_logg": {"sv": "Hoppa till Logg", "en": "Go to Log"},
 
     # ── Huvudfönstrets dialoger ───────────────────────────────────────
     "main.quit_title": {"sv": "Avsluta programmet", "en": "Quit the app"},
@@ -369,6 +372,36 @@ _STRINGS: dict[str, dict[str, str]] = {
     "scan.missing": {"sv": "saknas: {fields}", "en": "missing: {fields}"},
 
     "scan.no_text": {"sv": "ingen text hittad", "en": "no text found"},
+
+    # ── Loggfliken (felsökning) ───────────────────────────────────────
+    "log.title": {"sv": "🪵  Systemlogg — hitta fel på sekunder", "en": "🪵  System log — find errors in seconds"},
+    "log.level": {"sv": "Nivå:", "en": "Level:"},
+    "log.search_ph": {"sv": "Sök i loggen (meddelande, logger, action) …", "en": "Search the log (message, logger, action) …"},
+    "log.only_errors": {"sv": "Endast fel", "en": "Errors only"},
+    "log.only_session": {"sv": "Denna session", "en": "This session"},
+    "log.auto_scroll": {"sv": "Auto-scroll", "en": "Auto-scroll"},
+    "log.col_time": {"sv": "Tid", "en": "Time"},
+    "log.col_level": {"sv": "Nivå", "en": "Level"},
+    "log.col_logger": {"sv": "Logger", "en": "Logger"},
+    "log.col_action": {"sv": "Action", "en": "Action"},
+    "log.col_message": {"sv": "Meddelande", "en": "Message"},
+    "log.banner_errors": {"sv": "⚠  {n} fel i loggen — senaste: {last}", "en": "⚠  {n} errors in the log — latest: {last}"},
+    "log.goto_error": {"sv": "Visa senaste felet", "en": "Show latest error"},
+    "log.refresh": {"sv": "🔄  Uppdatera", "en": "🔄  Refresh"},
+    "log.pause": {"sv": "⏸  Pausa live", "en": "⏸  Pause live"},
+    "log.resume": {"sv": "▶  Återuppta", "en": "▶  Resume"},
+    "log.mark": {"sv": "🔖  Markera här", "en": "🔖  Mark here"},
+    "log.marker_set": {"sv": "✔  Markering satt!", "en": "✔  Marker set!"},
+    "log.marker_text": {"sv": "Användarmarkering — återskapa felet nu, kopiera sedan loggen efter markeringen", "en": "User marker — reproduce the error now, then copy the log after the marker"},
+    "log.copy_marked": {"sv": "📋  Kopiera efter markering", "en": "📋  Copy after marker"},
+    "log.copy_diag": {"sv": "📋  Kopiera felsökningspaket", "en": "📋  Copy diagnostics"},
+    "log.open_dir": {"sv": "📁  Öppna loggmapp", "en": "📁  Open log folder"},
+    "log.export_shown": {"sv": "💾  Exportera visade", "en": "💾  Export shown"},
+    "log.export_title": {"sv": "Exportera logg", "en": "Export log"},
+    "log.reset_filters": {"sv": "🧹  Nollställ filter", "en": "🧹  Reset filters"},
+    "log.copy_row": {"sv": "📋  Kopiera rad", "en": "📋  Copy row"},
+    "log.copied": {"sv": "✔  Kopierat!", "en": "✔  Copied!"},
+    "log.info_line": {"sv": "Visar {shown} av {total} rader  ·  {errors} fel  ·  {warnings} varningar  ·  loggfil {size} KB", "en": "Showing {shown} of {total} rows  ·  {errors} errors  ·  {warnings} warnings  ·  log file {size} KB"},
 
     # ── PDF-export ────────────────────────────────────────────────────
     "pdf.complete_list": {"sv": "Komplett fakturalista", "en": "Complete invoice list"},

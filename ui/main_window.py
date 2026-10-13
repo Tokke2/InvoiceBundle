@@ -1210,6 +1210,8 @@ class MainWindow(QMainWindow):
          "📥", "Importera fakturor via PDF / e-post"),
         ("reports",      "Rapporter",     "📊  Rapporter",
          "📊", "Månads- och leverantörsrapporter"),
+        ("log_tab",      "Logg",          "🪵  Logg",
+         "🪵", "Systemlogg och felsökning"),
         ("settings_tab", "Inställningar", "⚙️  Inställningar",
          "⚙️", "Program- och företagsinställningar"),
     ]
@@ -1221,6 +1223,9 @@ class MainWindow(QMainWindow):
         self._tab_map: dict[str, tuple[QScrollArea, QWidget]] = {}
         self._hidden: dict[str, str] = {}
         self._plugins_ui_registered = False
+        #: Loggen är en inbyggd flik (ui/log_view.py) — advanced_logger-
+        #: pluginet ska INTE lägga till en andra loggflik.
+        self._builtin_log_tab = True
         self._invoices_view: QWidget | None = None
         self._suppliers_view: QWidget | None = None
         #: Senast applicerat KONKRETA tema (dark/light) — används av
@@ -1357,6 +1362,7 @@ class MainWindow(QMainWindow):
     _BUILTIN_VIEWS: dict[str, tuple[str, list[str]]] = {
         "suppliers": ("SuppliersView", ["ui.suppliers_view", "suppliers_view"]),
         "invoices": ("InvoicesView", ["ui.invoices_view", "invoices_view"]),
+        "log_tab": ("LogView", ["ui.log_view", "log_view"]),
     }
 
     def _load_builtin_views(self) -> None:
@@ -2593,10 +2599,11 @@ class MainWindow(QMainWindow):
             ("tab_import",        "import_tab"),
             ("tab_rapporter",     "reports"),
             ("tab_installningar", "settings_tab"),
+            ("tab_logg",          "log_tab"),
         ]
         fallback = [
             "Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4",
-            "Ctrl+5", "Ctrl+6", "Ctrl+7",
+            "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8",
         ]
         for i, (action, key) in enumerate(tab_shortcuts):
             seq = self._shortcut_seq(action, fallback[i])

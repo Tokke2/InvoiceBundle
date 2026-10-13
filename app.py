@@ -3017,6 +3017,7 @@ DEFAULT_SHORTCUTS: dict[str, str] = {
     "tab_import":     "Ctrl+5",
     "tab_rapporter":  "Ctrl+6",
     "tab_installningar": "Ctrl+7",
+    "tab_logg":       "Ctrl+8",
 }
 
 SHORTCUT_LABELS: dict[str, str] = {
@@ -3026,6 +3027,7 @@ SHORTCUT_LABELS: dict[str, str] = {
     "exportera_pdf":    "Exportera alla aktiva till PDF",
     "uppdatera":        "Uppdatera alla vyer",
     "avsluta":          "Avsluta programmet helt",
+    "tab_logg":         "Hoppa till Logg",
     "tab_dashboard":    "Hoppa till Dashboard",
     "tab_fakturor":     "Hoppa till Fakturor",
     "tab_leverantorer": "Hoppa till Leverantörer",

@@ -1558,6 +1558,19 @@ def register_ui(main_window: Any) -> None:
     except Exception as exc:
         log_diagnosis("_install_ui_signal_loggers", exc)
 
+    if getattr(main_window, "_builtin_log_tab", False):
+        # Huvudfönstret har en inbyggd loggflik (ui/log_view.py) som
+        # läser samma logs/app.log — lägg inte till en andra flik.
+        alog(
+            "LOGGER_VIEW",
+            "Inbyggd loggflik finns i huvudfönstret — pluginet "
+            "hoppar över sin egen LoggerView-flik",
+            logger="AdvancedLogger",
+        )
+        alog("PLUGIN", "AdvancedLogger UI registrerat (phase 2)",
+             logger="AdvancedLogger")
+        return
+
     try:
         view = LoggerView(
             _memory_handler_global, app=_app_ref, parent=main_window
