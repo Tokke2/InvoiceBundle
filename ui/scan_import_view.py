@@ -27,6 +27,7 @@ Copyright © dynamiskt år Rickard Längkvist
 
 import datetime
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QGroupBox, QTextEdit, QMessageBox, QFileDialog, QFrame,
     QComboBox, QLineEdit, QCheckBox, QSplitter, QApplication,
+    QDialog, QListWidget, QPlainTextEdit,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QCursor, QPixmap
@@ -95,6 +97,239 @@ def _parse_amount(text: str) -> float:
         return 0.0
 
 
+def _scan_module():
+    """Laddar plugins/scan_import.py (samma sökvägstrick som vyn)."""
+    import sys
+
+    plugins_dir = str(Path(__file__).resolve().parent.parent / "plugins")
+    if plugins_dir not in sys.path:
+        sys.path.insert(0, plugins_dir)
+    import scan_import as si
+
+    return si
+
+
+#: Fält i malldialogen (ordning = visning).
+_TEMPLATE_FIELDS = (
+    "invoice_number", "total_amount", "date", "due_date", "ocr",
+)
+
+
+def _infer_label(text_before: str) -> str:
+    """
+    Härleder etiketten före en markering: sista textbiten på raden,
+    max 5 ord / 40 tecken, utan avslutande kolon.
+    """
+    line = (text_before or "").rsplit("\n", 1)[-1]
+    cand = re.split(r"\s{2,}", line)[-1].strip()
+    cand = cand.strip(":# \t").strip()
+    words = cand.split()
+    cand = " ".join(words[-5:])[:40].rstrip(":# ").strip()
+    return cand
+
+
+class TemplateDialog(QDialog):
+    """
+    Skapa/redigera en leverantörsmall mot en konkret fakturatext.
+
+    Flöde: markera värdet i texten → 🎯 vid rätt fält → etiketten
+    härleds automatiskt → testa → spara. result_template sätts vid OK:
+    {"supplier": namn, "fields": {fält: {"label": ...}}}.
+    """
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        text: str,
+        supplier: str = "",
+        existing: dict | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._text = text or ""
+        self.result_template: dict | None = None
+        self.setWindowTitle(tr("tmpl.title", supplier=supplier or "…"))
+        self.setMinimumSize(760, 560)
+
+        root = QVBoxLayout(self)
+        root.setSpacing(8)
+
+        row_sup = QHBoxLayout()
+        lbl_sup = QLabel(tr("tmpl.supplier"))
+        row_sup.addWidget(lbl_sup)
+        self._supplier_edit = QLineEdit(supplier)
+        row_sup.addWidget(self._supplier_edit, stretch=1)
+        root.addLayout(row_sup)
+
+        intro = QLabel(tr("tmpl.intro"))
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        self._txt = QPlainTextEdit()
+        self._txt.setReadOnly(True)
+        self._txt.setPlainText(self._text)
+        self._txt.setFont(QFont("Consolas", 10))
+        root.addWidget(self._txt, stretch=1)
+
+        self._label_edits: dict[str, QLineEdit] = {}
+        self._previews: dict[str, QLabel] = {}
+        existing_fields = (existing or {}).get("fields", {})
+        for field in _TEMPLATE_FIELDS:
+            row = QHBoxLayout()
+            lbl = QLabel(tr(f"tmpl.field_{field}"))
+            lbl.setMinimumWidth(130)
+            row.addWidget(lbl)
+            edit = QLineEdit()
+            edit.setPlaceholderText(tr("tmpl.label_ph"))
+            spec = existing_fields.get(field, {})
+            if isinstance(spec, dict):
+                edit.setText(str(spec.get("label", "")))
+            edit.textChanged.connect(
+                lambda _t, f=field: self._preview_field(f)
+            )
+            row.addWidget(edit, stretch=1)
+            btn = QPushButton(tr("tmpl.use_selection"))
+            btn.clicked.connect(
+                lambda _c=False, f=field: self._use_selection(f)
+            )
+            row.addWidget(btn)
+            prev = QLabel()
+            prev.setMinimumWidth(110)
+            row.addWidget(prev)
+            root.addLayout(row)
+            self._label_edits[field] = edit
+            self._previews[field] = prev
+
+        self._lbl_hint = QLabel()
+        self._lbl_hint.setWordWrap(True)
+        root.addWidget(self._lbl_hint)
+
+        row_btn = QHBoxLayout()
+        btn_test = QPushButton(tr("tmpl.test"))
+        btn_test.clicked.connect(self._test_all)
+        row_btn.addWidget(btn_test)
+        row_btn.addStretch()
+        btn_cancel = QPushButton(f"✖  {tr('common.cancel')}")
+        btn_cancel.clicked.connect(self.reject)
+        row_btn.addWidget(btn_cancel)
+        btn_save = QPushButton(tr("tmpl.save"))
+        btn_save.setProperty("success", True)
+        btn_save.clicked.connect(self._save)
+        row_btn.addWidget(btn_save)
+        root.addLayout(row_btn)
+        self._test_all()
+
+    # ── Logik ─────────────────────────────────────────────────────────
+
+    def _rules(self) -> dict:
+        return {
+            f: {"label": e.text().strip()}
+            for f, e in self._label_edits.items()
+            if e.text().strip()
+        }
+
+    def _use_selection(self, field: str) -> None:
+        cursor = self._txt.textCursor()
+        selected = cursor.selectedText().strip()
+        if not selected:
+            self._lbl_hint.setText(tr("tmpl.no_selection"))
+            return
+        before = self._txt.toPlainText()[: cursor.selectionStart()]
+        label = _infer_label(before)
+        self._label_edits[field].setText(label)
+        self._preview_field(field)
+
+    def _preview_field(self, field: str) -> None:
+        si = _scan_module()
+        found = si.apply_template(
+            self._text, {"fields": self._rules()}
+        )
+        self._set_preview(field, found.get(field))
+
+    def _test_all(self) -> None:
+        si = _scan_module()
+        found = si.apply_template(
+            self._text, {"fields": self._rules()}
+        )
+        for field in _TEMPLATE_FIELDS:
+            self._set_preview(field, found.get(field))
+
+    def _set_preview(self, field: str, value: Any) -> None:
+        lbl = self._previews[field]
+        if value in (None, "", 0, 0.0):
+            lbl.setText(tr("tmpl.not_found"))
+            lbl.setStyleSheet("color:#d29922;background:transparent;")
+        else:
+            shown = (
+                _fmt_amount(float(value))
+                if field == "total_amount"
+                else str(value)
+            )
+            lbl.setText(tr("tmpl.found", value=shown))
+            lbl.setStyleSheet("color:#3fb950;background:transparent;")
+
+    def _save(self) -> None:
+        supplier = self._supplier_edit.text().strip()
+        if not supplier:
+            self._lbl_hint.setText(tr("tmpl.need_supplier"))
+            self._supplier_edit.setFocus()
+            return
+        rules = self._rules()
+        if not rules:
+            self._lbl_hint.setText(tr("tmpl.need_label"))
+            return
+        self.result_template = {"supplier": supplier, "fields": rules}
+        self.accept()
+
+
+class TemplatesManagerDialog(QDialog):
+    """Lista sparade mallar; radering sker via callback direkt."""
+
+    def __init__(
+        self, parent: QWidget | None, templates: dict,
+        on_delete: Any,
+    ) -> None:
+        super().__init__(parent)
+        self._templates = templates
+        self._on_delete = on_delete
+        self.setWindowTitle(tr("tmpl.manager_title"))
+        self.setMinimumSize(520, 360)
+        root = QVBoxLayout(self)
+        self._list = QListWidget()
+        root.addWidget(self._list, stretch=1)
+        row = QHBoxLayout()
+        btn_del = QPushButton(tr("tmpl.delete"))
+        btn_del.clicked.connect(self._delete_selected)
+        row.addWidget(btn_del)
+        row.addStretch()
+        btn_close = QPushButton(f"✖  {tr('common.cancel')}")
+        btn_close.clicked.connect(self.accept)
+        row.addWidget(btn_close)
+        root.addLayout(row)
+        self._refresh_list()
+
+    def _refresh_list(self) -> None:
+        self._list.clear()
+        if not self._templates:
+            self._list.addItem(tr("tmpl.manager_empty"))
+            return
+        for name in sorted(self._templates):
+            fields = (self._templates[name] or {}).get("fields", {})
+            self._list.addItem(tr(
+                "tmpl.manager_entry", supplier=name,
+                n=len(fields), fields=", ".join(fields.keys()),
+            ))
+
+    def _delete_selected(self) -> None:
+        row = self._list.currentRow()
+        if row < 0 or not self._templates:
+            return
+        names = sorted(self._templates)
+        if row >= len(names):
+            return
+        self._on_delete(names[row])
+        self._refresh_list()
+
+
 class ScanImportView(QWidget):
     """
     Import-vy för skannade fakturor.
@@ -104,12 +339,19 @@ class ScanImportView(QWidget):
     "Skapa faktura".
     """
 
-    def __init__(self, app: Any = None, parent: QWidget | None = None):
+    def __init__(
+        self, app: Any = None, parent: QWidget | None = None,
+        templates_path: Path | None = None,
+    ):
         super().__init__(parent)
         self._app = app
         self._rows: list[dict] = []       # tolkade rader
         self._paths: list[Path] = []      # valda filer
         self._dark = True
+        self._templates_path = (
+            Path(templates_path) if templates_path else None
+        )
+        self._templates_cache: dict | None = None
         self._build_ui()
         self._log_status()
 
@@ -272,6 +514,10 @@ class ScanImportView(QWidget):
         btn_del = QPushButton(tr("scan.remove_row"))
         self._btn_del = btn_del
         btn_del.clicked.connect(self._remove_row)
+        self._btn_template = QPushButton(tr("scan.template_btn"))
+        self._btn_template.clicked.connect(self._open_template_dialog)
+        self._btn_templates = QPushButton()
+        self._btn_templates.clicked.connect(self._open_templates_manager)
         self._lbl_sum = QLabel()
         self._lbl_sum.setStyleSheet(
             "background:transparent;font-weight:700;"
@@ -279,7 +525,10 @@ class ScanImportView(QWidget):
         row3.addWidget(btn_create)
         row3.addWidget(btn_open_dlg)
         row3.addWidget(btn_del)
+        row3.addWidget(self._btn_template)
+        row3.addWidget(self._btn_templates)
         row3.addWidget(self._lbl_sum, stretch=1)
+        self._refresh_templates_btn()
         br.addLayout(row3)
         root.addWidget(box_res, stretch=1)
 
@@ -316,6 +565,8 @@ class ScanImportView(QWidget):
         self._btn_create.setText(tr("scan.create"))
         self._btn_open_dlg.setText(tr("scan.open_dialog"))
         self._btn_del.setText(tr("scan.remove_row"))
+        self._btn_template.setText(tr("scan.template_btn"))
+        self._refresh_templates_btn()
         _scan_headers = tr_list("scan.columns")
         if len(_scan_headers) == len(COLUMNS):
             self._tbl.setHorizontalHeaderLabels(_scan_headers)
@@ -391,6 +642,133 @@ class ScanImportView(QWidget):
     #  TOLKNING
     # ══════════════════════════════════════════════════════════════════
 
+    # ── Leverantörsmallar ─────────────────────────────────────────────
+
+    def _templates_file(self) -> Path:
+        if self._templates_path is not None:
+            return self._templates_path
+        raw = ""
+        try:
+            if self._app is not None and hasattr(self._app, "settings"):
+                raw = str(self._app.settings.get("db_path", "data"))
+            elif self._app is not None and hasattr(
+                self._app, "get_setting"
+            ):
+                raw = str(self._app.get_setting("db_path", "data"))
+        except Exception:
+            raw = ""
+        data_dir = Path(raw or "data")
+        if not data_dir.is_absolute():
+            data_dir = (
+                Path(__file__).resolve().parent.parent / data_dir
+            )
+        return data_dir / "invoice_templates.json"
+
+    def _get_templates(self) -> dict:
+        if self._templates_cache is None:
+            si = _scan_module()
+            self._templates_cache = si.load_templates(
+                self._templates_file()
+            )
+        return self._templates_cache
+
+    def _save_templates_file(self) -> None:
+        si = _scan_module()
+        si.save_templates(
+            self._templates_file(), self._get_templates()
+        )
+        self._refresh_templates_btn()
+
+    def _refresh_templates_btn(self) -> None:
+        try:
+            n = len(self._get_templates())
+        except Exception:
+            n = 0
+        self._btn_templates.setText(tr("scan.templates_btn", n=n))
+
+    @staticmethod
+    def _compute_status(parsed: dict, has_text: bool) -> str:
+        status = (
+            "redo" if not parsed.get("missing")
+            else "saknas: " + ", ".join(parsed["missing"])
+        )
+        if not has_text:
+            status = "ingen text hittad"
+        return status
+
+    def _open_template_dialog(self) -> None:
+        """Skapa/redigera mall för markerad rad + tolka om raden."""
+        idxs = self._selected_rows()
+        if not idxs:
+            self._lbl_status.setText(tr("scan.select_row"))
+            return
+        si = _scan_module()
+        row = self._rows[idxs[0]]
+        text = str(row.get("_text", "") or "")
+        if not text:
+            self._lbl_status.setText(tr("scan.select_row"))
+            return
+        templates = self._get_templates()
+        existing = si.find_template(
+            templates, str(row.get("supplier", "") or "")
+        )
+        dlg = TemplateDialog(
+            self, text,
+            supplier=str(row.get("supplier", "") or ""),
+            existing=existing,
+        )
+        if not dlg.exec() or not dlg.result_template:
+            return
+        supplier = dlg.result_template["supplier"]
+        templates[supplier] = {"fields": dlg.result_template["fields"]}
+        self._save_templates_file()
+
+        # Den just sparade mallen appliceras ALLTID på den här raden
+        # (även om leverantörsnamnet inte står ordagrant i texten).
+        found = si.apply_template(text, templates[supplier])
+        if found:
+            for field, value in found.items():
+                row[field] = value
+            row["supplier"] = supplier
+            row["template"] = supplier
+            miss = []
+            if not float(row.get("total_amount") or 0) > 0:
+                miss.append("belopp")
+            if not row.get("invoice_number"):
+                miss.append("fakturanummer")
+            row["missing"] = miss
+            row["status"] = (
+                "redo" if not miss
+                else "saknas: " + ", ".join(miss)
+            )
+        else:
+            reparsed = si.parse_invoice_text(
+                text, self._suppliers(), templates=templates
+            )
+            for key in ("supplier", "invoice_number", "date",
+                        "due_date", "ocr", "total_amount", "missing"):
+                row[key] = reparsed.get(key, row.get(key))
+            row["template"] = reparsed.get("template", "")
+            row["status"] = self._compute_status(reparsed, bool(text))
+        self._refresh_table()
+        self._lbl_status.setText(
+            tr("tmpl.saved", supplier=supplier)
+        )
+        log.info(
+            "SCAN_TEMPLATE: mall sparad för %s, fält=%s",
+            supplier, list(dlg.result_template["fields"]),
+        )
+
+    def _open_templates_manager(self) -> None:
+        templates = self._get_templates()
+
+        def _delete(name: str) -> None:
+            templates.pop(name, None)
+            self._save_templates_file()
+
+        dlg = TemplatesManagerDialog(self, templates, _delete)
+        dlg.exec()
+
     def _suppliers(self) -> list[dict]:
         try:
             return self._app.get_suppliers() if self._app else []
@@ -429,7 +807,10 @@ class ScanImportView(QWidget):
             except Exception as exc:
                 log.error("extract %s: %s", path.name, exc)
                 text, method = "", "fel"
-            parsed = si.parse_invoice_text(text, suppliers)
+            parsed = si.parse_invoice_text(
+                text, suppliers,
+                templates=self._get_templates(),
+            )
             parsed["file"] = path.name
             parsed["_path"] = str(path)
             parsed["method"] = method
@@ -470,7 +851,10 @@ class ScanImportView(QWidget):
             )
             return
 
-        parsed = si.parse_invoice_text(text, self._suppliers())
+        parsed = si.parse_invoice_text(
+            text, self._suppliers(),
+            templates=self._get_templates(),
+        )
         parsed["file"] = "(inklistrad text)"
         parsed["_path"] = ""
         parsed["method"] = "manuell text"
@@ -523,6 +907,8 @@ class ScanImportView(QWidget):
     def _display_status(row: dict) -> str:
         """Statuscell på aktuellt språk (internt värde är svenska)."""
         raw = str(row.get("status", "") or "")
+        if raw == "redo" and row.get("template"):
+            return tr("scan.template_used")
         if raw == "redo":
             return tr("scan.ready")
         if raw.startswith("saknas:"):

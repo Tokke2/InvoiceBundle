@@ -304,22 +304,55 @@ def match_supplier(text: str, suppliers: list[dict]) -> str:
 
 
 def parse_invoice_text(
-    text: str, suppliers: list[dict] | None = None
+    text: str,
+    suppliers: list[dict] | None = None,
+    templates: dict | None = None,
 ) -> dict[str, Any]:
     """
     Tolkar en fakturatext och returnerar kandidater:
 
         {"total_amount", "invoice_number", "ocr", "date", "due_date",
-         "supplier", "missing": [..]}
+         "supplier", "missing": [..]} (+ "template" vid mallträff)
 
     Inget gissas ohämmat: saknas ett fält blir det tomt och listas i
     "missing" så att användaren ser vad som ska kompletteras.
+
+    Finns en leverantörsmall (templates) för den igenkända
+    leverantören körs den FÖRST för sina fält — användarens egna
+    etiketter vinner alltid över den generiska heuristiken. Mallens
+    leverantörsnamn kan också kännas igen direkt i texten, även om
+    leverantören inte finns i registret än.
     """
     total = parse_total(text or "")
     inv_nr = parse_invoice_number(text or "")
     ocr = parse_ocr(text or "")
     date, due = parse_dates(text or "")
     supplier = match_supplier(text or "", suppliers or [])
+    template_name = ""
+    template_fields: list[str] = []
+
+    if templates:
+        if not supplier:
+            supplier = match_supplier(
+                text or "", [{"name": n} for n in templates.keys()]
+            )
+        template = find_template(templates, supplier) if supplier else None
+        if template:
+            found = apply_template(text or "", template)
+            for field, value in found.items():
+                if field == "total_amount":
+                    total = float(value)
+                elif field == "invoice_number":
+                    inv_nr = str(value)
+                elif field == "ocr":
+                    ocr = str(value)
+                elif field == "date":
+                    date = str(value)
+                elif field == "due_date":
+                    due = str(value)
+                template_fields.append(field)
+            if found:
+                template_name = supplier
 
     missing = [
         label for ok, label in (
@@ -328,7 +361,7 @@ def parse_invoice_text(
             (bool(supplier), "leverantör"),
         ) if not ok
     ]
-    return {
+    result: dict[str, Any] = {
         "total_amount": total,
         "invoice_number": inv_nr,
         "ocr": ocr,
@@ -337,6 +370,145 @@ def parse_invoice_text(
         "supplier": supplier,
         "missing": missing,
     }
+    if template_name:
+        result["template"] = template_name
+        result["template_fields"] = template_fields
+    return result
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  LEVERANTÖRSMALLAR (egen layout per leverantör)
+#
+#  Fakturor har olika layout per leverantör. En mall talar om för
+#  tolkaren VILKEN ETIKETT som står framför varje värde på just den
+#  leverantörens fakturor, t.ex. {"label": "Att betala", ...}.
+#  Användaren skapar mallen i Import-fliken genom att markera ett
+#  värde i fakturatexten — etiketten härleds automatiskt.
+#
+#  Format (data/invoice_templates.json):
+#    {"Elgiganten AB": {"fields": {
+#        "total_amount": {"label": "Att betala"},
+#        "invoice_number": {"label": "Fakturanr"},
+#        "due_date": {"label": "Förfallodatum"}}}}
+# ═════════════════════════════════════════════════════════════════════
+
+#: Fält som kan ingå i en mall → extraktor-typ.
+TEMPLATE_FIELD_KINDS: dict[str, str] = {
+    "invoice_number": "token",
+    "total_amount": "amount",
+    "date": "date",
+    "due_date": "date",
+    "ocr": "digits",
+}
+
+_AMOUNT_AFTER = re.compile(
+    r"\d{1,3}(?:[ .\u00a0]\d{3})+(?:[,.]\d{2})?|\d+[,.]\d{2}"
+)
+_DATE_AFTER = re.compile(r"\d{4}-?\d{2}-?\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}")
+_TOKEN_AFTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-/.]{1,29}")
+_DIGITS_AFTER = re.compile(r"\d[\d \-]{4,28}\d")
+
+
+def extract_with_label(text: str, label: str, kind: str) -> str:
+    """
+    Hittar etiketten i texten (skiftlägesoberoende) och extraherar
+    första värdet av rätt typ EFTER etiketten — först på samma rad,
+    annars inom de närmaste 120 tecknen. Returnerar strängvärde
+    (belopp som float-sträng, datum som YYYY-MM-DD) eller "".
+    """
+    if not text or not label:
+        return ""
+    flat = re.sub(r"[ \t]+", " ", text)
+    lab = re.sub(r"\s+", " ", str(label)).strip().rstrip(":#").strip()
+    if not lab:
+        return ""
+    m = re.search(re.escape(lab), flat, re.IGNORECASE)
+    if not m:
+        return ""
+    window = flat[m.end(): m.end() + 160]
+    same_line = window.split("\n", 1)[0]
+    hit = _extract_kind(same_line, kind)
+    if hit:
+        return hit
+    return _extract_kind(window, kind)
+
+
+def _extract_kind(chunk: str, kind: str) -> str:
+    if not chunk:
+        return ""
+    if kind == "amount":
+        m = _AMOUNT_AFTER.search(chunk)
+        if m:
+            v = _norm_amount(m.group(0))
+            if v > 0:
+                return f"{v:.2f}"
+        return ""
+    if kind == "date":
+        m = _DATE_AFTER.search(chunk)
+        return _parse_date(m.group(0)) if m else ""
+    if kind == "digits":
+        m = _DIGITS_AFTER.search(chunk)
+        return re.sub(r"\s", "", m.group(0)) if m else ""
+    m = _TOKEN_AFTER.search(chunk)
+    return m.group(0).strip(" .") if m else ""
+
+
+def apply_template(text: str, template: dict) -> dict[str, Any]:
+    """Kör en leverantörsmall på texten → {fält: värde} för träffar."""
+    fields = (template or {}).get("fields", {})
+    found: dict[str, Any] = {}
+    for field, spec in fields.items():
+        kind = TEMPLATE_FIELD_KINDS.get(field)
+        if kind is None or not isinstance(spec, dict):
+            continue
+        raw = extract_with_label(text or "", str(spec.get("label", "")), kind)
+        if raw == "":
+            continue
+        found[field] = float(raw) if field == "total_amount" else raw
+    return found
+
+
+def find_template(templates: dict, supplier: str) -> dict | None:
+    """Mall för leverantörsnamn (exakt eller skiftlägesoberoende)."""
+    if not templates or not supplier:
+        return None
+    if supplier in templates:
+        return templates[supplier]
+    low = supplier.strip().lower()
+    for name, tmpl in templates.items():
+        if str(name).strip().lower() == low:
+            return tmpl
+    return None
+
+
+def load_templates(path: Path) -> dict:
+    """Läser mall-JSON tolerant ({} vid saknad/trasig fil)."""
+    try:
+        import json as _json
+
+        data = _json.loads(Path(path).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_templates(path: Path, templates: dict) -> bool:
+    """Skriver mall-JSON (atomärt via tmp-fil)."""
+    try:
+        import json as _json
+
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(
+            _json.dumps(templates, ensure_ascii=False, indent=1),
+            encoding="utf-8",
+        )
+        tmp.replace(target)
+        return True
+    except Exception as exc:
+        log.warning("save_templates: %s", exc)
+        return False
 
 
 # ═════════════════════════════════════════════════════════════════════
