@@ -1250,17 +1250,19 @@ class InvoicesView(QWidget):
             )
             from PySide6.QtCore import QDate
 
+            from ui.date_picker import (
+                NiceDateEdit, date_preview_label, quick_pick_row,
+            )
+
             dlg = QDialog(self)
-            dlg.setWindowTitle("Betalningsdatum för export")
-            dlg.setMinimumWidth(360)
+            dlg.setWindowTitle(tr("export.date_window_title"))
+            dlg.setMinimumWidth(430)
             dlg.setModal(True)
 
             root = QVBoxLayout(dlg)
             root.setSpacing(12)
             root.setContentsMargins(20, 16, 20, 16)
-            root.addWidget(
-                QLabel(f"Ange betalningsdatum för {n} fakturor:")
-            )
+            root.addWidget(QLabel(tr("export.choose_for", n=n)))
             root.addWidget(
                 QLabel(
                     f"ATT BETALA: {fmt_amount(att_betala, currency)}"
@@ -1273,14 +1275,11 @@ class InvoicesView(QWidget):
             root.addWidget(sep)
 
             date_row = QHBoxLayout()
-            lbl_d = QLabel("Betalningsdatum:")
+            lbl_d = QLabel(tr("export.payment_date"))
             lbl_d.setFont(make_font(11, True))
             date_row.addWidget(lbl_d)
 
-            date_edit = QDateEdit()
-            date_edit.setCalendarPopup(True)
-            date_edit.setDisplayFormat("yyyy-MM-dd")
-            date_edit.setMinimumHeight(36)
+            date_edit = NiceDateEdit()
 
             default_date = QDate.currentDate()
             if session_due_str:
@@ -1294,13 +1293,16 @@ class InvoicesView(QWidget):
                     pass
             date_edit.setDate(default_date)
             date_row.addWidget(date_edit)
+            date_row.addStretch()
             root.addLayout(date_row)
+            root.addWidget(quick_pick_row(date_edit, dlg))
+            root.addWidget(date_preview_label(date_edit, dlg))
 
             btn_row = QHBoxLayout()
-            btn_ok = QPushButton("✔  Exportera")
+            btn_ok = QPushButton(tr("export.export_btn"))
             btn_ok.setDefault(True)
             btn_ok.clicked.connect(dlg.accept)
-            btn_cancel = QPushButton("✖  Avbryt")
+            btn_cancel = QPushButton(f"✖  {tr('common.cancel')}")
             btn_cancel.clicked.connect(dlg.reject)
             btn_row.addWidget(btn_ok)
             btn_row.addWidget(btn_cancel)

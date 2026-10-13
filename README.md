@@ -1,61 +1,149 @@
 # Fakturabunten / InvoiceBundle
 
-Lokalt program som räknar ihop fakturor och krediter till en summa att betala.
-A local app that totals invoices and credit notes into one amount to pay.
+**Version 1.0.0** · Windows / Linux / macOS · Svenska & English
 
-Ingen prenumeration. Ingen molntjänst. All data ligger i programmappen på din dator.
-No subscription. No cloud. All data stays in the app folder on your computer.
+Lokalt program som räknar ihop leverantörsfakturor och kreditfakturor till en summa att betala — med leverantörsregister, förfallokoll och PDF-export. Ingen prenumeration. Ingen molntjänst. All data ligger i programmappen på din dator.
+
+A local app that totals supplier invoices and credit notes into one amount to pay — with a supplier register, due-date tracking and PDF export. No subscription. No cloud service. All data stays in the app folder on your computer.
 
 **© 2026 Rickard Längkvist**
 
-## Språk / Language
+---
 
-Appen finns på **svenska** (standard) och **engelska**.
-Byt i menyn **🌐 Språk → Svenska / English** eller på fliken Inställningar — bytet gäller direkt, utan omstart.
+# 🇸🇪 Svenska
 
-The app is available in **Swedish** (default) and **English**.
-Switch via the **🌐 Language** menu or the Settings tab — it applies instantly, no restart needed.
+## Vad programmet gör
 
-## Gratis, med frivillig donation / Free, with voluntary donation
+- Registrerar leverantörsfakturor och kreditfakturor.
+- Leverantörsregister med live-sökning, favoriter (★), betalvillkor och export till CSV/JSON.
+- Räknar ihop **Fakturor (+)**, **Krediter (−)** och **ATT BETALA**.
+- Import av skannade fakturor (PDF/bild) med tolkning av belopp, OCR och datum.
+- Exporterar en betallista som PDF med betalningsdatum och bankgiro.
+  - Betalningsdatumet väljs **vid varje export** i en kalender med snabbval (Idag, +7, +14, +30 dagar, månadsslut) — och nollställs efteråt.
+- Fyra teman (mörkt, ljust, auto, system), systemfältsikon, autostart och automatisk backup.
+- All data lagras lokalt som JSON i programmappen (`data/`). Ingenting skickas över nätet.
+
+## Språk
+
+Gränssnittet finns på **svenska** (standard) och **engelska**.
+Byt i menyn **🌐 Språk → Svenska / English** eller på fliken **Inställningar** — bytet gäller direkt, utan omstart, och sparas till nästa start.
+
+## Gratis — med frivillig donation
 
 Programmet är gratis att använda. En donation krävs inte och låser inte upp något.
 
-Donera via **💖 Stöd Fakturabunten…** (Hjälp-menyn, guldknappen i verktygsfältet, knappen i statusfältet, högerklick på flikraden eller Inställnings-fliken):
+Vill du stödja utvecklingen finns flera vägar i programmet under
+**💖 Stöd Fakturabunten…** (Hjälp-menyn, guldknappen i verktygsfältet, knappen i statusfältet, högerklick på flikraden eller fliken Inställningar):
 
-- 💙 PayPal: https://paypal.me/Rickard3dPrint
-- ☕ Ko-fi: https://ko-fi.com/tokke2
-- 📱 Swish: knappen i donationsrutan kopierar numret
+- 💙 **PayPal:** https://paypal.me/Rickard3dPrint
+- ☕ **Ko-fi:** https://ko-fi.com/tokke2
+- 📱 **Swish:** knappen i donationsrutan kopierar numret
 
-Free to use — a donation is never required and unlocks nothing. Donate via PayPal, Ko-fi or Swish from the **💖 Support** button/dialog inside the app.
+Betalningen sker hos PayPal/Ko-fi. Programmet ser inga betalningsuppgifter.
 
-## Vad det gör / What it does
-
-- Registrerar leverantörsfakturor och kreditfakturor. / Registers supplier invoices and credit notes.
-- Leverantörsregister med sök, favoriter ★, export till CSV/JSON. / Supplier register with search, favourites ★, CSV/JSON export.
-- Räknar ihop **Fakturor (+)**, **Krediter (−)** och **ATT BETALA**. / Totals **Invoices (+)**, **Credits (−)** and **TO PAY**.
-- Exporterar en PDF med betalningsdatum och bankgiro. / Exports a PDF with payment date and bankgiro.
-
-Datum väljs vid export, inte vid start. / The date is chosen at export time, not at startup.
-
-## Starta på Windows
+## Kom igång (Windows)
 
 1. Lägg hela mappen där du vill, till exempel `D:\Program\Fakturabunten`. Sökvägen spelar ingen roll.
 2. Saknas Python: kör `Installera senaste Python.bat` en gång. Den installerar senaste stabila Python på datorn.
 3. Starta `main.pyw`, eller genvägen `Fakturabunten.lnk` som skapas vid första starten.
 
-Saknade Python-paket hämtas vid start, bara om de behövs.
+Saknade Python-paket (`PySide6`, `reportlab`, `pypdf`) hämtas automatiskt vid start, bara om de behövs.
 
-## Tester / Tests
+Utvecklare startar med:
 
 ```bash
-python tests/test_core.py        # eller: pytest tests/
+pip install -r requirements.txt
+python main.py
 ```
 
-## Licens / Licence
+## Användning i korthet
 
-Ingen öppen licens är vald.
+1. Skapa minst en leverantör på fliken **Leverantörer** (Ctrl+L).
+2. Registrera fakturor på fliken **Fakturor** (Ctrl+N): fakturanummer + belopp (`+` = faktura, `−` = kreditfaktura).
+3. Klicka **Exportera ALLA till PDF**, välj betalningsdatum i kalendern och bekräfta.
+4. Tidigare exporter finns under **Exporthistorik** om något behöver återställas.
 
-Fritt att använda. Inte fritt att kopiera, ändra eller sälja vidare.
-Donation är frivillig. / Free to use. Not free to copy, modify or resell. Donations are voluntary.
+## Tester
+
+```bash
+pytest tests/              # eller utan pytest:
+python tests/test_core.py
+```
+
+## Licens
+
+Ingen öppen licens är vald. Fritt att använda. Inte fritt att kopiera, ändra eller sälja vidare. Donation är frivillig.
 
 © 2026 Rickard Längkvist
+
+---
+
+# 🇬🇧 English
+
+## What the app does
+
+- Registers supplier invoices and credit notes.
+- Supplier register with live search, favourites (★), payment terms and CSV/JSON export.
+- Totals **Invoices (+)**, **Credits (−)** and **TO PAY**.
+- Imports scanned invoices (PDF/image), reading amounts, OCR references and dates.
+- Exports a payment list as PDF with payment date and bankgiro details.
+  - The payment date is chosen **at every export** in a calendar with quick picks (Today, +7, +14, +30 days, end of month) — and reset afterwards.
+- Four themes (dark, light, auto, system), system tray icon, autostart and automatic backups.
+- All data is stored locally as JSON in the app folder (`data/`). Nothing is sent over the network.
+
+## Language
+
+The interface is available in **Swedish** (default) and **English**.
+Switch via the **🌐 Language** menu or the **Settings** tab — the change applies instantly, needs no restart, and is remembered for the next launch.
+
+## Free — with a voluntary donation
+
+The app is free to use. A donation is never required and unlocks nothing.
+
+If you would like to support development, use
+**💖 Support InvoiceBundle…** inside the app (Help menu, the gold toolbar button, the status-bar button, right-clicking the tab bar, or the Settings tab):
+
+- 💙 **PayPal:** https://paypal.me/Rickard3dPrint
+- ☕ **Ko-fi:** https://ko-fi.com/tokke2
+- 📱 **Swish:** the button in the donation dialog copies the number
+
+Payment takes place at PayPal/Ko-fi. The app never sees any payment details.
+
+## Getting started (Windows)
+
+1. Put the whole folder wherever you like, e.g. `D:\Program\InvoiceBundle`. The path does not matter.
+2. If Python is missing: run `Installera senaste Python.bat` once. It installs the latest stable Python. *(Installer script name is in Swedish.)*
+3. Start `main.pyw`, or the `Fakturabunten.lnk` shortcut created on first launch.
+
+Missing Python packages (`PySide6`, `reportlab`, `pypdf`) are fetched automatically at startup, only if needed.
+
+Developers start with:
+
+```bash
+pip install -r requirements.txt
+python main.py
+```
+
+## Usage in short
+
+1. Create at least one supplier on the **Suppliers** tab (Ctrl+L).
+2. Register invoices on the **Invoices** tab (Ctrl+N): invoice number + amount (`+` = invoice, `−` = credit note).
+3. Click **Export ALL to PDF**, pick the payment date in the calendar and confirm.
+4. Previous exports are available under **Export history** if anything needs restoring.
+
+## Tests
+
+```bash
+pytest tests/              # or without pytest:
+python tests/test_core.py
+```
+
+## Licence
+
+No open licence has been chosen. Free to use. Not free to copy, modify or resell. Donations are voluntary.
+
+© 2026 Rickard Längkvist
+
+---
+
+Se [CHANGELOG.md](CHANGELOG.md) för versionshistorik. / See [CHANGELOG.md](CHANGELOG.md) for version history.

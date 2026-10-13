@@ -334,12 +334,41 @@ def ask_export_payment_date(
         from PySide6.QtCore import Qt, QDate
         from PySide6.QtGui import QFont
 
+        # Bättre kalender-drop + språk (mjuka importer med fallback —
+        # pluginet ska fungera även helt fristående).
+        NiceDateEdit = QDateEdit  # type: ignore[assignment,misc]
+        quick_pick_row = None
+        date_preview_label = None
+        try:
+            from ui.date_picker import (
+                NiceDateEdit, date_preview_label, quick_pick_row,
+            )
+        except Exception:
+            try:
+                from date_picker import (  # type: ignore[no-redef]
+                    NiceDateEdit, date_preview_label, quick_pick_row,
+                )
+            except Exception:
+                pass
+        try:
+            from ui.i18n import tr
+        except Exception:
+            def tr(key: str, **_f: object) -> str:  # type: ignore[no-redef]
+                _sv = {
+                    "export.date_title": "📄  Ange betalningsdatum för export",
+                    "export.payment_date": "Betalningsdatum:",
+                    "export.export_with_date": "✔  Exportera med detta datum",
+                    "export.cancel_export": "✖  Avbryt export",
+                    "export.date_window_title": "Betalningsdatum för export",
+                }
+                return _sv.get(key, key)
+
         class _ExportDateDialog(QDialog):
             """Dialog för betalningsdatum per export-batch."""
 
             def __init__(self) -> None:
                 super().__init__(parent)
-                self.setWindowTitle("Betalningsdatum för export")
+                self.setWindowTitle(tr("export.date_window_title"))
                 self.setWindowFlags(
                     Qt.WindowType.Dialog
                     | Qt.WindowType.WindowStaysOnTopHint
@@ -354,7 +383,7 @@ def ask_export_payment_date(
                 root.setSpacing(12)
                 root.setContentsMargins(22, 18, 22, 18)
 
-                title = QLabel("📄  Ange betalningsdatum för export")
+                title = QLabel(tr("export.date_title"))
                 title_font = QFont()
                 title_font.setPointSize(12)
                 title_font.setBold(True)
@@ -369,15 +398,17 @@ def ask_export_payment_date(
 
                 # Export-sammanfattning
                 summary_parts: list[str] = [
-                    f"Antal fakturor:  {invoice_count}",
+                    tr("export.date_count", n=invoice_count),
                 ]
                 if supplier_names:
                     shown = supplier_names[:5]
                     rest = len(supplier_names) - 5
                     sup_str = ",  ".join(shown)
                     if rest > 0:
-                        sup_str += f"  och {rest} till …"
-                    summary_parts.append(f"Leverantörer:     {sup_str}")
+                        sup_str += tr("export.date_and_more", n=rest)
+                    summary_parts.append(
+                        tr("export.date_suppliers", names=sup_str)
+                    )
                 summary_parts.append(
                     f"ATT BETALA:      {fmt_amount(total_amount, currency)}"
                 )
@@ -393,11 +424,7 @@ def ask_export_payment_date(
                 sep2.setFrameShadow(QFrame.Shadow.Sunken)
                 root.addWidget(sep2)
 
-                info = QLabel(
-                    "Betalningsdatumet gäller ALLA fakturor i denna export.\n"
-                    "Det nollställs automatiskt efter exporten.\n"
-                    "Nästa export → du tillfrågas igen."
-                )
+                info = QLabel(tr("export.date_info"))
                 info.setFont(QFont("Segoe UI", 9))
                 info.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 info.setWordWrap(True)
@@ -407,16 +434,13 @@ def ask_export_payment_date(
                 # Datumrad
                 date_row = QHBoxLayout()
                 date_row.setSpacing(10)
-                lbl_d = QLabel("Betalningsdatum:")
+                lbl_d = QLabel(tr("export.payment_date"))
                 lbl_d.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
                 lbl_d.setStyleSheet("background:transparent;")
                 date_row.addWidget(lbl_d)
 
-                self._date_edit = QDateEdit()
-                self._date_edit.setCalendarPopup(True)
-                self._date_edit.setDisplayFormat("yyyy-MM-dd")
-                self._date_edit.setMinimumHeight(36)
-                self._date_edit.setMinimumWidth(150)
+                self._date_edit = NiceDateEdit()
+                self._date_edit.setMinimumWidth(170)
 
                 # Default: session_due_date → idag
                 default_date = datetime.date.today()
@@ -438,6 +462,14 @@ def ask_export_payment_date(
                 date_row.addStretch()
                 root.addLayout(date_row)
 
+                # Snabbval + läsbar förhandsvisning under datumraden
+                if quick_pick_row is not None:
+                    root.addWidget(quick_pick_row(self._date_edit, self))
+                if date_preview_label is not None:
+                    root.addWidget(
+                        date_preview_label(self._date_edit, self)
+                    )
+
                 sep3 = QFrame()
                 sep3.setFrameShape(QFrame.Shape.HLine)
                 sep3.setFrameShadow(QFrame.Shadow.Sunken)
@@ -447,13 +479,13 @@ def ask_export_payment_date(
                 btn_row = QHBoxLayout()
                 btn_row.setSpacing(10)
 
-                btn_ok = QPushButton("✔  Exportera med detta datum")
+                btn_ok = QPushButton(tr("export.export_with_date"))
                 btn_ok.setDefault(True)
                 btn_ok.setMinimumHeight(38)
                 btn_ok.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
                 btn_ok.clicked.connect(self._on_ok)
 
-                btn_cancel = QPushButton("✖  Avbryt export")
+                btn_cancel = QPushButton(tr("export.cancel_export"))
                 btn_cancel.setMinimumHeight(38)
                 btn_cancel.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
                 btn_cancel.clicked.connect(self.reject)

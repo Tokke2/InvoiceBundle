@@ -202,6 +202,27 @@ _STRINGS: dict[str, dict[str, str]] = {
     "scan.open_dialog": {"sv": "✏️  Öppna i fakturadialogen", "en": "✏️  Open in invoice dialog"},
     "scan.remove_row": {"sv": "🗑  Ta bort rad", "en": "🗑  Remove row"},
 
+    # ── Datumväljare / exportdatum ───────────────────────────────────
+    "date.today_btn": {"sv": "Idag", "en": "Today"},
+    "date.tomorrow_btn": {"sv": "Imorgon", "en": "Tomorrow"},
+    "date.month_end_btn": {"sv": "Månadsslut", "en": "End of month"},
+    "date.rel_today": {"sv": "idag", "en": "today"},
+    "date.rel_tomorrow": {"sv": "imorgon", "en": "tomorrow"},
+    "date.rel_yesterday": {"sv": "igår", "en": "yesterday"},
+    "date.rel_in_days": {"sv": "om {n} dagar", "en": "in {n} days"},
+    "date.rel_days_ago": {"sv": "för {n} dagar sedan", "en": "{n} days ago"},
+    "export.date_window_title": {"sv": "Betalningsdatum för export", "en": "Payment date for export"},
+    "export.date_title": {"sv": "📄  Ange betalningsdatum för export", "en": "📄  Choose the payment date for this export"},
+    "export.date_count": {"sv": "Antal fakturor:  {n}", "en": "Invoices:  {n}"},
+    "export.date_suppliers": {"sv": "Leverantörer:     {names}", "en": "Suppliers:     {names}"},
+    "export.date_and_more": {"sv": "  och {n} till …", "en": "  and {n} more …"},
+    "export.date_info": {"sv": "Betalningsdatumet gäller ALLA fakturor i denna export.\nDet nollställs automatiskt efter exporten.\nNästa export → du tillfrågas igen.", "en": "The payment date applies to ALL invoices in this export.\nIt is reset automatically after the export.\nNext export → you will be asked again."},
+    "export.payment_date": {"sv": "Betalningsdatum:", "en": "Payment date:"},
+    "export.export_with_date": {"sv": "✔  Exportera med detta datum", "en": "✔  Export with this date"},
+    "export.cancel_export": {"sv": "✖  Avbryt export", "en": "✖  Cancel export"},
+    "export.choose_for": {"sv": "Ange betalningsdatum för {n} fakturor:", "en": "Choose the payment date for {n} invoices:"},
+    "export.export_btn": {"sv": "✔  Exportera", "en": "✔  Export"},
+
     # ── Donation ─────────────────────────────────────────────────────
     "donate.title": {"sv": "💖 Stöd Fakturabunten", "en": "💖 Support InvoiceBundle"},
     "donate.window_title": {"sv": "Fakturabunten — Stöd projektet", "en": "InvoiceBundle — Support the project"},

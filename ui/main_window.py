@@ -64,7 +64,7 @@ BASE_DIR: Path = Path(__file__).parent.resolve()   # .../ui/
 PROJECT_DIR: Path = BASE_DIR.parent                # .../Fakturabunten_/
 
 APP_NAME: str = "Fakturabunten"
-APP_VERSION: str = "1.5.0"
+APP_VERSION: str = "1.0.0"
 
 FONT_FAMILY: str = "Segoe UI"
 

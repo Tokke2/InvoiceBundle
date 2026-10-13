@@ -70,7 +70,7 @@ log = logging.getLogger("FakturaApp")
 
 APP_NAME: str = "Fakturabunten"
 APP_SHORT_NAME: str = "Fakturabunten"
-APP_VERSION: str = "1.5.0"
+APP_VERSION: str = "1.0.0"
 
 COPYRIGHT_YEAR: int = datetime.date.today().year
 COPYRIGHT: str = f"© {COPYRIGHT_YEAR} Rickard Längkvist"

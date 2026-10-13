@@ -831,13 +831,16 @@ def make_date_edit(
     today: bool = False, offset_days: int = 0
 ) -> QDateEdit:
     """
-    Skapar en QDateEdit med kalender-popup (yyyy-MM-dd).
+    Skapar ett datumfält med STOR kalender-popup (yyyy-MM-dd):
+    måndag först, veckonummer, helger röda, idag markerat (date_picker).
 
     Standardvärde: idag (+ offset_days dagar om angivet).
     """
-    w = QDateEdit()
-    w.setCalendarPopup(True)
-    w.setDisplayFormat("yyyy-MM-dd")
+    try:
+        from ui.date_picker import NiceDateEdit
+    except ImportError:
+        from date_picker import NiceDateEdit  # type: ignore[no-redef]
+    w = NiceDateEdit()
     w.setMinimumHeight(36)
     w.setFont(make_font(12))
     d = QDate.currentDate()
