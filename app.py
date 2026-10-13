@@ -70,16 +70,17 @@ log = logging.getLogger("FakturaApp")
 
 APP_NAME: str = "Fakturabunten"
 APP_SHORT_NAME: str = "Fakturabunten"
-APP_VERSION: str = "1.4.10"
+APP_VERSION: str = "1.5.0"
 
 COPYRIGHT_YEAR: int = datetime.date.today().year
 COPYRIGHT: str = f"© {COPYRIGHT_YEAR} Rickard Längkvist"
 
-#: Donationsuppgifter — ändras på EN plats.
-#: Används av Om-dialogen (main_window.py) och about.md-öppnaren.
+#: Donationsuppgifter. PayPal/Ko-fi ägs av ui/donate.py (dialogen);
+#: Swish bor här. Används av ui/donate.py och Om-dialogen.
 DONATE_SWISH: str = "123 456 78 90"   # ← ditt Swish-nummer här
-DONATE_PAYPAL: str = "https://www.paypal.com/donate"
-DONATE_BMC: str = "https://www.buymeacoffee.com/fakturabetalaren"
+DONATE_PAYPAL: str = "https://paypal.me/Rickard3dPrint"
+DONATE_KOFI: str = "https://ko-fi.com/tokke2"
+DONATE_BMC: str = "https://ko-fi.com/tokke2"  # bakåtkompat: BMC → Ko-fi
 
 #: Bakåtkompatibilitet (äldre kod/plugins som använder DONATE_URL).
 DONATE_URL: str = DONATE_PAYPAL
@@ -132,6 +133,9 @@ CURRENT_PLATFORM: str = get_platform()
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "theme":            "dark",
+    # Gränssnittsspråk: "sv" (standard) eller "en". Byts i menyn
+    # 🌐 Språk och gäller direkt, utan omstart (ui/i18n.py).
+    "language":         "sv",
     "hidden_tabs":      [],
     "window_width":     1280,
     "window_height":    800,
@@ -188,6 +192,7 @@ SETTINGS_SCHEMA_VERSION: int = int(DEFAULT_SETTINGS["schema_version"])
 #: Värden som måste tillhöra en fast mängd.
 SETTINGS_ALLOWED_VALUES: dict[str, tuple] = {
     "theme": ("dark", "light", "auto", "system"),
+    "language": ("sv", "en"),
     "pdf_rounding": ("exact", "hel", "50", "100"),
 }
 

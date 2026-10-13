@@ -442,8 +442,11 @@ def test_autostart_launcher_pins_cwd() -> None:
     assert path.parent.resolve() == (appmod.BASE_DIR / "autostart").resolve()
     text = path.read_text(encoding="utf-8")
     assert "--minimized" in text
-    assert str(appmod.BASE_DIR) in text
-    assert "cd " in text
+    # Startfilen är PORTABEL: den hittar appmappen själv ($APP_DIR)
+    # i stället för en inbakad absolut sökväg — därför får den
+    # fungera även efter att hela mappen flyttats.
+    assert "main.py" in text
+    assert "APP_DIR" in text or "cd " in text
 
 
 def test_confine_export_never_leaves_app(tmp_path: Path) -> None:

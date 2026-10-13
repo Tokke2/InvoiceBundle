@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 """
-FakturaRäknaren — Invoices View
+Fakturabunten — Invoices View
 =====================================
-Fil    : FakturaRäknaren_/ui/invoices_view.py
+Fil    : Fakturabunten_/ui/invoices_view.py
 Författare : Rickard Längkvist
 År     : Dynamiskt (auto)
 
@@ -77,6 +77,11 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QSize
+
+try:
+    from ui.i18n import tr, tr_list
+except ImportError:  # fristående körning av filen
+    from i18n import tr, tr_list  # type: ignore[no-redef]
 from PySide6.QtGui import QFont, QColor, QWheelEvent, QBrush, QPixmap
 
 # ═════════════════════════════════════════════════════════════════════
@@ -97,6 +102,8 @@ try:
         ExportHistoryManager,
         ExportHistoryDialog,
         InvoiceDialog,
+        is_dark_theme,
+        is_dark_theme,
         make_btn,
         make_cell,
         make_font,
@@ -314,7 +321,7 @@ class InvoicesView(QWidget):
         self.setMinimumWidth(0)
 
         # ── Header ─────────────────────────────────────────────────────
-        self._header_label = QLabel("🧾  Registrerade leverantörsfakturor")
+        self._header_label = QLabel(tr("invoices.title"))
         self._header_label.setFont(make_font(17, True))
         head = QHBoxLayout()
         head.setSpacing(8)
@@ -342,7 +349,8 @@ class InvoicesView(QWidget):
         supplier_layout.setContentsMargins(10, 8, 10, 8)
         supplier_layout.setSpacing(10)
 
-        lbl_sup = QLabel("🏢  Välj leverantör:")
+        lbl_sup = QLabel(tr("invoices.choose_supplier"))
+        self._lbl_sup = lbl_sup
         lbl_sup.setFont(make_font(12, True))
         lbl_sup.setStyleSheet("background:transparent;")
 
@@ -351,7 +359,7 @@ class InvoicesView(QWidget):
         self._sup_selector.setMinimumWidth(160)
         self._sup_selector.setFont(make_font(13, True))
         self._sup_selector.setEditable(True)
-        self._sup_selector.setPlaceholderText("— välj leverantör —")
+        self._sup_selector.setPlaceholderText(tr("invoices.choose_ph"))
         self._sup_selector.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
@@ -376,9 +384,7 @@ class InvoicesView(QWidget):
         row_search.setSpacing(8)
 
         self._search = QLineEdit()
-        self._search.setPlaceholderText(
-            "🔍  Sök fakturanummer, leverantör, OCR, referens …"
-        )
+        self._search.setPlaceholderText(tr("invoices.search_ph"))
         self._search.setMinimumHeight(38)
         self._search.setFont(make_font(12))
         self._search.setClearButtonEnabled(True)
@@ -390,7 +396,7 @@ class InvoicesView(QWidget):
         self._filter_type.setMinimumHeight(38)
         self._filter_type.setMinimumWidth(0)
         self._filter_type.setFont(make_font(12))
-        self._filter_type.addItem("Alla typer")
+        self._filter_type.addItem(tr("invoices.all_types"))
         self._filter_type.addItems(["Faktura", "Kreditfaktura"])
         self._filter_type.currentTextChanged.connect(
             lambda *_: self._search_timer.start()
@@ -400,8 +406,8 @@ class InvoicesView(QWidget):
         self._filter_status.setMinimumHeight(38)
         self._filter_status.setMinimumWidth(0)
         self._filter_status.setFont(make_font(12))
-        self._filter_status.addItem("Aktiva (ej arkiv)")
-        self._filter_status.addItem("Alla statusar")
+        self._filter_status.addItem(tr("invoices.active_only"))
+        self._filter_status.addItem(tr("invoices.all_statuses"))
         self._filter_status.addItems(INVOICE_STATUSES)
         self._filter_status.currentTextChanged.connect(
             lambda *_: self._search_timer.start()
@@ -411,7 +417,7 @@ class InvoicesView(QWidget):
         self._filter_supplier.setMinimumHeight(38)
         self._filter_supplier.setMinimumWidth(0)
         self._filter_supplier.setFont(make_font(12))
-        self._filter_supplier.addItem("Alla leverantörer")
+        self._filter_supplier.addItem(tr("invoices.all_suppliers"))
         self._filter_supplier.currentTextChanged.connect(
             lambda *_: self._search_timer.start()
         )
@@ -427,32 +433,32 @@ class InvoicesView(QWidget):
         row_actions.setSpacing(8)
 
         self._btn_add = make_btn(
-            "➕  Registrera faktura",
+            tr("invoices.add"),
             "Registrera faktura för vald leverantör",
             accent=True,
         )
         self._btn_add.clicked.connect(self._add_invoice)
 
         self._btn_edit = make_btn(
-            "✏️  Redigera", "Redigera markerad faktura"
+            tr("invoices.edit"), "Redigera markerad faktura"
         )
         self._btn_edit.clicked.connect(self._edit_invoice)
         self._btn_edit.setEnabled(False)
 
         self._btn_delete = make_btn(
-            "🗑  Ta bort", "Ta bort markerad faktura", danger=True
+            tr("invoices.delete"), "Ta bort markerad faktura", danger=True
         )
         self._btn_delete.clicked.connect(self._delete_invoice)
         self._btn_delete.setEnabled(False)
 
         self._btn_duplicate = make_btn(
-            "📋  Duplicera", "Duplicera markerad faktura"
+            tr("invoices.duplicate"), "Duplicera markerad faktura"
         )
         self._btn_duplicate.clicked.connect(self._duplicate_invoice)
         self._btn_duplicate.setEnabled(False)
 
         self._btn_mark_paid = make_btn(
-            "✅  Markera betald",
+            tr("invoices.mark_paid"),
             "Markera markerade fakturor som betalda",
             success=True,
         )
@@ -476,7 +482,7 @@ class InvoicesView(QWidget):
         row_export.setSpacing(10)
 
         self._btn_export_all = make_btn(
-            "📄  Exportera ALLA till PDF",
+            tr("invoices.export_all"),
             "Exportera alla aktiva fakturor till PDF-fil\n"
             "Du tillfrågas om betalningsdatum innan export.",
             info=True,
@@ -484,13 +490,13 @@ class InvoicesView(QWidget):
         self._btn_export_all.clicked.connect(self._export_all_pdf)
 
         self._btn_history = make_btn(
-            "📚  Exporthistorik",
+            tr("invoices.history"),
             "Visa tidigare exporter och återställ vid behov",
         )
         self._btn_history.clicked.connect(self._show_history)
 
         self._btn_open_export = make_btn(
-            "📂  Öppna exportmapp",
+            tr("invoices.open_export_folder"),
             "Öppna exports/-mappen i filhanteraren",
         )
         self._btn_open_export.clicked.connect(
@@ -525,6 +531,7 @@ class InvoicesView(QWidget):
             lay.setSpacing(0)
             cap = QLabel(caption)
             cap.setObjectName("MoneyCaption")
+            self._money_caps[name] = cap
             cap.setFont(make_font(11, True))
             value.setFont(make_font(16, True))
             value.setObjectName("MoneyValue")
@@ -532,18 +539,22 @@ class InvoicesView(QWidget):
             lay.addWidget(value)
             return card
 
+        self._money_caps: dict[str, QLabel] = {}
         self._lbl_invoices = QLabel("0,00 SEK")
         self._lbl_credits = QLabel("0,00 SEK")
         self._lbl_att_betala = QLabel("0,00 SEK")
         summary_layout.addWidget(
-            _money_card("MoneyCard", "Fakturor  +", self._lbl_invoices), 1
+            _money_card("MoneyCard", tr("invoices.card_invoices"), self._lbl_invoices), 1
         )
         summary_layout.addWidget(
-            _money_card("MoneyCardCredit", "Krediter  −", self._lbl_credits), 1
+            _money_card("MoneyCardCredit", tr("invoices.card_credits"), self._lbl_credits), 1
         )
         summary_layout.addWidget(
-            _money_card("MoneyCardTotal", "ATT BETALA", self._lbl_att_betala), 1
+            _money_card("MoneyCardTotal", tr("invoices.card_total"), self._lbl_att_betala), 1
         )
+        self._cap_invoices = self._money_caps.get("MoneyCard")
+        self._cap_credits = self._money_caps.get("MoneyCardCredit")
+        self._cap_total = self._money_caps.get("MoneyCardTotal")
 
         meta = QVBoxLayout()
         meta.setSpacing(2)
@@ -561,7 +572,10 @@ class InvoicesView(QWidget):
         # ── Tabell ─────────────────────────────────────────────────────
         self._table = QTableWidget()
         self._table.setColumnCount(len(COLUMNS))
-        self._table.setHorizontalHeaderLabels(COL_LABELS)
+        _headers = tr_list("invoices.columns")
+        self._table.setHorizontalHeaderLabels(
+            _headers if len(_headers) == len(COLUMNS) else COL_LABELS
+        )
         self._table.setSortingEnabled(True)
         self._table.setAlternatingRowColors(True)
         self._table.setSelectionBehavior(
@@ -625,7 +639,7 @@ class InvoicesView(QWidget):
         root.addWidget(h_line())
         self._footer = QLabel(
             f"© {COPYRIGHT_YEAR} Rickard Längkvist"
-            f"  —  FakturaRäknaren"
+            f"  —  Fakturabunten"
         )
         self._footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._footer.setFont(make_font(9))
@@ -1040,12 +1054,42 @@ class InvoicesView(QWidget):
                 return "SEK"
 
     def _is_dark(self) -> bool:
-        """True om aktuellt tema är mörkt."""
-        bg = self._current_theme.get("bg", "#0d1117")
-        light_bgs = (
-            "#ffffff", "#f5f7fa", "#f8f9fa", "#f6f8fa", "#eaeef2",
-        )
-        return bg.lower() not in light_bgs
+        """True om aktuellt tema är mörkt (temanamn → luminans)."""
+        return is_dark_theme(self._current_theme)
+
+    def retranslate(self) -> None:
+        """Uppdaterar vyns texter efter språkbyte (utan omstart)."""
+        self._header_label.setText(tr("invoices.title"))
+        self._lbl_sup.setText(tr("invoices.choose_supplier"))
+        self._sup_selector.setPlaceholderText(tr("invoices.choose_ph"))
+        self._search.setPlaceholderText(tr("invoices.search_ph"))
+        self._btn_add.setText(tr("invoices.add"))
+        self._btn_edit.setText(tr("invoices.edit"))
+        self._btn_delete.setText(tr("invoices.delete"))
+        self._btn_duplicate.setText(tr("invoices.duplicate"))
+        self._btn_mark_paid.setText(tr("invoices.mark_paid"))
+        self._btn_export_all.setText(tr("invoices.export_all"))
+        self._btn_history.setText(tr("invoices.history"))
+        self._btn_open_export.setText(tr("invoices.open_export_folder"))
+        for attr, key in (
+            ("_cap_invoices", "invoices.card_invoices"),
+            ("_cap_credits", "invoices.card_credits"),
+            ("_cap_total", "invoices.card_total"),
+        ):
+            cap = getattr(self, attr, None)
+            if cap is not None:
+                cap.setText(tr(key))
+        # Filterrullistor: behåll datavärden, översätt bara kromtexter
+        if self._filter_type.count() >= 1:
+            self._filter_type.setItemText(0, tr("invoices.all_types"))
+        if self._filter_status.count() >= 2:
+            self._filter_status.setItemText(0, tr("invoices.active_only"))
+            self._filter_status.setItemText(1, tr("invoices.all_statuses"))
+        if self._filter_supplier.count() >= 1:
+            self._filter_supplier.setItemText(0, tr("invoices.all_suppliers"))
+        headers = tr_list("invoices.columns")
+        if len(headers) == len(COLUMNS):
+            self._table.setHorizontalHeaderLabels(headers)
 
     def _status(self, msg: str, timeout: int = 5000) -> None:
         """Visar ett meddelande i huvudfönstrets statusrad."""

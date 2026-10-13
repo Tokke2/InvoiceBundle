@@ -78,10 +78,12 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QCompleter,
     QApplication,
+    QStyledItemDelegate,
 )
 from PySide6.QtCore import Qt, QTimer, QDate, Signal, QUrl, QObject, QEvent
 from PySide6.QtGui import (
     QFont, QColor, QCursor, QBrush, QDesktopServices, QWheelEvent,
+    QPalette,
 )
 
 log = logging.getLogger("InvoicesHelpers")
@@ -594,6 +596,153 @@ def h_line() -> QFrame:
     f.setFrameShape(QFrame.Shape.HLine)
     f.setFrameShadow(QFrame.Shadow.Sunken)
     return f
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  RAD-DELEGATE  (synliga rader i tabeller — används av suppliers_view)
+#
+#  BAKGRUND: suppliers_view.py importerade attach_visible_rows(),
+#  ensure_row_height(), fg_on_row() och ROLE_*-konstanterna härifrån,
+#  men funktionerna fanns aldrig i filen → ImportError vid import →
+#  HELA leverantörsfliken dog tyst (MainWindow visade bara en död
+#  platshållare). Här är den saknade implementationen.
+# ═════════════════════════════════════════════════════════════════════
+
+#: Item-data-roller för radmålning (över UserRole så de aldrig
+#: krockar med post-id:t som vyerna lagrar i UserRole).
+ROLE_ROW_BG: int = int(Qt.ItemDataRole.UserRole) + 11      # jämn rad
+ROLE_ROW_BG_ODD: int = int(Qt.ItemDataRole.UserRole) + 12  # udda rad
+ROLE_ROW_FG: int = int(Qt.ItemDataRole.UserRole) + 13      # textfärg
+ROLE_STRIPE: int = int(Qt.ItemDataRole.UserRole) + 14      # vänsterkant
+
+
+def _luminance(color: str) -> float:
+    """Relativ luminans (0–1) för '#rrggbb'. 0.5 vid ogiltig färg."""
+    try:
+        h = str(color).lstrip("#")
+        if len(h) == 3:
+            h = "".join(ch * 2 for ch in h)
+        r, g, b = (int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+
+        def ch(v: float) -> float:
+            return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+        return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+    except Exception:
+        return 0.5
+
+
+def _contrast(a: str, b: str) -> float:
+    """WCAG-kontrastförhållande (1–21) mellan två hexfärger."""
+    la, lb = _luminance(a), _luminance(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def is_dark_theme(theme: dict | None) -> bool:
+    """
+    True om temat är mörkt.
+
+    Använder temats ``name`` ("dark"/"light") när det finns och
+    faller tillbaka på bakgrundens luminans. (Den gamla listan över
+    ljusa hexvärden kände inte igen nuvarande ljustema #f4f1ea,
+    så vyerna trodde att ljust läge var mörkt och målade fel.)
+    """
+    if not theme:
+        return True
+    name = str(theme.get("name", "")).lower()
+    if name in ("dark", "light"):
+        return name == "dark"
+    return _luminance(str(theme.get("bg", "#0c1218"))) < 0.5
+
+
+def fg_on_row(
+    row_bg: str, preferred: str, fallback: str, dark: bool,
+) -> str:
+    """
+    Väljer läsbar textfärg för en tabellrad.
+
+    ``preferred`` (t.ex. accentfärg i första kolumnen) används bara
+    om den håller minst 3:1 kontrast mot radbakgrunden — annars
+    ``fallback``. ``dark`` behålls i signaturen för anropens skull.
+    """
+    if preferred and _contrast(row_bg, preferred) >= 3.0:
+        return preferred
+    return fallback
+
+
+def ensure_row_height(table: QTableWidget, min_px: int = 40) -> None:
+    """Ser till att ingen rad är lägre än ``min_px`` pixlar."""
+    for row in range(table.rowCount()):
+        if table.rowHeight(row) < min_px:
+            table.setRowHeight(row, min_px)
+
+
+class VisibleRowsDelegate(QStyledItemDelegate):
+    """
+    Målar tabellrader från ROLE_*-data på varje item:
+
+    • jämn/udda radbakgrund (ROLE_ROW_BG / ROLE_ROW_BG_ODD)
+    • textfärg (ROLE_ROW_FG), vit på markerad rad
+    • färgrand i vänsterkanten på kolumn 0 (ROLE_STRIPE) —
+      guld för favoriter, accentfärg annars
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._dark = True
+        self._select_bg = "#0b5cab"
+
+    def set_theme(self, *, dark: bool, select_bg: str) -> None:
+        self._dark = bool(dark)
+        if select_bg:
+            self._select_bg = select_bg
+
+    def paint(self, painter, option, index) -> None:  # noqa: N802
+        from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
+
+        selected = bool(option.state & QStyle.State.State_Selected)
+        row_bg = index.data(
+            ROLE_ROW_BG_ODD if index.row() % 2 else ROLE_ROW_BG
+        )
+        stripe = index.data(ROLE_STRIPE) if index.column() == 0 else None
+
+        painter.save()
+        if selected:
+            painter.fillRect(option.rect, QColor(self._select_bg))
+        elif row_bg:
+            painter.fillRect(option.rect, QColor(str(row_bg)))
+        if stripe:
+            r = option.rect
+            painter.fillRect(r.x(), r.y(), 4, r.height(), QColor(str(stripe)))
+        painter.restore()
+
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.backgroundBrush = QBrush(Qt.GlobalColor.transparent)
+        fg = "#ffffff" if selected else index.data(ROLE_ROW_FG)
+        if fg:
+            opt.palette.setColor(
+                QPalette.ColorRole.Text, QColor(str(fg))
+            )
+            opt.palette.setColor(
+                QPalette.ColorRole.HighlightedText, QColor("#ffffff")
+            )
+        widget = option.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        style.drawControl(
+            QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget
+        )
+
+
+def attach_visible_rows(table: QTableWidget) -> VisibleRowsDelegate:
+    """
+    Kopplar VisibleRowsDelegate till tabellen och returnerar den
+    (så vyn kan anropa ``delegate.set_theme(...)`` vid temabyte).
+    """
+    delegate = VisibleRowsDelegate(table)
+    table.setItemDelegate(delegate)
+    return delegate
 
 
 def make_btn(

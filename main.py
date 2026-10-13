@@ -72,7 +72,7 @@ for _dir in (str(BASE_DIR), str(UI_DIR)):
 
 APP_NAME: str = "Fakturabunten"
 APP_SHORT_NAME: str = "Fakturabunten"
-APP_VERSION: str = "1.4.10"
+APP_VERSION: str = "1.5.0"
 APP_ORGANIZATION: str = "Rickard Längkvist"
 
 COPYRIGHT_YEAR: int = datetime.date.today().year

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 """
-FakturaRäknaren — Import-vy för skannade fakturor
+Fakturabunten — Import-vy för skannade fakturor
 ======================================================
-Fil    : FakturaRäknaren_/ui/scan_import_view.py
+Fil    : Fakturabunten_/ui/scan_import_view.py
 Författare : Rickard Längkvist
 År     : Dynamiskt (auto)
 
@@ -40,6 +40,15 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QCursor, QPixmap
 
 log = logging.getLogger("ScanImportView")
+
+try:
+    from ui.i18n import tr
+except Exception:  # pragma: no cover
+    try:
+        from i18n import tr  # type: ignore[no-redef]
+    except Exception:
+        def tr(key: str, **_fmt: object) -> str:  # type: ignore[no-redef]
+            return key
 
 COPYRIGHT_YEAR: int = datetime.date.today().year
 
@@ -107,7 +116,8 @@ class ScanImportView(QWidget):
         root.setContentsMargins(16, 14, 16, 14)
         root.setSpacing(10)
 
-        hdr = QLabel("📥  Importera skannade fakturor")
+        hdr = QLabel(tr("scan.title"))
+        self._hdr_label = hdr
         hdr.setFont(QFont("Segoe UI", 17, QFont.Weight.Bold))
         head = QHBoxLayout()
         head.setSpacing(8)
@@ -127,28 +137,28 @@ class ScanImportView(QWidget):
         head.addStretch()
         root.addLayout(head)
 
-        info = QLabel(
-            "Läs in PDF eller bild (skannad faktura), kontrollera vad "
-            "som tolkades och bekräfta.\nInget registreras förrän du "
-            "klickar Skapa faktura — appens summor räknas som vanligt."
-        )
+        info = QLabel(tr("scan.info"))
+        self._info_label = info
         info.setWordWrap(True)
         info.setStyleSheet("color:#8b949e;background:transparent;")
         root.addWidget(info)
         root.addWidget(self._hline())
 
         # ── 1. Välj filer ─────────────────────────────────────────────
-        box_files = QGroupBox("1.  Välj fakturafiler")
+        box_files = QGroupBox(tr("scan.step1"))
+        self._box_files = box_files
         bf = QVBoxLayout(box_files)
         bf.setSpacing(8)
 
         row1 = QHBoxLayout()
         row1.setSpacing(8)
-        btn_pick = QPushButton("📂  Välj filer …")
+        btn_pick = QPushButton(tr("scan.pick"))
+        self._btn_pick = btn_pick
         btn_pick.clicked.connect(self._pick_files)
-        btn_clear = QPushButton("🗑  Rensa lista")
+        btn_clear = QPushButton(tr("scan.clear"))
+        self._btn_clear = btn_clear
         btn_clear.clicked.connect(self._clear_paths)
-        self._lbl_files = QLabel("Inga filer valda")
+        self._lbl_files = QLabel(tr("scan.no_files"))
         self._lbl_files.setStyleSheet("color:#8b949e;background:transparent;")
         row1.addWidget(btn_pick)
         row1.addWidget(btn_clear)
@@ -166,7 +176,8 @@ class ScanImportView(QWidget):
 
         row2 = QHBoxLayout()
         row2.setSpacing(8)
-        btn_scan = QPushButton("🔍  Läs in och tolka")
+        btn_scan = QPushButton(tr("scan.scan"))
+        self._btn_scan = btn_scan
         btn_scan.setProperty("accent", True)
         btn_scan.setMinimumHeight(42)
         btn_scan.clicked.connect(self._scan_files)
@@ -178,7 +189,8 @@ class ScanImportView(QWidget):
         root.addWidget(box_files)
 
         # ── 2. Klistra in text (manuell fallback) ─────────────────────
-        box_txt = QGroupBox("2.  … eller klistra in fakturatext (fallback)")
+        box_txt = QGroupBox(tr("scan.step2"))
+        self._box_txt = box_txt
         bt = QVBoxLayout(box_txt)
         bt.setSpacing(6)
         self._txt_paste = QTextEdit()
@@ -193,9 +205,10 @@ class ScanImportView(QWidget):
 
         rowt = QHBoxLayout()
         rowt.setSpacing(8)
-        btn_parse = QPushButton("🧠  Tolka texten")
+        btn_parse = QPushButton(tr("scan.parse"))
+        self._btn_parse = btn_parse
         btn_parse.clicked.connect(self._scan_pasted)
-        self._chk_auto = QCheckBox("Öppna fakturadialogen direkt")
+        self._chk_auto = QCheckBox(tr("scan.auto_open"))
         self._chk_auto.setChecked(False)
         rowt.addWidget(btn_parse)
         rowt.addWidget(self._chk_auto)
@@ -204,7 +217,8 @@ class ScanImportView(QWidget):
         root.addWidget(box_txt)
 
         # ── 3. Tolkade rader ──────────────────────────────────────────
-        box_res = QGroupBox("3.  Tolkade fakturor  (dubbelklicka för att rätta)")
+        box_res = QGroupBox(tr("scan.step3"))
+        self._box_res = box_res
         br = QVBoxLayout(box_res)
         br.setSpacing(8)
 
@@ -236,13 +250,16 @@ class ScanImportView(QWidget):
 
         row3 = QHBoxLayout()
         row3.setSpacing(8)
-        btn_create = QPushButton("✅  Skapa fakturor (markerade)")
+        btn_create = QPushButton(tr("scan.create"))
+        self._btn_create = btn_create
         btn_create.setProperty("success", True)
         btn_create.setMinimumHeight(42)
         btn_create.clicked.connect(self._create_invoices)
-        btn_open_dlg = QPushButton("✏️  Öppna i fakturadialogen")
+        btn_open_dlg = QPushButton(tr("scan.open_dialog"))
+        self._btn_open_dlg = btn_open_dlg
         btn_open_dlg.clicked.connect(self._open_row_dialog)
-        btn_del = QPushButton("🗑  Ta bort rad")
+        btn_del = QPushButton(tr("scan.remove_row"))
+        self._btn_del = btn_del
         btn_del.clicked.connect(self._remove_row)
         self._lbl_sum = QLabel()
         self._lbl_sum.setStyleSheet(
@@ -265,11 +282,29 @@ class ScanImportView(QWidget):
 
         footer = QLabel(
             f"© {COPYRIGHT_YEAR} Rickard Längkvist  —  "
-            f"FakturaRäknaren  ·  allt körs lokalt"
+            f"Fakturabunten  ·  allt körs lokalt"
         )
         footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         footer.setStyleSheet("color:#8b949e;background:transparent;")
         root.addWidget(footer)
+
+    def retranslate(self) -> None:
+        """Uppdaterar vyns texter efter språkbyte (utan omstart)."""
+        self._hdr_label.setText(tr("scan.title"))
+        self._info_label.setText(tr("scan.info"))
+        self._box_files.setTitle(tr("scan.step1"))
+        self._box_txt.setTitle(tr("scan.step2"))
+        self._box_res.setTitle(tr("scan.step3"))
+        self._btn_pick.setText(tr("scan.pick"))
+        self._btn_clear.setText(tr("scan.clear"))
+        if not self._paths:
+            self._lbl_files.setText(tr("scan.no_files"))
+        self._btn_scan.setText(tr("scan.scan"))
+        self._btn_parse.setText(tr("scan.parse"))
+        self._chk_auto.setText(tr("scan.auto_open"))
+        self._btn_create.setText(tr("scan.create"))
+        self._btn_open_dlg.setText(tr("scan.open_dialog"))
+        self._btn_del.setText(tr("scan.remove_row"))
 
     @staticmethod
     def _hline() -> QFrame:
