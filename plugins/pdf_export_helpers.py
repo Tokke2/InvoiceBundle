@@ -119,6 +119,47 @@ ATT_BETALA_BG_L    = "#bee3f8"
 DUE_DATE_BG_DARK   = "#1a3a2a"   # grön box – mörkt tema
 DUE_DATE_BG_LIGHT  = "#c6f6d5"   # grön box – ljust tema
 
+#: PDF-etiketter per språk. Dokumentet följer appens språk
+#: (settings "language"); standard är svenska.
+PDF_LABELS: dict[str, dict[str, str]] = {
+    "sv": {
+        "col_invoice_number": "Fakturanr", "col_type": "Typ",
+        "col_supplier": "Leverantor", "col_date": "Datum",
+        "col_due_date": "Forfallodatum", "col_amount": "Belopp",
+        "col_status": "Status",
+        "invoices_plus": "Fakturor  (+):", "credits_minus": "Krediter  (-):",
+        "to_pay": "ATT BETALA:", "page": "Sida", "of": "av",
+        "invoices": "FAKTUROR", "supplier_details": "LEVERANTORSUPPGIFTER",
+        "exported": "Exporterad", "payment_date": "BETALNINGSDATUM:",
+        "rounding": "avrundning",
+        "terms": "Betalvillkor", "contact": "Kontaktperson",
+        "email": "E-post", "phone": "Telefon", "address": "Adress",
+        "days": "dagar", "rows": "Rader", "suppliers": "Leverantorer",
+    },
+    "en": {
+        "col_invoice_number": "Invoice no.", "col_type": "Type",
+        "col_supplier": "Supplier", "col_date": "Date",
+        "col_due_date": "Due date", "col_amount": "Amount",
+        "col_status": "Status",
+        "invoices_plus": "Invoices  (+):", "credits_minus": "Credits  (-):",
+        "to_pay": "TO PAY:", "page": "Page", "of": "of",
+        "invoices": "INVOICES", "supplier_details": "SUPPLIER DETAILS",
+        "exported": "Exported", "payment_date": "PAYMENT DATE:",
+        "rounding": "rounding",
+        "terms": "Payment terms", "contact": "Contact person",
+        "email": "E-mail", "phone": "Phone", "address": "Address",
+        "days": "days", "rows": "Rows", "suppliers": "Suppliers",
+    },
+}
+
+_PDF_COL_KEYS: dict[str, str] = {
+    "invoice_number": "col_invoice_number", "invoice_type": "col_type",
+    "supplier": "col_supplier", "date": "col_date",
+    "due_date": "col_due_date", "total_amount": "col_amount",
+    "status": "col_status",
+}
+
+
 #: Giltiga avrundningslägen för ATT BETALA (samma som GUI).
 PDF_ROUNDING_MODES: tuple[str, ...] = ("exact", "hel", "50", "100")
 
@@ -561,14 +602,25 @@ def build_supplier_map(
     return sup_map
 
 
-def supplier_detail_lines(sup: dict) -> list[tuple[str, str]]:
+_DETAIL_LABEL_KEYS: dict[str, str] = {
+    "payment_terms": "terms", "contact_person": "contact",
+    "email": "email", "phone": "phone", "address": "address",
+}
+
+
+def supplier_detail_lines(
+    sup: dict, language: str = "sv"
+) -> list[tuple[str, str]]:
     """Formaterade (etikett, värde)-rader för PDF:ens leverantörsblock."""
+    labels = PDF_LABELS["en" if str(language).startswith("en") else "sv"]
     lines: list[tuple[str, str]] = []
     for label, key in SUPPLIER_DETAIL_FIELDS:
         val = str(sup.get(key, "")).strip()
         if val and val != "0":
             if key == "payment_terms":
-                val = f"{val} dagar"
+                val = f"{val} {labels['days']}"
+            if key in _DETAIL_LABEL_KEYS:
+                label = labels[_DETAIL_LABEL_KEYS[key]]
             lines.append((label, val))
     return lines
 
@@ -749,7 +801,10 @@ class PDFExporter:
         theme: str = "dark",
         get_suppliers_fn: Callable[[], list[dict]] | None = None,
         rounding_mode: str = "exact",
+        language: str = "sv",
     ) -> None:
+        _lang_in = str(language).lower()
+        self._lang = "en" if _lang_in.startswith("en") else "sv"
         self._export_dir = confine_export_dir(Path(export_dir))
         self._data_dir = Path(data_dir)
         self._guard = InvoiceNumberGuard(self._data_dir)
@@ -773,6 +828,26 @@ class PDFExporter:
             log.info("reportlab available – full PDF support")
         except ImportError:
             log.warning("reportlab not installed – text fallback active")
+
+    def _refresh_lang(self) -> None:
+        """Hämtar språket live om en språk-källa kopplats (språkbyte)."""
+        fn = getattr(self, "_language_fn", None)
+        if fn is not None:
+            try:
+                self._lang = "en" if str(fn()).lower().startswith("en") else "sv"
+            except Exception:
+                pass
+
+    def _t(self, key: str) -> str:
+        """PDF-etikett på dokumentets språk."""
+        return PDF_LABELS[self._lang].get(key, key)
+
+    def _columns(self):
+        """PDF_COLUMNS med rubriker på dokumentets språk."""
+        return [
+            (self._t(_PDF_COL_KEYS.get(k, "")), k, w)
+            for _lbl, k, w in PDF_COLUMNS
+        ]
 
     @property
     def guard(self) -> InvoiceNumberGuard:
@@ -914,6 +989,7 @@ class PDFExporter:
         ask_payment_date: bool = True,
         parent_widget: Any = None,
     ) -> dict[str, Any]:
+        self._refresh_lang()
         """
         Exporterar fakturor till PDF.
 
@@ -1184,9 +1260,9 @@ class PDFExporter:
                     f"  |  Exporterad {now_iso()}"
                 ),
             )
-            pages = f"Sida {page_num[0]}"
+            pages = f"{self._t('page')} {page_num[0]}"
             if total_pages:
-                pages += f" av {total_pages}"
+                pages += f" {self._t('of')} {total_pages}"
             c.drawRightString(
                 page_w - PDF_MARGIN_RIGHT, PDF_MARGIN_BOTTOM - 16, pages,
             )
@@ -1249,7 +1325,7 @@ class PDFExporter:
             c.setFont("Helvetica-Bold", 8)
             c.setFillColor(hc(col["header_fg"]))
             x = PDF_MARGIN_LEFT
-            for label, _k, width in PDF_COLUMNS:
+            for label, _k, width in self._columns():
                 c.drawString(x + 4, y + 4, label)
                 x += width
             return y - PDF_HEADER_HEIGHT - 3
@@ -1284,10 +1360,10 @@ class PDFExporter:
         c.drawString(
             PDF_MARGIN_LEFT, y,
             to_ascii(
-                f"Exporterad: {now_iso()}   |   Rader: {len(invoices)}"
-                f"   |   Fakturor: {len(regular)}"
-                f"   |   Krediter: {len(credits)}"
-                f"   |   Leverantorer: {len(sup_list)}"
+                f"{self._t('exported')}: {now_iso()}   |   {self._t('rows')}: {len(invoices)}"
+                f"   |   {self._t('invoices')}: {len(regular)}"
+                f"   |   {self._t('credits_minus').split('(')[0].strip()}: {len(credits)}"
+                f"   |   {self._t('suppliers')}: {len(sup_list)}"
             ),
         )
         y -= 8
@@ -1302,7 +1378,8 @@ class PDFExporter:
             c.setFont("Helvetica-Bold", 10)
             c.setFillColor(hc(col["invoice"]))
             c.drawString(
-                PDF_MARGIN_LEFT + 10, y - 4, to_ascii("BETALNINGSDATUM:"),
+                PDF_MARGIN_LEFT + 10, y - 4,
+                to_ascii(self._t("payment_date")),
             )
             c.setFont("Helvetica-Bold", 13)
             c.drawRightString(
@@ -1318,7 +1395,7 @@ class PDFExporter:
 
         c.setFont("Helvetica", 9.5)
         c.setFillColor(hc(col["invoice"]))
-        c.drawString(PDF_MARGIN_LEFT + 8, y - 2, "Fakturor  (+):")
+        c.drawString(PDF_MARGIN_LEFT + 8, y - 2, self._t("invoices_plus"))
         c.setFont("Helvetica-Bold", 10)
         c.drawRightString(
             page_w - PDF_MARGIN_RIGHT - 8, y - 2,
@@ -1328,7 +1405,7 @@ class PDFExporter:
 
         c.setFont("Helvetica", 9.5)
         c.setFillColor(hc(col["credit"]))
-        c.drawString(PDF_MARGIN_LEFT + 8, y - 2, "Krediter  (-):")
+        c.drawString(PDF_MARGIN_LEFT + 8, y - 2, self._t("credits_minus"))
         c.setFont("Helvetica-Bold", 10)
         c.drawRightString(
             page_w - PDF_MARGIN_RIGHT - 8, y - 2,
@@ -1344,12 +1421,12 @@ class PDFExporter:
         y -= 17
 
         rounding_note = (
-            f"  (avrundning: {self._rounding})"
+            f"  ({self._t('rounding')}: {self._rounding})"
             if self._rounding != "exact" else ""
         )
         c.setFont("Helvetica-Bold", 13)
         c.setFillColor(hc(col["accent"]))
-        c.drawString(PDF_MARGIN_LEFT + 8, y - 4, "ATT BETALA:")
+        c.drawString(PDF_MARGIN_LEFT + 8, y - 4, self._t("to_pay"))
         c.setFont("Helvetica-Bold", 15)
         c.drawRightString(
             page_w - PDF_MARGIN_RIGHT - 8, y - 5,
@@ -1370,7 +1447,7 @@ class PDFExporter:
 
             for sup in sup_list:
                 name = str(sup.get("name", "-")).strip()
-                details = supplier_detail_lines(sup)
+                details = supplier_detail_lines(sup, self._lang)
                 block_h = 16 + len(details) * 11 + 6
                 y = check(y, block_h)
 
@@ -1402,7 +1479,7 @@ class PDFExporter:
         y = check(y, 40)
         c.setFont("Helvetica-Bold", 10)
         c.setFillColor(hc(col["accent"]))
-        c.drawString(PDF_MARGIN_LEFT, y, "FAKTUROR")
+        c.drawString(PDF_MARGIN_LEFT, y, self._t("invoices"))
         y -= 4
         _line(y, 0.5)
         y -= 14
@@ -1434,7 +1511,7 @@ class PDFExporter:
             c.setFillColor(hc(text_col))
 
             x = PDF_MARGIN_LEFT
-            for _label, key, width in PDF_COLUMNS:
+            for _label, key, width in self._columns():
                 raw = inv.get(key, "")
                 if key == "total_amount":
                     cell = fmt_amount(_to_float(raw), "")
@@ -1484,7 +1561,7 @@ class PDFExporter:
                     if self._org_number else ""
                 )
             )
-        lines.append(f"  Exporterad: {now_iso()}")
+        lines.append(f"  {self._t('exported')}: {now_iso()}")
         lines.append(dbl)
         lines.append("")
 
@@ -1499,10 +1576,10 @@ class PDFExporter:
             if self._rounding != "exact" else ""
         )
         lines += [
-            f"  Fakturor  (+):  {fmt_amount(sum_inv, self._currency)}",
-            f"  Krediter  (-):  {fmt_amount(abs(sum_crd), self._currency)}",
+            f"  {self._t('invoices_plus')}  {fmt_amount(sum_inv, self._currency)}",
+            f"  {self._t('credits_minus')}  {fmt_amount(abs(sum_crd), self._currency)}",
             sep,
-            f"  ATT BETALA:     "
+            f"  {self._t('to_pay')}     "
             f"{fmt_amount(net_display, self._currency)}{rounding_note}",
             "",
             sep,
@@ -1511,12 +1588,12 @@ class PDFExporter:
 
         # Leverantörsuppgifter
         if sup_list:
-            lines.append("  LEVERANTORSUPPGIFTER")
+            lines.append(f"  {self._t('supplier_details')}")
             lines.append(sep)
             for sup in sup_list:
                 name = a(str(sup.get("name", "-")).strip())
                 lines.append(f"  {name}")
-                for label, value in supplier_detail_lines(sup):
+                for label, value in supplier_detail_lines(sup, self._lang):
                     lines.append(f"    {a(label):<16} {a(value)}")
                 lines.append("")
             lines.append(sep)

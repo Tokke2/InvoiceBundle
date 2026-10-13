@@ -159,6 +159,7 @@ def quick_export(
     rounding_mode: str = "exact",
     payment_date: str = "",
     ask_payment_date: bool = True,
+    language: str = "sv",
 ) -> dict[str, Any]:
     """
     One-call export med valfri leverantörslista, session-datum och
@@ -182,6 +183,7 @@ def quick_export(
         currency=currency,
         theme=theme,
         rounding_mode=rounding_mode,
+        language=language,
     )
     return exporter.export_invoice_list(
         invoices,
@@ -245,7 +247,10 @@ def register(app: Any) -> None:
         theme=theme,
         get_suppliers_fn=get_sup_fn,
         rounding_mode=rounding,
+        language=str(app.get_setting("language", "sv")),
     )
+    # Live-språk: PDF:en följer appens språk även efter språkbyte
+    pdf._language_fn = lambda: str(app.get_setting("language", "sv"))
 
     app.pdf_exporter = pdf
     app.invoice_guard = pdf.guard

@@ -79,9 +79,9 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, Signal, QSize
 
 try:
-    from ui.i18n import tr, tr_list
+    from ui.i18n import tr, tr_list, tr_status, tr_type
 except ImportError:  # fristående körning av filen
-    from i18n import tr, tr_list  # type: ignore[no-redef]
+    from i18n import tr, tr_list, tr_status, tr_type  # type: ignore[no-redef]
 from PySide6.QtGui import QFont, QColor, QWheelEvent, QBrush, QPixmap
 
 # ═════════════════════════════════════════════════════════════════════
@@ -396,8 +396,9 @@ class InvoicesView(QWidget):
         self._filter_type.setMinimumHeight(38)
         self._filter_type.setMinimumWidth(0)
         self._filter_type.setFont(make_font(12))
-        self._filter_type.addItem(tr("invoices.all_types"))
-        self._filter_type.addItems(["Faktura", "Kreditfaktura"])
+        self._filter_type.addItem(tr("invoices.all_types"), "")
+        self._filter_type.addItem(tr_type("Faktura"), "Faktura")
+        self._filter_type.addItem(tr_type("Kreditfaktura"), "Kreditfaktura")
         self._filter_type.currentTextChanged.connect(
             lambda *_: self._search_timer.start()
         )
@@ -406,9 +407,10 @@ class InvoicesView(QWidget):
         self._filter_status.setMinimumHeight(38)
         self._filter_status.setMinimumWidth(0)
         self._filter_status.setFont(make_font(12))
-        self._filter_status.addItem(tr("invoices.active_only"))
-        self._filter_status.addItem(tr("invoices.all_statuses"))
-        self._filter_status.addItems(INVOICE_STATUSES)
+        self._filter_status.addItem(tr("invoices.active_only"), "__active__")
+        self._filter_status.addItem(tr("invoices.all_statuses"), "__all__")
+        for _st in INVOICE_STATUSES:
+            self._filter_status.addItem(tr_status(_st), _st)
         self._filter_status.currentTextChanged.connect(
             lambda *_: self._search_timer.start()
         )
@@ -417,7 +419,7 @@ class InvoicesView(QWidget):
         self._filter_supplier.setMinimumHeight(38)
         self._filter_supplier.setMinimumWidth(0)
         self._filter_supplier.setFont(make_font(12))
-        self._filter_supplier.addItem(tr("invoices.all_suppliers"))
+        self._filter_supplier.addItem(tr("invoices.all_suppliers"), "")
         self._filter_supplier.currentTextChanged.connect(
             lambda *_: self._search_timer.start()
         )
@@ -693,13 +695,13 @@ class InvoicesView(QWidget):
         n = len(exportable)
         self._btn_export_all.setEnabled(n > 0)
         self._btn_export_all.setText(
-            f"📄  Exportera ALLA till PDF  ({n})"
+            tr("invoices.export_all_n", n=n)
             if n > 0
-            else "📄  Inga fakturor att exportera"
+            else tr("invoices.export_none")
         )
         hist_count = self._export_history.count()
         self._lbl_history_count.setText(
-            f"({hist_count} export{'er' if hist_count != 1 else ''})"
+            tr("invoices.history_count", n=hist_count)
         )
 
     # ══════════════════════════════════════════════════════════════════
@@ -709,20 +711,22 @@ class InvoicesView(QWidget):
     def _apply_filters(self) -> list[dict]:
         """Applicerar sök + typ/status/leverantörs-filter."""
         query = self._search.text().strip().lower()
-        type_f = self._filter_type.currentText()
-        status_f = self._filter_status.currentText()
-        sup_f = self._filter_supplier.currentText()
+        type_f = self._filter_type.currentData() or ""
+        status_f = self._filter_status.currentData() or ""
+        sup_f = self._filter_supplier.currentData()
+        if sup_f is None:
+            sup_f = self._filter_supplier.currentText()
 
         data = list(self._all_data)
 
-        # Status-filter
-        if status_f == "Aktiva (ej arkiv)":
+        # Status-filter (kanoniska värden via itemData)
+        if status_f == "__active__":
             data = [
                 r
                 for r in data
                 if r.get("status") not in HIDDEN_STATUSES
             ]
-        elif status_f and status_f != "Alla statusar":
+        elif status_f and status_f != "__all__":
             data = [r for r in data if r.get("status") == status_f]
 
         # Fritextsökning
@@ -752,8 +756,8 @@ class InvoicesView(QWidget):
                 and _to_float(r.get("total_amount")) >= 0
             ]
 
-        # Leverantörs-filter
-        if sup_f and sup_f != "Alla leverantörer":
+        # Leverantörs-filter ("" = alla; annars leverantörens namn)
+        if sup_f:
             data = [r for r in data if r.get("supplier") == sup_f]
 
         return data
@@ -809,7 +813,7 @@ class InvoicesView(QWidget):
         """Visar leverantörsinfo (org.nr, BG/PG/IBAN) bredvid väljaren."""
         name = name.strip()
         if not name:
-            self._lbl_supplier_info.setText("(ingen vald)")
+            self._lbl_supplier_info.setText(tr("invoices.none_chosen"))
             return
 
         try:
@@ -825,7 +829,7 @@ class InvoicesView(QWidget):
             if sup:
                 parts: list[str] = []
                 if sup.get("favorite"):
-                    parts.append("★ Favorit")
+                    parts.append(tr("invoices.favorite"))
                 if sup.get("org_number"):
                     parts.append(sup["org_number"])
                 if sup.get("bg"):
@@ -859,7 +863,7 @@ class InvoicesView(QWidget):
         )
         self._filter_supplier.blockSignals(True)
         self._filter_supplier.clear()
-        self._filter_supplier.addItem("Alla leverantörer")
+        self._filter_supplier.addItem(tr("invoices.all_suppliers"), "")
         self._filter_supplier.addItems(names)
         idx = self._filter_supplier.findText(current)
         if idx >= 0:
@@ -885,15 +889,17 @@ class InvoicesView(QWidget):
                     val = _to_float(raw)
                     text = fmt_amount(val, "").strip()
                 elif key == "invoice_type":
-                    text = str(raw) if raw else "Faktura"
+                    text = tr_type(str(raw) if raw else "Faktura")
+                elif key == "status":
+                    text = tr_status(str(raw)) if raw else ""
                 else:
                     text = str(raw) if raw not in ("", None) else ""
 
                 fg = ""
                 if key == "status":
-                    pair = STATUS_COLORS.get(text, ("", ""))
+                    pair = STATUS_COLORS.get(str(raw or ""), ("", ""))
                     fg = pair[0] if dark else pair[1]
-                elif key == "invoice_type" and text == "Kreditfaktura":
+                elif key == "invoice_type" and str(raw) == "Kreditfaktura":
                     fg = "#64b5f6" if dark else "#1565c0"
                 elif key == "total_amount" and _to_float(raw) < 0:
                     fg = "#64b5f6" if dark else "#1565c0"
@@ -969,17 +975,26 @@ class InvoicesView(QWidget):
         )
         n_cre = len(rows) - n_inv
 
-        count_label = f"Poster: {len(rows)}"
         if len(rows) != len(self._all_data):
-            count_label += f" av {len(self._all_data)}"
-        count_label += f"  ({n_inv}f/{n_cre}k)"
+            count_label = tr(
+                "invoices.rows_of", shown=len(rows),
+                total=len(self._all_data), f=n_inv, k=n_cre,
+            )
+        else:
+            count_label = tr(
+                "invoices.rows", n=len(rows), f=n_inv, k=n_cre
+            )
 
         self._lbl_count.setText(count_label)
         self._lbl_invoices.setText(fmt_amount(total_invoices))
         self._lbl_credits.setText(fmt_amount(total_credits))
         self._lbl_att_betala.setText(fmt_amount(att_betala))
-        self._lbl_unpaid.setText(f"Obetalt: {fmt_amount(unpaid)}")
-        self._lbl_overdue.setText(f"Förfallet: {fmt_amount(overdue)}")
+        self._lbl_unpaid.setText(
+            tr("invoices.unpaid", amount=fmt_amount(unpaid))
+        )
+        self._lbl_overdue.setText(
+            tr("invoices.overdue", amount=fmt_amount(overdue))
+        )
 
     # ══════════════════════════════════════════════════════════════════
     #  MARKERING
@@ -1079,14 +1094,27 @@ class InvoicesView(QWidget):
             cap = getattr(self, attr, None)
             if cap is not None:
                 cap.setText(tr(key))
-        # Filterrullistor: behåll datavärden, översätt bara kromtexter
-        if self._filter_type.count() >= 1:
-            self._filter_type.setItemText(0, tr("invoices.all_types"))
-        if self._filter_status.count() >= 2:
-            self._filter_status.setItemText(0, tr("invoices.active_only"))
-            self._filter_status.setItemText(1, tr("invoices.all_statuses"))
+        # Filterrullistor: visningstext från kanoniskt itemData-värde
+        for i in range(self._filter_type.count()):
+            data = self._filter_type.itemData(i)
+            self._filter_type.setItemText(
+                i, tr("invoices.all_types") if not data else tr_type(data)
+            )
+        for i in range(self._filter_status.count()):
+            data = self._filter_status.itemData(i)
+            if data == "__active__":
+                txt = tr("invoices.active_only")
+            elif data == "__all__":
+                txt = tr("invoices.all_statuses")
+            else:
+                txt = tr_status(data or "")
+            self._filter_status.setItemText(i, txt)
         if self._filter_supplier.count() >= 1:
-            self._filter_supplier.setItemText(0, tr("invoices.all_suppliers"))
+            self._filter_supplier.setItemText(
+                0, tr("invoices.all_suppliers")
+            )
+        self._update_summary(self._apply_filters())
+        self._update_export_buttons()
         headers = tr_list("invoices.columns")
         if len(headers) == len(COLUMNS):
             self._table.setHorizontalHeaderLabels(headers)
@@ -1662,7 +1690,7 @@ class InvoicesView(QWidget):
             result = exporter.export_invoice_list(
                 exportable,
                 filename=str(full_path),
-                title="Komplett fakturalista",
+                title=tr("invoices.export_title"),
                 check_duplicates=False,
                 mark_exported=True,
                 force_export=True,

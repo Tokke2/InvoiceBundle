@@ -246,6 +246,141 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "<h2 style='color:#58a6ff'>{app}</h2><p><b>Version {version}</b> · Modern local invoice handling for Windows, Linux and macOS.</p><p><b>© {year} Rickard Längkvist</b></p><hr><h3>What the app does</h3><p>Registers supplier invoices and credit notes, totals Invoices (+) / Credits (−) / <b>TO PAY</b>, keeps track of due dates and exports payment lists to PDF — entirely locally on your computer, no subscription.</p><h3>How it works</h3><ol><li>Choose a supplier in the list (favourites ★ first).</li><li>Register an invoice: invoice number + amount. ＋ = invoice, − = credit note.</li><li>Export ALL active invoices to PDF — the payment date is always asked before export and reset afterwards.</li><li>Export history: restore archived invoices, open the PDF or folder.</li></ol><h3>Support development 💖</h3><p>💙 Swish: <b>{swish}</b> (the button copies the number)<br>🅿️ PayPal: {paypal}<br>☕ Ko-fi: {kofi}</p><hr><p style='color:#888;font-size:11px;'>Platform: {platform} · Python {python} · Autostart: {autostart}</p>",
     },
 
+    # ── Fakturadialogen ──────────────────────────────────────────────
+    "invdialog.title_new": {"sv": "➕  Registrera faktura", "en": "➕  Register invoice"},
+    "invdialog.title_edit": {"sv": "✏️  Redigera faktura", "en": "✏️  Edit invoice"},
+    "invdialog.supplier": {"sv": "🏢  Leverantör", "en": "🏢  Supplier"},
+    "invdialog.none_chosen": {"sv": "(ingen vald)", "en": "(none selected)"},
+    "invdialog.session_banner": {"sv": "📅  Session-förfallodatum: {date}  (används som default för nya fakturor)", "en": "📅  Session due date: {date}  (default for new invoices)"},
+    "invdialog.primary": {"sv": "🧾  Fakturainformation  ✱", "en": "🧾  Invoice information  ✱"},
+    "invdialog.invoice_number": {"sv": "Fakturanummer  ✱ :", "en": "Invoice number  ✱ :"},
+    "invdialog.amount": {"sv": "Belopp  ✱ :", "en": "Amount  ✱ :"},
+    "invdialog.sign_tip": {"sv": "＋  Faktura – beloppet läggs till ATT BETALA\n−  Kredit – beloppet dras av från ATT BETALA", "en": "＋  Invoice – added to TO PAY\n−  Credit – deducted from TO PAY"},
+    "invdialog.type_invoice": {"sv": "🧾  FAKTURA – läggs till ATT BETALA", "en": "🧾  INVOICE – added to TO PAY"},
+    "invdialog.type_credit": {"sv": "📋  KREDITFAKTURA – dras av från ATT BETALA", "en": "📋  CREDIT NOTE – deducted from TO PAY"},
+    "invdialog.other": {"sv": "📋  Övriga uppgifter  (valfritt)", "en": "📋  Other details  (optional)"},
+    "invdialog.ocr": {"sv": "OCR :", "en": "OCR :"},
+    "invdialog.reference": {"sv": "Referens :", "en": "Reference :"},
+    "invdialog.category": {"sv": "Kategori :", "en": "Category :"},
+    "invdialog.category_ph": {"sv": "ex. IT, Kontorsmaterial, Hyra", "en": "e.g. IT, Office supplies, Rent"},
+    "invdialog.ref_ph": {"sv": "Er referens / PO-nummer", "en": "Your reference / PO number"},
+    "invdialog.invoice_date": {"sv": "Fakturadatum :", "en": "Invoice date :"},
+    "invdialog.due_date": {"sv": "Förfallodatum :", "en": "Due date :"},
+    "invdialog.payment_date": {"sv": "Betalningsdatum :", "en": "Payment date :"},
+    "invdialog.currency": {"sv": "Valuta :", "en": "Currency :"},
+    "invdialog.status": {"sv": "Status :", "en": "Status :"},
+    "invdialog.note": {"sv": "Anteckning :", "en": "Note :"},
+    "invdialog.note_ph": {"sv": "Fritext anteckning …", "en": "Free-text note …"},
+    "invdialog.no_date": {"sv": "(ej angivet)", "en": "(not set)"},
+    "invdialog.ocr_warning": {"sv": "⚠️  OCR saknas – kontrollera om det behövs.", "en": "⚠️  OCR missing – check if it is needed."},
+    "invdialog.save_changes": {"sv": "💾  Spara ändringar", "en": "💾  Save changes"},
+    "invdialog.register": {"sv": "➕  Registrera", "en": "➕  Register"},
+    "invdialog.terms": {"sv": "Betalvillkor: {n} dagar", "en": "Payment terms: {n} days"},
+    "invdialog.orgnr": {"sv": "Org.nr", "en": "Org. no."},
+    "invdialog.bankgiro": {"sv": "Bankgiro", "en": "BG"},
+    "invdialog.plusgiro": {"sv": "Plusgiro", "en": "PG"},
+
+    "invdialog.validation": {"sv": "Validering", "en": "Validation"},
+    "invdialog.amount_required": {"sv": "Ange ett belopp större än 0.\n\nVälj ＋ för faktura eller − för kreditfaktura.", "en": "Enter an amount greater than 0.\n\nChoose ＋ for invoice or − for credit note."},
+    "invdialog.overdue_title": {"sv": "Förfallodatum passerat", "en": "Due date passed"},
+    "invdialog.overdue_body": {"sv": "Förfallodatum har passerat.\n\nVill du ändra status till 'Förfallen'?", "en": "The due date has passed.\n\nChange the status to 'Overdue'?"},
+
+    # ── Fakturavyn (summor, info, meddelanden) ────────────────────────
+    "invoices.rows": {"sv": "Poster: {n}  ({f}f/{k}k)", "en": "Entries: {n}  ({f} inv/{k} cr)"},
+    "invoices.unpaid": {"sv": "Obetalt: {amount}", "en": "Unpaid: {amount}"},
+    "invoices.overdue": {"sv": "Förfallet: {amount}", "en": "Overdue: {amount}"},
+    "invoices.history_count": {"sv": "({n} exporter)", "en": "({n} exports)"},
+    "invoices.none_chosen": {"sv": "(ingen vald)", "en": "(none selected)"},
+    "invoices.no_supplier_title": {"sv": "🏢  Ingen leverantör vald", "en": "🏢  No supplier selected"},
+    "invoices.no_supplier_body": {"sv": "Välj en leverantör i listan först — eller skapa en ny.", "en": "Choose a supplier in the list first — or create a new one."},
+    "invoices.delete_title": {"sv": "Ta bort faktura", "en": "Delete invoice"},
+    "invoices.delete_body": {"sv": "Ta bort fakturan?\nKan inte ångras.", "en": "Delete this invoice?\nThis cannot be undone."},
+    "invoices.export_title": {"sv": "Komplett fakturalista", "en": "Complete invoice list"},
+
+    "invoices.rows_of": {"sv": "Poster: {shown} av {total}  ({f}f/{k}k)", "en": "Entries: {shown} of {total}  ({f} inv/{k} cr)"},
+    "invoices.export_all_n": {"sv": "📄  Exportera ALLA till PDF  ({n})", "en": "📄  Export ALL to PDF  ({n})"},
+    "invoices.export_none": {"sv": "📄  Inga fakturor att exportera", "en": "📄  No invoices to export"},
+    "invoices.favorite": {"sv": "★ Favorit", "en": "★ Favourite"},
+
+    # ── Leverantörsdialogen (återstående fält) ────────────────────────
+    "supplierdlg.bg": {"sv": "Bankgiro (BG):", "en": "Bankgiro (BG):"},
+    "supplierdlg.pg": {"sv": "Plusgiro (PG):", "en": "Plusgiro (PG):"},
+    "supplierdlg.iban": {"sv": "IBAN:", "en": "IBAN:"},
+    "supplierdlg.bic": {"sv": "BIC / SWIFT:", "en": "BIC / SWIFT:"},
+    "supplierdlg.terms": {"sv": "Betalvillkor:", "en": "Payment terms:"},
+    "supplierdlg.contact": {"sv": "Kontaktperson:", "en": "Contact person:"},
+    "supplierdlg.email": {"sv": "E-post:", "en": "E-mail:"},
+    "supplierdlg.phone": {"sv": "Telefon:", "en": "Phone:"},
+    "supplierdlg.address": {"sv": "Adress:", "en": "Address:"},
+    "supplierdlg.note": {"sv": "Anteckning:", "en": "Note:"},
+    "supplierdlg.note_ph": {"sv": "Fritext anteckning …", "en": "Free-text note …"},
+    "supplier.unknown_title": {"sv": "Okänd leverantör", "en": "Unknown supplier"},
+    "supplier.unknown_body": {"sv": "Leverantören '{name}' finns inte.\nLägga till nu?", "en": "The supplier '{name}' does not exist.\nAdd it now?"},
+
+    # ── Kortkommandon (Inställnings-fliken) ───────────────────────────
+    "shortcut.ny_leverantor": {"sv": "Ny leverantör", "en": "New supplier"},
+    "shortcut.ny_faktura": {"sv": "Ny faktura", "en": "New invoice"},
+    "shortcut.skapa_backup": {"sv": "Skapa backup", "en": "Create backup"},
+    "shortcut.exportera_pdf": {"sv": "Exportera alla aktiva till PDF", "en": "Export all active to PDF"},
+    "shortcut.uppdatera": {"sv": "Uppdatera alla vyer", "en": "Refresh all views"},
+    "shortcut.avsluta": {"sv": "Avsluta programmet helt", "en": "Quit completely"},
+    "shortcut.tab_dashboard": {"sv": "Hoppa till Dashboard", "en": "Go to Dashboard"},
+    "shortcut.tab_fakturor": {"sv": "Hoppa till Fakturor", "en": "Go to Invoices"},
+    "shortcut.tab_leverantorer": {"sv": "Hoppa till Leverantörer", "en": "Go to Suppliers"},
+    "shortcut.tab_betalningar": {"sv": "Hoppa till Betalningar", "en": "Go to Payments"},
+    "shortcut.tab_import": {"sv": "Hoppa till Import", "en": "Go to Import"},
+    "shortcut.tab_rapporter": {"sv": "Hoppa till Rapporter", "en": "Go to Reports"},
+    "shortcut.tab_installningar": {"sv": "Hoppa till Inställningar", "en": "Go to Settings"},
+
+    # ── Huvudfönstrets dialoger ───────────────────────────────────────
+    "main.quit_title": {"sv": "Avsluta programmet", "en": "Quit the app"},
+    "main.quit_body": {"sv": "Stäng {app} helt?\n\nAlla data har sparats automatiskt.", "en": "Close {app} completely?\n\nAll data has been saved automatically."},
+    "main.backup_created": {"sv": "✅  Backup skapad:\n{path}", "en": "✅  Backup created:\n{path}"},
+    "main.backup_failed": {"sv": "❌  Backup misslyckades.", "en": "❌  Backup failed."},
+    "main.no_supplier_title": {"sv": "🏢  Ingen leverantör", "en": "🏢  No supplier"},
+    "main.no_supplier_body": {"sv": "Du måste skapa en leverantör\ninnan du kan registrera en faktura.\n\nVill du lägga till en leverantör nu?", "en": "You must create a supplier\nbefore you can register an invoice.\n\nAdd a supplier now?"},
+    "main.view_missing": {"sv": "Leverantörsvyn saknas.", "en": "The suppliers view is missing."},
+    "main.invoice_view_missing": {"sv": "Fakturavyn saknas.", "en": "The invoices view is missing."},
+
+    "main.reading": {"sv": "🔄  Läser data/ …", "en": "🔄  Reading data/ …"},
+    "main.opening": {"sv": "📁  Öppnar: {path}", "en": "📁  Opening: {path}"},
+    "main.shortcuts_restored": {"sv": "↩️  Standardkortkommandon återställda", "en": "↩️  Default shortcuts restored"},
+    "main.plugin_status_na": {"sv": "Status ej tillgänglig: {error}", "en": "Status unavailable: {error}"},
+    "main.autostart": {"sv": "Autostart", "en": "Autostart"},
+    "main.autostart_failed": {"sv": "Kunde inte registrera autostart hos operativsystemet.\nInställningen är sparad och försöket görs om vid nästa start.", "en": "Could not register autostart with the operating system.\nThe setting is saved and will be retried at next start."},
+    "main.autostart_error": {"sv": "Kunde inte ändra:\n{error}", "en": "Could not change:\n{error}"},
+    "main.autostart_on": {"sv": "Autostart är på.\n\nVid inloggning väntar programmet om disken inte är redo,\nstartar gömd, och sätter arbetsmappen till appmappen.", "en": "Autostart is on.\n\nAt login the app waits if the disk is not ready,\nstarts hidden, and sets the working folder to the app folder."},
+    "main.autostart_off": {"sv": "Autostart är av.\nProgrammet startar inte längre vid inloggning.", "en": "Autostart is off.\nThe app no longer starts at login."},
+    "main.autostart_status": {"sv": "🚀  Autostart {state}", "en": "🚀  Autostart {state}"},
+    "main.autostart_on_full": {"sv": "Autostart är på.\n\nVid inloggning:\n• väntar upp till 90 sekunder om disken inte är redo (t.ex. om E: inte hunnit monteras)\n• startar gömd i systemfältet, utan konsolfönster\n• arbetsmapp = appmappen, aldrig System32\n\nArbetsmapp: {workdir}\nStartfil: {launcher}", "en": "Autostart is on.\n\nAt login:\n• waits up to 90 seconds if the disk is not ready (e.g. if E: has not mounted yet)\n• starts hidden in the system tray, without a console window\n• working folder = the app folder, never System32\n\nWorking folder: {workdir}\nLauncher: {launcher}"},
+    "main.on_check": {"sv": "på ✔", "en": "on ✔"},
+    "main.off": {"sv": "av", "en": "off"},
+    "main.close_tray_status": {"sv": "🙈  Stäng till tray: {state}", "en": "🙈  Close to tray: {state}"},
+    "main.on": {"sv": "PÅ", "en": "ON"},
+    "main.off_state": {"sv": "AV", "en": "OFF"},
+    "donate.paypal_tip": {"sv": "Öppnar PayPal i webbläsaren", "en": "Opens PayPal in the browser"},
+    "donate.kofi_tip": {"sv": "Öppnar Ko-fi i webbläsaren", "en": "Opens Ko-fi in the browser"},
+    "donate.about_tip": {"sv": "Öppnar about.md med komplett info", "en": "Opens about.md with complete info"},
+
+    # ── Skanningsimport (återstående) ─────────────────────────────────
+    "scan.columns": {"sv": "Fil|Leverantör|Fakturanr|Datum|Förfaller|OCR|Belopp|Metod|Status", "en": "File|Supplier|Invoice no.|Date|Due|OCR|Amount|Method|Status"},
+    "scan.sum": {"sv": "{n} rad(er)  ·  summa {amount} kr", "en": "{n} row(s)  ·  total {amount} SEK"},
+    "scan.ready": {"sv": "redo", "en": "ready"},
+    "scan.missing": {"sv": "saknas: {fields}", "en": "missing: {fields}"},
+
+    "scan.no_text": {"sv": "ingen text hittad", "en": "no text found"},
+
+    # ── PDF-export ────────────────────────────────────────────────────
+    "pdf.complete_list": {"sv": "Komplett fakturalista", "en": "Complete invoice list"},
+    "pdf.page": {"sv": "Sida {n} av {total}", "en": "Page {n} of {total}"},
+    "pdf.invoices_plus": {"sv": "Fakturor  (+):", "en": "Invoices  (+):"},
+    "pdf.credits_minus": {"sv": "Krediter  (-):", "en": "Credits  (-):"},
+    "pdf.to_pay": {"sv": "ATT BETALA:", "en": "TO PAY:"},
+    "pdf.invoices_count": {"sv": "Fakturor: {n}", "en": "Invoices: {n}"},
+    "pdf.credits_count": {"sv": "Krediter: {n}", "en": "Credits: {n}"},
+    "pdf.payment_date": {"sv": "Betalningsdatum", "en": "Payment date"},
+    "pdf.no_invoices": {"sv": "Inga fakturor att exportera.", "en": "No invoices to export."},
+
     # ── Tray ─────────────────────────────────────────────────────────
     "tray.show": {"sv": "🖥  Visa fönster", "en": "🖥  Show window"},
     "tray.theme": {"sv": "🎨  Tema", "en": "🎨  Theme"},
@@ -255,6 +390,62 @@ _STRINGS: dict[str, dict[str, str]] = {
     "tray.quit": {"sv": "❌  Avsluta helt", "en": "❌  Quit completely"},
     "tray.tooltip": {"sv": "{app}\nEnkelklicka för att öppna", "en": "{app}\nSingle-click to open"},
 }
+
+
+# Kanoniska värden som LAGRAS i datafilerna (alltid svenska, så att
+# filter/statuslogik aldrig bryts av ett språkbyte) → visningstext.
+STATUS_LABELS: dict[str, dict[str, str]] = {
+    "Obetald":         {"sv": "Obetald",         "en": "Unpaid"},
+    "Planerad":        {"sv": "Planerad",        "en": "Planned"},
+    "Betalfil skapad": {"sv": "Betalfil skapad", "en": "Payment file created"},
+    "Betald":          {"sv": "Betald",          "en": "Paid"},
+    "Förfallen":       {"sv": "Förfallen",       "en": "Overdue"},
+    "Makulerad":       {"sv": "Makulerad",       "en": "Cancelled"},
+    "Arkiverad":       {"sv": "Arkiverad",       "en": "Archived"},
+}
+
+TYPE_LABELS: dict[str, dict[str, str]] = {
+    "Faktura":       {"sv": "Faktura",       "en": "Invoice"},
+    "Kreditfaktura": {"sv": "Kreditfaktura", "en": "Credit note"},
+    "Kredit":        {"sv": "Kredit",        "en": "Credit"},
+}
+
+
+#: Fält som skanningsparsern rapporterar som saknade (svenska internt).
+SCAN_MISSING_LABELS: dict[str, dict[str, str]] = {
+    "belopp":         {"sv": "belopp",         "en": "amount"},
+    "fakturanummer":  {"sv": "fakturanummer",  "en": "invoice number"},
+    "leverantör":     {"sv": "leverantör",     "en": "supplier"},
+    "datum":          {"sv": "datum",          "en": "date"},
+    "förfallodatum":  {"sv": "förfallodatum",  "en": "due date"},
+}
+
+
+def tr_missing(fields: list) -> str:
+    """Visningstext för parserns saknade-fält-lista."""
+    out = []
+    for f in fields:
+        entry = SCAN_MISSING_LABELS.get(str(f))
+        out.append(
+            (entry.get(_current) or entry["sv"]) if entry else str(f)
+        )
+    return ", ".join(out)
+
+
+def tr_status(status: str) -> str:
+    """Visningstext för en lagrad (svensk) status, på aktuellt språk."""
+    entry = STATUS_LABELS.get(str(status))
+    if entry is None:
+        return str(status)
+    return entry.get(_current) or entry["sv"]
+
+
+def tr_type(invoice_type: str) -> str:
+    """Visningstext för en lagrad (svensk) fakturatyp."""
+    entry = TYPE_LABELS.get(str(invoice_type))
+    if entry is None:
+        return str(invoice_type)
+    return entry.get(_current) or entry["sv"]
 
 
 # ═════════════════════════════════════════════════════════════════════

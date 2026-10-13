@@ -88,6 +88,18 @@ from PySide6.QtGui import (
 
 log = logging.getLogger("InvoicesHelpers")
 
+try:
+    from ui.i18n import tr, tr_status
+except Exception:  # pragma: no cover - fristående körning
+    try:
+        from i18n import tr, tr_status  # type: ignore[no-redef]
+    except Exception:
+        def tr(key: str, **_f: object) -> str:  # type: ignore[no-redef]
+            return key
+
+        def tr_status(v: str) -> str:  # type: ignore[no-redef]
+            return str(v)
+
 COPYRIGHT_YEAR: int = datetime.date.today().year
 
 # ═════════════════════════════════════════════════════════════════════
@@ -1661,9 +1673,9 @@ class InvoiceDialog(QDialog):
         self._supplier_rec: dict | None = None
 
         self.setWindowTitle(
-            "✏️  Redigera faktura"
+            tr("invdialog.title_edit")
             if self._is_edit
-            else "➕  Registrera faktura"
+            else tr("invdialog.title_new")
         )
         self.setMinimumWidth(580)
         self.setMinimumHeight(540)
@@ -1747,8 +1759,9 @@ class InvoiceDialog(QDialog):
             return
         parts: list[str] = []
         for lab, key in (
-            ("Org.nr", "org_number"), ("Bankgiro", "bg"),
-            ("Plusgiro", "pg"), ("IBAN", "iban"),
+            (tr("invdialog.orgnr"), "org_number"),
+            (tr("invdialog.bankgiro"), "bg"),
+            (tr("invdialog.plusgiro"), "pg"), ("IBAN", "iban"),
         ):
             val = str(sup.get(key, "") or "").strip()
             if val:
@@ -1758,7 +1771,7 @@ class InvoiceDialog(QDialog):
         except (TypeError, ValueError):
             terms = 0
         if terms:
-            parts.append(f"Betalvillkor: {terms} dagar")
+            parts.append(tr("invdialog.terms", n=terms))
         if parts:
             lbl.setText("  ·  ".join(parts))
             lbl.setVisible(True)
@@ -1809,7 +1822,7 @@ class InvoiceDialog(QDialog):
         v.setContentsMargins(0, 0, 0, 0)
 
         # ── Leverantör ─────────────────────────────────────────────────
-        sup_box = QGroupBox("🏢  Leverantör")
+        sup_box = QGroupBox(tr("invdialog.supplier"))
         sup_box.setFont(make_font(11, True))
         sup_outer = QVBoxLayout(sup_box)
         sup_outer.setContentsMargins(12, 8, 12, 8)
@@ -1819,7 +1832,7 @@ class InvoiceDialog(QDialog):
         sup_outer.addLayout(sup_layout)
 
         self._lbl_supplier = QLabel(
-            self._supplier_name or "(ingen vald)"
+            self._supplier_name or tr("invdialog.none_chosen")
         )
         self._lbl_supplier.setFont(make_font(15, True))
         self._lbl_supplier.setStyleSheet(
@@ -1867,8 +1880,7 @@ class InvoiceDialog(QDialog):
         due_str = get_session_due_date_str(self._app_core)
         if due_str and not self._is_edit:
             self._session_due_banner = QLabel(
-                f"📅  Session-förfallodatum: {due_str}"
-                f"  (används som default för nya fakturor)"
+                tr("invdialog.session_banner", date=due_str)
             )
             self._session_due_banner.setFont(make_font(10, True))
             self._session_due_banner.setStyleSheet(
@@ -1883,7 +1895,7 @@ class InvoiceDialog(QDialog):
             self._session_due_banner = None
 
         # ── Primära fält ───────────────────────────────────────────────
-        prim_box = QGroupBox("🧾  Fakturainformation  ✱")
+        prim_box = QGroupBox(tr("invdialog.primary"))
         prim_box.setFont(make_font(11, True))
         pf = QFormLayout(prim_box)
         pf.setSpacing(12)
@@ -1896,7 +1908,7 @@ class InvoiceDialog(QDialog):
         self.f_inv_nr = make_line_edit("ex. 2025-001 / INV-001")
         self.f_inv_nr.setFont(make_font(14, True))
         self.f_inv_nr.setMinimumHeight(44)
-        pf.addRow("Fakturanummer  ✱ :", self.f_inv_nr)
+        pf.addRow(tr("invdialog.invoice_number"), self.f_inv_nr)
 
         # Teckenväljare ＋/−
         self.f_sign = QComboBox()
@@ -1905,10 +1917,7 @@ class InvoiceDialog(QDialog):
         self.f_sign.setFont(make_font(20, True))
         self.f_sign.addItem("＋", +1)
         self.f_sign.addItem("−", -1)
-        self.f_sign.setToolTip(
-            "＋  Faktura – belopp läggs till ATT BETALA\n"
-            "−   Kredit – belopp dras av från ATT BETALA"
-        )
+        self.f_sign.setToolTip(tr("invdialog.sign_tip"))
         self.f_sign.currentIndexChanged.connect(self._on_sign_changed)
 
         # Belopp — AmountLineEdit: bättre textfält, svenskt format,
@@ -1942,7 +1951,7 @@ class InvoiceDialog(QDialog):
         amount_layout.addWidget(self.f_sign)
         amount_layout.addWidget(self.f_total, stretch=1)
         amount_layout.addWidget(kr_label)
-        pf.addRow("Belopp  ✱ :", amount_widget)
+        pf.addRow(tr("invdialog.amount"), amount_widget)
 
         # Typ-indikator (FAKTURA / KREDITFAKTURA)
         self._lbl_type = QLabel()
@@ -1953,7 +1962,7 @@ class InvoiceDialog(QDialog):
         v.addWidget(prim_box)
 
         # ── Sekundära fält ─────────────────────────────────────────────
-        sec_box = QGroupBox("📋  Övriga uppgifter  (valfritt)")
+        sec_box = QGroupBox(tr("invdialog.other"))
         sec_box.setFont(make_font(11))
         # EJ checkable: Qt inaktiverar annars alla fält i rutan när den
         # är okryssad (standard vid ny faktura). Fälten ska ALLTID vara
@@ -1966,10 +1975,8 @@ class InvoiceDialog(QDialog):
         )
 
         self.f_ocr = make_line_edit("OCR-nummer")
-        self.f_ref = make_line_edit("Er referens / PO-nummer")
-        self.f_category = make_line_edit(
-            "ex. IT, Kontorsmaterial, Hyra"
-        )
+        self.f_ref = make_line_edit(tr("invdialog.ref_ph"))
+        self.f_category = make_line_edit(tr("invdialog.category_ph"))
         self.f_date = make_date_edit(today=True)
         # Förfallodatum: default sätts av _apply_session_due_date()
         self.f_due_date = make_date_edit(offset_days=30)
@@ -1979,7 +1986,7 @@ class InvoiceDialog(QDialog):
         self.f_payment_date = make_date_edit()
         self.f_payment_date.setMinimumDate(EMPTY_DATE)
         self.f_payment_date.setDate(EMPTY_DATE)
-        self.f_payment_date.setSpecialValueText(NO_DATE_TEXT)
+        self.f_payment_date.setSpecialValueText(tr("invdialog.no_date"))
 
         self.f_currency = QComboBox()
         self.f_currency.setMinimumHeight(34)
@@ -1990,25 +1997,27 @@ class InvoiceDialog(QDialog):
         self.f_status = QComboBox()
         self.f_status.setMinimumHeight(34)
         self.f_status.setFont(make_font(12))
-        self.f_status.addItems(INVOICE_STATUSES)
+        # Visning på aktuellt språk — kanonisk (svensk) status i data
+        for _st in INVOICE_STATUSES:
+            self.f_status.addItem(tr_status(_st), _st)
 
         self.f_note = QTextEdit()
-        self.f_note.setPlaceholderText("Fritext anteckning …")
+        self.f_note.setPlaceholderText(tr("invdialog.note_ph"))
         self.f_note.setMaximumHeight(80)
         self.f_note.setFont(make_font(12))
 
-        sf.addRow("OCR :", self.f_ocr)
-        sf.addRow("Referens :", self.f_ref)
-        sf.addRow("Kategori :", self.f_category)
+        sf.addRow(tr("invdialog.ocr"), self.f_ocr)
+        sf.addRow(tr("invdialog.reference"), self.f_ref)
+        sf.addRow(tr("invdialog.category"), self.f_category)
         sf.addRow(h_line())
-        sf.addRow("Fakturadatum :", self.f_date)
-        sf.addRow("Förfallodatum :", self.f_due_date)
-        sf.addRow("Betalningsdatum :", self.f_payment_date)
+        sf.addRow(tr("invdialog.invoice_date"), self.f_date)
+        sf.addRow(tr("invdialog.due_date"), self.f_due_date)
+        sf.addRow(tr("invdialog.payment_date"), self.f_payment_date)
         sf.addRow(h_line())
-        sf.addRow("Valuta :", self.f_currency)
-        sf.addRow("Status :", self.f_status)
+        sf.addRow(tr("invdialog.currency"), self.f_currency)
+        sf.addRow(tr("invdialog.status"), self.f_status)
         sf.addRow(h_line())
-        sf.addRow("Anteckning :", self.f_note)
+        sf.addRow(tr("invdialog.note"), self.f_note)
 
         v.addWidget(sec_box)
         v.addStretch()
@@ -2017,9 +2026,7 @@ class InvoiceDialog(QDialog):
         root.addWidget(scroll, stretch=1)
 
         # ── OCR-varning ────────────────────────────────────────────────
-        self._warn_ocr = QLabel(
-            "⚠️  OCR saknas – kontrollera om det behövs."
-        )
+        self._warn_ocr = QLabel(tr("invdialog.ocr_warning"))
         self._warn_ocr.setStyleSheet(
             "color:#ff9800;font-weight:700;background:transparent;"
         )
@@ -2039,14 +2046,14 @@ class InvoiceDialog(QDialog):
         )
         save_btn = bb.button(QDialogButtonBox.StandardButton.Save)
         save_btn.setText(
-            "💾  Spara ändringar"
+            tr("invdialog.save_changes")
             if self._is_edit
-            else "➕  Registrera"
+            else tr("invdialog.register")
         )
         save_btn.setMinimumHeight(44)
         save_btn.setFont(make_font(13, True))
         cancel_btn = bb.button(QDialogButtonBox.StandardButton.Cancel)
-        cancel_btn.setText("✖  Avbryt")
+        cancel_btn.setText(f"✖  {tr('common.cancel')}")
         cancel_btn.setMinimumHeight(40)
         cancel_btn.setFont(make_font(12))
         bb.accepted.connect(self._validate_and_accept)
@@ -2080,16 +2087,12 @@ class InvoiceDialog(QDialog):
     def _on_sign_changed(self, _: int = 0) -> None:
         """Uppdaterar typ-indikatorn (FAKTURA / KREDITFAKTURA)."""
         if self.f_sign.currentData() == -1:
-            self._lbl_type.setText(
-                "📋  KREDITFAKTURA – dras av från ATT BETALA"
-            )
+            self._lbl_type.setText(tr("invdialog.type_credit"))
             self._lbl_type.setStyleSheet(
                 "color:#2196f3;font-weight:700;background:transparent;"
             )
         else:
-            self._lbl_type.setText(
-                "🧾  FAKTURA – läggs till ATT BETALA"
-            )
+            self._lbl_type.setText(tr("invdialog.type_invoice"))
             self._lbl_type.setStyleSheet(
                 "color:#4caf50;font-weight:700;background:transparent;"
             )
@@ -2135,7 +2138,7 @@ class InvoiceDialog(QDialog):
         if idx >= 0:
             self.f_currency.setCurrentIndex(idx)
 
-        idx = self.f_status.findText(d.get("status", "Obetald"))
+        idx = self.f_status.findData(d.get("status", "Obetald"))
         if idx >= 0:
             self.f_status.setCurrentIndex(idx)
 
@@ -2163,9 +2166,8 @@ class InvoiceDialog(QDialog):
         if self.f_total.value() <= 0:
             QMessageBox.warning(
                 self,
-                "Validering",
-                "Ange ett belopp större än 0.\n\n"
-                "Välj ＋ för faktura eller − för kreditfaktura.",
+                tr("invdialog.validation"),
+                tr("invdialog.amount_required"),
             )
             self.f_total.setFocus()
             return
@@ -2173,19 +2175,20 @@ class InvoiceDialog(QDialog):
         # Förfallodatum passerat + Obetald → erbjud statusändring
         if (
             self.f_due_date.date() < QDate.currentDate()
-            and self.f_status.currentText() == "Obetald"
+            and (self.f_status.currentData() or "Obetald") == "Obetald"
         ):
             reply = QMessageBox.question(
                 self,
-                "Förfallodatum passerat",
-                "Förfallodatum har passerat.\n\n"
-                "Vill du ändra status till 'Förfallen'?",
+                tr("invdialog.overdue_title"),
+                tr("invdialog.overdue_body"),
                 QMessageBox.StandardButton.Yes
                 | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.Yes,
             )
             if reply == QMessageBox.StandardButton.Yes:
-                self.f_status.setCurrentText("Förfallen")
+                idx = self.f_status.findData("Förfallen")
+                if idx >= 0:
+                    self.f_status.setCurrentIndex(idx)
 
         # SMART IFYLLNING: kom ihåg OCR/referens/kategori för
         # leverantören till nästa registrering.
@@ -2239,6 +2242,6 @@ class InvoiceDialog(QDialog):
             "amount_ex_vat": total,
             "vat_percent": 0,
             "currency": self.f_currency.currentText(),
-            "status": self.f_status.currentText(),
+            "status": self.f_status.currentData() or "Obetald",
             "note": self.f_note.toPlainText().strip(),
         }

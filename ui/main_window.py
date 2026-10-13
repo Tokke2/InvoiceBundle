@@ -2017,10 +2017,8 @@ class MainWindow(QMainWindow):
         if not suppliers:
             reply = QMessageBox.question(
                 self,
-                "🏢  Ingen leverantör",
-                "Du måste skapa en leverantör\n"
-                "innan du kan registrera en faktura.\n\n"
-                "Vill du lägga till en leverantör nu?",
+                tr("main.no_supplier_title"),
+                tr("main.no_supplier_body"),
                 QMessageBox.StandardButton.Yes
                 | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.Yes,
@@ -2069,43 +2067,56 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             log.error("_toggle_autostart: %s", exc)
             QMessageBox.warning(
-                self, "Autostart", f"Kunde inte ändra:\n{exc}"
+                self, tr("main.autostart"),
+                tr("main.autostart_error", error=exc)
             )
             return
 
         actual = checked
         message = (
-            "Autostart är på.\n\n"
-            "Vid inloggning väntar programmet om disken inte är redo,\n"
-            "startar gömd, och sätter arbetsmappen till appmappen."
+            tr("main.autostart_on")
             if checked
-            else "Autostart är av.\nProgrammet startar inte längre vid inloggning."
+            else tr("main.autostart_off")
         )
         try:
             if self._app and hasattr(self._app, "settings"):
                 mgr = self._app.settings.get_autostart_manager()
                 actual = mgr.is_enabled()
                 message = mgr.user_message(actual)
+                if _i18n_language() == "en":
+                    # app.py:s user_message är svenska — bygg EN-text här
+                    if actual:
+                        plan = mgr.plan()
+                        message = tr(
+                            "main.autostart_on_full",
+                            workdir=plan["working_directory"],
+                            launcher=plan["launcher"],
+                        )
+                    else:
+                        message = tr("main.autostart_off")
                 self._sync_autostart_checkboxes(actual)
         except Exception:
             pass
         if checked and not actual:
             QMessageBox.warning(
                 self,
-                "Autostart",
-                "Kunde inte registrera autostart hos operativsystemet.\n"
-                "Inställningen är sparad och försöket görs om vid nästa start.",
+                tr("main.autostart"),
+                tr("main.autostart_failed"),
             )
             return
-        txt = "på ✔" if actual else "av"
-        self.set_status(f"🚀  Autostart {txt}", 4000)
-        QMessageBox.information(self, "Autostart", message)
+        txt = tr("main.on_check") if actual else tr("main.off")
+        self.set_status(tr("main.autostart_status", state=txt), 4000)
+        QMessageBox.information(self, tr("main.autostart"), message)
 
     def _toggle_close_to_tray(self, checked: bool) -> None:
         """Kryssruta: göm till tray vid kryss."""
         self._settings.set("close_to_tray", checked)
         self.set_status(
-            f"🙈  Stäng till tray: {'PÅ' if checked else 'AV'}", 4000
+            tr(
+                "main.close_tray_status",
+                state=tr("main.on") if checked else tr("main.off_state"),
+            ),
+            4000,
         )
         log.info("close_to_tray → %s", checked)
 
@@ -2415,9 +2426,8 @@ class MainWindow(QMainWindow):
         """Avsluta helt — med bekräftelse."""
         reply = QMessageBox.question(
             self,
-            "Avsluta programmet",
-            f"Stäng {APP_NAME} helt?\n\n"
-            f"Alla data har sparats automatiskt.",
+            tr("main.quit_title"),
+            tr("main.quit_body", app=APP_NAME),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -2436,7 +2446,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_all(self) -> None:
         """Läser om data/ från disk och uppdaterar alla vyer."""
-        self.set_status("🔄  Läser data/ …")
+        self.set_status(tr("main.reading"))
         summary = ""
         try:
             if hasattr(self._app, "rescan_data"):
@@ -2465,11 +2475,12 @@ class MainWindow(QMainWindow):
             if result:
                 self.set_status(f"💾  Backup: {result.name}", 5000)
                 QMessageBox.information(
-                    self, "Backup", f"✅  Backup skapad:\n{result}"
+                    self, "Backup",
+                    tr("main.backup_created", path=str(result))
                 )
             else:
                 QMessageBox.warning(
-                    self, "Backup", "❌  Backup misslyckades."
+                    self, "Backup", tr("main.backup_failed")
                 )
         except AttributeError:
             QMessageBox.information(
@@ -2487,7 +2498,7 @@ class MainWindow(QMainWindow):
         except Exception:
             export_path.mkdir(parents=True, exist_ok=True)
         _open_path(export_path)
-        self.set_status(f"📁  Öppnar: {export_path}", 3000)
+        self.set_status(tr("main.opening", path=export_path), 3000)
 
     def _open_log_file(self) -> None:
         """Öppnar app.log i OS:ets standardprogram."""
@@ -2719,6 +2730,11 @@ class MainWindow(QMainWindow):
         ]
         tbl.setRowCount(len(rows))
         for r, (action, label) in enumerate(rows):
+            # Visningsetikett på aktuellt språk (shortcut.<id> i i18n);
+            # svensk standardetikett som fallback för okända nycklar.
+            _alt = tr(f"shortcut.{action}")
+            if _alt != f"shortcut.{action}":
+                label = _alt
             if mgr is not None:
                 try:
                     seq = mgr.get(action)
@@ -2802,7 +2818,9 @@ class MainWindow(QMainWindow):
                 lines.append(f"Kraschräknare: {status['strikes']}")
             self._plugin_status_label.setText("\n".join(lines))
         except Exception as exc:
-            self._plugin_status_label.setText(f"Status ej tillgänglig: {exc}")
+            self._plugin_status_label.setText(
+                tr("main.plugin_status_na", error=exc)
+            )
 
     def _save_shortcuts_panel(self) -> None:
         """Sparar redigerade kortkommandon till shortcuts.json."""
@@ -2833,7 +2851,7 @@ class MainWindow(QMainWindow):
         for action, editor in self._shortcut_editors:
             editor.setKeySequence(QKeySequence(mgr.get(action)))
         self._build_shortcut_actions()
-        self.set_status("↩️  Standardkortkommandon återställda", 5000)
+        self.set_status(tr("main.shortcuts_restored"), 5000)
 
     def _reenable_plugins(self) -> None:
         """Återställer 3-strikes-avaktiverade plugins."""
@@ -3068,19 +3086,19 @@ class MainWindow(QMainWindow):
         btn_swish.clicked.connect(self._copy_swish)
 
         btn_paypal = QPushButton("🅿️  PayPal")
-        btn_paypal.setToolTip("Öppnar PayPal i webbläsaren")
+        btn_paypal.setToolTip(tr("donate.paypal_tip"))
         btn_paypal.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl(DONATE_PAYPAL))
         )
 
         btn_bmc = QPushButton("☕  Ko-fi")
-        btn_bmc.setToolTip("Öppnar Ko-fi i webbläsaren")
+        btn_bmc.setToolTip(tr("donate.kofi_tip"))
         btn_bmc.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl(DONATE_BMC))
         )
 
         btn_about = QPushButton("📖  Om programmet")
-        btn_about.setToolTip("Öppnar about.md med komplett info")
+        btn_about.setToolTip(tr("donate.about_tip"))
         btn_about.clicked.connect(self._open_about_file)
 
         btn_donate = QPushButton(tr("about.donate_btn"))

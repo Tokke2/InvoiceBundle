@@ -42,13 +42,19 @@ from PySide6.QtGui import QFont, QCursor, QPixmap
 log = logging.getLogger("ScanImportView")
 
 try:
-    from ui.i18n import tr
+    from ui.i18n import tr, tr_list, tr_missing
 except Exception:  # pragma: no cover
     try:
-        from i18n import tr  # type: ignore[no-redef]
+        from i18n import tr, tr_list, tr_missing  # type: ignore[no-redef]
     except Exception:
         def tr(key: str, **_fmt: object) -> str:  # type: ignore[no-redef]
             return key
+
+        def tr_list(key: str) -> list:  # type: ignore[no-redef]
+            return []
+
+        def tr_missing(fields: list) -> str:  # type: ignore[no-redef]
+            return ", ".join(map(str, fields))
 
 COPYRIGHT_YEAR: int = datetime.date.today().year
 
@@ -223,7 +229,12 @@ class ScanImportView(QWidget):
         br.setSpacing(8)
 
         self._tbl = QTableWidget(0, len(COLUMNS))
-        self._tbl.setHorizontalHeaderLabels([c[0] for c in COLUMNS])
+        _scan_headers = tr_list("scan.columns")
+        self._tbl.setHorizontalHeaderLabels(
+            _scan_headers
+            if len(_scan_headers) == len(COLUMNS)
+            else [c[0] for c in COLUMNS]
+        )
         self._tbl.verticalHeader().setVisible(False)
         self._tbl.setAlternatingRowColors(True)
         self._tbl.setSelectionBehavior(
@@ -305,6 +316,10 @@ class ScanImportView(QWidget):
         self._btn_create.setText(tr("scan.create"))
         self._btn_open_dlg.setText(tr("scan.open_dialog"))
         self._btn_del.setText(tr("scan.remove_row"))
+        _scan_headers = tr_list("scan.columns")
+        if len(_scan_headers) == len(COLUMNS):
+            self._tbl.setHorizontalHeaderLabels(_scan_headers)
+        self._refresh_table()
 
     @staticmethod
     def _hline() -> QFrame:
@@ -482,6 +497,8 @@ class ScanImportView(QWidget):
             for c, (_lbl, key, _w, align) in enumerate(COLUMNS):
                 if key == "total_amount":
                     text = _fmt_amount(row.get(key, 0.0))
+                elif key == "status":
+                    text = self._display_status(row)
                 else:
                     text = str(row.get(key, "") or "")
                 item = QTableWidgetItem(text)
@@ -489,7 +506,7 @@ class ScanImportView(QWidget):
                     align | Qt.AlignmentFlag.AlignVCenter
                 )
                 if key == "status":
-                    if "saknas" in text or "ingen" in text:
+                    if row.get("missing") or text == tr("scan.no_text"):
                         item.setForeground(
                             QApplication.palette().mid()
                         )
@@ -502,10 +519,25 @@ class ScanImportView(QWidget):
         self._tbl.resizeRowsToContents()
         self._tbl.resizeRowsToContents()
 
+    @staticmethod
+    def _display_status(row: dict) -> str:
+        """Statuscell på aktuellt språk (internt värde är svenska)."""
+        raw = str(row.get("status", "") or "")
+        if raw == "redo":
+            return tr("scan.ready")
+        if raw.startswith("saknas:"):
+            return tr(
+                "scan.missing",
+                fields=tr_missing(list(row.get("missing") or [])),
+            )
+        if raw == "ingen text hittad":
+            return tr("scan.no_text")
+        return raw
+
     def _update_sum(self) -> None:
         total = sum(float(r.get("total_amount", 0.0)) for r in self._rows)
         self._lbl_sum.setText(
-            f"{len(self._rows)} rad(er)  ·  summa {_fmt_amount(total)} kr"
+            tr("scan.sum", n=len(self._rows), amount=_fmt_amount(total))
         )
 
     def _selected_rows(self) -> list[int]:

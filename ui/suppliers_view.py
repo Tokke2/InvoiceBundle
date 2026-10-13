@@ -277,10 +277,10 @@ class SupplierDialog(QDialog):
         self.f_iban = _le("SEXX XXXX …")
         self.f_bic = _le("XXXXSESS")
 
-        form.addRow("Bankgiro (BG):", self.f_bg)
-        form.addRow("Plusgiro (PG):", self.f_pg)
-        form.addRow("IBAN:", self.f_iban)
-        form.addRow("BIC / SWIFT:", self.f_bic)
+        form.addRow(tr("supplierdlg.bg"), self.f_bg)
+        form.addRow(tr("supplierdlg.pg"), self.f_pg)
+        form.addRow(tr("supplierdlg.iban"), self.f_iban)
+        form.addRow(tr("supplierdlg.bic"), self.f_bic)
         form.addRow(_h_line())
 
         # ── Betalvillkor ───────────────────────────────────────────────
@@ -290,7 +290,7 @@ class SupplierDialog(QDialog):
         self.f_terms.setValue(30)
         self.f_terms.setMinimumHeight(34)
         self.f_terms.setFont(_font(11))
-        form.addRow("Betalvillkor:", self.f_terms)
+        form.addRow(tr("supplierdlg.terms"), self.f_terms)
 
         # Snabbvalsknappar för betalvillkor — färre klick i vardagen
         terms_row = QHBoxLayout()
@@ -323,18 +323,18 @@ class SupplierDialog(QDialog):
         self.f_phone = _le("+46 70 XXX XX XX")
         self.f_address = _le("Gatuadress, postnr, ort")
 
-        form.addRow("Kontaktperson:", self.f_contact)
-        form.addRow("E-post:", self.f_email)
-        form.addRow("Telefon:", self.f_phone)
-        form.addRow("Adress:", self.f_address)
+        form.addRow(tr("supplierdlg.contact"), self.f_contact)
+        form.addRow(tr("supplierdlg.email"), self.f_email)
+        form.addRow(tr("supplierdlg.phone"), self.f_phone)
+        form.addRow(tr("supplierdlg.address"), self.f_address)
         form.addRow(_h_line())
 
         # ── Anteckning ─────────────────────────────────────────────────
         self.f_note = QTextEdit()
-        self.f_note.setPlaceholderText("Fritext anteckning …")
+        self.f_note.setPlaceholderText(tr("supplierdlg.note_ph"))
         self.f_note.setMaximumHeight(100)
         self.f_note.setFont(_font(11))
-        form.addRow("Anteckning:", self.f_note)
+        form.addRow(tr("supplierdlg.note"), self.f_note)
 
         scroll.setWidget(inner)
         root.addWidget(scroll)
@@ -349,7 +349,7 @@ class SupplierDialog(QDialog):
         save_btn.setMinimumHeight(40)
         save_btn.setFont(_font(12, bold=True))
         btn_box.button(QDialogButtonBox.StandardButton.Cancel).setText(
-            "✖  Avbryt"
+            f"✖  {tr('common.cancel')}"
         )
         btn_box.accepted.connect(self._validate_and_accept)
         btn_box.rejected.connect(self.reject)
@@ -1002,12 +1002,12 @@ class SuppliersView(QWidget):
             return
 
         menu = QMenu(self)
-        menu.addAction("✏️  Redigera", self._edit_supplier)
-        menu.addAction("📋  Duplicera", self._duplicate_supplier)
+        menu.addAction(tr("suppliers.edit"), self._edit_supplier)
+        menu.addAction(tr("suppliers.duplicate"), self._duplicate_supplier)
         menu.addSeparator()
-        menu.addAction("📄  Exportera", self._export_suppliers)
+        menu.addAction(tr("suppliers.export"), self._export_suppliers)
         menu.addSeparator()
-        menu.addAction("🗑  Ta bort", self._delete_supplier)
+        menu.addAction(tr("suppliers.delete"), self._delete_supplier)
         menu.exec(self._table.viewport().mapToGlobal(pos))
 
     # ══════════════════════════════════════════════════════════════════
@@ -1037,8 +1037,8 @@ class SuppliersView(QWidget):
         """
         reply = QMessageBox.question(
             self,
-            "Okänd leverantör",
-            f"Leverantören '{name}' finns inte.\nLägga till nu?",
+            tr("supplier.unknown_title"),
+            tr("supplier.unknown_body", name=name),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )
