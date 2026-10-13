@@ -1,0 +1,2870 @@
+from __future__ import annotations
+
+"""
+Fakturabunten — Main Window
+===================================
+Fil    : Fakturabunten_/ui/main_window.py
+Författare : Rickard Längkvist
+År     : Dynamiskt (auto)
+
+Huvudfönster — hanterar:
+• Flikar, meny, toolbar, statusfält
+• System Tray (alltid minimerad vid start, göm vid kryss)
+• 4 teman: Mörkt / Ljust / Auto / System
+• Tydliga dropdown-pilar som anpassas efter tema
+• Autostart med OS via kryssruta i Inställningar-menyn
+• Stäng till tray via kryssruta i Inställningar-menyn
+• Visa/dölj flikar (meny + högerklick på flik)
+• Geometrisparning i JSON (debounced — skriver inte per pixel)
+• Inladdning av InvoicesView och SuppliersView (builtins)
+• Plugin fas-2-registrering
+• Multi-OS: Windows / Linux / macOS
+• Mushjul-scroll i alla flikar (QScrollArea-wrap)
+• Betalningsdatum hanteras PER export-batch och nollställs efter export
+  (publikt API: confirm_and_export_invoices)
+
+Copyright © dynamiskt år Rickard Längkvist
+"""
+
+import datetime
+import logging
+import os
+import platform
+import subprocess
+import sys
+import traceback
+from pathlib import Path
+from typing import Any
+
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QTabWidget, QVBoxLayout,
+    QHBoxLayout, QLabel, QMenu, QSystemTrayIcon,
+    QApplication, QToolBar, QStatusBar,
+    QMessageBox, QScrollArea, QFrame, QSizePolicy,
+    QPushButton, QDialog, QTextEdit, QGroupBox,
+    QTableWidget, QTableWidgetItem, QKeySequenceEdit,
+    QHeaderView, QAbstractItemView,
+)
+from PySide6.QtGui import (
+    QAction, QFont, QPalette, QColor, QCursor,
+    QIcon, QPixmap, QPainter, QDesktopServices,
+    QKeySequence, QShortcut,
+)
+from PySide6.QtCore import (
+    Qt, QSize, QTimer, QPoint, Signal, QUrl, QFileSystemWatcher,
+)
+
+# ═════════════════════════════════════════════════════════════════════
+#  KONSTANTER
+# ═════════════════════════════════════════════════════════════════════
+
+COPYRIGHT_YEAR: int = datetime.date.today().year
+
+BASE_DIR: Path = Path(__file__).parent.resolve()   # .../ui/
+PROJECT_DIR: Path = BASE_DIR.parent                # .../Fakturabunten_/
+
+APP_NAME: str = "Fakturabunten"
+APP_VERSION: str = "1.4.10"
+
+FONT_FAMILY: str = "Segoe UI"
+
+log = logging.getLogger("MainWindow")
+
+
+def get_platform() -> str:
+    """Returnerar 'windows' | 'macos' | 'linux'."""
+    p = platform.system().lower()
+    if p == "darwin":
+        return "macos"
+    if p == "windows":
+        return "windows"
+    return "linux"
+
+
+CURRENT_PLATFORM: str = get_platform()
+
+VALID_THEMES: tuple[str, ...] = ("dark", "light", "auto", "system")
+
+#: Donationslänk — definieras på EN plats (app.py), används av
+#: donate-knappen i Om-dialogen.
+try:
+    from app import DONATE_SWISH, DONATE_PAYPAL, DONATE_BMC
+except Exception:  # pragma: no cover
+    DONATE_SWISH = "123 456 78 90"
+    DONATE_PAYPAL = "https://www.paypal.com/donate"
+    DONATE_BMC = "https://www.buymeacoffee.com/"
+
+# ═════════════════════════════════════════════════════════════════════
+#  SYS.PATH
+# ═════════════════════════════════════════════════════════════════════
+
+
+def _ensure_paths() -> None:
+    """Säkerställer att projekt- och ui-mappen finns i sys.path."""
+    for _d in (str(PROJECT_DIR), str(BASE_DIR)):
+        if _d not in sys.path:
+            sys.path.insert(0, _d)
+
+
+_ensure_paths()
+
+# ═════════════════════════════════════════════════════════════════════
+#  TEMAN  (exakt 4: dark / light / auto / system)
+# ═════════════════════════════════════════════════════════════════════
+
+THEMES: dict[str, dict] = {
+    "dark": {
+        "name": "dark", "label": "🌙  Mörkt",
+        "bg": "#0c1218", "bg_secondary": "#141c26",
+        "bg_tertiary": "#1c2836",
+        "text": "#d5deea", "text_strong": "#f4f7fb",
+        "accent": "#3d8bfd", "accent_hover": "#6aa6ff",
+        "button_bg": "#1c2836", "button_text": "#f4f7fb",
+        "button_hover": "#283648",
+        "tab_bg": "#141c26", "tab_selected": "#1f4f8a",
+        "tab_text": "#b7c5d6", "tab_text_selected": "#ffffff",
+        "border": "#2a3848", "header_bg": "#17304c",
+        "row_alt": "#1c3044", "row_normal": "#0c1218",
+        "card_bg": "#141c26", "status_bar": "#0c1218",
+        "status_text": "#d5deea",
+        "input_bg": "#0c1218", "input_border": "#2a3848",
+        "scrollbar_bg": "#0c1218", "scrollbar_handle": "#3a4a5c",
+        "menu_bg": "#141c26", "menu_text": "#d5deea",
+        "menu_hover": "#1f4f8a",
+        "tooltip_bg": "#1c2836", "tooltip_text": "#f4f7fb",
+        "success": "#3ecf8e", "warning": "#e3b341",
+        "error": "#f07178", "info": "#3d8bfd",
+        "gold": "#e8b030", "gold_bg": "#2a2416",
+        "toolbar_bg": "#101820", "toolbar_border": "#c9a227",
+        "tray_icon_color": "#e8b030",
+    },
+    "light": {
+        "name": "light", "label": "☀️  Ljust",
+        "bg": "#f4f1ea", "bg_secondary": "#fffcf7",
+        "bg_tertiary": "#e8e2d6",
+        "text": "#3d4450", "text_strong": "#1c2128",
+        "accent": "#0b5cab", "accent_hover": "#084a8a",
+        "button_bg": "#fffcf7", "button_text": "#1c2128",
+        "button_hover": "#efe8dc",
+        "tab_bg": "#e8e2d6", "tab_selected": "#0b5cab",
+        "tab_text": "#5c6570", "tab_text_selected": "#ffffff",
+        "border": "#ddd4c6", "header_bg": "#1c3f6e",
+        "row_alt": "#d5e4f5", "row_normal": "#fffcf7",
+        "card_bg": "#fffcf7", "status_bar": "#fffcf7",
+        "status_text": "#1c2128",
+        "input_bg": "#fffcf7", "input_border": "#ddd4c6",
+        "scrollbar_bg": "#f4f1ea", "scrollbar_handle": "#cfc6b6",
+        "menu_bg": "#fffcf7", "menu_text": "#1c2128",
+        "menu_hover": "#0b5cab",
+        "tooltip_bg": "#1c2128", "tooltip_text": "#ffffff",
+        "success": "#1a7f37", "warning": "#9a6700",
+        "error": "#cf222e", "info": "#0b5cab",
+        "gold": "#8a5a12", "gold_bg": "#f8efd4",
+        "toolbar_bg": "#fffcf7", "toolbar_border": "#c4a15a",
+        "tray_icon_color": "#0b5cab",
+    },
+}
+
+
+def _resolve_auto() -> str:
+    """Auto-tema: ljust 07–20, annars mörkt."""
+    h = datetime.datetime.now().hour
+    return "light" if 7 <= h < 20 else "dark"
+
+
+def _resolve_system() -> str:
+    """
+    System-tema: två metoder i prioriteingordning.
+
+    1. QStyleHints.colorScheme() (Qt ≥ 6.5) — idén från PDF reader Pro
+       SPEC v2.1 §2.5: läser operativsystemets FAKTISKA mörkt/ljust-läge.
+    2. Fallback: systempalettens luminans (äldre Qt / alla plattformar).
+    """
+    inst = None
+    try:
+        inst = QApplication.instance()
+    except Exception:
+        inst = None
+
+    if inst is not None:
+        # Metod 1: QStyleHints (Qt 6.5+)
+        try:
+            hints = inst.styleHints()
+            if hints is not None and hasattr(hints, "colorScheme"):
+                scheme = hints.colorScheme()
+                scheme_name = getattr(scheme, "name", str(scheme))
+                if "Dark" in scheme_name:
+                    return "dark"
+                if "Light" in scheme_name:
+                    return "light"
+                # 'Unknown' → gå vidare till palett-metoden
+        except Exception as exc:
+            log.debug("QStyleHints.colorScheme ej tillgänglig: %s", exc)
+
+        # Metod 2: palettens luminans
+        try:
+            bg = inst.palette().color(QPalette.ColorRole.Window)
+            lum = (
+                0.299 * bg.red()
+                + 0.587 * bg.green()
+                + 0.114 * bg.blue()
+            )
+            return "dark" if lum < 128 else "light"
+        except Exception:
+            pass
+    return "dark"
+
+
+def resolve_theme(name: str) -> dict:
+    """
+    Löser ett temanamn till en konkret tema-dict.
+
+    'auto'   → tidbaserat (ljust 07–20)
+    'system' → följer operativsystemets mörkt/ljust-läge
+
+    Varje tema WCAG-valideras innan det returneras: textfärger som
+    inte håller kontrastkravet (≥ 4.5:1) rättas automatiskt och en
+    CONTRAST_ADJUST-rad loggas (ui/contrast.py).
+    """
+    if name == "auto":
+        name = _resolve_auto()
+    elif name == "system":
+        name = _resolve_system()
+    if name not in ("dark", "light"):
+        name = "dark"
+
+    theme = dict(THEMES[name])
+    try:
+        from ui.contrast import enforce_theme_contrast
+        theme = enforce_theme_contrast(theme)
+    except ImportError:
+        try:
+            from contrast import enforce_theme_contrast
+            theme = enforce_theme_contrast(theme)
+        except ImportError:
+            pass
+    return theme
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  GLOBAL STYLESHEET
+# ═════════════════════════════════════════════════════════════════════
+
+
+def build_stylesheet(t: dict) -> str:
+    """Bygger hela appens QSS från en tema-dict."""
+    is_dark = t.get("bg", "#0d1117").lower() not in (
+        "#ffffff", "#f5f7fa", "#f8f9fa", "#f6f8fa", "#eaeef2",
+    )
+    arrow_fg = "#ffffff" if is_dark else "#000000"
+    arrow_hover = "#000000" if is_dark else "#ffffff"
+    grid = "#8ea4ba" if is_dark else "#8a7d6c"
+
+    return f"""
+/* Fakturabunten – Global QSS
+   © {COPYRIGHT_YEAR} Rickard Längkvist */
+
+* {{
+    font-family : "Segoe UI","SF Pro Display","Helvetica Neue",
+                  Arial,sans-serif;
+    font-size   : 13px;
+    outline     : none;
+}}
+
+QMainWindow, QDialog {{
+    background-color : {t["bg"]};
+    color            : {t["text_strong"]};
+}}
+
+QWidget {{
+    background-color : {t["bg"]};
+    color            : {t["text"]};
+}}
+
+/* ── Scrollbars ─────────────────────────────────────────────── */
+
+QScrollBar:vertical {{
+    background    : {t["scrollbar_bg"]};
+    width         : 12px;
+    border-radius : 6px;
+    margin        : 0;
+    border        : none;
+}}
+QScrollBar::handle:vertical {{
+    background    : {t["scrollbar_handle"]};
+    min-height    : 30px;
+    border-radius : 6px;
+}}
+QScrollBar::handle:vertical:hover {{ background: {t["accent"]}; }}
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {{ height: 0; background: none; }}
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {{ background: none; }}
+
+QScrollBar:horizontal {{
+    background    : {t["scrollbar_bg"]};
+    height        : 12px;
+    border-radius : 6px;
+    margin        : 0;
+    border        : none;
+}}
+QScrollBar::handle:horizontal {{
+    background    : {t["scrollbar_handle"]};
+    min-width     : 30px;
+    border-radius : 6px;
+}}
+QScrollBar::handle:horizontal:hover {{ background: {t["accent"]}; }}
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal {{ width: 0; background: none; }}
+QScrollBar::add-page:horizontal,
+QScrollBar::sub-page:horizontal {{ background: none; }}
+
+/* ── Labels ─────────────────────────────────────────────────── */
+
+QLabel {{
+    color       : {t["text_strong"]};
+    font-weight : 700;
+    background  : transparent;
+}}
+
+/* ── Buttons ────────────────────────────────────────────────── */
+
+QPushButton {{
+    background-color : {t["button_bg"]};
+    color            : {t["button_text"]};
+    font-weight      : 700;
+    font-size        : 13px;
+    padding          : 8px 16px;
+    border-radius    : 8px;
+    border           : 1px solid {t["border"]};
+    min-height       : 30px;
+    min-width        : 0px;
+}}
+QPushButton:hover {{
+    background-color : {t["button_hover"]};
+    border-color     : {t["accent"]};
+}}
+QPushButton:pressed {{
+    background-color : {t["accent"]};
+    color            : #ffffff;
+}}
+QPushButton:disabled {{
+    background-color : {t["border"]};
+    color            : #666666;
+    border-color     : {t["border"]};
+}}
+QPushButton[accent="true"] {{
+    background-color : {t["accent"]};
+    color            : #ffffff;
+    border-color     : {t["accent"]};
+}}
+QPushButton[accent="true"]:hover {{
+    background-color : {t["accent_hover"]};
+}}
+QPushButton[danger="true"] {{
+    background-color : {t["error"]};
+    color            : #ffffff;
+    border-color     : {t["error"]};
+}}
+QPushButton[success="true"] {{
+    background-color : {t["success"]};
+    color            : #ffffff;
+    border-color     : {t["success"]};
+}}
+QPushButton[info="true"] {{
+    background-color : {t["info"]};
+    color            : #ffffff;
+    border-color     : {t["info"]};
+}}
+
+/* ── Tabs ───────────────────────────────────────────────────── */
+
+QTabWidget::pane {{
+    border        : 1px solid {t["border"]};
+    background    : {t["bg_secondary"]};
+    border-radius : 0 8px 8px 8px;
+    top           : -1px;
+}}
+QTabBar {{ background: transparent; border: none; }}
+QTabBar::tab {{
+    background    : {t["tab_bg"]};
+    color         : {t["tab_text"]};
+    font-weight   : 700;
+    font-size     : 13px;
+    padding       : 6px 10px;
+    margin-right  : 2px;
+    border-radius : 8px 8px 0 0;
+    border        : 1px solid {t["border"]};
+    border-bottom : none;
+    min-width     : 0px;
+}}
+QTabBar::tab:selected {{
+    background   : {t["tab_selected"]};
+    color        : {t["tab_text_selected"]};
+    border-color : {t["tab_selected"]};
+    font-weight  : 800;
+}}
+QTabBar::tab:hover:!selected {{
+    background   : {t["button_hover"]};
+    color        : {t["text_strong"]};
+    border-color : {t["accent"]};
+}}
+QTabBar::scroller {{ width: 28px; }}
+
+/* ── Tables ─────────────────────────────────────────────────── */
+
+QTableWidget, QTableView, QTreeView, QListView {{
+    background-color           : {t["row_normal"]};
+    color                      : {t["text_strong"]};
+    font-weight                : 700;
+    font-size                  : 13px;
+    gridline-color             : {grid};
+    border                     : 1px solid {t["border"]};
+    border-radius              : 6px;
+    selection-background-color : {t["accent"]};
+    selection-color            : #ffffff;
+    alternate-background-color : {t["row_alt"]};
+    outline                    : none;
+}}
+QHeaderView::section {{
+    background-color : {t["header_bg"]};
+    color            : #ffffff;
+    font-weight      : 800;
+    font-size        : 12px;
+    padding          : 8px 10px;
+    border           : none;
+    border-right     : 1px solid {t["border"]};
+    border-bottom    : 1px solid {t["border"]};
+}}
+QTableWidget::item, QTableView::item {{
+    padding : 8px 8px;
+    color   : {t["text_strong"]};
+}}
+QTableWidget::item:selected, QTableView::item:selected {{
+    background-color : {t["accent"]};
+    color            : #ffffff;
+}}
+
+/* ── Text inputs ─────────────────────────────────────────────── */
+
+QLineEdit, QTextEdit, QPlainTextEdit,
+QSpinBox, QDoubleSpinBox, QDateEdit {{
+    background-color : {t["input_bg"]};
+    color            : {t["text_strong"]};
+    font-weight      : 600;
+    font-size        : 13px;
+    border           : 1.5px solid {t["input_border"]};
+    border-radius    : 6px;
+    padding          : 6px 10px;
+    min-height       : 32px;
+}}
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus,
+QSpinBox:focus, QDoubleSpinBox:focus,
+QDateEdit:focus {{ border-color: {t["accent"]}; }}
+
+/* ── COMBOBOX ────────────────────────────────────────────────── */
+
+QComboBox {{
+    background-color : {t["input_bg"]};
+    color            : {t["text_strong"]};
+    font-weight      : 700;
+    font-size        : 13px;
+    border           : 1px solid {t["input_border"]};
+    border-radius    : 6px;
+    padding          : 4px 28px 4px 10px;
+    min-height       : 30px;
+}}
+QComboBox:focus, QComboBox:on {{
+    border-color : {t["accent"]};
+}}
+QComboBox:hover {{ border-color: {t["accent"]}; }}
+QComboBox::drop-down {{
+    subcontrol-origin   : padding;
+    subcontrol-position : right center;
+    width               : 26px;
+    border              : none;
+    background          : transparent;
+}}
+QComboBox::down-arrow {{
+    width         : 0;
+    height        : 0;
+    border-left   : 5px solid transparent;
+    border-right  : 5px solid transparent;
+    border-top    : 6px solid {t["text_strong"]};
+    margin-right  : 8px;
+}}
+QComboBox QAbstractItemView {{
+    background-color           : {t["menu_bg"]};
+    color                      : {t["text_strong"]};
+    font-weight                : 700;
+    font-size                  : 13px;
+    selection-background-color : {t["accent"]};
+    selection-color            : #ffffff;
+    border                     : 1px solid {t["border"]};
+    outline                    : none;
+    padding                    : 4px;
+}}
+QComboBox QAbstractItemView::item {{
+    padding    : 7px 12px;
+    min-height : 26px;
+    color      : {t["text_strong"]};
+}}
+QComboBox QAbstractItemView::item:hover,
+QComboBox QAbstractItemView::item:selected {{
+    background-color : {t["accent"]};
+    color            : #ffffff;
+}}
+
+/* ── Menus ──────────────────────────────────────────────────── */
+
+QMenuBar {{
+    background-color : {t["bg_secondary"]};
+    color            : {t["text_strong"]};
+    font-weight      : 700;
+    padding          : 2px 4px;
+    border-bottom    : 1px solid {t["border"]};
+}}
+QMenuBar::item {{
+    background    : transparent;
+    padding       : 6px 14px;
+    border-radius : 4px;
+    color         : {t["text_strong"]};
+    font-weight   : 700;
+}}
+QMenuBar::item:selected {{ background: {t["accent"]}; color: #ffffff; }}
+
+QMenu {{
+    background-color : {t["menu_bg"]};
+    color            : {t["menu_text"]};
+    font-weight      : 600;
+    font-size        : 13px;
+    border           : 1px solid {t["border"]};
+    border-radius    : 8px;
+    padding          : 4px;
+}}
+QMenu::item {{
+    padding       : 6px 22px 6px 12px;
+    border-radius : 4px;
+    margin        : 1px 2px;
+    color         : {t["menu_text"]};
+}}
+QMenu::item:selected {{
+    background-color : {t["menu_hover"]};
+    color            : #ffffff;
+}}
+QMenu::separator {{
+    height     : 1px;
+    background : {t["border"]};
+    margin     : 4px 8px;
+}}
+QMenu::indicator {{ width: 16px; height: 16px; }}
+QMenu::indicator:checked {{
+    background    : {t["accent"]};
+    border-radius : 3px;
+}}
+QMenu::indicator:unchecked {{
+    background    : {t["input_bg"]};
+    border        : 2px solid {t["border"]};
+    border-radius : 3px;
+}}
+
+/* ── Toolbar ────────────────────────────────────────────────── */
+
+QToolBar {{
+    background-color : {t["toolbar_bg"]};
+    border-bottom    : 1px solid {t["border"]};
+    spacing          : 4px;
+    padding          : 4px 8px;
+}}
+QToolBar QToolButton {{
+    background-color : transparent;
+    color            : {t["button_text"]};
+    font-weight      : 700;
+    font-size        : 12px;
+    border-radius    : 6px;
+    padding          : 4px 10px;
+    border           : 1px solid transparent;
+    min-height       : 28px;
+}}
+QToolBar QToolButton:hover {{
+    background-color : {t["button_hover"]};
+    border-color     : {t["accent"]};
+    color            : {t["text_strong"]};
+}}
+QToolBar QToolButton:pressed {{
+    background-color : {t["accent"]};
+    color            : #ffffff;
+}}
+QToolBar::separator {{
+    background : {t["border"]};
+    width      : 1px;
+    margin     : 4px 8px;
+}}
+
+/* ── Status bar ─────────────────────────────────────────────── */
+
+QStatusBar {{
+    background-color : {t["status_bar"]};
+    color            : {t.get("status_text", t["text_strong"])};
+    font-weight      : 700;
+    font-size        : 12px;
+    border-top       : 1px solid {t["border"]};
+}}
+QStatusBar::item {{ border: none; }}
+
+/* ── Group box ──────────────────────────────────────────────── */
+
+QGroupBox {{
+    border        : 1px solid {t["border"]};
+    border-radius : 8px;
+    margin-top    : 14px;
+    font-weight   : 700;
+    color         : {t["text_strong"]};
+    padding       : 8px 8px 6px 8px;
+    background    : {t["bg_secondary"]};
+}}
+QGroupBox::title {{
+    subcontrol-origin   : margin;
+    subcontrol-position : top left;
+    padding             : 0 8px;
+    left                : 12px;
+    color               : {t["accent"]};
+    background          : {t["bg"]};
+}}
+
+/* ── Checkboxes / Radio ─────────────────────────────────────── */
+
+QCheckBox, QRadioButton {{
+    color       : {t["text_strong"]};
+    font-weight : 600;
+    spacing     : 8px;
+    background  : transparent;
+}}
+QCheckBox::indicator, QRadioButton::indicator {{
+    width         : 18px;
+    height        : 18px;
+    border        : 2px solid {t["border"]};
+    border-radius : 4px;
+    background    : {t["input_bg"]};
+}}
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
+    background   : {t["accent"]};
+    border-color : {t["accent"]};
+}}
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
+    border-color : {t["accent"]};
+}}
+
+/* ── Tooltips ───────────────────────────────────────────────── */
+
+QToolTip {{
+    background-color : {t["tooltip_bg"]};
+    color            : {t["tooltip_text"]};
+    border           : 1px solid {t["border"]};
+    border-radius    : 5px;
+    padding          : 5px 9px;
+    font-weight      : 600;
+    font-size        : 12px;
+}}
+
+/* ── Progress bar ───────────────────────────────────────────── */
+
+QProgressBar {{
+    background-color : {t["bg_secondary"]};
+    border           : 1px solid {t["border"]};
+    border-radius    : 5px;
+    text-align       : center;
+    color            : {t["text_strong"]};
+    font-weight      : 700;
+    min-height       : 18px;
+}}
+QProgressBar::chunk {{
+    background-color : {t["accent"]};
+    border-radius    : 5px;
+}}
+
+/* ── Misc ───────────────────────────────────────────────────── */
+
+QSplitter::handle {{
+    background : {t["border"]};
+    width      : 2px;
+    height     : 2px;
+}}
+QDialog {{
+    background-color : {t["bg"]};
+    border           : 1px solid {t["border"]};
+    border-radius    : 10px;
+}}
+QDialogButtonBox QPushButton {{ min-width: 110px; }}
+QScrollArea {{ border: none; background: transparent; }}
+QScrollArea > QWidget > QWidget {{ background: transparent; }}
+QFrame[frameShape="4"], QFrame[frameShape="5"] {{
+    color: {t["border"]}; max-height: 1px;
+}}
+
+/* ── Calendar ───────────────────────────────────────────────── */
+
+QCalendarWidget {{
+    background-color : {t["bg"]};
+    color            : {t["text_strong"]};
+    border           : 1px solid {t["border"]};
+    border-radius    : 8px;
+}}
+QCalendarWidget QToolButton {{
+    background-color : {t["button_bg"]};
+    color            : {t["button_text"]};
+    font-weight      : 700;
+    border-radius    : 4px;
+    padding          : 4px 8px;
+}}
+QCalendarWidget QAbstractItemView {{
+    background-color           : {t["bg_secondary"]};
+    color                      : {t["text_strong"]};
+    selection-background-color : {t["accent"]};
+    selection-color            : #ffffff;
+    font-weight                : 600;
+}}
+
+/* ── Beloppskort (fakturavyn) ───────────────────────────────── */
+
+QFrame#MoneyCard, QFrame#MoneyCardCredit, QFrame#MoneyCardTotal {{
+    border-radius : 12px;
+    border        : 1px solid {t["border"]};
+    background    : {t["card_bg"]};
+}}
+QFrame#MoneyCardTotal {{
+    background : {t.get("gold_bg", t["card_bg"])};
+    border     : 1px solid {t.get("gold", t["accent"])};
+}}
+QLabel#MoneyCaption {{
+    color       : {t["text"]};
+    font-size   : 11px;
+    font-weight : 700;
+    background  : transparent;
+}}
+"""
+
+
+def apply_app_palette(theme: dict) -> None:
+    """
+    Sätter QPalette så tabelltext inte faller tillbaka till svart.
+
+    Fusion ignorerar stylesheet-färgen på celler som har egen
+    bakgrund och använder palettens Text i stället. Utan den här
+    blir fakturarader svart text på mörk statusfärg.
+    """
+    inst = QApplication.instance()
+    if inst is None or not theme:
+        return
+    text = QColor(theme.get("text_strong", "#f4f7fb"))
+    muted = QColor(theme.get("text", "#d5deea"))
+    pal = inst.palette()
+    pal.setColor(QPalette.ColorRole.Window, QColor(theme.get("bg", "#0c1218")))
+    pal.setColor(QPalette.ColorRole.WindowText, text)
+    pal.setColor(
+        QPalette.ColorRole.Base,
+        QColor(theme.get("row_normal", theme.get("bg", "#0c1218"))),
+    )
+    pal.setColor(
+        QPalette.ColorRole.AlternateBase,
+        QColor(theme.get("row_alt", "#1c3044")),
+    )
+    pal.setColor(QPalette.ColorRole.Text, text)
+    pal.setColor(
+        QPalette.ColorRole.Button,
+        QColor(theme.get("button_bg", "#1c2836")),
+    )
+    pal.setColor(
+        QPalette.ColorRole.ButtonText,
+        QColor(theme.get("button_text", "#f4f7fb")),
+    )
+    pal.setColor(
+        QPalette.ColorRole.Highlight,
+        QColor("#1f6feb"),
+    )
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    pal.setColor(
+        QPalette.ColorRole.ToolTipBase,
+        QColor(theme.get("tooltip_bg", "#1c2836")),
+    )
+    pal.setColor(
+        QPalette.ColorRole.ToolTipText,
+        QColor(theme.get("tooltip_text", "#f4f7fb")),
+    )
+    pal.setColor(QPalette.ColorRole.PlaceholderText, muted)
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, muted)
+    pal.setColor(
+        QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, muted
+    )
+    inst.setPalette(pal)
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  UI-HJÄLPARE
+# ═════════════════════════════════════════════════════════════════════
+
+
+def _font(size: int = 11, bold: bool = False) -> QFont:
+    """Typsnittsfabrik — konsekvent typografi i hela fönstret."""
+    f = QFont(FONT_FAMILY, size)
+    if bold:
+        f.setBold(True)
+    return f
+
+
+def _load_app_icon() -> QIcon | None:
+    """
+    Laddar app_icon.png/.ico/.svg och registrerar flera storlekar
+    så aktivitetsfält och tray blir skarpa.
+    """
+    icon = QIcon()
+    png = PROJECT_DIR / "app_icon.png"
+    if png.exists():
+        pix = QPixmap(str(png))
+        if not pix.isNull():
+            for size in (16, 20, 24, 32, 48, 64, 128, 256):
+                icon.addPixmap(
+                    pix.scaled(
+                        size, size,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+    for name in ("app_icon.ico", "app_icon.svg", "icon.ico", "icon.png"):
+        p = PROJECT_DIR / name
+        if p.exists():
+            icon.addFile(str(p))
+    if icon.isNull():
+        return None
+    return icon
+
+
+def _make_tray_icon(color: str = "#e8b030") -> QIcon:
+    """Fallback om ikonfil saknas: tre kvitton som summeras till en guldrad."""
+    size = 64
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor("#0e3444"))
+    p.drawRoundedRect(1, 1, 62, 62, 14, 14)
+    p.setBrush(QColor("#f7f3ec"))
+    p.drawRoundedRect(14, 12, 36, 8, 3, 3)
+    p.drawRoundedRect(18, 24, 28, 8, 3, 3)
+    p.drawRoundedRect(22, 36, 20, 8, 3, 3)
+    p.setBrush(QColor(color))
+    p.drawRoundedRect(10, 48, 44, 10, 3, 3)
+    p.end()
+    return QIcon(pix)
+
+
+def _wrap_scroll(widget: QWidget) -> QScrollArea:
+    """Wrappar en widget i QScrollArea — mushjul-scroll i alla flikar."""
+    sa = QScrollArea()
+    sa.setWidgetResizable(True)
+    sa.setHorizontalScrollBarPolicy(
+        Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
+    sa.setHorizontalScrollBarPolicy(
+        Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    )
+    sa.setVerticalScrollBarPolicy(
+        Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    )
+    sa.setFrameShape(QFrame.Shape.NoFrame)
+    sa.setWidget(widget)
+    return sa
+
+
+def _placeholder(icon: str, title: str, subtitle: str = "") -> QWidget:
+    """Placeholder-innehåll för flikar som inte byggts ännu."""
+    w = QWidget()
+    v = QVBoxLayout(w)
+    v.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    v.setSpacing(16)
+    v.addStretch()
+    for text, size, bold, color in [
+        (icon,     54, False, ""),
+        (title,    22, True,  ""),
+        (subtitle, 12, False, "#888888"),
+    ]:
+        if not text:
+            continue
+        lbl = QLabel(text)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setFont(_font(size, bold=bold))
+        ss = "background:transparent;"
+        if color:
+            ss += f" color:{color};"
+        lbl.setStyleSheet(ss)
+        v.addWidget(lbl)
+    v.addStretch()
+    return w
+
+
+def _open_path(path: Path) -> None:
+    """Öppnar en fil eller mapp i OS:ets standardprogram."""
+    try:
+        if not path.is_file():
+            path.mkdir(parents=True, exist_ok=True)
+        if CURRENT_PLATFORM == "windows":
+            os.startfile(str(path))  # type: ignore[attr-defined]
+        elif CURRENT_PLATFORM == "macos":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+    except Exception as exc:
+        log.error("_open_path: %s", exc)
+
+
+def _field(obj: Any, *names: str, default: Any = "") -> Any:
+    """
+    Hämtar första icke-tomma värdet från dict ELLER objekt.
+
+    Används av confirm_and_export_invoices så att både faktura-dicts
+    och objekt med attribut fungerar.
+    """
+    for n in names:
+        if isinstance(obj, dict):
+            v = obj.get(n)
+        else:
+            v = getattr(obj, n, None)
+        if v not in (None, ""):
+            return v
+    return default
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  AUTOSTART FALLBACK  (används bara om app.py saknar manager)
+# ═════════════════════════════════════════════════════════════════════
+
+
+def _set_autostart_os(enable: bool) -> None:
+    """Fallback: samma AutostartManager som app.py (startfil i appmappen)."""
+    try:
+        from app import AutostartManager
+        AutostartManager().set_enabled(enable)
+    except Exception as exc:
+        log.error("_set_autostart_os: %s", exc)
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  EXPORT-BETALNINGSDATUM — PUBLIKT API
+#
+#  Betalningsdatum hanteras ENBART per PDF-exportbatch.
+#  Ingen session-lagring, inget globalt tillstånd.
+#  Flöde: bekräftelsedialog → export → nollställning.
+# ═════════════════════════════════════════════════════════════════════
+
+
+def confirm_and_export_invoices(
+    parent_widget: QWidget,
+    invoices: list,
+    due_date: "datetime.date | str",
+    export_callback,
+    reset_callback=None,
+) -> bool:
+    """
+    Visar bekräftelsedialog innan PDF-export av fakturor.
+
+    Parametrar
+    ----------
+    parent_widget   : föräldrafönster för dialogen
+    invoices        : lista med faktura-dicts/objekt som ska exporteras
+    due_date        : betalningsdatum (date-objekt eller ISO-sträng)
+    export_callback : funktion(invoices, due_date) som utför exporten,
+                      ska returnera (ok: bool, exported_files: list)
+    reset_callback  : valfri funktion() som nollställer betalningsdatumet
+                      i den anropande vyn efter lyckad export
+
+    Returnerar
+    ----------
+    True  om exporten genomfördes
+    False om användaren avbröt eller exporten misslyckades
+    """
+    # ── Normalisera datum ─────────────────────────────────────────────
+    if isinstance(due_date, str):
+        try:
+            due_date = datetime.date.fromisoformat(due_date.strip())
+        except ValueError:
+            QMessageBox.warning(
+                parent_widget,
+                "Ogiltigt datum",
+                f"Betalningsdatumet '{due_date}' är ogiltigt.\n"
+                f"Använd formatet ÅÅÅÅ-MM-DD.",
+            )
+            return False
+
+    if not isinstance(due_date, datetime.date):
+        QMessageBox.warning(
+            parent_widget,
+            "Datum saknas",
+            "Inget giltigt betalningsdatum angivet för export.",
+        )
+        return False
+
+    n = len(invoices)
+    date_str = due_date.strftime("%d/%m")   # "10/11"-format i dialogen
+    today = datetime.date.today()
+    days = (due_date - today).days
+
+    # ── Bygg informationstext ─────────────────────────────────────────
+    if days > 0:
+        days_txt = f"{days} dagar kvar"
+    elif days == 0:
+        days_txt = "förfaller idag!"
+    else:
+        days_txt = f"⚠️  PASSERAT — {abs(days)} dagar sedan"
+
+    invoice_list = ""
+    for i, inv in enumerate(invoices[:10]):           # max 10 i listan
+        supplier = _field(
+            inv, "supplier_name", "supplier", default=f"Faktura {i + 1}"
+        )
+        amount = _field(inv, "amount", "total", "total_amount")
+        ref = _field(inv, "invoice_number", "reference")
+
+        row = f"  • {supplier}"
+        if ref:
+            row += f"  #{ref}"
+        if amount not in (None, ""):
+            row += f"  {amount} kr"
+        invoice_list += row + "\n"
+
+    if n > 10:
+        invoice_list += f"  … och {n - 10} till\n"
+
+    msg = (
+        f"Du är på väg att exportera {n} faktura"
+        f"{'r' if n != 1 else ''} till PDF.\n\n"
+        f"Betalningsdatum : {due_date.isoformat()}  ({date_str})  "
+        f"[{days_txt}]\n\n"
+        f"Fakturor:\n{invoice_list}\n"
+        f"Efter export nollställs betalningsdatumet.\n\n"
+        f"Vill du fortsätta?"
+    )
+
+    reply = QMessageBox.question(
+        parent_widget,
+        "📄  Bekräfta PDF-export",
+        msg,
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.Yes,
+    )
+    if reply != QMessageBox.StandardButton.Yes:
+        log.info("PDF-export avbruten av användaren")
+        return False
+
+    # ── Genomför exporten ─────────────────────────────────────────────
+    try:
+        ok, exported = export_callback(invoices, due_date)
+    except Exception as exc:
+        log.error(
+            "export_callback kraschade: %s\n%s",
+            exc, traceback.format_exc(),
+        )
+        QMessageBox.critical(
+            parent_widget, "Exportfel", f"Export misslyckades:\n{exc}"
+        )
+        return False
+
+    if not ok:
+        QMessageBox.warning(
+            parent_widget,
+            "Export misslyckades",
+            "Exporten kunde inte genomföras.\n"
+            "Kontrollera loggen för detaljer.",
+        )
+        return False
+
+    # ── Nollställ betalningsdatum i anropande vy ──────────────────────
+    if reset_callback is not None:
+        try:
+            reset_callback()
+            log.info(
+                "Betalningsdatum nollställt efter export (%d filer)",
+                len(exported or []),
+            )
+        except Exception as exc:
+            log.warning("reset_callback: %s", exc)
+
+    # ── Bekräftelse till användaren ───────────────────────────────────
+    files_txt = "\n".join(
+        f"  • {Path(f).name}" for f in (exported or [])[:8]
+    )
+    if len(exported or []) > 8:
+        files_txt += f"\n  … och {len(exported) - 8} till"
+
+    QMessageBox.information(
+        parent_widget,
+        "✅  Export klar",
+        f"{n} faktura{'r' if n != 1 else ''} exporterade.\n"
+        f"Betalningsdatum {due_date.isoformat()} applicerat.\n\n"
+        + (f"Filer:\n{files_txt}\n" if files_txt else "")
+        + "\nBetalningsdatumet är nollställt.",
+    )
+    log.info(
+        "PDF-export klar: %d fakturor, betaldatum=%s",
+        n, due_date.isoformat(),
+    )
+    return True
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  MAIN WINDOW
+# ═════════════════════════════════════════════════════════════════════
+
+
+class MainWindow(QMainWindow):
+    """Centralt huvudfönster för Fakturabunten."""
+
+    theme_changed = Signal(dict)
+
+    #: (nyckel, titel med emoji, ren titel, ikon, undertext)
+    _TAB_DEFS: list[tuple[str, str, str, str, str]] = [
+        ("dashboard",    "Dashboard",     "🏠  Dashboard",
+         "🏠", "Översikt och nyckeltal"),
+        ("invoices",     "Fakturor",      "🧾  Fakturor",
+         "🧾", "Hantera inkommande fakturor"),
+        ("suppliers",    "Leverantörer",  "🏢  Leverantörer",
+         "🏢", "Leverantörsregister"),
+        ("payments",     "Betalningar",   "💳  Betalningar",
+         "💳", "Betalbatcher och betalhistorik"),
+        ("import_tab",   "Import",        "📥  Import",
+         "📥", "Importera fakturor via PDF / e-post"),
+        ("reports",      "Rapporter",     "📊  Rapporter",
+         "📊", "Månads- och leverantörsrapporter"),
+        ("settings_tab", "Inställningar", "⚙️  Inställningar",
+         "⚙️", "Program- och företagsinställningar"),
+    ]
+
+    def __init__(self, app: Any) -> None:
+        super().__init__()
+        self._app = app
+        self._settings = app.settings
+        self._tab_map: dict[str, tuple[QScrollArea, QWidget]] = {}
+        self._hidden: dict[str, str] = {}
+        self._plugins_ui_registered = False
+        self._invoices_view: QWidget | None = None
+        self._suppliers_view: QWidget | None = None
+        #: Senast applicerat KONKRETA tema (dark/light) — används av
+        #: _refresh_auto_theme för att undvika onödig ommålning/loggspam.
+        self._last_resolved_theme: str = ""
+        #: Sätts True av _build_settings_panel() — skyddar fliken från
+        #: att skrivas över av plugins (loggvyn blir egen flik i stället).
+        self._settings_tab_custom: bool = False
+
+        self.setWindowTitle(APP_NAME)
+        self.setMinimumSize(860, 560)
+
+        # Egen app-ikon (app_icon.*) med QPainter-fallback
+        self._custom_icon = _load_app_icon()
+        if self._custom_icon is not None:
+            self.setWindowIcon(self._custom_icon)
+            app_qt = QApplication.instance()
+            if app_qt is not None:
+                app_qt.setWindowIcon(self._custom_icon)
+
+        # Återställ dolda flikar från settings
+        tab_titles = {d[0]: d[2] for d in self._TAB_DEFS}
+        for key in self._settings.get("hidden_tabs", []):
+            if key in tab_titles:
+                self._hidden[key] = tab_titles[key]
+
+        # ── Debounced geometri-sparning (skriv inte JSON per pixel) ──
+        self._geometry_timer = QTimer(self)
+        self._geometry_timer.setSingleShot(True)
+        self._geometry_timer.setInterval(500)
+        self._geometry_timer.timeout.connect(self._save_geometry)
+
+        # ── Flikar ─────────────────────────────────────────────────────
+        self.tabs = QTabWidget()
+        self.tabs.setMovable(True)
+        self.tabs.setUsesScrollButtons(True)
+        self.tabs.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.tabs.customContextMenuRequested.connect(
+            self._tab_context_menu
+        )
+        self.setCentralWidget(self.tabs)
+
+        self._build_menu_bar()
+        self._build_toolbar()
+        self._build_status_bar()
+        self._build_tabs()
+        self._setup_tray()
+        self._apply_theme(self._settings.get("theme", "dark"), save=False)
+        self._restore_geometry()
+        _ensure_paths()
+        self._load_builtin_views()
+
+        # ── Inställningar-fliken: riktig panel (genvägar + plugins) ──
+        self._build_settings_panel()
+
+        # ── Konfigurerbara kortkommandon (shortcuts.json) ────────────
+        self._shortcut_objects: list = []
+        self._build_shortcut_actions()
+
+        # ── GUI-frysningsvakt (heartbeat var 5:e sekund) ─────────────
+        self._watchdog = None
+        try:
+            from app import FreezeWatchdog
+            self._watchdog = FreezeWatchdog(interval=5.0, limit=30.0)
+            self._beat_timer = QTimer(self)
+            self._beat_timer.setInterval(5_000)
+            self._beat_timer.timeout.connect(self._watchdog.beat)
+            self._beat_timer.start()
+            self._watchdog.start()
+        except Exception as exc:
+            log.debug("FreezeWatchdog ej startad: %s", exc)
+
+        # ── Tema-timer (auto/system uppdateras var 60:e sekund) ──────
+        self._theme_timer = QTimer(self)
+        self._theme_timer.setInterval(60_000)
+        self._theme_timer.timeout.connect(self._refresh_auto_theme)
+        self._theme_timer.start()
+
+        self._watch_data_folder()
+        ready = "✅  Redo"
+        try:
+            if hasattr(self._app, "data_load_summary"):
+                ready = self._app.data_load_summary()
+        except Exception:
+            pass
+        self.set_status(ready, 8000)
+        log.info("MainWindow klar  platform=%s  %s", CURRENT_PLATFORM, ready)
+
+    def _watch_data_folder(self) -> None:
+        """
+        Om suppliers.json sparas i en editor läser appen om den själv.
+        Debounce så en halvskriven fil inte tolkas som tom.
+        """
+        self._data_watch = QFileSystemWatcher(self)
+        self._data_watch_timer = QTimer(self)
+        self._data_watch_timer.setSingleShot(True)
+        self._data_watch_timer.setInterval(600)
+        self._data_watch_timer.timeout.connect(self._refresh_all)
+        roots = [PROJECT_DIR / "data", PROJECT_DIR / "ui" / "data"]
+        for folder in roots:
+            if folder.is_dir():
+                self._data_watch.addPath(str(folder))
+            for name in ("suppliers.json", "invoices.json", "payments.json"):
+                f = folder / name
+                if f.is_file():
+                    self._data_watch.addPath(str(f))
+        self._data_watch.fileChanged.connect(self._on_data_file_changed)
+        self._data_watch.directoryChanged.connect(self._on_data_file_changed)
+
+    def _on_data_file_changed(self, _path: str) -> None:
+        # os.replace tar bort bevakningen — lägg tillbaka filen.
+        for folder in (PROJECT_DIR / "data", PROJECT_DIR / "ui" / "data"):
+            if folder.is_dir() and str(folder) not in self._data_watch.directories():
+                self._data_watch.addPath(str(folder))
+            for name in ("suppliers.json", "invoices.json", "payments.json"):
+                f = folder / name
+                if f.is_file() and str(f) not in self._data_watch.files():
+                    self._data_watch.addPath(str(f))
+        self._data_watch_timer.start()
+
+    # ══════════════════════════════════════════════════════════════════
+    #  INBYGGDA VYER
+    # ══════════════════════════════════════════════════════════════════
+
+    def _load_builtin_views(self) -> None:
+        """Laddar SuppliersView och InvoicesView."""
+        _ensure_paths()
+
+        self._suppliers_view = self._safe_load_view(
+            "SuppliersView", "suppliers",
+            ["ui.suppliers_view", "suppliers_view"],
+        )
+        if self._suppliers_view:
+            log.info("SuppliersView laddad ✔")
+        else:
+            log.error("SuppliersView KUNDE INTE LADDAS ✘")
+
+        self._invoices_view = self._safe_load_view(
+            "InvoicesView", "invoices",
+            ["ui.invoices_view", "invoices_view"],
+        )
+        if self._invoices_view:
+            log.info("InvoicesView laddad ✔")
+        else:
+            log.error("InvoicesView KUNDE INTE LADDAS ✘")
+
+    def _safe_load_view(
+        self,
+        class_name: str,
+        tab_key: str,
+        module_names: list[str],
+    ) -> QWidget | None:
+        """Importerar och monterar en vy. Returnerar widget eller None."""
+        import importlib
+        import importlib.util
+
+        view_class = None
+
+        # Försök 1: normal modulimport
+        for mod_name in module_names:
+            try:
+                importlib.invalidate_caches()
+                mod = importlib.import_module(mod_name)
+                cls = getattr(mod, class_name, None)
+                if cls is not None:
+                    view_class = cls
+                    log.debug(
+                        "%s hittad via import('%s')", class_name, mod_name
+                    )
+                    break
+                log.debug(
+                    "%s: import('%s') OK men klass saknas. Tillgängligt: %s",
+                    class_name, mod_name,
+                    [x for x in dir(mod) if not x.startswith("_")],
+                )
+            except Exception as exc:
+                log.debug(
+                    "%s: import('%s') fel: %s", class_name, mod_name, exc
+                )
+
+        # Försök 2: direkt filimport
+        if view_class is None:
+            for fp in [
+                BASE_DIR / f"{tab_key}_view.py",
+                PROJECT_DIR / "ui" / f"{tab_key}_view.py",
+            ]:
+                if not fp.exists():
+                    continue
+                try:
+                    spec = importlib.util.spec_from_file_location(
+                        fp.stem, str(fp)
+                    )
+                    if spec and spec.loader:
+                        mod = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(mod)  # type: ignore
+                        cls = getattr(mod, class_name, None)
+                        if cls is not None:
+                            view_class = cls
+                            log.debug(
+                                "%s hittad via direktfil '%s'",
+                                class_name, fp,
+                            )
+                            break
+                except Exception as exc:
+                    log.warning(
+                        "%s direktfil '%s': %s\n%s",
+                        class_name, fp, exc, traceback.format_exc(),
+                    )
+
+        if view_class is None:
+            log.error(
+                "KUNDE INTE HITTA KLASSEN %s\n"
+                "  Kontrollera att %s/ui/%s_view.py finns\n"
+                "  och att alla imports i den är korrekta",
+                class_name, PROJECT_DIR, tab_key,
+            )
+            return None
+
+        try:
+            view = view_class(self._app, parent=self)
+        except Exception as exc:
+            log.error(
+                "%s __init__ kraschade: %s\n%s",
+                class_name, exc, traceback.format_exc(),
+            )
+            return None
+
+        try:
+            self.replace_tab_content(tab_key, view)
+        except Exception as exc:
+            log.error("%s montering: %s", class_name, exc)
+            return None
+
+        if hasattr(view, "apply_theme"):
+            try:
+                self.theme_changed.connect(view.apply_theme)
+                view.apply_theme(self.current_theme_dict())
+            except Exception as exc:
+                log.warning("%s apply_theme: %s", class_name, exc)
+
+        return view
+
+    # ══════════════════════════════════════════════════════════════════
+    #  PLUGIN-REGISTRERING (fas 2)
+    # ══════════════════════════════════════════════════════════════════
+
+    def register_plugins_ui(self, plugins: list) -> None:
+        """Kör register_ui(main_window) för externa plugins (en gång)."""
+        if self._plugins_ui_registered:
+            log.debug("register_plugins_ui: redan kört")
+            return
+        self._plugins_ui_registered = True
+
+        builtin_names = {"invoices_view", "suppliers_view"}
+        for module in plugins:
+            name = getattr(module, "__name__", str(module))
+            if name in builtin_names:
+                continue
+            if hasattr(module, "register_ui"):
+                try:
+                    module.register_ui(self)
+                    log.info("plugin fas 2: %s ✔", name)
+                except Exception as exc:
+                    log.error(
+                        "plugin register_ui (%s): %s\n%s",
+                        name, exc, traceback.format_exc(),
+                    )
+
+    # ══════════════════════════════════════════════════════════════════
+    #  MENYRAD
+    # ══════════════════════════════════════════════════════════════════
+
+    def _build_menu_bar(self) -> None:
+        bar = self.menuBar()
+
+        # ── Arkiv ─────────────────────────────────────────────────────
+        m_file = bar.addMenu("&Arkiv")
+
+        a_sup = QAction("🏢  Ny leverantör", self)
+        a_sup.setShortcut(self._shortcut_seq("ny_leverantor", "Ctrl+L"))
+        a_sup.triggered.connect(self._quick_new_supplier)
+        m_file.addAction(a_sup)
+
+        a_inv = QAction("🧾  Ny faktura", self)
+        a_inv.setShortcut(self._shortcut_seq("ny_faktura", "Ctrl+N"))
+        a_inv.triggered.connect(self._quick_new_invoice)
+        m_file.addAction(a_inv)
+
+        m_file.addSeparator()
+
+        a_backup = QAction("💾  Skapa backup nu", self)
+        a_backup.setShortcut(self._shortcut_seq("skapa_backup", "Ctrl+B"))
+        a_backup.triggered.connect(self._manual_backup)
+        m_file.addAction(a_backup)
+
+        a_exports = QAction("📁  Öppna exportmapp", self)
+        a_exports.triggered.connect(self._open_export_folder)
+        m_file.addAction(a_exports)
+
+        a_log = QAction("📋  Öppna loggfil", self)
+        a_log.triggered.connect(self._open_log_file)
+        m_file.addAction(a_log)
+
+        m_file.addSeparator()
+
+        a_hide = QAction("🙈  Minimera till systemfältet", self)
+        a_hide.triggered.connect(self.hide)
+        m_file.addAction(a_hide)
+
+        a_quit = QAction("❌  Avsluta programmet helt", self)
+        a_quit.setShortcut(self._shortcut_seq("avsluta", "Ctrl+Q"))
+        a_quit.triggered.connect(self._force_exit)
+        m_file.addAction(a_quit)
+
+        # ── Visa ──────────────────────────────────────────────────────
+        self._view_menu = bar.addMenu("&Visa")
+        self._rebuild_view_menu()
+
+        # ── Tema ──────────────────────────────────────────────────────
+        m_theme = bar.addMenu("&Tema")
+        for key, label in [
+            ("dark",   "🌙  Mörkt"),
+            ("light",  "☀️  Ljust"),
+            ("auto",   "🔄  Auto (tidbaserat)"),
+            ("system", "💻  System"),
+        ]:
+            act = QAction(label, self)
+            act.triggered.connect(
+                lambda checked=False, k=key: self._apply_theme(k)
+            )
+            m_theme.addAction(act)
+
+        # ── Inställningar ─────────────────────────────────────────────
+        m_set = bar.addMenu("&Inställningar")
+
+        self._act_autostart = QAction(
+            "🚀  Starta med operativsystemet", self
+        )
+        self._act_autostart.setCheckable(True)
+        self._act_autostart.setChecked(self._read_autostart_status())
+        self._act_autostart.setToolTip(
+            "Startar gömd vid inloggning.\n"
+            "Väntar om disken inte är redo. Arbetsmapp = appmappen."
+        )
+        self._act_autostart.triggered.connect(self._toggle_autostart)
+        m_set.addAction(self._act_autostart)
+
+        self._act_close_to_tray = QAction(
+            "🙈  Stäng till systemfältet (kryss-knappen)", self
+        )
+        self._act_close_to_tray.setCheckable(True)
+        self._act_close_to_tray.setChecked(
+            bool(self._settings.get("close_to_tray", True))
+        )
+        self._act_close_to_tray.triggered.connect(
+            self._toggle_close_to_tray
+        )
+        m_set.addAction(self._act_close_to_tray)
+
+        self._act_trace = QAction(
+            "🔬  Logga varje tryck (TRACE-nivå)", self
+        )
+        self._act_trace.setCheckable(True)
+        self._act_trace.setChecked(
+            bool(self._settings.get("log_trace", True))
+        )
+        self._act_trace.setToolTip(
+            "PÅ (standard): varje musklick, tangenttryck, fokusflytt,\n"
+            "menyval och fönsterhändelse skrivs till logs/app.log.\n"
+            "AV: detaljnivån sänks till DEBUG. Ändringen gäller direkt,\n"
+            "ingen omstart krävs."
+        )
+        self._act_trace.triggered.connect(self._toggle_trace_logging)
+        m_set.addAction(self._act_trace)
+
+        self._act_clean_cache = QAction(
+            "🧹  Töm cache vid avslut (Smart Cache)", self
+        )
+        self._act_clean_cache.setCheckable(True)
+        self._act_clean_cache.setChecked(
+            bool(self._settings.get("clean_cache_on_exit", True))
+        )
+        self._act_clean_cache.setToolTip(
+            "Tömmer __pycache__, *.pyc och kvarlämnade tmp-filer när\n"
+            "programmet avslutas. Data, inställningar, loggar och\n"
+            "backuper röras aldrig."
+        )
+        self._act_clean_cache.triggered.connect(self._toggle_clean_cache)
+        m_set.addAction(self._act_clean_cache)
+
+        # ── Hjälp ─────────────────────────────────────────────────────
+        m_help = bar.addMenu("&Hjälp")
+        a_about = QAction("ℹ️  Om programmet", self)
+        if self._custom_icon is not None:
+            a_about.setIcon(self._custom_icon)
+        a_about.triggered.connect(self._show_about)
+        m_help.addAction(a_about)
+
+        m_help.addSeparator()
+        a_diag = QAction("🩺  Kopiera diagnostik", self)
+        a_diag.setToolTip(
+            "Kopierar versioner, sökvägar, dataantal, plugin-hälsa,\n"
+            "inställningar och senaste loggraderna till urklipp.\n"
+            "Klistra in texten i en felrapport eller AI-chatt."
+        )
+        a_diag.triggered.connect(self._copy_diagnostics)
+        m_help.addAction(a_diag)
+
+    def _rebuild_view_menu(self) -> None:
+        """Bygger om Visa-menyn med aktuella visa/dölj-statusar."""
+        self._view_menu.clear()
+        for key, _plain, title, _icon, _sub in self._TAB_DEFS:
+            act = QAction(title.strip(), self)
+            act.setCheckable(True)
+            act.setChecked(key not in self._hidden)
+            act.triggered.connect(
+                lambda checked, k=key, t=title:
+                    self._set_tab_visible(k, t, checked)
+            )
+            self._view_menu.addAction(act)
+
+        self._view_menu.addSeparator()
+        a_all = QAction("👁  Visa alla flikar", self)
+        a_all.triggered.connect(self._show_all_tabs)
+        self._view_menu.addAction(a_all)
+
+    # ══════════════════════════════════════════════════════════════════
+    #  TOOLBAR
+    # ══════════════════════════════════════════════════════════════════
+
+    def _build_toolbar(self) -> None:
+        tb = QToolBar("Verktygsfält", self)
+        tb.setObjectName("main_toolbar")
+        tb.setMovable(False)
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.addToolBar(tb)
+
+        if self._custom_icon is not None:
+            logo = QLabel()
+            logo.setPixmap(self._custom_icon.pixmap(28, 28))
+            logo.setStyleSheet("background:transparent; padding:0 4px 0 8px;")
+            logo.setToolTip(APP_NAME)
+            tb.addWidget(logo)
+            brand = QLabel(APP_NAME)
+            brand.setStyleSheet(
+                "background:transparent; font-weight:800; padding-right:10px;"
+            )
+            tb.addWidget(brand)
+            tb.addSeparator()
+
+        def _add(label: str, tip: str, slot) -> None:
+            act = QAction(label, self)
+            act.setToolTip(tip)
+            act.triggered.connect(slot)
+            tb.addAction(act)
+
+        _add("🏢  Ny leverantör",
+             "Registrera ny leverantör (Ctrl+L)",
+             self._quick_new_supplier)
+        _add("🧾  Ny faktura",
+             "Registrera ny faktura (Ctrl+N)",
+             self._quick_new_invoice)
+        tb.addSeparator()
+        _add("🔄  Uppdatera", "Uppdatera alla vyer", self._refresh_all)
+        tb.addSeparator()
+        _add("💾  Backup", "Skapa backup (Ctrl+B)", self._manual_backup)
+        _add("📁  Exporter", "Öppna exportmappen",
+             self._open_export_folder)
+        tb.addSeparator()
+        _add("🌙  Mörkt", "Aktivera mörkt tema",
+             lambda: self._apply_theme("dark"))
+        _add("☀️  Ljust", "Aktivera ljust tema",
+             lambda: self._apply_theme("light"))
+        tb.addSeparator()
+        _add("🙈  Minimera", "Minimera till systemfältet", self.hide)
+        _add("❌  Avsluta", "Avsluta helt (Ctrl+Q)", self._force_exit)
+
+    # ══════════════════════════════════════════════════════════════════
+    #  STATUSFÄLT
+    # ══════════════════════════════════════════════════════════════════
+
+    def _build_status_bar(self) -> None:
+        sb = QStatusBar(self)
+        self.setStatusBar(sb)
+        if self._custom_icon is not None:
+            mark = QLabel()
+            mark.setPixmap(self._custom_icon.pixmap(16, 16))
+            mark.setStyleSheet("background:transparent; padding-left:6px;")
+            sb.addWidget(mark)
+        lbl = QLabel(
+            f"  {APP_NAME}  v{APP_VERSION}  ·  "
+            f"© {COPYRIGHT_YEAR} Rickard Längkvist  ·  "
+            f"{CURRENT_PLATFORM}  "
+        )
+        lbl.setFont(_font(10, bold=True))
+        sb.addPermanentWidget(lbl)
+
+    # ══════════════════════════════════════════════════════════════════
+    #  FLIKAR
+    # ══════════════════════════════════════════════════════════════════
+
+    def _build_tabs(self) -> None:
+        """Skapar alla flikar med placeholders (vyer monteras senare)."""
+        hidden_keys = set(self._hidden.keys())
+        for key, _plain, title, icon, subtitle in self._TAB_DEFS:
+            inner = _placeholder(icon, title.strip(), subtitle)
+            scroll = _wrap_scroll(inner)
+            self._tab_map[key] = (scroll, inner)
+            if key not in hidden_keys:
+                self.tabs.addTab(scroll, title)
+
+    def _tab_index(self, key: str) -> int:
+        """Aktuell tab-index för en fliknyckel (-1 om dold/saknas)."""
+        scroll, _ = self._tab_map.get(key, (None, None))
+        if scroll is None:
+            return -1
+        for i in range(self.tabs.count()):
+            if self.tabs.widget(i) is scroll:
+                return i
+        return -1
+
+    def _set_tab_visible(
+        self, key: str, title: str, visible: bool
+    ) -> None:
+        """Visar/döljer en flik och sparar i settings (hidden_tabs)."""
+        idx = self._tab_index(key)
+
+        if visible and idx == -1:
+            # Hitta rätt insättningsposition enligt _TAB_DEFS-ordningen
+            order = [k for k, *_ in self._TAB_DEFS]
+            pos = order.index(key)
+            ins = self.tabs.count()
+            for k in order[pos + 1:]:
+                i = self._tab_index(k)
+                if i != -1:
+                    ins = i
+                    break
+            scroll, _ = self._tab_map[key]
+            self.tabs.insertTab(ins, scroll, title)
+            self._hidden.pop(key, None)
+        elif not visible and idx != -1:
+            self.tabs.removeTab(idx)
+            self._hidden[key] = title
+
+        self._settings.set("hidden_tabs", list(self._hidden.keys()))
+        self._rebuild_view_menu()
+
+    def _show_all_tabs(self) -> None:
+        for key, _plain, title, _icon, _sub in self._TAB_DEFS:
+            self._set_tab_visible(key, title, True)
+
+    def _tab_context_menu(self, pos: QPoint) -> None:
+        """Högerklick på flik: dölj flik / visa dolda flikar."""
+        bar = self.tabs.tabBar()
+        bar_pos = bar.mapFrom(self.tabs, pos)
+        idx = bar.tabAt(bar_pos)
+        if idx < 0:
+            return
+
+        clicked = self.tabs.widget(idx)
+        current_key = next(
+            (
+                k for k, (s, _) in self._tab_map.items() if s is clicked
+            ),
+            None,
+        )
+        if not current_key:
+            return
+
+        menu = QMenu(self)
+        a_hide = QAction("🙈  Dölj denna flik", self)
+        a_hide.triggered.connect(
+            lambda: self._set_tab_visible(
+                current_key, self.tabs.tabText(idx), False
+            )
+        )
+        menu.addAction(a_hide)
+
+        if self._hidden:
+            menu.addSeparator()
+            sub = menu.addMenu("👁  Visa dold flik …")
+            for k, t in self._hidden.items():
+                act = QAction(t.strip(), self)
+                act.triggered.connect(
+                    lambda checked=False, hk=k, ht=t:
+                        self._set_tab_visible(hk, ht, True)
+                )
+                sub.addAction(act)
+
+        menu.exec(bar.mapToGlobal(bar_pos))
+
+    # ══════════════════════════════════════════════════════════════════
+    #  PUBLIKT API (används av vyer och plugins)
+    # ══════════════════════════════════════════════════════════════════
+
+    def replace_tab_content(self, key: str, new_widget: QWidget) -> None:
+        """Ersätter innehållet i en befintlig flik."""
+        entry = self._tab_map.get(key)
+        if not entry:
+            log.warning("replace_tab_content: okänd nyckel '%s'", key)
+            return
+        scroll, old = entry
+        scroll.takeWidget()
+        old.deleteLater()
+        scroll.setWidget(new_widget)
+        self._tab_map[key] = (scroll, new_widget)
+
+    def add_plugin_tab(
+        self, widget: QWidget, title: str, key: str = ""
+    ) -> None:
+        """Lägger till en ny plugin-flik."""
+        scroll = _wrap_scroll(widget)
+        if key:
+            self._tab_map[key] = (scroll, widget)
+        self.tabs.addTab(scroll, title)
+
+    def current_theme_dict(self) -> dict:
+        """Aktuellt tema som dict (löser auto/system)."""
+        return resolve_theme(self._settings.get("theme", "dark"))
+
+    def set_status(self, msg: str, timeout: int = 4000) -> None:
+        """Visar ett meddelande i statusfältet."""
+        self.statusBar().showMessage(msg, timeout)
+
+    def get_invoices_view(self) -> QWidget | None:
+        return self._invoices_view
+
+    def get_suppliers_view(self) -> QWidget | None:
+        return self._suppliers_view
+
+    # ══════════════════════════════════════════════════════════════════
+    #  SNABBAKTIONER
+    # ══════════════════════════════════════════════════════════════════
+
+    def _quick_new_supplier(self) -> None:
+        """Öppnar leverantörsfliken och startar 'Ny leverantör'."""
+        idx = self._tab_index("suppliers")
+        if idx == -1:
+            self._set_tab_visible("suppliers", "🏢  Leverantörer", True)
+            idx = self._tab_index("suppliers")
+        self.tabs.setCurrentIndex(idx)
+
+        if self._suppliers_view and hasattr(
+            self._suppliers_view, "_add_supplier"
+        ):
+            self._suppliers_view._add_supplier()
+        else:
+            QMessageBox.warning(
+                self, "Vy ej laddad", "Leverantörsvyn saknas."
+            )
+
+    def _quick_new_invoice(self) -> None:
+        """
+        Öppnar fakturafliken och startar 'Ny faktura'.
+
+        LEVERANTÖRSKONTROLL: minst en leverantör måste finnas innan
+        en faktura kan registreras.
+        """
+        try:
+            suppliers = self._app.get_suppliers()
+        except Exception:
+            suppliers = []
+
+        if not suppliers:
+            reply = QMessageBox.question(
+                self,
+                "🏢  Ingen leverantör",
+                "Du måste skapa en leverantör\n"
+                "innan du kan registrera en faktura.\n\n"
+                "Vill du lägga till en leverantör nu?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._quick_new_supplier()
+            return
+
+        idx = self._tab_index("invoices")
+        if idx == -1:
+            self._set_tab_visible("invoices", "🧾  Fakturor", True)
+            idx = self._tab_index("invoices")
+        self.tabs.setCurrentIndex(idx)
+
+        if self._invoices_view and hasattr(
+            self._invoices_view, "_add_invoice"
+        ):
+            self._invoices_view._add_invoice()
+        else:
+            QMessageBox.warning(self, "Vy ej laddad", "Fakturavyn saknas.")
+
+    # ══════════════════════════════════════════════════════════════════
+    #  AUTOSTART
+    # ══════════════════════════════════════════════════════════════════
+
+    def _read_autostart_status(self) -> bool:
+        """Läser faktisk OS-status via AutostartManager (app.py)."""
+        try:
+            if self._app and hasattr(self._app, "settings"):
+                mgr = self._app.settings.get_autostart_manager()
+                return mgr.is_enabled()
+        except Exception:
+            pass
+        return bool(self._settings.get("startup", False))
+
+    def _toggle_autostart(self, checked: bool) -> None:
+        """Kryssruta i Inställningar-menyn → synka settings + OS."""
+        try:
+            if self._app and hasattr(self._app, "settings"):
+                self._app.settings.set("startup", checked)
+            else:
+                _set_autostart_os(checked)
+                self._settings.set("startup", checked)
+        except Exception as exc:
+            log.error("_toggle_autostart: %s", exc)
+            QMessageBox.warning(
+                self, "Autostart", f"Kunde inte ändra:\n{exc}"
+            )
+            return
+
+        actual = checked
+        message = (
+            "Autostart är på.\n\n"
+            "Vid inloggning väntar programmet om disken inte är redo,\n"
+            "startar gömd, och sätter arbetsmappen till appmappen."
+            if checked
+            else "Autostart är av.\nProgrammet startar inte längre vid inloggning."
+        )
+        try:
+            if self._app and hasattr(self._app, "settings"):
+                mgr = self._app.settings.get_autostart_manager()
+                actual = mgr.is_enabled()
+                message = mgr.user_message(actual)
+                self._sync_autostart_checkboxes(actual)
+        except Exception:
+            pass
+        if checked and not actual:
+            QMessageBox.warning(
+                self,
+                "Autostart",
+                "Kunde inte registrera autostart hos operativsystemet.\n"
+                "Inställningen är sparad och försöket görs om vid nästa start.",
+            )
+            return
+        txt = "på ✔" if actual else "av"
+        self.set_status(f"🚀  Autostart {txt}", 4000)
+        QMessageBox.information(self, "Autostart", message)
+
+    def _toggle_close_to_tray(self, checked: bool) -> None:
+        """Kryssruta: göm till tray vid kryss."""
+        self._settings.set("close_to_tray", checked)
+        self.set_status(
+            f"🙈  Stäng till tray: {'PÅ' if checked else 'AV'}", 4000
+        )
+        log.info("close_to_tray → %s", checked)
+
+    def _toggle_trace_logging(self, checked: bool) -> None:
+        """
+        Kryssruta: logga VARJE tryck (TRACE) PÅ/AV.
+
+        Sparas i settings.json → advanced_logger lyssnar på
+        settings-ändringen och byter loggnivå DIREKT (ingen omstart).
+        """
+        self._settings.set("log_trace", checked)
+        self.set_status(
+            f"🔬  TRACE-loggning (varje tryck): "
+            f"{'PÅ' if checked else 'AV'}", 5000
+        )
+        log.info("log_trace → %s", checked)
+
+    def _toggle_clean_cache(self, checked: bool) -> None:
+        """Kryssruta: Smart Cache-rensare PÅ/AV (tömmer cache vid avslut)."""
+        self._settings.set("clean_cache_on_exit", checked)
+        self.set_status(
+            f"🧹  Töm cache vid avslut: {'PÅ' if checked else 'AV'}", 4000
+        )
+        log.info("clean_cache_on_exit → %s", checked)
+
+    def set_autostart(self, enable: bool) -> None:
+        """Programmatisk autostart-sättning (synkar även kryssrutan)."""
+        try:
+            if self._app and hasattr(self._app, "settings"):
+                self._app.settings.set("startup", enable)
+            else:
+                _set_autostart_os(enable)
+                self._settings.set("startup", enable)
+        except Exception as exc:
+            log.error("set_autostart: %s", exc)
+        if hasattr(self, "_act_autostart"):
+            self._act_autostart.setChecked(enable)
+        log.info("set_autostart → %s", enable)
+
+    def _sync_autostart_checkboxes(self, checked: bool) -> None:
+        """Synkar autostart-kryssrutorna i meny och tray."""
+        if hasattr(self, "_act_autostart"):
+            self._act_autostart.setChecked(checked)
+        if hasattr(self, "_tray_act_autostart"):
+            self._tray_act_autostart.setChecked(checked)
+
+    # ══════════════════════════════════════════════════════════════════
+    #  TEMA-MOTOR
+    # ══════════════════════════════════════════════════════════════════
+
+    def _apply_theme(self, name: str, save: bool = True) -> None:
+        """Applicerar tema globalt och emitterar theme_changed."""
+        if name not in VALID_THEMES:
+            name = "dark"
+        if save:
+            self._settings.set("theme", name)
+
+        theme = resolve_theme(name)
+        # Kom ihåg vilket KONKRET tema (dark/light) som nu applicerats —
+        # så att 60-sekundersrefreshen kan hoppa över ommålning när
+        # upplöst tema är oförändrat (annars målas hela fönstret om
+        # i onödan och loggen spammas).
+        self._last_resolved_theme = theme.get("name", name)
+        inst = QApplication.instance()
+        if inst is not None:
+            apply_app_palette(theme)
+            inst.setStyleSheet(build_stylesheet(theme))
+
+        if hasattr(self, "tray"):
+            # Egen ikon behålls vid temabyte; annars ritas tray-ikonen om
+            if getattr(self, "_custom_icon", None) is None:
+                self.tray.setIcon(
+                    _make_tray_icon(
+                        theme.get("tray_icon_color", "#58a6ff")
+                    )
+                )
+
+        self.theme_changed.emit(theme)
+        log.info("Tema → %s", name)
+
+    def _refresh_auto_theme(self) -> None:
+        """
+        Var 60:e sekund: uppdatera auto/system-teman.
+
+        Applicera OM och ENDAST OM det upplösta temat (dark/light)
+        faktiskt har ändrats. Annars hoppar vi över — ingen onödig
+        ommålning av hela fönstret och inget loggspam var 60:e sekund.
+        """
+        current = self._settings.get("theme", "dark")
+        if current not in ("auto", "system"):
+            return
+
+        resolved_name = resolve_theme(current).get("name", current)
+        if resolved_name == getattr(self, "_last_resolved_theme", None):
+            # Samma konkreta tema som redan visas → gör ingenting.
+            return
+
+        self._apply_theme(current, save=False)
+
+    # ══════════════════════════════════════════════════════════════════
+    #  SYSTEM TRAY
+    # ══════════════════════════════════════════════════════════════════
+
+    def _setup_tray(self) -> None:
+        """Skapar tray-ikon med meny. Exakt EN ikon i processen."""
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            log.warning("System tray ej tillgängligt")
+            return
+
+        theme = resolve_theme(self._settings.get("theme", "dark"))
+        tray_icon = (
+            self._custom_icon
+            if getattr(self, "_custom_icon", None) is not None
+            else _make_tray_icon(theme.get("tray_icon_color", "#58a6ff"))
+        )
+        self.tray = QSystemTrayIcon(tray_icon, self)
+        self.tray.setToolTip(f"{APP_NAME}\nEnkelklicka för att öppna")
+
+        m = QMenu()
+
+        a_show = QAction("🖥  Visa fönster", self)
+        a_show.triggered.connect(self._bring_to_front)
+        m.addAction(a_show)
+        m.addSeparator()
+
+        a_sup = QAction("🏢  Ny leverantör", self)
+        a_sup.triggered.connect(self._tray_new_supplier)
+        m.addAction(a_sup)
+
+        a_inv = QAction("🧾  Ny faktura", self)
+        a_inv.triggered.connect(self._tray_new_invoice)
+        m.addAction(a_inv)
+        m.addSeparator()
+
+        tm = m.addMenu("🎨  Tema")
+        for key, label in [
+            ("dark",   "🌙  Mörkt"),
+            ("light",  "☀️  Ljust"),
+            ("auto",   "🔄  Auto"),
+            ("system", "💻  System"),
+        ]:
+            act = QAction(label, self)
+            act.triggered.connect(
+                lambda checked=False, k=key: self._apply_theme(k)
+            )
+            tm.addAction(act)
+        m.addSeparator()
+
+        self._tray_act_autostart = QAction(
+            "🚀  Starta med operativsystemet", self
+        )
+        self._tray_act_autostart.setCheckable(True)
+        self._tray_act_autostart.setChecked(self._read_autostart_status())
+        self._tray_act_autostart.triggered.connect(
+            self._tray_autostart_toggled
+        )
+        m.addAction(self._tray_act_autostart)
+        m.addSeparator()
+
+        a_backup = QAction("💾  Backup nu", self)
+        a_backup.triggered.connect(self._manual_backup)
+        m.addAction(a_backup)
+
+        a_exports = QAction("📁  Öppna exporter", self)
+        a_exports.triggered.connect(self._open_export_folder)
+        m.addAction(a_exports)
+        m.addSeparator()
+
+        a_hide = QAction("🙈  Minimera", self)
+        a_hide.triggered.connect(self.hide)
+        m.addAction(a_hide)
+
+        a_quit = QAction("❌  Avsluta helt", self)
+        a_quit.triggered.connect(self._force_exit)
+        m.addAction(a_quit)
+
+        self.tray.setContextMenu(m)
+        self.tray.activated.connect(self._tray_activated)
+        self.tray.show()
+
+    def _tray_new_supplier(self) -> None:
+        self._bring_to_front()
+        self._quick_new_supplier()
+
+    def _tray_new_invoice(self) -> None:
+        self._bring_to_front()
+        self._quick_new_invoice()
+
+    def _tray_autostart_toggled(self, checked: bool) -> None:
+        self._toggle_autostart(checked)
+        self._sync_autostart_checkboxes(checked)
+
+    def _tray_activated(
+        self, reason: QSystemTrayIcon.ActivationReason
+    ) -> None:
+        """Enkelklick/dubbelklick på tray-ikonen → öppna fönstret."""
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self._bring_to_front()
+
+    def _bring_to_front(self) -> None:
+        """Visar och fokuserar fönstret."""
+        if self.isMinimized():
+            self.showNormal()
+        elif not self.isVisible():
+            # show() respekterar sparat tillstånd (maximerat/normalt) —
+            # showNormal() skulle tvinga ner ett maximerat fönster.
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def closeEvent(self, event) -> None:
+        """Kryss → göm till tray (om close_to_tray), annars avsluta."""
+        close_to_tray = bool(self._settings.get("close_to_tray", True))
+        if (
+            close_to_tray
+            and hasattr(self, "tray")
+            and self.tray.isVisible()
+        ):
+            event.ignore()
+            self.hide()
+            self.tray.showMessage(
+                APP_NAME,
+                "Programmet körs i systemfältet.\n"
+                "Enkelklicka på ikonen för att öppna.\n"
+                "Högerklicka → Avsluta helt.",
+                QSystemTrayIcon.MessageIcon.Information,
+                3000,
+            )
+        else:
+            self._save_geometry()
+            if hasattr(self, "tray"):
+                self.tray.hide()
+            event.accept()
+
+    def _force_exit(self) -> None:
+        """Avsluta helt — med bekräftelse."""
+        reply = QMessageBox.question(
+            self,
+            "Avsluta programmet",
+            f"Stäng {APP_NAME} helt?\n\n"
+            f"Alla data har sparats automatiskt.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._save_geometry()
+            if self._watchdog is not None:
+                self._watchdog.stop()
+            if hasattr(self, "tray"):
+                self.tray.hide()
+            log.info("Programmet avslutas av användaren")
+            QApplication.quit()
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ACTIONER
+    # ══════════════════════════════════════════════════════════════════
+
+    def _refresh_all(self) -> None:
+        """Läser om data/ från disk och uppdaterar alla vyer."""
+        self.set_status("🔄  Läser data/ …")
+        summary = ""
+        try:
+            if hasattr(self._app, "rescan_data"):
+                summary = self._app.rescan_data()
+        except Exception as exc:
+            log.error("rescan_data: %s", exc)
+        self.theme_changed.emit(self.current_theme_dict())
+        for key, (_, inner) in self._tab_map.items():
+            for method in ("refresh", "_do_refresh"):
+                if hasattr(inner, method):
+                    try:
+                        getattr(inner, method)()
+                    except Exception as exc:
+                        log.warning(
+                            "refresh %s.%s: %s", key, method, exc
+                        )
+                    break
+        self.set_status(
+            f"✅  {summary}" if summary else "✅  Uppdaterad", 6000
+        )
+
+    def _manual_backup(self) -> None:
+        """Skapar en backup via app.backup."""
+        try:
+            result = self._app.backup.create()
+            if result:
+                self.set_status(f"💾  Backup: {result.name}", 5000)
+                QMessageBox.information(
+                    self, "Backup", f"✅  Backup skapad:\n{result}"
+                )
+            else:
+                QMessageBox.warning(
+                    self, "Backup", "❌  Backup misslyckades."
+                )
+        except AttributeError:
+            QMessageBox.information(
+                self, "Backup", "Backup-modulen är inte tillgänglig."
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Backup-fel", str(exc))
+
+    def _open_export_folder(self) -> None:
+        """Öppnar exports/ i appmappen. Aldrig en mapp utanför."""
+        export_path = PROJECT_DIR / "exports"
+        try:
+            from ui.invoices_helpers import get_export_base
+            export_path = get_export_base()
+        except Exception:
+            export_path.mkdir(parents=True, exist_ok=True)
+        _open_path(export_path)
+        self.set_status(f"📁  Öppnar: {export_path}", 3000)
+
+    def _open_log_file(self) -> None:
+        """Öppnar app.log i OS:ets standardprogram."""
+        for name in ("logs/app.log", "app.log"):
+            p = PROJECT_DIR / name
+            if p.exists():
+                _open_path(p)
+                return
+        QMessageBox.information(self, "Logg", "Ingen loggfil hittades.")
+
+    # ══════════════════════════════════════════════════════════════════
+    #  DIAGNOSTIK  ("Kopiera diagnostik" — Hjälp-menyn)
+    # ══════════════════════════════════════════════════════════════════
+
+    def _copy_diagnostics(self) -> None:
+        """
+        Kopierar komplett diagnostik till urklipp (idén från PDF reader
+        Pro SPEC v2.1 §2.3). Texten kan klistras in i en felrapport
+        eller en AI-chatt. Knappen får ALDRIG vara död — fallback bygger
+        en minimidiagnostik lokalt.
+        """
+        text: str | None = None
+        try:
+            text = self._app.diagnostics()
+        except Exception as exc:
+            log.warning("app.diagnostics() föll tillbaka: %s", exc)
+        if not text:
+            text = (
+                f"{APP_NAME} — DIAGNOSTIK (minimal)\n"
+                f"Version   : {APP_VERSION}\n"
+                f"Plattform : {CURRENT_PLATFORM}\n"
+                f"Python    : {sys.version.split()[0]}\n"
+                f"Tema      : {self._settings.get('theme', 'dark')}\n"
+                f"Appmapp   : {PROJECT_DIR}\n"
+            )
+        try:
+            QApplication.clipboard().setText(text)
+            self.set_status("🩺  Diagnostik kopierad till urklipp", 6000)
+            QMessageBox.information(
+                self,
+                "🩺  Diagnostik kopierad",
+                "Diagnostiken ligger i urklipp.\n\n"
+                "Klistra in den i din felrapport eller AI-chatt.\n"
+                "(Versioner, sökvägar, dataantal, plugin-hälsa,\n"
+                "inställningar och de senaste loggraderna.)",
+            )
+            log.info("DIAGNOSTICS_COPIED: %d tecken", len(text))
+        except Exception as exc:
+            log.error("_copy_diagnostics: %s", exc)
+            QMessageBox.warning(
+                self, "Diagnostik", f"Kunde inte kopiera:\n{exc}"
+            )
+
+    # ══════════════════════════════════════════════════════════════════
+    #  KORTKOMMANDON  (konfigurerbara via shortcuts.json)
+    # ══════════════════════════════════════════════════════════════════
+
+    def _shortcut_seq(self, action: str, fallback: str) -> QKeySequence:
+        """Hämtar en kortkommando-sekvens från ShortcutManager (app.py)."""
+        mgr = getattr(self._app, "shortcuts", None)
+        if mgr is not None:
+            try:
+                seq = mgr.get(action)
+                if seq:
+                    return QKeySequence(seq)
+            except Exception:
+                pass
+        return QKeySequence(fallback)
+
+    def _build_shortcut_actions(self) -> None:
+        """
+        (Om)bygger alla QShortcut utifrån shortcuts.json:
+
+        • Ctrl+1–7 : hoppa till flik (visar fliken om den är dold)
+        • F5       : uppdatera alla vyer
+
+        Anropas vid start och efter varje sparad genvägsändring.
+        """
+        # Ta bort gamla genvägar
+        for sc in getattr(self, "_shortcut_objects", []):
+            try:
+                sc.deleteLater()
+            except Exception:
+                pass
+        self._shortcut_objects = []
+
+        tab_shortcuts = [
+            ("tab_dashboard",     "dashboard",    "🏠  Dashboard"),
+            ("tab_fakturor",      "invoices",     "🧾  Fakturor"),
+            ("tab_leverantorer",  "suppliers",    "🏢  Leverantörer"),
+            ("tab_betalningar",   "payments",     "💳  Betalningar"),
+            ("tab_import",        "import_tab",   "📥  Import"),
+            ("tab_rapporter",     "reports",      "📊  Rapporter"),
+            ("tab_installningar", "settings_tab", "⚙️  Inställningar"),
+        ]
+        fallback = [
+            "Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4",
+            "Ctrl+5", "Ctrl+6", "Ctrl+7",
+        ]
+        for i, (action, key, title) in enumerate(tab_shortcuts):
+            seq = self._shortcut_seq(action, fallback[i])
+            if seq.isEmpty():
+                continue
+            sc = QShortcut(seq, self)
+            sc.activated.connect(
+                lambda k=key, t=title: self._goto_tab(k, t)
+            )
+            self._shortcut_objects.append(sc)
+
+        seq = self._shortcut_seq("uppdatera", "F5")
+        if not seq.isEmpty():
+            sc = QShortcut(seq, self)
+            sc.activated.connect(self._refresh_all)
+            self._shortcut_objects.append(sc)
+
+        log.debug(
+            "Kortkommandon aktiva: %d st", len(self._shortcut_objects)
+        )
+
+    def _goto_tab(self, key: str, title: str) -> None:
+        """Hoppa till flik — visar den först om den är dold."""
+        idx = self._tab_index(key)
+        if idx == -1:
+            self._set_tab_visible(key, title, True)
+            idx = self._tab_index(key)
+        if idx != -1:
+            self.tabs.setCurrentIndex(idx)
+
+    # ══════════════════════════════════════════════════════════════════
+    #  INSTÄLLNINGSFLIKEN  (kortkommandon + plugin-återställning)
+    # ══════════════════════════════════════════════════════════════════
+
+    def _build_settings_panel(self) -> None:
+        """
+        Bygger Inställningar-flikens innehåll:
+
+        • Kortkommandon  — redigerbar tabell, sparas i shortcuts.json
+        • Plugins        — status + återställning av 3-strikes-spärrade
+
+        Flaggan _settings_tab_custom talar om för plugins (t.ex.
+        advanced_logger) att fliken har EGET innehåll och inte får
+        skrivas över — loggvyn blir då en separat flik i stället.
+        """
+        self._settings_tab_custom = True
+        panel = QWidget()
+        root = QVBoxLayout(panel)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(14)
+
+        hdr = QLabel("⚙️  Programinställningar")
+        hdr.setFont(_font(16, bold=True))
+        root.addWidget(hdr)
+
+        # ── Kortkommandon ─────────────────────────────────────────────
+        box_keys = QGroupBox("⌨️  Kortkommandon (sparas i shortcuts.json)")
+        v_keys = QVBoxLayout(box_keys)
+        v_keys.setSpacing(8)
+
+        self._shortcut_editors: list[tuple[str, QKeySequenceEdit]] = []
+
+        tbl = QTableWidget(0, 2)
+        tbl.setColumnCount(2)
+        tbl.verticalHeader().setVisible(False)
+        tbl.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        tbl.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        tbl.setAlternatingRowColors(True)
+        tbl.setShowGrid(False)
+
+        labels: dict[str, str] = {}
+        defaults: dict[str, str] = {}
+        try:
+            from app import SHORTCUT_LABELS, DEFAULT_SHORTCUTS
+            labels = dict(SHORTCUT_LABELS)
+            defaults = dict(DEFAULT_SHORTCUTS)
+        except ImportError:
+            pass
+
+        mgr = getattr(self._app, "shortcuts", None)
+        rows = list(labels.items()) if labels else [
+            ("ny_leverantor", "Ny leverantör"),
+            ("ny_faktura", "Ny faktura"),
+            ("skapa_backup", "Skapa backup"),
+            ("uppdatera", "Uppdatera alla vyer"),
+            ("avsluta", "Avsluta programmet"),
+        ]
+        tbl.setRowCount(len(rows))
+        for r, (action, label) in enumerate(rows):
+            if mgr is not None:
+                try:
+                    seq = mgr.get(action)
+                except Exception:
+                    seq = defaults.get(action, "")
+            else:
+                seq = defaults.get(action, "")
+            cell = QTableWidgetItem(label)
+            cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            tbl.setItem(r, 0, cell)
+            editor = QKeySequenceEdit(QKeySequence(seq or ""))
+            editor.setClearButtonEnabled(True)
+            tbl.setCellWidget(r, 1, editor)
+            self._shortcut_editors.append((action, editor))
+
+        tbl.resizeColumnsToContents()
+        tbl.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        tbl.setMinimumHeight(min(60 + 38 * len(rows), 460))
+        v_keys.addWidget(tbl)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_save = QPushButton("💾  Spara kortkommandon")
+        btn_save.clicked.connect(self._save_shortcuts_panel)
+        btn_reset = QPushButton("↩️  Återställ standard")
+        btn_reset.clicked.connect(self._reset_shortcuts_panel)
+        hint = QLabel(
+            "Klicka i fältet och tryck önskad tangentkombination. "
+            "Tomt fält = ingen tangent."
+        )
+        hint.setStyleSheet("color:#8b949e; background:transparent;")
+        hint.setFont(_font(10))
+        btn_row.addWidget(btn_save)
+        btn_row.addWidget(btn_reset)
+        btn_row.addStretch(1)
+        btn_row.addWidget(hint)
+        v_keys.addLayout(btn_row)
+        root.addWidget(box_keys)
+
+        # ── Plugins ───────────────────────────────────────────────────
+        box_plug = QGroupBox("🧩  Plugins (3-strikes-recovery)")
+        v_plug = QVBoxLayout(box_plug)
+        v_plug.setSpacing(6)
+
+        self._plugin_status_label = QLabel()
+        self._plugin_status_label.setFont(_font(11))
+        self._plugin_status_label.setWordWrap(True)
+        self._refresh_plugin_status_label()
+        v_plug.addWidget(self._plugin_status_label)
+
+        btn_reenable = QPushButton("♻️  Återställ avaktiverade plugins")
+        btn_reenable.setToolTip(
+            "Nollställer kraschräknarna och lyfter bort 3-strikes-"
+            "spärren.\nPlugins försöks laddas igen vid nästa programstart."
+        )
+        btn_reenable.clicked.connect(self._reenable_plugins)
+        v_plug.addWidget(btn_reenable)
+        root.addWidget(box_plug)
+
+        note = QLabel(
+            "Övriga inställningar (tema, autostart, stäng till tray, "
+            "visa/dölj flikar,\nlogga varje tryck/TRACE, töm cache vid "
+            "avslut) finns i menyerna ovan. Alla data lagras\nlokalt i "
+            "JSON-filer i appmappen. Systemloggen är en egen flik: "
+            "🔍 Logg."
+        )
+        note.setStyleSheet("color:#8b949e; background:transparent;")
+        note.setFont(_font(10))
+        root.addWidget(note)
+        root.addStretch(1)
+
+        self.replace_tab_content("settings_tab", panel)
+
+    def _refresh_plugin_status_label(self) -> None:
+        """Uppdaterar plugin-status-texten i Inställningar-fliken."""
+        if not hasattr(self, "_plugin_status_label"):
+            return
+        try:
+            status = self._app.plugin_loader.status()
+            loaded = ", ".join(status["loaded"]) or "(inga)"
+            lines = [f"Laddade: {loaded}"]
+            if status["disabled"]:
+                lines.append(
+                    "⛔ Avaktiverade (3 krascher): "
+                    + ", ".join(status["disabled"])
+                )
+            if status["strikes"]:
+                lines.append(f"Kraschräknare: {status['strikes']}")
+            self._plugin_status_label.setText("\n".join(lines))
+        except Exception as exc:
+            self._plugin_status_label.setText(f"Status ej tillgänglig: {exc}")
+
+    def _save_shortcuts_panel(self) -> None:
+        """Sparar redigerade kortkommandon till shortcuts.json."""
+        mgr = getattr(self._app, "shortcuts", None)
+        if mgr is None:
+            QMessageBox.warning(
+                self, "Kortkommandon", "ShortcutManager saknas i app-kärnan."
+            )
+            return
+        changed = 0
+        for action, editor in self._shortcut_editors:
+            seq = editor.keySequence().toString()
+            if seq != mgr.get(action):
+                mgr.set(action, seq)
+                changed += 1
+        self._build_shortcut_actions()
+        self.set_status(
+            f"⌨️  {changed} kortkommando(n) sparade", 5000
+        )
+        log.info("SHORTCUT_SAVE: %d ändring(ar) sparade", changed)
+
+    def _reset_shortcuts_panel(self) -> None:
+        """Återställer alla kortkommandon till standard."""
+        mgr = getattr(self._app, "shortcuts", None)
+        if mgr is None:
+            return
+        mgr.reset_all()
+        for action, editor in self._shortcut_editors:
+            editor.setKeySequence(QKeySequence(mgr.get(action)))
+        self._build_shortcut_actions()
+        self.set_status("↩️  Standardkortkommandon återställda", 5000)
+
+    def _reenable_plugins(self) -> None:
+        """Återställer 3-strikes-avaktiverade plugins."""
+        try:
+            self._app.reenable_plugins()
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Plugins", f"Kunde inte återställa:\n{exc}"
+            )
+            return
+        self._refresh_plugin_status_label()
+        QMessageBox.information(
+            self,
+            "🧩  Plugins återställda",
+            "Kraschräknare nollställda och spärrar borttagna.\n\n"
+            "Avaktiverade plugins försöks laddas igen\n"
+            "vid nästa programstart.",
+        )
+
+    # ══════════════════════════════════════════════════════════════════
+    #  GEOMETRI  (sparas i settings.json, debounced)
+    # ══════════════════════════════════════════════════════════════════
+
+    def _restore_geometry(self) -> None:
+        """
+        Återställ storlek/position från settings.
+
+        VIKTIGT FIX: den sparade positionen VALIDERAS mot alla
+        anslutna skärmar. Om den pekar utanför (t.ex. en skärm som
+        inte längre är ansluten) centreras fönstret i stället —
+        annars öppnas fönstret OSYNLIGT utanför skärmen
+        ("blinkar till och är borta").
+        """
+        try:
+            screen = QApplication.primaryScreen().availableGeometry()
+        except Exception:
+            self.resize(1280, 820)
+            return
+
+        w = min(
+            int(self._settings.get("window_width", 1280)), screen.width()
+        )
+        h = min(
+            int(self._settings.get("window_height", 820)), screen.height()
+        )
+        self.resize(w, h)
+
+        x = int(self._settings.get("window_x", -1))
+        y = int(self._settings.get("window_y", -1))
+
+        placed = False
+        if x >= 0 and y >= 0:
+            # Fönstrets övre vänstra hörn måste ligga INOM minst en
+            # ansluten skärm (med minst 80 px synlig marginal).
+            try:
+                screens = QApplication.screens()
+            except Exception:
+                screens = []
+            for s in screens:
+                try:
+                    g = s.availableGeometry()
+                except Exception:
+                    continue
+                if (
+                    g.x() - 80 <= x < g.x() + g.width()
+                    and g.y() - 80 <= y < g.y() + g.height()
+                ):
+                    self.move(x, y)
+                    placed = True
+                    break
+            if not placed:
+                # Sparad position ligger utanför alla skärmar →
+                # centrera på primärskärmen och logga händelsen.
+                self.move(
+                    screen.x() + (screen.width() - w) // 2,
+                    screen.y() + (screen.height() - h) // 2,
+                )
+                log.warning(
+                    "GEOMETRI_RESET: sparad position (%s, %s) ligger "
+                    "utanför alla skärmar → fönstret centrerat "
+                    "(%s skärmar anslutna)",
+                    x, y, len(screens),
+                )
+        else:
+            self.move(
+                screen.x() + (screen.width() - w) // 2,
+                screen.y() + (screen.height() - h) // 2,
+            )
+
+        log.debug(
+            "Fönstergeometri återställd: %sx%s @ (%s, %s), maximerat=%s",
+            w, h, self.x(), self.y(),
+            bool(self._settings.get("window_maximized", False)),
+        )
+
+        if self._settings.get("window_maximized", False):
+            # VIKTIGT: setWindowState, ALDRIG showMaximized här —
+            # showMaximized() gör fönstret SYNLIGT redan i __init__
+            # och får annars autostartade (gömda) starter att
+            # "blinka till". Tillståndet appliceras först när
+            # fönstret faktiskt visas.
+            self.setWindowState(
+                self.windowState() | Qt.WindowState.WindowMaximized
+            )
+
+    def _save_geometry(self) -> None:
+        """Sparar storlek/position till settings (maximerat bevaras)."""
+        try:
+            mx = self.isMaximized()
+            self._settings.update({
+                "window_maximized": mx,
+                "window_width": (
+                    self.width() if not mx
+                    else self._settings.get("window_width", 1280)
+                ),
+                "window_height": (
+                    self.height() if not mx
+                    else self._settings.get("window_height", 820)
+                ),
+                "window_x": (
+                    self.x() if not mx
+                    else self._settings.get("window_x", -1)
+                ),
+                "window_y": (
+                    self.y() if not mx
+                    else self._settings.get("window_y", -1)
+                ),
+            })
+        except Exception as exc:
+            log.warning("_save_geometry: %s", exc)
+
+    def _schedule_geometry_save(self) -> None:
+        """
+        Debounced geometri-sparning.
+
+        resize/move-event startar om timern; JSON skrivs först efter
+        500 ms stillastående — inte per pixel.
+        """
+        if hasattr(self, "_geometry_timer"):
+            self._geometry_timer.start()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._schedule_geometry_save()
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        self._schedule_geometry_save()
+
+    # ══════════════════════════════════════════════════════════════════
+    #  OM-DIALOG
+    # ══════════════════════════════════════════════════════════════════
+
+    def _show_about(self) -> None:
+        """
+        Om/Hjälp-sida med donationsinfo (Swish/PayPal/BMC).
+
+        Fungerar ALLTID: om den rika dialogen mot förmodan skulle
+        falla finns en enkel fallback-ruta (MUST: knappen får aldrig
+        vara död).
+        """
+        try:
+            self._show_about_dialog()
+        except Exception as exc:
+            log.warning("Om-dialog föll tillbaka till enkel ruta: %s", exc)
+            QMessageBox.about(
+                self,
+                f"Om {APP_NAME}",
+                f"{APP_NAME} v{APP_VERSION}\n"
+                "Modern lokal fakturahantering för\n"
+                "Windows, Linux och macOS.\n\n"
+                f"💙 Swish: {DONATE_SWISH}\n"
+                f"🅿️ PayPal: {DONATE_PAYPAL}\n"
+                f"☕ Buy Me a Coffee: {DONATE_BMC}\n\n"
+                f"© {COPYRIGHT_YEAR} Rickard Längkvist",
+            )
+
+    def _copy_swish(self) -> None:
+        """Kopierar Swish-numret till urklipp + bekräftar i statusraden."""
+        try:
+            QApplication.clipboard().setText(DONATE_SWISH.replace(" ", ""))
+            self.set_status(f"💙  Swish-nummer kopierat: {DONATE_SWISH}", 6000)
+        except Exception as exc:
+            log.warning("Swish-kopiering: %s", exc)
+
+    def _open_about_file(self) -> None:
+        """Öppnar about.md — komplett info om programmet + donationer."""
+        _open_path(PROJECT_DIR / "about.md")
+
+    def _show_about_dialog(self) -> None:
+        """Rik Om-dialog: info, snabbknappar, funktioner, donationer."""
+        autostart_status = (
+            "✅ aktiv" if self._read_autostart_status() else "❌ inaktiv"
+        )
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Om {APP_NAME}")
+        if self._custom_icon is not None:
+            dlg.setWindowIcon(self._custom_icon)
+        dlg.setMinimumSize(640, 580)
+        dlg.setSizeGripEnabled(True)
+
+        root = QVBoxLayout(dlg)
+        root.setSpacing(12)
+        root.setContentsMargins(18, 16, 18, 14)
+
+        icon = self.windowIcon()
+        if not icon.isNull():
+            icon_lbl = QLabel()
+            icon_lbl.setPixmap(icon.pixmap(96, 96))
+            icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            icon_lbl.setStyleSheet("background:transparent;")
+            root.addWidget(icon_lbl)
+
+        text = QTextEdit(dlg)
+        text.setReadOnly(True)
+        text.setOpenExternalLinks(False)
+        text.setHtml(f"""
+            <h2 style='color:#58a6ff'>{APP_NAME}</h2>
+            <p><b>Version {APP_VERSION}</b> · Modern lokal
+            fakturahantering för Windows, Linux och macOS.</p>
+            <p><b>© {COPYRIGHT_YEAR} Rickard Längkvist</b></p>
+            <hr>
+            <h3>Vad programmet gör</h3>
+            <p>Registrerar leverantörsfakturor och kreditfakturor,
+            summerar Fakturor (+) / Krediter (−) / <b>ATT BETALA</b>,
+            håller koll på förfallodatum och exporterar betallistor
+            till PDF — helt lokalt på din dator, utan prenumeration.</p>
+            <h3>Hur det funkar</h3>
+            <ol>
+              <li>Välj leverantör i rullistan (favoriter ★ överst).</li>
+              <li>Registrera faktura: fakturanummer + belopp.
+                  ＋ = faktura, − = kreditfaktura.</li>
+              <li>Exportera ALLA aktiva till PDF — betalningsdatum
+                  frågas alltid innan export och nollställs efteråt.</li>
+              <li>Exporthistorik: återställ arkiverade fakturor,
+                  öppna PDF eller mapp.</li>
+            </ol>
+            <h3>Snabbknappar</h3>
+            <p style='color:#8b949e;font-size:11px'>Standardvärden — kan
+            ändras under ⚙️ Inställningar → Kortkommandon.</p>
+            <table cellpadding='3'>
+              <tr><td><b>Ctrl+L</b></td><td>Ny leverantör</td></tr>
+              <tr><td><b>Ctrl+N</b></td><td>Ny faktura</td></tr>
+              <tr><td><b>Ctrl+B</b></td><td>Skapa backup</td></tr>
+              <tr><td><b>Ctrl+E</b></td><td>Exportera alla aktiva till PDF</td></tr>
+              <tr><td><b>Ctrl+1–7</b></td><td>Hoppa till flik (visar om dold)</td></tr>
+              <tr><td><b>F5</b></td><td>Uppdatera alla vyer</td></tr>
+              <tr><td><b>Ctrl+Q</b></td><td>Avsluta helt</td></tr>
+            </table>
+            <h3>Stöd utvecklingen 💖</h3>
+            <p>💙 Swish: <b>{DONATE_SWISH}</b> (knappen kopierar numret)<br>
+            🅿️ PayPal: {DONATE_PAYPAL}<br>
+            ☕ Buy Me a Coffee: {DONATE_BMC}</p>
+            <hr>
+            <p style='color:#888;font-size:11px;'>
+            Plattform: {CURRENT_PLATFORM} ·
+            Python {sys.version.split()[0]} ·
+            Autostart: {autostart_status}</p>
+        """)
+        root.addWidget(text, stretch=1)
+
+        # ── Donations- och infoknappar ────────────────────────────────
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        btn_swish = QPushButton("💙  Swish")
+        btn_swish.setToolTip(f"Kopierar Swish-numret {DONATE_SWISH}")
+        btn_swish.clicked.connect(self._copy_swish)
+
+        btn_paypal = QPushButton("🅿️  PayPal")
+        btn_paypal.setToolTip("Öppnar PayPal i webbläsaren")
+        btn_paypal.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(DONATE_PAYPAL))
+        )
+
+        btn_bmc = QPushButton("☕  Buy Me a Coffee")
+        btn_bmc.setToolTip("Öppnar Buy Me a Coffee i webbläsaren")
+        btn_bmc.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(DONATE_BMC))
+        )
+
+        btn_about = QPushButton("📖  Om programmet")
+        btn_about.setToolTip("Öppnar about.md med komplett info")
+        btn_about.clicked.connect(self._open_about_file)
+
+        btn_close = QPushButton("✖  Stäng")
+        btn_close.clicked.connect(dlg.accept)
+
+        for b in (btn_swish, btn_paypal, btn_bmc, btn_about, btn_close):
+            b.setMinimumHeight(38)
+            b.setFont(_font(11, bold=True))
+            b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn_row.addWidget(b)
+        root.addLayout(btn_row)
+
+        dlg.exec()
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  STANDALONE (utvecklingsläge: python ui/main_window.py)
+# ═════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    _ensure_paths()
+    try:
+        from app import FakturaApp  # type: ignore
+
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+        try:
+            from ui.letter_jump import LetterJumpApplication
+            _App = LetterJumpApplication
+        except ImportError:
+            _App = QApplication
+        qt = QApplication.instance() or _App(sys.argv)
+        qt.setApplicationName(APP_NAME)
+        qt.setApplicationVersion(APP_VERSION)
+        qt.setOrganizationName("Rickard Längkvist")
+        qt.setStyle("Fusion")
+        qt.setQuitOnLastWindowClosed(False)
+
+        fa = FakturaApp()
+        theme = resolve_theme(fa.settings.get("theme", "dark"))
+        apply_app_palette(theme)
+        qt.setStyleSheet(build_stylesheet(theme))
+
+        w = MainWindow(app=fa)
+        if fa.settings.get("startup", False):
+            w.set_autostart(True)
+
+        w.show()
+        log.info("Standalone-läge: MainWindow startad")
+        sys.exit(qt.exec())
+    except ImportError as exc:
+        print(f"Kan inte ladda FakturaApp: {exc}")
+        print("Kör programmet via main.py istället.")
+        sys.exit(1)

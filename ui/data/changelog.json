@@ -1,0 +1,200 @@
+[
+    {
+        "timestamp": "2026-09-23T08:57:16.762092",
+        "action": "ADD",
+        "entity": "invoices",
+        "id": "374cda54-f730-4bf5-92fd-742c04c396d7",
+        "details": {
+            "supplier": "SELFTEST AB",
+            "invoice_number": "ST-1",
+            "total_amount": 100.0,
+            "status": "Obetald",
+            "invoice_type": "Faktura"
+        },
+        "platform": "linux"
+    },
+    {
+        "timestamp": "2026-09-23T08:57:16.764839",
+        "action": "UPDATE",
+        "entity": "invoices",
+        "id": "374cda54-f730-4bf5-92fd-742c04c396d7",
+        "details": {
+            "total_amount": -50.0,
+            "invoice_type": "Kreditfaktura"
+        },
+        "platform": "linux"
+    },
+    {
+        "timestamp": "2026-09-23T08:57:16.768303",
+        "action": "DELETE",
+        "entity": "invoices",
+        "id": "374cda54-f730-4bf5-92fd-742c04c396d7",
+        "details": {},
+        "platform": "linux"
+    },
+    {
+        "timestamp": "2026-09-23T08:58:50.279966",
+        "action": "ADD",
+        "entity": "invoices",
+        "id": "1fdd0a4f-e947-4846-b034-d356f5c01714",
+        "details": {
+            "supplier": "SELFTEST AB",
+            "invoice_number": "ST-1",
+            "total_amount": 100.0,
+            "status": "Obetald",
+            "invoice_type": "Faktura"
+        },
+        "platform": "linux"
+    },
+    {
+        "timestamp": "2026-09-23T08:58:50.283696",
+        "action": "UPDATE",
+        "entity": "invoices",
+        "id": "1fdd0a4f-e947-4846-b034-d356f5c01714",
+        "details": {
+            "total_amount": -50.0,
+            "invoice_type": "Kreditfaktura"
+        },
+        "platform": "linux"
+    },
+    {
+        "timestamp": "2026-09-23T08:58:50.286966",
+        "action": "DELETE",
+        "entity": "invoices",
+        "id": "1fdd0a4f-e947-4846-b034-d356f5c01714",
+        "details": {},
+        "platform": "linux"
+    },
+    {
+        "timestamp": "2026-09-23T09:25:12.748268",
+        "action": "ADD",
+        "entity": "invoices",
+        "id": "33e796c8-34e5-45e6-937a-9ae4959dc8e9",
+        "details": {
+            "supplier": "SELFTEST AB",
+            "invoice_number": "ST-1",
+            "total_amount": 100.0,
+            "status": "Obetald",
+            "invoice_type": "Faktura"
+        },
+        "platform": "linux"
+    },
+    {
+        "timestamp": "2026-09-23T09:25:12.751597",
+        "action": "UPDATE",
+        "entity": "invoices",
+        "id": "33e796c8-34e5-45e6-937a-9ae4959dc8e9",
+        "details": {
+            "total_amount": -50.0,
+            "invoice_type": "Kreditfaktura"
+        },
+        "platform": "linux"
+    },
+    {
+        "timestamp": "2026-09-23T09:25:12.753913",
+        "action": "DELETE",
+        "entity": "invoices",
+        "id": "33e796c8-34e5-45e6-937a-9ae4959dc8e9",
+        "details": {},
+        "platform": "linux"
+    },
+    {
+        "timestamp": "2026-09-23T09:33:50.945632",
+        "action": "ADD",
+        "entity": "invoices",
+        "id": "e294e148-fe18-4e88-9399-5197760e5122",
+        "details": {
+            "supplier": "SELFTEST AB",
+            "invoice_number": "ST-1",
+            "total_amount": 100.0,
+            "status": "Obetald",
+            "invoice_type": "Faktura"
+        },
+        "platform": "linux"
+    },
+    {
+        "timestamp": "2026-09-23T09:33:50.948566",
+        "action": "UPDATE",
+        "entity": "invoices",
+        "id": "e294e148-fe18-4e88-9399-5197760e5122",
+        "details": {
+            "total_amount": -50.0,
+            "invoice_type": "Kreditfaktura"
+        },
+        "platform": "linux"
+    },
+    {
+        "timestamp": "2026-09-23T09:33:50.952356",
+        "action": "DELETE",
+        "entity": "invoices",
+        "id": "e294e148-fe18-4e88-9399-5197760e5122",
+        "details": {},
+        "platform": "linux"
+    },
+    {
+        "timestamp": "2026-09-23T09:36:33.970701",
+        "action": "ADD",
+        "entity": "invoices",
+        "id": "443d5e8d-44ac-47b0-814e-92dc3e001741",
+        "details": {
+            "supplier": "SELFTEST AB",
+            "invoice_number": "ST-1",
+            "total_amount": 100.0,
+            "status": "Obetald",
+            "invoice_type": "Faktura"
+        },
+        "platform": "linux"
+    },
+    {
+        "timestamp": "2026-09-23T09:36:33.973908",
+        "action": "UPDATE",
+        "entity": "invoices",
+        "id": "443d5e8d-44ac-47b0-814e-92dc3e001741",
+        "details": {
+            "total_amount": -50.0,
+            "invoice_type": "Kreditfaktura"
+        },
+        "platform": "linux"
+    },
+    {
+        "timestamp": "2026-09-23T09:36:33.976423",
+        "action": "DELETE",
+        "entity": "invoices",
+        "id": "443d5e8d-44ac-47b0-814e-92dc3e001741",
+        "details": {},
+        "platform": "linux"
+    },
+    {
+        "timestamp": "2026-09-23T09:48:12.213068",
+        "action": "ADD",
+        "entity": "invoices",
+        "id": "279a9cb4-c58b-4a3c-855a-cda25551a6a4",
+        "details": {
+            "supplier": "SELFTEST AB",
+            "invoice_number": "ST-1",
+            "total_amount": 100.0,
+            "status": "Obetald",
+            "invoice_type": "Faktura"
+        },
+        "platform": "linux"
+    },
+    {
+        "timestamp": "2026-09-23T09:48:12.215436",
+        "action": "UPDATE",
+        "entity": "invoices",
+        "id": "279a9cb4-c58b-4a3c-855a-cda25551a6a4",
+        "details": {
+            "total_amount": -50.0,
+            "invoice_type": "Kreditfaktura"
+        },
+        "platform": "linux"
+    },
+    {
+        "timestamp": "2026-09-23T09:48:12.217811",
+        "action": "DELETE",
+        "entity": "invoices",
+        "id": "279a9cb4-c58b-4a3c-855a-cda25551a6a4",
+        "details": {},
+        "platform": "linux"
+    }
+]

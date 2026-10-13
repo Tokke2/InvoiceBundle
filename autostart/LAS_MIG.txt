@@ -1,0 +1,5 @@
+Startfil för autostart. Skapas av programmet.
+OS-posten pekar bara hit. Logg: logs/autostart.log
+Exporter och data skrivs aldrig här.
+Startfilen hittar appmappen själv (ingen fast sökväg).
+Saknas Python: kör Installera senaste Python.bat.
