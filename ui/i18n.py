@@ -419,6 +419,14 @@ _STRINGS: dict[str, dict[str, str]] = {
     "update.failed": {"sv": "Kunde inte slutföra uppdateringen.\n{error}", "en": "The update could not be completed.\n{error}"},
     "update.notes": {"sv": "Versionsnoteringar:", "en": "Release notes:"},
     "update.installed_build": {"sv": "Installerad build: {build}", "en": "Installed build: {build}"},
+    "update.auto_menu": {"sv": "🔄  Sök uppdateringar automatiskt vid start", "en": "🔄  Check for updates automatically at startup"},
+    "update.found_title": {"sv": "Ny version finns", "en": "Update available"},
+    "update.found_text": {"sv": "En ny version av Fakturabunten finns att hämta ({tag}).\nInstallera den nu? Dina data rörs aldrig — bara programfilerna byts.", "en": "A new version of InvoiceBundle is available ({tag}).\nInstall it now? Your data is never touched — only program files are replaced."},
+    "update.install_now": {"sv": "⬇️  Installera nu", "en": "⬇️  Install now"},
+    "update.later": {"sv": "Senare", "en": "Later"},
+    "update.restore": {"sv": "↩  Återställ senaste backup …", "en": "↩  Restore latest backup …"},
+    "update.restore_confirm": {"sv": "Återställ programfilerna från backupen {name}?\nFakturor och data påverkas inte.", "en": "Restore the program files from backup {name}?\nInvoices and data are not affected."},
+    "update.restored": {"sv": "↩  Backup återställd ({n} filer). Starta om appen.", "en": "↩  Backup restored ({n} files). Restart the app."},
     "update.unknown_build": {"sv": "okänd (äldre kopia utan build-info)", "en": "unknown (older copy without build info)"},
 
     # ── Dashboard ─────────────────────────────────────────────────────

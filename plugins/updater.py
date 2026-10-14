@@ -130,6 +130,17 @@ def read_local_build(root: Path) -> dict:
         return {}
 
 
+def auto_check_due(last_check: str,
+                   now: datetime.datetime | None = None) -> bool:
+    """True om bakgrundskollen får köras (minst 24 h sedan sist)."""
+    now = now or datetime.datetime.now()
+    try:
+        last = datetime.datetime.fromisoformat(str(last_check))
+    except Exception:
+        return True
+    return (now - last) >= datetime.timedelta(hours=24)
+
+
 def should_update(local_sha: str, remote_sha: str) -> bool:
     """Ny version = annan commit än den installerade (eller okänd)."""
     if not remote_sha:
@@ -217,6 +228,37 @@ def _copy_file(src: Path, dst: Path) -> None:
     tmp = dst.with_name(dst.name + ".update-tmp")
     shutil.copyfile(src, tmp)
     tmp.replace(dst)
+
+
+def find_backups(root: Path) -> list[Path]:
+    """Uppdateringsbackuper i bak/, nyaste först."""
+    bak = Path(root) / "bak"
+    try:
+        dirs = [d for d in bak.glob("update-*") if d.is_dir()]
+    except Exception:
+        return []
+    return sorted(dirs, reverse=True)
+
+
+def restore_backup(backup_dir: Path, root: Path) -> dict:
+    """Kopierar tillbaka en updateringsbackup (bara programfiler)."""
+    backup_dir, root = Path(backup_dir), Path(root)
+    report = {"restored": 0, "skipped": 0}
+    for src in sorted(backup_dir.rglob("*")):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(backup_dir).as_posix()
+        if is_preserved(rel):
+            report["skipped"] += 1
+            continue
+        try:
+            _copy_file(src, root / rel)
+            report["restored"] += 1
+        except Exception as exc:
+            log.warning("UPDATE återställ %s: %s", rel, exc)
+            report["skipped"] += 1
+    log.info("UPDATE återställd från %s: %s", backup_dir.name, report)
+    return report
 
 
 def apply_update(zip_path: Path, root: Path, *,

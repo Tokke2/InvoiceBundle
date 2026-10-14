@@ -136,3 +136,37 @@ def test_apply_update_strips_zipball_root(tmp_path):
     assert (root / "main.py").read_text(encoding="utf-8") == "start"
     assert (root / "ui" / "design.py").exists()
     assert not (root / "data" / "x.json").exists()   # data rörs inte
+
+
+def test_auto_check_due_daily_gate():
+    import datetime as dt
+    now = dt.datetime(2026, 10, 14, 12, 0, 0)
+    assert up.auto_check_due("", now)                        # aldrig kollat
+    assert up.auto_check_due("skräp", now)                   # korrupt värde
+    assert up.auto_check_due("2026-10-13T11:59:59", now)     # > 24 h sedan
+    assert not up.auto_check_due("2026-10-14T11:00:00", now)  # 1 h sedan
+    assert not up.auto_check_due("2026-10-13T13:00:00", now)  # 23 h sedan
+
+
+def test_restore_backup_roundtrip(tmp_path):
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / "app.py").write_text("STABIL GAMMAL", encoding="utf-8")
+    (root / "data").mkdir()
+    (root / "data" / "invoices.json").write_text("[]", encoding="utf-8")
+    # Uppdatering: app.py ersätts (backup får gamla innehållet)
+    up.apply_update(
+        _zip(tmp_path / "v2.zip", {"app.py": "NY MEN TRASIG"}),
+        root, sha="v2",
+    )
+    assert (root / "app.py").read_text(encoding="utf-8") == "NY MEN TRASIG"
+    backups = up.find_backups(root)
+    assert len(backups) == 1
+    report = up.restore_backup(backups[0], root)
+    assert report["restored"] == 1
+    assert (root / "app.py").read_text(
+        encoding="utf-8") == "STABIL GAMMAL"
+    # Data aldrig rörd av återställningen
+    assert (root / "data" / "invoices.json").read_text(
+        encoding="utf-8") == "[]"
+    assert up.find_backups(tmp_path / "tom") == []

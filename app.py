@@ -148,6 +148,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "start_minimized":  True,
     "close_to_tray":    True,
     "export_include_originals": False,
+    "update_auto_check": True,
+    "update_last_check": "",
     "last_opened":      None,
     "company_name":     "",
     "org_number":       "",

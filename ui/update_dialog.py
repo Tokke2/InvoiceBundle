@@ -17,8 +17,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar,
-    QPushButton, QVBoxLayout,
+    QDialog, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit,
+    QProgressBar, QPushButton, QVBoxLayout,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins"))
@@ -65,7 +65,7 @@ def schedule_restart(root: Path, delay_seconds: float = 2.5) -> bool:
         return False
 
 
-class _UpdateWorker(QThread):
+class UpdateWorker(QThread):
     """Bakgrundstråd: nätverk + filbyte ska aldrig frysa UI:t."""
 
     check_done = Signal(dict)
@@ -97,6 +97,7 @@ class _UpdateWorker(QThread):
                 url, zip_path,
                 progress=lambda d, t: self.progress.emit(d, t),
             )
+            self.progress.emit(0, 0)  # 0/0 = installationsfasen
             report = updater.apply_update(
                 zip_path, self._root,
                 version=str(release.get("tag", "")).lstrip("vV"),
@@ -115,12 +116,14 @@ class _UpdateWorker(QThread):
 class UpdateDialog(QDialog):
     """Dialog för versionskoll och installation av uppdatering."""
 
-    def __init__(self, parent, root: Path, version: str) -> None:
+    def __init__(self, parent, root: Path, version: str,
+                 initial_result: dict | None = None) -> None:
         super().__init__(parent)
         self._root = Path(root)
         self._version = version
+        self._initial_result = initial_result
         self._release: dict = {}
-        self._worker: _UpdateWorker | None = None
+        self._worker: UpdateWorker | None = None
         self.restart_requested = False
 
         self.setWindowTitle(tr("update.title"))
@@ -167,13 +170,21 @@ class UpdateDialog(QDialog):
         self._btn_restart.hide()
         self._btn_close = QPushButton(tr("update.close"))
         self._btn_close.clicked.connect(self.reject)
+        self._btn_restore = QPushButton(tr("update.restore"))
+        self._btn_restore.clicked.connect(self._restore)
+        if updater is None or not updater.find_backups(self._root):
+            self._btn_restore.hide()
         row.addWidget(self._btn_install)
         row.addWidget(self._btn_restart)
+        row.addWidget(self._btn_restore)
         row.addStretch(1)
         row.addWidget(self._btn_close)
         root_layout.addLayout(row)
 
-        self._start_check()
+        if self._initial_result is not None:
+            self._on_check(self._initial_result)
+        else:
+            self._start_check()
 
     # ── Status / lokal build ────────────────────────────────────────
     def _show_local_build(self) -> None:
@@ -195,7 +206,7 @@ class UpdateDialog(QDialog):
     def _start_check(self) -> None:
         self._lbl_status.setText(tr("update.checking"))
         self._progress.setRange(0, 0)
-        self._worker = _UpdateWorker("check", self._root, parent=self)
+        self._worker = UpdateWorker("check", self._root, parent=self)
         self._worker.check_done.connect(self._on_check)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
@@ -236,7 +247,7 @@ class UpdateDialog(QDialog):
         self._lbl_status.setText(tr("update.applying"))
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
-        self._worker = _UpdateWorker(
+        self._worker = UpdateWorker(
             "apply", self._root, self._release, parent=self
         )
         self._worker.progress.connect(self._on_progress)
@@ -245,6 +256,11 @@ class UpdateDialog(QDialog):
         self._worker.start()
 
     def _on_progress(self, done: int, total: int) -> None:
+        if total == 0:  # installationsfasen (efter hämtningen)
+            self._progress.setRange(0, 0)
+            self._lbl_status.setText(tr("update.applying"))
+            return
+        self._progress.setRange(0, 100)
         if total > 0:
             pct = int(done * 100 / total)
             self._progress.setValue(pct)
@@ -267,6 +283,32 @@ class UpdateDialog(QDialog):
         self._progress.setValue(0)
         self._lbl_status.setText(tr("update.failed", error=error))
         self._btn_install.hide()
+
+    # ── Återställning (rullback) ─────────────────────────────────────
+    def _restore(self) -> None:
+        if updater is None:
+            return
+        backups = updater.find_backups(self._root)
+        if not backups:
+            self._btn_restore.hide()
+            return
+        latest = backups[0]
+        answer = QMessageBox.question(
+            self, tr("update.title"),
+            tr("update.restore_confirm", name=latest.name),
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            report = updater.restore_backup(latest, self._root)
+            self._lbl_status.setText(
+                tr("update.restored", n=report.get("restored", 0))
+            )
+            self._btn_install.hide()
+            self._btn_restart.show()
+            self._show_local_build()
+        except Exception as exc:
+            self._lbl_status.setText(tr("update.failed", error=str(exc)))
 
     # ── Omstart ──────────────────────────────────────────────────────
     def _restart(self) -> None:

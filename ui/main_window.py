@@ -1320,6 +1320,11 @@ class MainWindow(QMainWindow):
         self.set_status(ready, 8000)
         log.info("MainWindow klar  platform=%s  %s", CURRENT_PLATFORM, ready)
 
+        # ── Bakgrundskoll av ny version (tyst om inget nytt) ───────
+        self._pending_update: dict | None = None
+        self._update_worker = None
+        QTimer.singleShot(5_000, self._maybe_auto_update_check)
+
     def _watch_data_folder(self) -> None:
         """
         Om suppliers.json sparas i en editor läser appen om den själv.
@@ -1685,6 +1690,16 @@ class MainWindow(QMainWindow):
             self._toggle_include_originals
         )
         m_set.addAction(self._act_include_originals)
+
+        self._act_update_auto = QAction(tr("update.auto_menu"), self)
+        self._act_update_auto.setCheckable(True)
+        self._act_update_auto.setChecked(
+            bool(self._settings.get("update_auto_check", True))
+        )
+        self._act_update_auto.triggered.connect(
+            self._toggle_update_auto
+        )
+        m_set.addAction(self._act_update_auto)
 
         self._act_trace = QAction(tr("menu.trace"), self)
         self._act_trace.setCheckable(True)
@@ -2184,6 +2199,100 @@ class MainWindow(QMainWindow):
                 self,
                 tr("main.autostart"),
                 tr("autostart.method_failed"),
+            )
+
+    def _toggle_update_auto(self, checked: bool) -> None:
+        """Kryss i Inställningar: automatisk versionskoll vid start."""
+        try:
+            self._settings.set("update_auto_check", checked)
+        except Exception as exc:
+            log.warning("_toggle_update_auto: %s", exc)
+
+    def _maybe_auto_update_check(self) -> None:
+        """Tyst bakgrundskoll (max 1 gång/dygn) — säger bara till
+        om en nyare build faktiskt finns, så ingen gammal kopia
+        blir liggande igång ovetande. Aldrig ett felmeddelande."""
+        try:
+            from ui.update_dialog import UpdateWorker
+            sys.path.insert(0, str(PROJECT_DIR / "plugins"))
+            import updater as _updater
+
+            if not bool(self._settings.get("update_auto_check", True)):
+                return
+            last = str(self._settings.get("update_last_check", ""))
+            if not _updater.auto_check_due(last):
+                return
+            import datetime as _dt
+            self._settings.set(
+                "update_last_check",
+                _dt.datetime.now().isoformat(timespec="seconds"),
+            )
+            self._update_worker = UpdateWorker(
+                "check", PROJECT_DIR, parent=self
+            )
+            self._update_worker.check_done.connect(
+                self._on_auto_update_result
+            )
+            self._update_worker.failed.connect(
+                lambda _e: log.debug("AUTOUPDATE tyst fel: %s", _e)
+            )
+            self._update_worker.start()
+        except Exception as exc:
+            log.debug("_maybe_auto_update_check: %s", exc)
+
+    def _on_auto_update_result(self, result: dict) -> None:
+        if result.get("status") != "update":
+            return
+        if self.isVisible():
+            self._offer_update(result)
+        else:
+            # Startad i tray — erbjud när fönstret visas igen
+            self._pending_update = result
+
+    def _offer_update(self, result: dict) -> None:
+        """Frågar vänligt; 'Installera nu' öppnar uppdateringsdialogen
+        med resultatet ifyllt (ingen extra nätkoll)."""
+        rel = result.get("release") or {}
+        tag = str(rel.get("tag", ""))
+        sha = str(rel.get("sha", ""))
+        if sha:
+            tag = f"{tag} ({sha[:7]})"
+        box = QMessageBox(self)
+        box.setWindowTitle(tr("update.found_title"))
+        box.setText(tr("update.found_text", tag=tag))
+        btn_install = box.addButton(
+            tr("update.install_now"),
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        box.addButton(
+            tr("update.later"), QMessageBox.ButtonRole.RejectRole
+        )
+        box.exec()
+        if box.clickedButton() is not btn_install:
+            return
+        try:
+            from ui.update_dialog import UpdateDialog, schedule_restart
+            dlg = UpdateDialog(
+                self, PROJECT_DIR, APP_VERSION, initial_result=result
+            )
+            dlg.exec()
+            if getattr(dlg, "restart_requested", False):
+                if schedule_restart(PROJECT_DIR):
+                    QTimer.singleShot(
+                        400,
+                        lambda: QApplication.instance().quit(),
+                    )
+        except Exception as exc:
+            log.warning("_offer_update: %s", exc, exc_info=True)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        event.accept()
+        super().showEvent(event)
+        pending = getattr(self, "_pending_update", None)
+        if pending is not None:
+            self._pending_update = None
+            QTimer.singleShot(
+                600, lambda: self._offer_update(pending)
             )
 
     def _check_updates(self) -> None:
