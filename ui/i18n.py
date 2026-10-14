@@ -234,6 +234,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "donate.paypal": {"sv": "💙 Donera via PayPal", "en": "💙 Donate with PayPal"},
     "donate.kofi": {"sv": "☕ Bjud på en kaffe (Ko-fi)", "en": "☕ Buy me a coffee (Ko-fi)"},
+    "donate.swish_scan": {"sv": "📱  Skanna med Swish-appen", "en": "📱  Scan with the Swish app"},
+    "donate.swish_number": {"sv": "Swish: {number}", "en": "Swish: {number}"},
     "donate.swish": {"sv": "📱 Kopiera Swish-nummer", "en": "📱 Copy Swish number"},
     "donate.swish_copied": {"sv": "💙  Swish-nummer kopierat: {number}", "en": "💙  Swish number copied: {number}"},
     "donate.open_failed": {"sv": "Kunde inte öppna länken — adressen finns i knappens verktygstips.", "en": "Could not open the link — the address is in the button tooltip."},

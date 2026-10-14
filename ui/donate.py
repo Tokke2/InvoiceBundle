@@ -38,6 +38,76 @@ except Exception:  # pragma: no cover
     _APP_SWISH = ""
 DONATE_SWISH_NUMBER: str = _APP_SWISH or ""
 
+
+def swish_qr_payload(number: str, amount: str = "",
+                     message: str = "") -> str:
+    """
+    Swish-QR i originalformatet (Swish "QR code design specification",
+    typ C):  C<nummer>;<belopp>;<meddelande>;<mask>
+
+    • nummer: bara siffror (072…), låses (går inte att ändra av betalaren)
+    • belopp: tomt — givaren väljer själv (decimalkomma om det sätts)
+    • meddelande: URL-kodat
+    • mask 6 = belopp (2) + meddelande (4) redigerbara i Swish-appen
+
+    Skannas med Swish-appen och förifyller numret exakt som Swishs
+    egna QR-koder.
+    """
+    from urllib.parse import quote
+
+    digits = "".join(c for c in (number or "") if c.isdigit())
+    if digits.startswith("46") and len(digits) == 11:
+        digits = "0" + digits[2:]
+    return f"C{digits};{amount};{quote(message, safe='')};6"
+
+
+def format_swish_number(number: str) -> str:
+    """0721817177 → '072-181 71 77' för visning."""
+    digits = "".join(c for c in (number or "") if c.isdigit())
+    if len(digits) == 10:
+        return f"{digits[:3]}-{digits[3:6]} {digits[6:8]} {digits[8:]}"
+    return number or ""
+
+
+def make_swish_qr_pixmap(payload: str, size: int = 184):
+    """Renderar QR-pixmap (svart på vitt) eller None om qrcode saknas."""
+    try:
+        import qrcode
+        from PySide6.QtGui import QImage, QPixmap
+
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            border=4,
+        )
+        qr.add_data(payload)
+        qr.make(fit=True)
+        matrix = qr.get_matrix()
+        modules = len(matrix)
+        scale = max(2, size // modules)
+        side = modules * scale
+        buf = bytearray(side * side)
+        pos = 0
+        for row in matrix:
+            line = bytearray(side)
+            i = 0
+            for dark in row:
+                fill = b"\x00" * scale if dark else b"\xff" * scale
+                line[i:i + scale] = fill
+                i += scale
+            row_bytes = bytes(line)
+            for _ in range(scale):
+                buf[pos:pos + side] = row_bytes
+                pos += side
+        img = QImage(
+            bytes(buf), side, side, side,
+            QImage.Format.Format_Grayscale8,
+        )
+        return QPixmap.fromImage(img.copy())
+    except Exception as exc:  # qrcode ej installerat ännu / Qt saknas
+        logger.info(f"{LOG_PREFIX} Swish-QR ej tillgänglig: {exc}")
+        return None
+
 try:
     from ui.i18n import tr
 except Exception:  # pragma: no cover - fristående körning
@@ -133,10 +203,45 @@ if _QT_AVAILABLE:
 
             root.addLayout(buttons)
 
-            # ── Swish (svenska användare): kopiera numret ─────────────
+            # ── Swish: QR-kod i originalformat + kopiera nummer ─────
+            # QR-koden är det primära (som i Swish-appen); numret står
+            # under som bildtext och kan kopieras för manuell inmatning.
+            self._lbl_swish_qr = None
             if DONATE_SWISH_NUMBER:
+                payload = swish_qr_payload(
+                    DONATE_SWISH_NUMBER, message="Donation"
+                )
+                pixmap = make_swish_qr_pixmap(payload)
+                if pixmap is not None:
+                    lbl_scan = QLabel(tr("donate.swish_scan"), self)
+                    lbl_scan.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    lbl_scan.setStyleSheet(
+                        "font-weight: 700; background: transparent;"
+                    )
+                    root.addWidget(lbl_scan)
+                    self._lbl_swish_qr = QLabel(self)
+                    self._lbl_swish_qr.setPixmap(pixmap)
+                    self._lbl_swish_qr.setAlignment(
+                        Qt.AlignmentFlag.AlignCenter
+                    )
+                    self._lbl_swish_qr.setToolTip(payload)
+                    root.addWidget(self._lbl_swish_qr)
+                    lbl_num = QLabel(
+                        tr(
+                            "donate.swish_number",
+                            number=format_swish_number(
+                                DONATE_SWISH_NUMBER
+                            ),
+                        ),
+                        self,
+                    )
+                    lbl_num.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    lbl_num.setStyleSheet("background: transparent;")
+                    root.addWidget(lbl_num)
                 btn_swish = QPushButton(
-                    f"{tr('donate.swish')}  ·  {DONATE_SWISH_NUMBER}", self
+                    f"{tr('donate.swish')}  ·  "
+                    f"{format_swish_number(DONATE_SWISH_NUMBER)}",
+                    self,
                 )
                 btn_swish.setCursor(Qt.CursorShape.PointingHandCursor)
                 btn_swish.setToolTip(DONATE_SWISH_NUMBER)
