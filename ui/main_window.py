@@ -148,12 +148,12 @@ THEMES: dict[str, dict] = {
         "name": "dark", "label": "🌙  Mörkt",
         "bg": "#0c1218", "bg_secondary": "#141c26",
         "bg_tertiary": "#1c2836",
-        "text": "#d5deea", "text_strong": "#f4f7fb",
+        "text": "#e8eef7", "text_strong": "#ffffff",
         "accent": "#3d8bfd", "accent_hover": "#6aa6ff",
         "button_bg": "#1c2836", "button_text": "#f4f7fb",
         "button_hover": "#283648",
         "tab_bg": "#141c26", "tab_selected": "#1f4f8a",
-        "tab_text": "#b7c5d6", "tab_text_selected": "#ffffff",
+        "tab_text": "#d9e4f0", "tab_text_selected": "#ffffff",
         "border": "#2a3848", "header_bg": "#17304c",
         "row_alt": "#1c3044", "row_normal": "#0c1218",
         "card_bg": "#141c26", "status_bar": "#0c1218",
@@ -173,12 +173,12 @@ THEMES: dict[str, dict] = {
         "name": "light", "label": "☀️  Ljust",
         "bg": "#f4f1ea", "bg_secondary": "#fffcf7",
         "bg_tertiary": "#e8e2d6",
-        "text": "#3d4450", "text_strong": "#1c2128",
+        "text": "#252d38", "text_strong": "#0d1218",
         "accent": "#0b5cab", "accent_hover": "#084a8a",
         "button_bg": "#fffcf7", "button_text": "#1c2128",
         "button_hover": "#efe8dc",
         "tab_bg": "#e8e2d6", "tab_selected": "#0b5cab",
-        "tab_text": "#5c6570", "tab_text_selected": "#ffffff",
+        "tab_text": "#39424e", "tab_text_selected": "#ffffff",
         "border": "#ddd4c6", "header_bg": "#1c3f6e",
         "row_alt": "#d5e4f5", "row_normal": "#fffcf7",
         "card_bg": "#fffcf7", "status_bar": "#fffcf7",
@@ -306,7 +306,7 @@ def build_stylesheet(t: dict) -> str:
 * {{
     font-family : "Segoe UI","SF Pro Display","Helvetica Neue",
                   Arial,sans-serif;
-    font-size   : 13px;
+    font-size   : 14px;
     outline     : none;
 }}
 
@@ -318,6 +318,11 @@ QMainWindow, QDialog {{
 QWidget {{
     background-color : {t["bg"]};
     color            : {t["text"]};
+}}
+
+QLabel {{
+    color       : {t["text_strong"]};
+    font-weight : 600;
 }}
 
 /* ── Scrollbars ─────────────────────────────────────────────── */
@@ -372,11 +377,11 @@ QPushButton {{
     background-color : {t["button_bg"]};
     color            : {t["button_text"]};
     font-weight      : 700;
-    font-size        : 13px;
-    padding          : 8px 16px;
+    font-size        : 14px;
+    padding          : 9px 18px;
     border-radius    : 8px;
     border           : 1px solid {t["border"]};
-    min-height       : 30px;
+    min-height       : 34px;
     min-width        : 0px;
 }}
 QPushButton:hover {{
@@ -462,9 +467,9 @@ QTabBar {{ background: transparent; border: none; }}
 QTabBar::tab {{
     background    : {t["tab_bg"]};
     color         : {t["tab_text"]};
-    font-weight   : 700;
-    font-size     : 13px;
-    padding       : 9px 18px;
+    font-weight   : 800;
+    font-size     : 15px;
+    padding       : 12px 22px;
     margin-right  : 3px;
     border-radius : 10px 10px 0 0;
     border        : 1px solid {t["border"]};
@@ -490,7 +495,7 @@ QTableWidget, QTableView, QTreeView, QListView {{
     background-color           : {t["row_normal"]};
     color                      : {t["text_strong"]};
     font-weight                : 700;
-    font-size                  : 13px;
+    font-size                  : 14px;
     gridline-color             : {grid};
     border                     : 1px solid {t["border"]};
     border-radius              : 6px;
@@ -503,8 +508,8 @@ QHeaderView::section {{
     background-color : {t["header_bg"]};
     color            : #ffffff;
     font-weight      : 800;
-    font-size        : 12px;
-    padding          : 8px 10px;
+    font-size        : 13px;
+    padding          : 10px 10px;
     border           : none;
     border-right     : 1px solid {t["border"]};
     border-bottom    : 1px solid {t["border"]};
@@ -610,7 +615,7 @@ QMenu {{
     background-color : {t["menu_bg"]};
     color            : {t["menu_text"]};
     font-weight      : 600;
-    font-size        : 13px;
+    font-size        : 14px;
     border           : 1px solid {t["border"]};
     border-radius    : 8px;
     padding          : 4px;
@@ -680,7 +685,7 @@ QStatusBar {{
     background-color : {t["status_bar"]};
     color            : {t.get("status_text", t["text_strong"])};
     font-weight      : 700;
-    font-size        : 12px;
+    font-size        : 13px;
     border-top       : 1px solid {t["border"]};
 }}
 QStatusBar::item {{ border: none; }}

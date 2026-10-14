@@ -116,34 +116,72 @@ def summarize(invoices: list[dict], today: date) -> dict[str, Any]:
 
 
 class _StatCard(QWidget):
-    """Ett nyckeltalskort med stor summa och liten förklaring."""
+    """Ett nyckeltalskort med stor summa och liten förklaring.
 
-    def __init__(self, accent: str) -> None:
+    Två varianter med samma höga kontrast: marinblått kort med
+    vit/guld text (mörkt tema) och vitt kort med marinblå/svart
+    text och färgad överkant (ljust tema) — alltid väl synligt.
+    """
+
+    def __init__(self, accent: str, light_value: str) -> None:
         super().__init__()
-        self.setStyleSheet(
-            f"background:{NAVY}; border:1px solid {accent};"
-            " border-radius:10px;"
-        )
+        # ID-väljare krävs: en välj-lös regel på kortet skulle annars
+        # ärvs av barn-etiketterna och rita en låda runt varje rad.
+        self.setObjectName("StatCard")
+        # Krävs för att QWidget-subklasser ska måla stilarkets
+        # bakgrund/kant över huvud taget.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._accent = accent
+        self._light_value = light_value
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 10, 14, 10)
         lay.setSpacing(2)
         self._title = QLabel()
-        self._title.setStyleSheet(
-            "color:#c9d4e6; background:transparent; font-size:12px;"
-            " font-weight:700;"
-        )
         self._value = QLabel("–")
-        self._value.setStyleSheet(
-            f"color:{GOLD}; background:transparent; font-size:22px;"
-            " font-weight:800;"
-        )
         self._sub = QLabel()
-        self._sub.setStyleSheet(
-            "color:#8ea4ba; background:transparent; font-size:11px;"
-        )
         lay.addWidget(self._title)
         lay.addWidget(self._value)
         lay.addWidget(self._sub)
+        self.apply_variant(False)
+
+    def apply_variant(self, light: bool) -> None:
+        if light:
+            self.setStyleSheet(
+                f"QWidget#StatCard {{ background:#ffffff;"
+                f" border:2px solid {NAVY};"
+                f" border-top:6px solid {self._accent};"
+                " border-radius:10px; }"
+            )
+            self._title.setStyleSheet(
+                f"color:{NAVY}; background:transparent;"
+                " font-size:13px; font-weight:800;"
+            )
+            self._value.setStyleSheet(
+                f"color:{self._light_value}; background:transparent;"
+                " font-size:26px; font-weight:800;"
+            )
+            self._sub.setStyleSheet(
+                "color:#334155; background:transparent;"
+                " font-size:12px; font-weight:600;"
+            )
+        else:
+            self.setStyleSheet(
+                f"QWidget#StatCard {{ background:{NAVY};"
+                f" border:1px solid {self._accent};"
+                " border-radius:10px; }"
+            )
+            self._title.setStyleSheet(
+                "color:#e8eff9; background:transparent;"
+                " font-size:13px; font-weight:800;"
+            )
+            self._value.setStyleSheet(
+                f"color:{GOLD}; background:transparent;"
+                " font-size:26px; font-weight:800;"
+            )
+            self._sub.setStyleSheet(
+                "color:#c9d9ee; background:transparent;"
+                " font-size:12px; font-weight:600;"
+            )
 
     def set(self, title: str, value: str, sub: str) -> None:
         self._title.setText(title)
@@ -185,10 +223,10 @@ class DashboardView(QWidget):
 
         cards = QHBoxLayout()
         cards.setSpacing(10)
-        self._card_pay = _StatCard(GOLD)
-        self._card_overdue = _StatCard("#e5534b")
-        self._card_week = _StatCard("#58a6ff")
-        self._card_suppliers = _StatCard("#3fb950")
+        self._card_pay = _StatCard(GOLD, "#0f2140")
+        self._card_overdue = _StatCard("#e5534b", "#b3261e")
+        self._card_week = _StatCard("#58a6ff", "#0b5cab")
+        self._card_suppliers = _StatCard("#3fb950", "#146c2e")
         for card in (self._card_pay, self._card_overdue,
                      self._card_week, self._card_suppliers):
             cards.addWidget(card, stretch=1)
@@ -206,18 +244,16 @@ class DashboardView(QWidget):
             QTableWidget.SelectionBehavior.SelectRows
         )
         self._table.horizontalHeader().setStretchLastSection(True)
-        self._table.setColumnWidth(0, 110)
+        self._table.setColumnWidth(0, 128)
+        self._table.setColumnWidth(1, 190)
         self._table.setColumnWidth(2, 120)
-        self._table.setColumnWidth(3, 130)
+        self._table.setColumnWidth(3, 150)
         self._table.doubleClicked.connect(
             lambda _i: self._goto_invoices()
         )
         root.addWidget(self._table, stretch=1)
 
         self._lbl_hint = QLabel()
-        self._lbl_hint.setStyleSheet(
-            "color:#8b949e;background:transparent;"
-        )
         root.addWidget(self._lbl_hint)
         self.retranslate()
 
@@ -299,6 +335,15 @@ class DashboardView(QWidget):
     # ── Tema / språk ──────────────────────────────────────────────────
 
     def apply_theme(self, theme: dict | None = None) -> None:
+        """Anpassar kort + hjälptext till ljust/mörkt tema."""
+        light = str((theme or {}).get("name", "")).lower() == "light"
+        for card in (self._card_pay, self._card_overdue,
+                     self._card_week, self._card_suppliers):
+            card.apply_variant(light)
+        self._lbl_hint.setStyleSheet(
+            f"color:{'#334155' if light else '#c9d9ee'};"
+            " background:transparent; font-weight:600; font-size:13px;"
+        )
         self.refresh()
 
     def retranslate(self) -> None:

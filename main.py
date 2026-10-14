@@ -1513,6 +1513,14 @@ def main() -> None:
     app_qt.setOrganizationName(APP_ORGANIZATION)
     app_qt.setStyle("Fusion")
     app_qt.setQuitOnLastWindowClosed(False)
+    # Läsbar grundtypografi i hela appen (temat förstärker rubriker,
+    # flikar och tabeller ytterligare via stilarket).
+    try:
+        from PySide6.QtGui import QFont as _QFont
+
+        app_qt.setFont(_QFont("Segoe UI", 11))
+    except Exception:
+        pass
     for _icon_name in ("app_icon.ico", "app_icon.png", "app_icon.svg"):
         _icon_path = BASE_DIR / _icon_name
         if _icon_path.exists():
