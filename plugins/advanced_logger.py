@@ -52,7 +52,7 @@ from typing import Any
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QFrame,
-    QFileDialog, QMessageBox,
+    QMessageBox,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QGroupBox, QLineEdit, QCheckBox,
 )
@@ -598,7 +598,6 @@ def attach_session_due_date_watcher(app: Any) -> None:
 
 def attach_app_watchers(app: Any) -> None:
     """CRUD/settings-watchers → varje datamutation loggas som AUDIT."""
-    log = logging.getLogger("AppWatcher")
 
     def _make_store_cb(store_name: str):
         def cb(name: str, records: list):
@@ -1007,11 +1006,9 @@ def log_system_info() -> None:
         pyside = meta.version("PySide6")
     except Exception:
         pyside = "okänd"
-    try:
-        import reportlab  # noqa: F401
-        rl = "ja"
-    except Exception:
-        rl = "nej (text-fallback)"
+    import importlib.util as _ilu
+
+    rl = "ja" if _ilu.find_spec("reportlab") else "nej (text-fallback)"
     alog(
         "SYSTEM_INFO",
         "Systeminfo vid start",

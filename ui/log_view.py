@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QFont
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -44,6 +44,17 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+try:
+    from ui.design import ICON_HEADER_PX, app_icon_pixmap, header_font
+except Exception:  # pragma: no cover
+    ICON_HEADER_PX = 28  # type: ignore[no-redef]
+
+    def app_icon_pixmap(size: int = 28):  # type: ignore[no-redef]
+        return QPixmap()
+
+    def header_font():  # type: ignore[no-redef]
+        return QFont("Segoe UI", 17, QFont.Weight.Bold)
 
 try:
     from ui.i18n import tr
@@ -276,8 +287,17 @@ class LogView(QWidget):
         root.setSpacing(8)
 
         self._lbl_title = QLabel()
-        self._lbl_title.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
-        root.addWidget(self._lbl_title)
+        self._lbl_title.setFont(header_font())
+        head = QHBoxLayout()
+        _pix = app_icon_pixmap(ICON_HEADER_PX)
+        if not _pix.isNull():
+            _mark = QLabel()
+            _mark.setPixmap(_pix)
+            _mark.setStyleSheet("background:transparent;")
+            head.addWidget(_mark)
+        head.addWidget(self._lbl_title)
+        head.addStretch()
+        root.addLayout(head)
 
         # Felbanner (dold när inga fel finns)
         banner_row = QHBoxLayout()

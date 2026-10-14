@@ -664,6 +664,7 @@ def test_supplier_defaults_roundtrip(tmp_path: Path) -> None:
 
 def test_invoice_dialog_smart_fill(tmp_path: Path) -> None:
     from types import SimpleNamespace
+
     from PySide6.QtWidgets import QApplication
     from ui.invoices_helpers import InvoiceDialog
 
@@ -720,9 +721,9 @@ def test_invoice_dialog_smart_fill(tmp_path: Path) -> None:
 
 
 def test_pdf_pro_design_multipage(tmp_path: Path) -> None:
-    try:
-        import reportlab  # noqa: F401
-    except ImportError:
+    import importlib.util as _ilu
+
+    if _ilu.find_spec("reportlab") is None:
         print("  (hoppar över: reportlab saknas)")
         return
     sys.path.insert(0, str(PROJECT_DIR / "plugins"))
@@ -958,7 +959,6 @@ def test_scan_extract_unknown_filetype(tmp_path: Path) -> None:
 
 
 def test_scan_view_builds(tmp_path: Path) -> None:
-    from types import SimpleNamespace
     from PySide6.QtWidgets import QApplication
     from ui.scan_import_view import ScanImportView, _fmt_amount
 

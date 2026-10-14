@@ -1,24 +1,27 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- FakturaRäknaren — appikon: faktura med guldbock på marinblått.
+       Matchar app_icon.png (genererad) så alla format visar samma ikon. -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#0E3444"/>
-      <stop offset="1" stop-color="#08121C"/>
+      <stop offset="0" stop-color="#16305A"/>
+      <stop offset="1" stop-color="#0F2140"/>
     </linearGradient>
     <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#F0C24A"/>
-      <stop offset="1" stop-color="#D4A017"/>
+      <stop offset="0" stop-color="#E3B341"/>
+      <stop offset="1" stop-color="#C9932B"/>
     </linearGradient>
   </defs>
   <rect width="1024" height="1024" rx="226" fill="url(#bg)"/>
-  <rect x="200" y="200" width="624" height="130" rx="36" fill="#F8F4EC"/>
-  <rect x="248" y="236" width="312" height="22" rx="8" fill="#BCB2A2"/>
-  <rect x="248" y="274" width="182" height="18" rx="8" fill="#CEC6B8"/>
-  <rect x="268" y="368" width="488" height="130" rx="36" fill="#F8F4EC"/>
-  <rect x="308" y="404" width="252" height="22" rx="8" fill="#BCB2A2"/>
-  <rect x="308" y="442" width="162" height="18" rx="8" fill="#CEC6B8"/>
-  <rect x="336" y="536" width="352" height="130" rx="36" fill="#E2DACC"/>
-  <rect x="372" y="572" width="188" height="22" rx="8" fill="#C4BAA8"/>
-  <rect x="372" y="608" width="118" height="16" rx="8" fill="#C4BAA8"/>
-  <rect x="156" y="712" width="712" height="176" rx="40" fill="url(#gold)"/>
-  <text x="512" y="828" text-anchor="middle" font-family="DejaVu Sans, Segoe UI, sans-serif" font-size="108" font-weight="700" fill="#1C1406">kr</text>
+  <!-- Fakturablad med vikt hörn -->
+  <path d="M340 218 h238 l106 106 v482 a34 34 0 0 1 -34 34 H340 a34 34 0 0 1 -34 -34 V252 a34 34 0 0 1 34 -34 z" fill="#FFFFFF"/>
+  <path d="M578 218 l106 106 H612 a34 34 0 0 1 -34 -34 z" fill="#C9D4E6"/>
+  <!-- Textlinjer -->
+  <rect x="370" y="452" width="250" height="34" rx="17" fill="#5B7296"/>
+  <rect x="370" y="532" width="250" height="34" rx="17" fill="#5B7296"/>
+  <rect x="370" y="612" width="150" height="34" rx="17" fill="#5B7296"/>
+  <!-- Guldbadge med bock -->
+  <circle cx="662" cy="700" r="128" fill="url(#gold)" stroke="#0F2140" stroke-width="18"/>
+  <path d="M590 700 l52 52 96 -104" fill="none" stroke="#FFFFFF" stroke-width="42" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Gnista -->
+  <path d="M812 566 l14 34 34 14 -34 14 -14 34 -14 -34 -34 -14 34 -14 z" fill="url(#gold)"/>
 </svg>

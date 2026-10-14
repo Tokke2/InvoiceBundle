@@ -822,11 +822,12 @@ class PDFExporter:
         ensure_dir(self._export_dir)
         ensure_dir(self._data_dir)
 
-        try:
-            import reportlab  # noqa: F401
-            self._has_rl = True
+        import importlib.util as _ilu
+
+        self._has_rl = _ilu.find_spec("reportlab") is not None
+        if self._has_rl:
             log.info("reportlab available – full PDF support")
-        except ImportError:
+        else:
             log.warning("reportlab not installed – text fallback active")
 
     def _refresh_lang(self) -> None:

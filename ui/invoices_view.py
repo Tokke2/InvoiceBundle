@@ -66,7 +66,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QComboBox,
     QTableWidget,
-    QTableWidgetItem,
     QHeaderView,
     QAbstractItemView,
     QAbstractScrollArea,
@@ -82,7 +81,7 @@ try:
     from ui.i18n import tr, tr_list, tr_status, tr_type
 except ImportError:  # fristående körning av filen
     from i18n import tr, tr_list, tr_status, tr_type  # type: ignore[no-redef]
-from PySide6.QtGui import QFont, QColor, QWheelEvent, QBrush, QPixmap
+from PySide6.QtGui import QColor, QWheelEvent
 
 # ═════════════════════════════════════════════════════════════════════
 #  IMPORTER FRÅN HELPERS
@@ -98,7 +97,6 @@ try:
         COL_KEYS,
         COL_WIDTHS,
         COL_ALIGN,
-        CURRENCIES,
         ExportHistoryManager,
         ExportHistoryDialog,
         InvoiceDialog,
@@ -127,7 +125,6 @@ except ImportError:
         COL_KEYS,
         COL_WIDTHS,
         COL_ALIGN,
-        CURRENCIES,
         ExportHistoryManager,
         ExportHistoryDialog,
         InvoiceDialog,
@@ -144,6 +141,18 @@ except ImportError:
         get_session_due_date_str,
         COPYRIGHT_YEAR,
     )
+
+try:
+    from ui.design import ICON_HEADER_PX, app_icon_pixmap
+except Exception:  # pragma: no cover - fristående körning
+    try:
+        from design import ICON_HEADER_PX, app_icon_pixmap  # type: ignore[no-redef]
+    except Exception:
+        ICON_HEADER_PX = 28  # type: ignore[no-redef]
+
+        def app_icon_pixmap(size: int = 28):  # type: ignore[no-redef]
+            from PySide6.QtGui import QPixmap as _QP
+            return _QP()
 
 log = logging.getLogger("InvoicesView")
 
@@ -325,16 +334,10 @@ class InvoicesView(QWidget):
         self._header_label.setFont(make_font(17, True))
         head = QHBoxLayout()
         head.setSpacing(8)
-        _icon = Path(__file__).resolve().parent.parent / "app_icon.png"
-        if _icon.is_file():
+        _pix = app_icon_pixmap(ICON_HEADER_PX)
+        if not _pix.isNull():
             mark = QLabel()
-            mark.setPixmap(
-                QPixmap(str(_icon)).scaled(
-                    28, 28,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+            mark.setPixmap(_pix)
             mark.setStyleSheet("background:transparent;")
             head.addWidget(mark)
         head.addWidget(self._header_label)
@@ -1274,7 +1277,7 @@ class InvoicesView(QWidget):
         try:
             from PySide6.QtWidgets import (
                 QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-                QPushButton, QDateEdit, QFrame,
+                QPushButton, QFrame,
             )
             from PySide6.QtCore import QDate
 

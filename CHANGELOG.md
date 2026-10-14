@@ -3,10 +3,14 @@
 ## Ej släppt / Unreleased
 
 ### Svenska
+- **Ny appikon överallt** — faktura med guldbock på marinblått, samma motiv i `.ico` (aktivitetsfältet), `.png` (fönster, flikrubriker, PDF-export, Linux `.desktop`) och handgjord `.svg`. Donationsdialogen och loggfliken bär nu också ikonen, och vyernas rubriker är enhetliga (17 pt + 28 px-ikon) via nya `ui/design.py`.
+- **Kodstädning** — gemensam designmodul i stället för kopierade ikonsökvägar i fyra vyer; oanvända importer och döda variabler borttagna (pyflakes: 28 → 0 fynd förutom en avsiktlig fallback-import).
 - **Egen loggflik** (🪵 Logg, Ctrl+8) för felsökning: historik från `logs/app.log` även från föregående sessioner, felbanner med genväg till senaste felet, 🔖 markering + kopiera-efter-markering och ett **felsökningspaket** som kopieras med ett klick.
 - **Multi-OS + autostart utan VBS** — appen körs på Windows, macOS och Linux. Ny autostart-metod i Inställningar-menyn: **Direkt** (standard, OS startar Python direkt — ingen VBS/startfil) eller **Startfil** (klassiska `start_hidden`-filen som väntar på disken, för portabla installationer). Windows = register/pythonw, Linux = XDG-autostart, macOS = LaunchAgent.
 
 ### English
+- **New app icon everywhere** — invoice with a gold checkmark on navy, the same artwork in `.ico` (taskbar), `.png` (window, tab headers, PDF export, Linux `.desktop`) and a hand-made `.svg`. The donate dialog and Log tab now also carry the icon, and view headers are unified (17 pt + 28 px icon) via the new `ui/design.py`.
+- **Code cleanup** — shared design module instead of copied icon paths in four views; unused imports and dead variables removed (pyflakes: 28 → 0 findings apart from one intentional fallback import).
 - **Dedicated Log tab** (🪵 Log, Ctrl+8) for troubleshooting: history from `logs/app.log` including previous sessions, an error banner with a jump-to-latest-error shortcut, 🔖 markers with copy-after-marker, and a one-click **diagnostics bundle**.
 - **Multi-OS + autostart without VBS** — the app runs on Windows, macOS and Linux. New autostart method choice in the Settings menu: **Direct** (default; the OS starts Python directly — no VBS/launcher file) or **Launcher file** (the classic `start_hidden` file that waits for the disk, for portable installs). Windows = registry/pythonw, Linux = XDG autostart, macOS = LaunchAgent.
 

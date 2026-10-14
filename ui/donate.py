@@ -78,6 +78,12 @@ if _QT_AVAILABLE:
 
         def __init__(self, parent: Optional[QWidget] = None) -> None:
             super().__init__(parent)
+            try:  # samma appikon som överallt annars
+                from ui.design import app_icon_path
+                from PySide6.QtGui import QIcon as _QIcon
+                self.setWindowIcon(_QIcon(str(app_icon_path())))
+            except Exception:
+                pass
             self.setWindowTitle(tr("donate.window_title"))
             self.setModal(True)
             self.setMinimumWidth(420)

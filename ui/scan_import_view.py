@@ -35,11 +35,23 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QGroupBox, QTextEdit, QMessageBox, QFileDialog, QFrame,
-    QComboBox, QLineEdit, QCheckBox, QSplitter, QApplication,
+    QLineEdit, QCheckBox, QApplication,
     QDialog, QListWidget, QPlainTextEdit,
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QCursor, QPixmap
+from PySide6.QtGui import QFont
+
+try:
+    from ui.design import ICON_HEADER_PX, app_icon_pixmap
+except Exception:  # pragma: no cover - fristående körning
+    try:
+        from design import ICON_HEADER_PX, app_icon_pixmap  # type: ignore[no-redef]
+    except Exception:
+        ICON_HEADER_PX = 28  # type: ignore[no-redef]
+
+        def app_icon_pixmap(size: int = 28):  # type: ignore[no-redef]
+            from PySide6.QtGui import QPixmap as _QP
+            return _QP()
 
 log = logging.getLogger("ScanImportView")
 
@@ -369,16 +381,10 @@ class ScanImportView(QWidget):
         hdr.setFont(QFont("Segoe UI", 17, QFont.Weight.Bold))
         head = QHBoxLayout()
         head.setSpacing(8)
-        _icon = Path(__file__).resolve().parent.parent / "app_icon.png"
-        if _icon.is_file():
+        _pix = app_icon_pixmap(ICON_HEADER_PX)
+        if not _pix.isNull():
             mark = QLabel()
-            mark.setPixmap(
-                QPixmap(str(_icon)).scaled(
-                    28, 28,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+            mark.setPixmap(_pix)
             mark.setStyleSheet("background:transparent;")
             head.addWidget(mark)
         head.addWidget(hdr)

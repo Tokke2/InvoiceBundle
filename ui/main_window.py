@@ -40,8 +40,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QMenu, QSystemTrayIcon,
     QApplication, QToolBar, QStatusBar,
-    QMessageBox, QScrollArea, QFrame, QSizePolicy,
-    QPushButton, QDialog, QTextEdit, QGroupBox,
+    QMessageBox, QScrollArea, QFrame, QPushButton, QDialog, QTextEdit, QGroupBox,
     QTableWidget, QTableWidgetItem, QKeySequenceEdit, QComboBox,
     QHeaderView, QAbstractItemView,
 )
@@ -52,7 +51,7 @@ from PySide6.QtGui import (
     QKeySequence, QShortcut,
 )
 from PySide6.QtCore import (
-    Qt, QSize, QTimer, QPoint, Signal, QUrl, QFileSystemWatcher,
+    Qt, QTimer, QPoint, Signal, QUrl, QFileSystemWatcher,
 )
 
 # ═════════════════════════════════════════════════════════════════════
@@ -298,8 +297,6 @@ def build_stylesheet(t: dict) -> str:
         return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
     is_dark = _lum(t.get("bg", "#0c1218")) < 0.5
-    arrow_fg = "#ffffff" if is_dark else "#000000"
-    arrow_hover = "#000000" if is_dark else "#ffffff"
     grid = "#8ea4ba" if is_dark else "#8a7d6c"
 
     return f"""

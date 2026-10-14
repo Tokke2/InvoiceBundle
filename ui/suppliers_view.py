@@ -49,7 +49,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QScrollArea, QMenu, QFileDialog, QCheckBox,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QSize
-from PySide6.QtGui import QFont, QColor, QCursor, QBrush, QWheelEvent, QPixmap
+from PySide6.QtGui import QFont, QColor, QCursor, QBrush, QWheelEvent
 
 # Tangentbordsnavigation delas med invoices_helpers (en implementation)
 try:
@@ -86,6 +86,18 @@ except ImportError:
 # ═════════════════════════════════════════════════════════════════════
 
 COPYRIGHT_YEAR: int = datetime.date.today().year
+
+try:
+    from ui.design import ICON_HEADER_PX, app_icon_pixmap, header_font
+except Exception:  # pragma: no cover - fristående körning
+    try:
+        from design import ICON_HEADER_PX, app_icon_pixmap, header_font  # type: ignore[no-redef]
+    except Exception:
+        ICON_HEADER_PX = 28  # type: ignore[no-redef]
+
+        def app_icon_pixmap(size: int = 28):  # type: ignore[no-redef]
+            from PySide6.QtGui import QPixmap as _QP
+            return _QP()
 
 log = logging.getLogger("SuppliersView")
 
@@ -488,19 +500,13 @@ class SuppliersView(QWidget):
         # ── Header ─────────────────────────────────────────────────────
         hdr = QLabel(tr("suppliers.title"))
         self._hdr_label = hdr
-        hdr.setFont(_font(18, bold=True))
+        hdr.setFont(header_font())
         head = QHBoxLayout()
         head.setSpacing(8)
-        _icon = Path(__file__).resolve().parent.parent / "app_icon.png"
-        if _icon.is_file():
+        _pix = app_icon_pixmap(ICON_HEADER_PX)
+        if not _pix.isNull():
             mark = QLabel()
-            mark.setPixmap(
-                QPixmap(str(_icon)).scaled(
-                    28, 28,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+            mark.setPixmap(_pix)
             mark.setStyleSheet("background:transparent;")
             head.addWidget(mark)
         head.addWidget(hdr)

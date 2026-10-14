@@ -55,25 +55,13 @@ from typing import Any, Callable
 try:
     from plugins.pdf_export_helpers import (
         PDFExporter,
-        InvoiceNumberGuard,
-        PDF_ROUNDING_MODES,
-        fmt_amount,
-        to_ascii,
         get_platform,
-        now_iso,
-        round_by_mode,
         COPYRIGHT_YEAR,
     )
 except ImportError:
     from pdf_export_helpers import (  # type: ignore[no-redef]
         PDFExporter,
-        InvoiceNumberGuard,
-        PDF_ROUNDING_MODES,
-        fmt_amount,
-        to_ascii,
         get_platform,
-        now_iso,
-        round_by_mode,
         COPYRIGHT_YEAR,
     )
 

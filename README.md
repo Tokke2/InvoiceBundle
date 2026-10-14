@@ -1,5 +1,8 @@
 # Fakturabunten / InvoiceBundle
 
+<img src="app_icon.png" alt="Fakturabunten icon" width="112" align="right">
+
+
 **Version 1.0.0** · Windows / Linux / macOS · Svenska & English
 
 Lokalt program som räknar ihop leverantörsfakturor och kreditfakturor till en summa att betala — med leverantörsregister, förfallokoll och PDF-export. Ingen prenumeration. Ingen molntjänst. All data ligger i programmappen på din dator.
