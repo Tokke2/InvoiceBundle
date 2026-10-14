@@ -98,7 +98,9 @@ class _UpdateWorker(QThread):
                 progress=lambda d, t: self.progress.emit(d, t),
             )
             report = updater.apply_update(
-                zip_path, self._root, sha=release.get("sha", ""),
+                zip_path, self._root,
+                version=str(release.get("tag", "")).lstrip("vV"),
+                sha=release.get("sha", ""),
             )
             try:
                 zip_path.unlink(missing_ok=True)
