@@ -1,6 +1,6 @@
 # Ändringslogg / Changelog
 
-## Ej släppt / Unreleased
+## v1.0.0 — 2026-10-14 (uppdaterad / updated)
 
 ### Svenska
 - **Ny appikon överallt** — faktura med guldbock på marinblått, samma motiv i `.ico` (aktivitetsfältet), `.png` (fönster, flikrubriker, PDF-export, Linux `.desktop`) och handgjord `.svg`. Donationsdialogen och loggfliken bär nu också ikonen, och vyernas rubriker är enhetliga (17 pt + 28 px-ikon) via nya `ui/design.py`.
@@ -14,9 +14,7 @@
 - **Dedicated Log tab** (🪵 Log, Ctrl+8) for troubleshooting: history from `logs/app.log` including previous sessions, an error banner with a jump-to-latest-error shortcut, 🔖 markers with copy-after-marker, and a one-click **diagnostics bundle**.
 - **Multi-OS + autostart without VBS** — the app runs on Windows, macOS and Linux. New autostart method choice in the Settings menu: **Direct** (default; the OS starts Python directly — no VBS/launcher file) or **Launcher file** (the classic `start_hidden` file that waits for the disk, for portable installs). Windows = registry/pythonw, Linux = XDG autostart, macOS = LaunchAgent.
 
-## v1.0.0 — 2026-10-13
-
-Första officiella releasen. / First official release.
+Första officiella releasen, uppdaterad med allt nedan. / First official release, updated with everything below.
 
 ### Svenska
 - **Leverantörsfliken lagad** — den var helt död på grund av en `ImportError` (vyfunktioner som saknades i hjälpmodulen). Om en vy ändå skulle misslyckas visas nu en felruta med **Försök igen** i stället för en tyst död flik.
