@@ -149,6 +149,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "close_to_tray":    True,
     "export_include_originals": False,
     "update_auto_check": True,
+    "auto_batch":      False,
     "update_last_check": "",
     "last_opened":      None,
     "company_name":     "",

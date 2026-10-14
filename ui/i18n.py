@@ -454,6 +454,13 @@ _STRINGS: dict[str, dict[str, str]] = {
     "combine.export_title": {"sv": "Exportera markerade fakturor", "en": "Export selected invoices"},
     "combine.need_two": {"sv": "Markera minst två fakturor i listan först.", "en": "Select at least two invoices in the list first."},
 
+    # ── Automatisk batch-export ───────────────────────────────────────
+    "auto_batch.menu": {"sv": "🤖  Autoexport: 10 fakturor/leverantör eller förfall inom 5 dagar", "en": "🤖  Auto-export: 10 invoices/supplier or due within 5 days"},
+    "auto_batch.pdf_title": {"sv": "Autoexport – {supplier}", "en": "Auto-export – {supplier}"},
+    "auto_batch.done": {"sv": "🤖  Autoexport: {n} fakturor från {supplier} exporterades och sattes som Betald", "en": "🤖  Auto-export: {n} invoices from {supplier} exported and marked Paid"},
+    "auto_batch.printed": {"sv": "  ·  🖨 utskriven med original", "en": "  ·  🖨 printed with originals"},
+    "auto_batch.failed": {"sv": "🤖  Autoexport för {supplier} misslyckades: {error}", "en": "🤖  Auto-export for {supplier} failed: {error}"},
+
     # ── Dashboard ─────────────────────────────────────────────────────
     "dashboard.title": {"sv": "🏠  Dashboard", "en": "🏠  Dashboard"},
     "dashboard.open_invoices": {"sv": "🧾  Öppna Fakturor", "en": "🧾  Open Invoices"},

@@ -144,6 +144,30 @@ def open_file(path: str | Path) -> None:
             log.error("open_file fallback-fel: %s", exc)
 
 
+def print_file(path: str | Path) -> bool:
+    """Skriver ut en fil via OS:ets standardväg. True om det gick iväg.
+
+    Windows: print-verbet (standardprogrammets utskrift),
+    macOS/Linux: lpr/lp. Kastar aldrig — utskrift är ett tillägg,
+    aldrig ett krav för att exporten ska räknas som lyckad.
+    """
+    p = Path(path)
+    if not p.exists():
+        log.warning("print_file: filen hittades inte: %s", p)
+        return False
+    try:
+        if CURRENT_PLATFORM == "windows":
+            os.startfile(str(p), "print")  # type: ignore[attr-defined]
+        elif CURRENT_PLATFORM == "macos":
+            subprocess.Popen(["lpr", str(p)])
+        else:
+            subprocess.Popen(["lp", str(p)])
+        return True
+    except Exception as exc:
+        log.warning("print_file %s: %s", p, exc)
+        return False
+
+
 def open_folder(path: str | Path) -> None:
     """Öppnar en mapp i OS:ets filhanterare. Skapar aldrig utanför appmappen."""
     p = Path(path)

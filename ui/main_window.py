@@ -1330,6 +1330,22 @@ class MainWindow(QMainWindow):
         self._update_worker = None
         QTimer.singleShot(5_000, self._maybe_auto_update_check)
 
+        # ── Autoexport-triggers: vid start + när fakturor ändras ───
+        self._auto_batch_worker = None
+        self._auto_batch_debounce = QTimer(self)
+        self._auto_batch_debounce.setSingleShot(True)
+        self._auto_batch_debounce.setInterval(3_000)
+        self._auto_batch_debounce.timeout.connect(self._maybe_auto_batch)
+        try:
+            _inv_store = getattr(self._app, "invoices_store", None)
+            if _inv_store is not None and hasattr(_inv_store, "on_change"):
+                _inv_store.on_change(
+                    lambda *_a: self._auto_batch_debounce.start()
+                )
+        except Exception as exc:
+            log.debug("auto_batch store-hook: %s", exc)
+        QTimer.singleShot(7_000, self._maybe_auto_batch)
+
     def _watch_data_folder(self) -> None:
         """
         Om suppliers.json sparas i en editor läser appen om den själv.
@@ -1705,6 +1721,14 @@ class MainWindow(QMainWindow):
             self._toggle_update_auto
         )
         m_set.addAction(self._act_update_auto)
+
+        self._act_auto_batch = QAction(tr("auto_batch.menu"), self)
+        self._act_auto_batch.setCheckable(True)
+        self._act_auto_batch.setChecked(
+            bool(self._settings.get("auto_batch", False))
+        )
+        self._act_auto_batch.triggered.connect(self._toggle_auto_batch)
+        m_set.addAction(self._act_auto_batch)
 
         self._act_trace = QAction(tr("menu.trace"), self)
         self._act_trace.setCheckable(True)
@@ -2212,6 +2236,108 @@ class MainWindow(QMainWindow):
             self._settings.set("update_auto_check", checked)
         except Exception as exc:
             log.warning("_toggle_update_auto: %s", exc)
+
+    def _toggle_auto_batch(self, checked: bool) -> None:
+        """Kryss i Inställningar: automatisk batch-export på/av."""
+        try:
+            self._settings.set("auto_batch", checked)
+        except Exception as exc:
+            log.warning("_toggle_auto_batch: %s", exc)
+        if checked:
+            # Kör direkt en gång om något redan ligger och väntar
+            QTimer.singleShot(800, self._maybe_auto_batch)
+
+    def _maybe_auto_batch(self) -> None:
+        """Startar autoexport i bakgrunden om funktionen är på och
+        ingen körning redan pågår. Tyst när inget behöver göras."""
+        try:
+            if not bool(self._settings.get("auto_batch", False)):
+                return
+            worker = self._auto_batch_worker
+            if worker is not None and worker.isRunning():
+                return
+            from ui.auto_batch import AutoBatchWorker
+
+            self._auto_batch_worker = AutoBatchWorker(
+                self._app, parent=self
+            )
+            self._auto_batch_worker.done.connect(
+                self._on_auto_batch_done
+            )
+            self._auto_batch_worker.failed.connect(
+                lambda e: log.debug("AUTOBATCH tyst fel: %s", e)
+            )
+            self._auto_batch_worker.start()
+        except Exception as exc:
+            log.debug("_maybe_auto_batch: %s", exc)
+
+    def _auto_batch_data_dir(self) -> Path:
+        raw = "data"
+        try:
+            raw = self._app.settings.get("db_path", "data")
+        except Exception:
+            pass
+        pth = Path(raw)
+        return pth if pth.is_absolute() else PROJECT_DIR / pth
+
+    def _on_auto_batch_done(self, results: list) -> None:
+        """Applicerar Betald + historik + utskrift på huvudtråden."""
+        from ui.invoices_helpers import (
+            ExportHistoryManager, combine_invoices, print_file,
+        )
+
+        messages: list[str] = []
+        for item in results or []:
+            batch = item["batch"]
+            supplier = batch["supplier"]
+            if not item["success"]:
+                self.set_status(
+                    tr(
+                        "auto_batch.failed",
+                        supplier=supplier,
+                        error=str(item.get("error", ""))[:80],
+                    ),
+                    12000,
+                )
+                continue
+            paid = 0
+            for inv in batch["invoices"]:
+                try:
+                    self._app.update_invoice(
+                        inv["id"],
+                        {
+                            "status": "Betald",
+                            "payment_date": batch["payment_date"],
+                        },
+                    )
+                    paid += 1
+                except Exception as exc:
+                    log.warning("AUTOBATCH betald %s: %s",
+                                inv.get("id"), exc)
+            try:
+                summary = combine_invoices(batch["invoices"])
+                ExportHistoryManager(
+                    self._auto_batch_data_dir()
+                ).record_export(
+                    invoices=batch["invoices"],
+                    file_path=item["file_path"],
+                    total_inv=summary["total_invoices"],
+                    total_cred=summary["total_credits"],
+                    att_betala=summary["net"],
+                    suppliers=[supplier],
+                    payment_date=batch["payment_date"],
+                )
+            except Exception as exc:
+                log.warning("AUTOBATCH historik: %s", exc)
+            printed = False
+            if batch["reason"] == "due":
+                printed = print_file(item["file_path"])
+            msg = tr("auto_batch.done", n=paid, supplier=supplier)
+            if printed:
+                msg += tr("auto_batch.printed")
+            messages.append(msg)
+        if messages:
+            self.set_status("   ".join(messages), 12000)
 
     def _maybe_auto_update_check(self) -> None:
         """Tyst bakgrundskoll (max 1 gång/dygn) — säger bara till
