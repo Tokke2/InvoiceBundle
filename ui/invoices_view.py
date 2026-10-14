@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtWidgets import (
+    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -107,6 +108,7 @@ try:
         h_line,
         fit_table_columns,
         fmt_amount,
+        combine_invoices,
         build_export_path,
         get_export_base,
         open_file,
@@ -133,6 +135,7 @@ except ImportError:
         h_line,
         fit_table_columns,
         fmt_amount,
+        combine_invoices,
         build_export_path,
         get_export_base,
         open_file,
@@ -469,11 +472,20 @@ class InvoicesView(QWidget):
         self._btn_mark_paid.clicked.connect(self._mark_selected_paid)
         self._btn_mark_paid.setEnabled(False)
 
+        self._btn_combine = make_btn(
+            tr("combine.button"),
+            tr("combine.tip"),
+            info=True,
+        )
+        self._btn_combine.clicked.connect(self._show_combine_dialog)
+        self._btn_combine.setEnabled(False)
+
         row_actions.addWidget(self._btn_add)
         row_actions.addWidget(self._btn_edit)
         row_actions.addWidget(self._btn_delete)
         row_actions.addWidget(self._btn_duplicate)
         row_actions.addWidget(self._btn_mark_paid)
+        row_actions.addWidget(self._btn_combine)
         row_actions.addStretch()
 
         self._btn_refresh = make_btn("🔄", "Uppdatera vyn", width=50)
@@ -1027,11 +1039,34 @@ class InvoicesView(QWidget):
 
     def _update_buttons(self) -> None:
         single = self._selected_id() is not None
-        multi = len(self._selected_ids()) > 0
+        ids = self._selected_ids()
+        multi = len(ids) > 0
         self._btn_edit.setEnabled(single)
         self._btn_delete.setEnabled(single)
         self._btn_duplicate.setEnabled(single)
         self._btn_mark_paid.setEnabled(multi)
+        self._btn_combine.setEnabled(len(ids) >= 2)
+        if len(ids) >= 2:
+            summary = combine_invoices(self._selected_invoices())
+            if summary["earliest_due"]:
+                self._status(
+                    tr(
+                        "combine.status",
+                        n=summary["count"],
+                        amount=fmt_amount(summary["net"]),
+                        due=summary["earliest_due"],
+                    ),
+                    timeout=6000,
+                )
+            else:
+                self._status(
+                    tr(
+                        "combine.status_no_due",
+                        n=summary["count"],
+                        amount=fmt_amount(summary["net"]),
+                    ),
+                    timeout=6000,
+                )
 
     def _selected_id(self) -> str | None:
         items = self._table.selectedItems()
@@ -1050,6 +1085,13 @@ class InvoicesView(QWidget):
                 seen.add(rid)
                 ids.append(rid)
         return ids
+
+    def _selected_invoices(self) -> list[dict]:
+        """Alla markerade fakturor (i markeringsordning)."""
+        by_id = {r.get("id"): r for r in self._all_data}
+        return [
+            by_id[i] for i in self._selected_ids() if i in by_id
+        ]
 
     def _selected_invoice(self) -> dict | None:
         sid = self._selected_id()
@@ -1102,6 +1144,8 @@ class InvoicesView(QWidget):
         self._btn_delete.setText(tr("invoices.delete"))
         self._btn_duplicate.setText(tr("invoices.duplicate"))
         self._btn_mark_paid.setText(tr("invoices.mark_paid"))
+        self._btn_combine.setText(tr("combine.button"))
+        self._btn_combine.setToolTip(tr("combine.tip"))
         self._btn_export_all.setText(tr("invoices.export_all"))
         self._btn_history.setText(tr("invoices.history"))
         self._btn_open_export.setText(tr("invoices.open_export_folder"))
@@ -1228,6 +1272,7 @@ class InvoicesView(QWidget):
         total_invoices: float,
         total_credits: float,
         att_betala: float,
+        default_date: str = "",
     ) -> tuple[str, bool]:
         """
         Frågar efter betalningsdatum för DENNA export-batch.
@@ -1242,8 +1287,11 @@ class InvoicesView(QWidget):
         Använder ask_export_payment_date() från pdf_export_helpers.
         Faller tillbaka till en inbyggd dialog om modulen saknas.
         """
-        # session_due_date som förslag
-        session_due_str = get_session_due_date_str(self._app)
+        # Förslag: explicit standard (t.ex. tidigaste förfallodatum
+        # vid sammanslagning) vinner över sessionens datum.
+        session_due_str = (
+            default_date or get_session_due_date_str(self._app)
+        )
         currency = self._default_currency()
 
         suppliers = sorted(
@@ -1568,6 +1616,148 @@ class InvoicesView(QWidget):
     #  CRUD — MARKERA BETALD / STATUS
     # ══════════════════════════════════════════════════════════════════
 
+    # ── Slå ihop markerade ────────────────────────────────────────────
+    @staticmethod
+    def _due_relative(due_str: str) -> str:
+        """'om 5 dagar' / 'förfaller idag!' / 'förfallen sedan 2 dagar!'."""
+        import datetime as _dt
+
+        try:
+            due = _dt.date.fromisoformat(str(due_str)[:10])
+        except (ValueError, TypeError):
+            return ""
+        delta = (due - _dt.date.today()).days
+        if delta == 0:
+            return tr("combine.due_today")
+        if delta > 0:
+            return tr("combine.due_in", d=delta)
+        return tr("combine.due_overdue", d=-delta)
+
+    def _show_combine_dialog(self) -> None:
+        """Visar ihopslagna markerade: summa + tidigaste förfallodatum,
+        med kopia- och exportknappar (exporten förifyller tidigaste
+        förfallodatumet som betalningsdatum)."""
+        from PySide6.QtWidgets import (
+            QDialog, QHBoxLayout, QLabel, QPlainTextEdit,
+            QPushButton, QVBoxLayout,
+        )
+
+        rows = self._selected_invoices()
+        if len(rows) < 2:
+            QMessageBox.information(
+                self, tr("combine.button"), tr("combine.need_two")
+            )
+            return
+        summary = combine_invoices(rows)
+        earliest = summary["earliest_due"]
+
+        def _inv_line(r: dict) -> str:
+            due = str(r.get("due_date", "") or "—")
+            return (
+                f"{due}   {r.get('supplier', '')} · "
+                f"{r.get('invoice_number', '')} · "
+                f"{fmt_amount(_to_float(r.get('total_amount')))}"
+            )
+
+        ordered = sorted(
+            rows,
+            key=lambda r: (not r.get("due_date"),
+                           str(r.get("due_date", ""))),
+        )
+        lines = [_inv_line(r) for r in ordered]
+        earliest_row = summary["earliest_invoice"] or {}
+        if earliest:
+            earliest_text = tr(
+                "combine.earliest",
+                date=earliest,
+                supplier=earliest_row.get("supplier", ""),
+                nr=earliest_row.get("invoice_number", ""),
+            ) + f"  ·  {self._due_relative(earliest)}"
+        else:
+            earliest_text = tr("combine.earliest_none")
+
+        copy_text = "\n".join(
+            [
+                tr("combine.title", n=summary["count"]),
+                f"{tr('combine.invoices_line', n=summary['n_invoices'])} "
+                f"{fmt_amount(summary['total_invoices'])}",
+                f"{tr('combine.credits_line', n=summary['n_credits'])} "
+                f"{fmt_amount(summary['total_credits'])}",
+                f"{tr('combine.total')} {fmt_amount(summary['net'])}",
+                earliest_text,
+                "",
+                *lines,
+            ]
+        )
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr("combine.title", n=summary["count"]))
+        dlg.setMinimumWidth(560)
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(8)
+
+        lbl_total = QLabel(
+            f"{tr('combine.total')}  {fmt_amount(summary['net'])}"
+        )
+        lbl_total.setFont(make_font(16, bold=True))
+        lbl_total.setStyleSheet("color:#d4a017;")
+        lay.addWidget(lbl_total)
+
+        lbl_detail = QLabel(
+            f"{tr('combine.invoices_line', n=summary['n_invoices'])} "
+            f"{fmt_amount(summary['total_invoices'])}    ·    "
+            f"{tr('combine.credits_line', n=summary['n_credits'])} "
+            f"{fmt_amount(summary['total_credits'])}"
+        )
+        lay.addWidget(lbl_detail)
+
+        lbl_earliest = QLabel(earliest_text)
+        lbl_earliest.setFont(make_font(12, bold=True))
+        lay.addWidget(lbl_earliest)
+
+        if summary["missing_due"]:
+            lbl_warn = QLabel(
+                tr("combine.missing_due", n=summary["missing_due"])
+            )
+            lbl_warn.setStyleSheet("color:#e8a13a;")
+            lay.addWidget(lbl_warn)
+
+        txt = QPlainTextEdit()
+        txt.setReadOnly(True)
+        txt.setPlainText("\n".join(lines))
+        txt.setMaximumHeight(220)
+        lay.addWidget(txt)
+
+        row_btns = QHBoxLayout()
+        btn_copy = QPushButton(tr("combine.copy"))
+
+        def _copy() -> None:
+            QApplication.clipboard().setText(copy_text)
+            self._status(tr("combine.copied"))
+
+        btn_copy.clicked.connect(_copy)
+        btn_export = QPushButton(tr("combine.export_sel"))
+        btn_export.setProperty("accent", True)
+
+        def _export() -> None:
+            dlg.accept()
+            self._export_invoices(
+                rows,
+                confirm_title=tr("combine.export_title"),
+                default_payment_date=earliest,
+                confirm=False,
+            )
+
+        btn_export.clicked.connect(_export)
+        btn_close = QPushButton(tr("combine.close"))
+        btn_close.clicked.connect(dlg.reject)
+        row_btns.addWidget(btn_copy)
+        row_btns.addWidget(btn_export)
+        row_btns.addStretch(1)
+        row_btns.addWidget(btn_close)
+        lay.addLayout(row_btns)
+        dlg.exec()
+
     def _mark_selected_paid(self) -> None:
         ids = self._selected_ids()
         if not ids:
@@ -1615,7 +1805,16 @@ class InvoicesView(QWidget):
         7. Öppna PDF-filen.
         8. Nollställ betalningsdatum (implicit — nästa export frågar igen).
         """
-        exportable = self._get_exportable()
+        self._export_invoices(self._get_exportable())
+
+    def _export_invoices(
+        self,
+        exportable: list[dict],
+        *,
+        confirm_title: str = "Exportera alla fakturor",
+        default_payment_date: str = "",
+        confirm: bool = True,
+    ) -> None:
         if not exportable:
             QMessageBox.information(
                 self, "Export", "Inga aktiva fakturor att exportera."
@@ -1646,9 +1845,10 @@ class InvoicesView(QWidget):
         )
 
         # ── Bekräftelsedialog ──────────────────────────────────────────
-        reply = QMessageBox.question(
-            self,
-            "Exportera alla fakturor",
+        reply = (
+            QMessageBox.question(
+                self,
+                confirm_title,
             f"Exportera {len(exportable)} poster till PDF?\n\n"
             f"  Fakturor ({n_inv}):   {fmt_amount(total_invoices)}\n"
             f"  Krediter ({n_cre}):   {fmt_amount(total_credits)}\n"
@@ -1659,7 +1859,9 @@ class InvoicesView(QWidget):
             f"Fakturorna arkiveras efter export.",
             QMessageBox.StandardButton.Yes
             | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirm else QMessageBox.StandardButton.Yes
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
@@ -1673,6 +1875,7 @@ class InvoicesView(QWidget):
             total_invoices=total_invoices,
             total_credits=total_credits,
             att_betala=att_betala,
+            default_date=default_payment_date,
         )
         if not confirmed:
             log.info(

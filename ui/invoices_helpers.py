@@ -212,6 +212,65 @@ def fmt_amount(value: float, currency: str = "SEK") -> str:
     return f"{prefix}{s}{suffix}"
 
 
+def combine_invoices(rows: list[dict]) -> dict:
+    """
+    Slår ihop markerade fakturor till en sammanfattning.
+
+    Returnerar summor (fakturor +, krediter −, netto) samt det
+    TIDIGASTE förfallodatumet bland rader som har ett giltigt datum —
+    tanken: betalar man allt i ett svep gör man det senast när den
+    första fakturan förfaller. Ogiltiga/saknade datum räknas i
+    ``missing_due`` men stoppar aldrig sammanslagningen.
+    """
+    import datetime as _dt
+
+    total_invoices = 0.0
+    total_credits = 0.0
+    earliest: _dt.date | None = None
+    earliest_row: dict | None = None
+    missing_due = 0
+    suppliers: set[str] = set()
+
+    for row in rows or []:
+        val = _to_float(row.get("total_amount"))
+        if val >= 0:
+            total_invoices += val
+        else:
+            total_credits += val
+        sup = str(row.get("supplier", "")).strip()
+        if sup:
+            suppliers.add(sup)
+        raw_due = str(row.get("due_date", "") or "").strip()[:10]
+        parsed: _dt.date | None = None
+        if raw_due:
+            try:
+                parsed = _dt.date.fromisoformat(raw_due)
+            except ValueError:
+                parsed = None
+        if parsed is None:
+            missing_due += 1
+        elif earliest is None or parsed < earliest:
+            earliest = parsed
+            earliest_row = row
+
+    return {
+        "count": len(rows or []),
+        "n_invoices": sum(
+            1 for r in rows or [] if _to_float(r.get("total_amount")) >= 0
+        ),
+        "n_credits": sum(
+            1 for r in rows or [] if _to_float(r.get("total_amount")) < 0
+        ),
+        "total_invoices": round(total_invoices, 2),
+        "total_credits": round(total_credits, 2),
+        "net": round(total_invoices + total_credits, 2),
+        "earliest_due": earliest.isoformat() if earliest else "",
+        "earliest_invoice": earliest_row,
+        "missing_due": missing_due,
+        "suppliers": sorted(suppliers),
+    }
+
+
 def _to_float(value: Any, default: float = 0.0) -> float:
     """Säker float-konvertering."""
     try:

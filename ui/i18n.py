@@ -429,6 +429,28 @@ _STRINGS: dict[str, dict[str, str]] = {
     "update.restored": {"sv": "↩  Backup återställd ({n} filer). Starta om appen.", "en": "↩  Backup restored ({n} files). Restart the app."},
     "update.unknown_build": {"sv": "okänd (äldre kopia utan build-info)", "en": "unknown (older copy without build info)"},
 
+    # ── Slå ihop markerade fakturor ───────────────────────────────────
+    "combine.button": {"sv": "🧮  Slå ihop markerade", "en": "🧮  Combine selected"},
+    "combine.tip": {"sv": "Lägg ihop markerade fakturor: totalsumma + förfallodatum från den som förfaller först", "en": "Add up the selected invoices: total + the due date of the earliest one"},
+    "combine.title": {"sv": "Sammanslagning — {n} fakturor", "en": "Combined — {n} invoices"},
+    "combine.status": {"sv": "🧮  Markerade: {n} st · {amount} · tidigast förfall {due}", "en": "🧮  Selected: {n} · {amount} · earliest due {due}"},
+    "combine.status_no_due": {"sv": "🧮  Markerade: {n} st · {amount}", "en": "🧮  Selected: {n} · {amount}"},
+    "combine.invoices_line": {"sv": "Fakturor ({n}):", "en": "Invoices ({n}):"},
+    "combine.credits_line": {"sv": "Krediter ({n}):", "en": "Credits ({n}):"},
+    "combine.total": {"sv": "ATT BETALA:", "en": "TOTAL TO PAY:"},
+    "combine.earliest": {"sv": "📅  Förfaller först: {date}  ({supplier} · {nr})", "en": "📅  Earliest due: {date}  ({supplier} · {nr})"},
+    "combine.earliest_none": {"sv": "📅  Ingen av de markerade har ett förfallodatum", "en": "📅  None of the selected invoices has a due date"},
+    "combine.missing_due": {"sv": "⚠  {n} av fakturorna saknar förfallodatum", "en": "⚠  {n} of the invoices have no due date"},
+    "combine.due_today": {"sv": "förfaller idag!", "en": "due today!"},
+    "combine.due_in": {"sv": "om {d} dagar", "en": "in {d} days"},
+    "combine.due_overdue": {"sv": "förfallen sedan {d} dagar!", "en": "overdue by {d} days!"},
+    "combine.copy": {"sv": "📋  Kopiera sammanfattning", "en": "📋  Copy summary"},
+    "combine.copied": {"sv": "Sammanfattningen kopierad till urklipp", "en": "Summary copied to clipboard"},
+    "combine.export_sel": {"sv": "📄  Exportera dessa till betal-PDF …", "en": "📄  Export these to payment PDF …"},
+    "combine.close": {"sv": "Stäng", "en": "Close"},
+    "combine.export_title": {"sv": "Exportera markerade fakturor", "en": "Export selected invoices"},
+    "combine.need_two": {"sv": "Markera minst två fakturor i listan först.", "en": "Select at least two invoices in the list first."},
+
     # ── Dashboard ─────────────────────────────────────────────────────
     "dashboard.title": {"sv": "🏠  Dashboard", "en": "🏠  Dashboard"},
     "dashboard.open_invoices": {"sv": "🧾  Öppna Fakturor", "en": "🧾  Open Invoices"},
