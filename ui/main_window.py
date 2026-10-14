@@ -1721,6 +1721,12 @@ class MainWindow(QMainWindow):
         a_about.triggered.connect(self._show_about)
         m_help.addAction(a_about)
 
+        a_update = QAction(tr("menu.update"), self)
+        if self._custom_icon is not None:
+            a_update.setIcon(self._custom_icon)
+        a_update.triggered.connect(self._check_updates)
+        m_help.addAction(a_update)
+
         a_donate = QAction(tr("menu.donate"), self)
         a_donate.setToolTip(tr("toolbar.donate_tip"))
         if self._custom_icon is not None:
@@ -2179,6 +2185,21 @@ class MainWindow(QMainWindow):
                 tr("main.autostart"),
                 tr("autostart.method_failed"),
             )
+
+    def _check_updates(self) -> None:
+        """Öppnar dialogen 'Sök ny version' (uppdatering i appen)."""
+        try:
+            from ui.update_dialog import UpdateDialog, schedule_restart
+            dlg = UpdateDialog(self, PROJECT_DIR, APP_VERSION)
+            dlg.exec()
+            if getattr(dlg, "restart_requested", False):
+                if schedule_restart(PROJECT_DIR):
+                    QTimer.singleShot(
+                        400,
+                        lambda: QApplication.instance().quit(),
+                    )
+        except Exception as exc:
+            log.warning("_check_updates: %s", exc, exc_info=True)
 
     def _toggle_include_originals(self, checked: bool) -> None:
         """Kryss i Inställningar-menyn: original i betal-PDF:en."""

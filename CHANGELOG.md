@@ -3,10 +3,12 @@
 ## Ej släppt / Unreleased
 
 ### Svenska
+- **Uppdatering i appen** — Hjälp → 🔄 Sök ny version … hämtar senaste releasen från GitHub, visar noteringarna och kan hämta + installera den med ett klick. Bara programfiler byts: data/, js/, ui/data/, settings.json, loggar och exporter rörs aldrig, och en backup sparas i bak/ innan något ersätts. Jämförelsen sker per commit, så även en uppdaterad v1.0.0-release hittas trots samma versionsnummer.
 - **Bevakade mappar + original i betal-PDF:en** — lägg en bevakad mapp per leverantör i Import-fliken (t.ex. Pilkington, Direktglas): nya fakturafiler tolkas och registreras automatiskt, ofullständiga parkeras för granskning och samma fil importeras aldrig två gånger (innehålls-hash + dubblettkoll mot registret). Originalen kopieras till `data/attachments/<leverantör>/` och kan läggas efter betal-PDF:en (Inställningar → 📎 Inkludera originalfakturor) med avdelarsida per faktura.
 - **Riktig Dashboard** — startsidan är inte längre en platshållare: fyra nyckeltalskort (ATT BETALA, FÖRFALLET, FÖRFALLER 7 DAGAR, LEVERANTÖRER) i marinblått/guld plus listan "Förfaller snart" med dubbelklick direkt till Fakturor. Samma statusregler och beloppsformat som Fakturor-fliken.
 
 ### English
+- **In-app updates** — Help → 🔄 Check for updates … fetches the latest release from GitHub, shows the notes and can download + install it in one click. Only program files are replaced: data/, js/, ui/data/, settings.json, logs and exports are never touched, and a backup is saved to bak/ before anything is replaced. Comparison is per commit, so an updated v1.0.0 release is found even with the same version number.
 - **Watched folders + originals in the payment PDF** — add one watched folder per supplier in the Import tab (e.g. Pilkington, Direktglas): new invoice files are parsed and registered automatically, incomplete ones are parked for review, and the same file is never imported twice (content hash + duplicate check against the register). Originals are copied to `data/attachments/<supplier>/` and can be appended after the payment PDF (Settings → 📎 Include original invoices) with a divider page per invoice.
 - **A real Dashboard** — the start page is no longer a placeholder: four stat cards (TO PAY, OVERDUE, DUE IN 7 DAYS, SUPPLIERS) in navy/gold plus a "Due soon" list with double-click straight to Invoices. Same status rules and amount format as the Invoices tab.
 

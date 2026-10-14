@@ -402,6 +402,25 @@ _STRINGS: dict[str, dict[str, str]] = {
     "menu.include_originals": {"sv": "📎  Inkludera originalfakturor i PDF-export", "en": "📎  Include original invoices in PDF export"},
     "invoices.attachments_note": {"sv": "  📎 {n} original bifogade", "en": "  📎 {n} originals attached"},
 
+    # ── Uppdatering i appen ───────────────────────────────────────────
+    "menu.update": {"sv": "🔄  Sök ny version …", "en": "🔄  Check for updates …"},
+    "update.title": {"sv": "Sök ny version", "en": "Check for updates"},
+    "update.checking": {"sv": "Söker efter ny version …", "en": "Checking for a new version …"},
+    "update.current": {"sv": "Du har redan den senaste versionen (v{version}).", "en": "You already have the latest version (v{version})."},
+    "update.available": {"sv": "🎉  Ny version finns: {tag}  (installerad: {current})", "en": "🎉  A new version is available: {tag}  (installed: {current})"},
+    "update.published": {"sv": "Släppt: {date}", "en": "Released: {date}"},
+    "update.install": {"sv": "⬇️  Hämta och installera", "en": "⬇️  Download and install"},
+    "update.downloading": {"sv": "Hämtar uppdateringen … {percent}%", "en": "Downloading the update … {percent}%"},
+    "update.applying": {"sv": "Installerar …", "en": "Installing …"},
+    "update.safe_note": {"sv": "✓ Bara programfilerna byts. Dina fakturor och data (data/, ui/data/), settings.json, loggar och exporter rörs aldrig. En backup sparas i bak/.", "en": "✓ Only program files are replaced. Your invoices and data (data/, ui/data/), settings.json, logs and exports are never touched. A backup is saved in bak/."},
+    "update.done": {"sv": "✅  Uppdateringen är installerad ({n} filer utbytta). Starta om appen för att köra den nya versionen.", "en": "✅  The update is installed ({n} files replaced). Restart the app to run the new version."},
+    "update.restart": {"sv": "🔁  Starta om nu", "en": "🔁  Restart now"},
+    "update.close": {"sv": "Stäng", "en": "Close"},
+    "update.failed": {"sv": "Kunde inte slutföra uppdateringen.\n{error}", "en": "The update could not be completed.\n{error}"},
+    "update.notes": {"sv": "Versionsnoteringar:", "en": "Release notes:"},
+    "update.installed_build": {"sv": "Installerad build: {build}", "en": "Installed build: {build}"},
+    "update.unknown_build": {"sv": "okänd (äldre kopia utan build-info)", "en": "unknown (older copy without build info)"},
+
     # ── Dashboard ─────────────────────────────────────────────────────
     "dashboard.title": {"sv": "🏠  Dashboard", "en": "🏠  Dashboard"},
     "dashboard.open_invoices": {"sv": "🧾  Öppna Fakturor", "en": "🧾  Open Invoices"},
