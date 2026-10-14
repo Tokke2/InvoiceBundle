@@ -101,7 +101,6 @@ try:
         ExportHistoryDialog,
         InvoiceDialog,
         is_dark_theme,
-        is_dark_theme,
         make_btn,
         make_cell,
         make_font,
@@ -691,6 +690,23 @@ class InvoicesView(QWidget):
             for r in self._all_data
             if r.get("status") not in HIDDEN_STATUSES
         ]
+
+    def _include_originals(self) -> bool:
+        """Inställningen export_include_originals (standard: av)."""
+        try:
+            if hasattr(self._app, "get_setting"):
+                return bool(
+                    self._app.get_setting(
+                        "export_include_originals", False
+                    )
+                )
+            return bool(
+                self._app.settings.get(
+                    "export_include_originals", False
+                )
+            )
+        except Exception:
+            return False
 
     def _update_export_buttons(self) -> None:
         """Uppdaterar exportknapp + historikräknare."""
@@ -1699,6 +1715,7 @@ class InvoicesView(QWidget):
                 force_export=True,
                 payment_date=payment_date,
                 ask_payment_date=False,   # dialog redan visad ovan
+                include_originals=self._include_originals(),
             )
         except Exception as exc:
             QMessageBox.critical(
@@ -1743,10 +1760,17 @@ class InvoicesView(QWidget):
                 pass
 
         self._do_refresh()
+        attach_note = ""
+        if result.get("attachments_included"):
+            attach_note = tr(
+                "invoices.attachments_note",
+                n=result["attachments_included"],
+            )
         self._status(
             f"📄  {archived} poster exporterade"
             f" → {fmt_amount(att_betala)}"
             + (f"  (betaldatum: {export_pd})" if export_pd else "")
+            + attach_note
         )
 
         # ── Resultatdialog: Öppna filen / Öppna mappen / Stäng ─────────

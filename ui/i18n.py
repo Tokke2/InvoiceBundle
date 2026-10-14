@@ -381,6 +381,27 @@ _STRINGS: dict[str, dict[str, str]] = {
 
     "scan.no_text": {"sv": "ingen text hittad", "en": "no text found"},
 
+    # ── Bevakade mappar (auto-import) ─────────────────────────────────
+    "watch.title": {"sv": "📁  Bevakade mappar — automatisk import", "en": "📁  Watched folders — automatic import"},
+    "watch.info": {"sv": "En mapp per leverantör (t.ex. Pilkington, Direktglas). Nya fakturafiler tolkas och registreras automatiskt; ofullständiga parkeras här för granskning. Samma fil importeras aldrig två gånger.", "en": "One folder per supplier (e.g. Pilkington, Direktglas). New invoice files are parsed and registered automatically; incomplete ones are parked here for review. The same file is never imported twice."},
+    "watch.add_folder": {"sv": "➕  Lägg till mapp …", "en": "➕  Add folder …"},
+    "watch.remove_folder": {"sv": "🗑  Ta bort markerad", "en": "🗑  Remove selected"},
+    "watch.auto_create": {"sv": "Registrera kompletta fakturor automatiskt", "en": "Register complete invoices automatically"},
+    "watch.no_folders": {"sv": "(inga bevakade mappar ännu)", "en": "(no watched folders yet)"},
+    "watch.folder_entry": {"sv": "{supplier}  →  {path}", "en": "{supplier}  →  {path}"},
+    "watch.folder_no_supplier": {"sv": "(leverantör känns igen automatiskt)", "en": "(supplier recognised automatically)"},
+    "watch.parked": {"sv": "⏸  {n} fil(er) väntar på granskning", "en": "⏸  {n} file(s) awaiting review"},
+    "watch.review": {"sv": "Granska i tabellen", "en": "Review in table"},
+    "watch.imported": {"sv": "📥  Auto-import: {file} registrerad", "en": "📥  Auto-import: {file} registered"},
+    "watch.dialog_title": {"sv": "Bevaka mapp för leverantör", "en": "Watch folder for supplier"},
+    "watch.supplier": {"sv": "Leverantör:", "en": "Supplier:"},
+    "watch.folder": {"sv": "Mapp:", "en": "Folder:"},
+    "watch.browse": {"sv": "Bläddra …", "en": "Browse …"},
+    "watch.add": {"sv": "➕  Bevaka mappen", "en": "➕  Watch folder"},
+    "watch.need_folder": {"sv": "Välj en befintlig mapp först.", "en": "Choose an existing folder first."},
+    "menu.include_originals": {"sv": "📎  Inkludera originalfakturor i PDF-export", "en": "📎  Include original invoices in PDF export"},
+    "invoices.attachments_note": {"sv": "  📎 {n} original bifogade", "en": "  📎 {n} originals attached"},
+
     # ── Dashboard ─────────────────────────────────────────────────────
     "dashboard.title": {"sv": "🏠  Dashboard", "en": "🏠  Dashboard"},
     "dashboard.open_invoices": {"sv": "🧾  Öppna Fakturor", "en": "🧾  Open Invoices"},

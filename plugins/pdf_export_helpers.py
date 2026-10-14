@@ -133,6 +133,7 @@ PDF_LABELS: dict[str, dict[str, str]] = {
         "exported": "Exporterad", "payment_date": "BETALNINGSDATUM:",
         "rounding": "avrundning",
         "terms": "Betalvillkor", "contact": "Kontaktperson",
+        "attachment_divider": "Originalfaktura",
         "email": "E-post", "phone": "Telefon", "address": "Adress",
         "days": "dagar", "rows": "Rader", "suppliers": "Leverantorer",
     },
@@ -147,6 +148,7 @@ PDF_LABELS: dict[str, dict[str, str]] = {
         "exported": "Exported", "payment_date": "PAYMENT DATE:",
         "rounding": "rounding",
         "terms": "Payment terms", "contact": "Contact person",
+        "attachment_divider": "Original invoice",
         "email": "E-mail", "phone": "Phone", "address": "Address",
         "days": "days", "rows": "Rows", "suppliers": "Suppliers",
     },
@@ -769,6 +771,102 @@ class InvoiceNumberGuard:
 # ═════════════════════════════════════════════════════════════════════
 
 
+def _divider_page_bytes(text: str) -> bytes | None:
+    """En enkel avdelarsida (reportlab) som bytes — None utan reportlab."""
+    try:
+        import io
+
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas
+
+        buf = io.BytesIO()
+        c = canvas.Canvas(buf, pagesize=A4)
+        c.setFillColorRGB(0.07, 0.16, 0.29)
+        c.rect(0, 0, A4[0], A4[1], fill=1, stroke=0)
+        c.setFillColorRGB(0.83, 0.63, 0.09)
+        c.setFont("Helvetica-Bold", 20)
+        c.drawString(48, A4[1] - 110, to_ascii("📎  " + text))
+        c.setFillColorRGB(1, 1, 1)
+        c.setFont("Helvetica", 11)
+        c.drawString(48, A4[1] - 140, to_ascii(text))
+        c.showPage()
+        c.save()
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def merge_originals(
+    base_pdf: Path,
+    attachments: list,
+    divider_label: str = "Originalfaktura",
+) -> dict:
+    """
+    Lägger originalfakturorna EFTER huvud-PDF:en i samma fil:
+    avdelarsida + original (PDF-sidor direkt; bilder som helsidor).
+    Returnerar {"included": n, "missing": m, "pages_added": p}.
+    """
+    result = {"included": 0, "missing": 0, "pages_added": 0}
+    if not attachments:
+        return result
+    try:
+        from pypdf import PdfWriter
+    except Exception as exc:
+        log.warning("merge_originals: pypdf saknas: %s", exc)
+        return result
+
+    writer = PdfWriter()
+    try:
+        writer.append(str(base_pdf))
+    except Exception as exc:
+        log.warning("merge_originals: kan inte läsa bas-PDF: %s", exc)
+        return result
+
+    import io
+
+    for label, raw_path in attachments:
+        path = Path(str(raw_path))
+        if not str(raw_path).strip() or not path.is_file():
+            result["missing"] += 1
+            continue
+        pages_before = len(writer.pages)
+        try:
+            divider = _divider_page_bytes(f"{divider_label}: {label}")
+            if divider is not None:
+                writer.append(io.BytesIO(divider))
+            suffix = path.suffix.lower()
+            if suffix == ".pdf":
+                writer.append(str(path))
+            elif suffix in (".png", ".jpg", ".jpeg", ".tif", ".tiff",
+                            ".bmp"):
+                from PIL import Image
+
+                img = Image.open(path).convert("RGB")
+                buf = io.BytesIO()
+                img.save(buf, format="PDF")
+                buf.seek(0)
+                writer.append(buf)
+            else:
+                result["missing"] += 1
+                continue
+            result["included"] += 1
+            result["pages_added"] += len(writer.pages) - pages_before
+        except Exception as exc:
+            log.warning("merge_originals %s: %s", path, exc)
+            result["missing"] += 1
+
+    if result["included"]:
+        tmp = base_pdf.with_suffix(".merged.pdf")
+        try:
+            with open(tmp, "wb") as fh:
+                writer.write(fh)
+            tmp.replace(base_pdf)
+        except Exception as exc:
+            log.warning("merge_originals skriv: %s", exc)
+            result["included"] = 0
+    return result
+
+
 class PDFExporter:
     """
     Exporterar fakturalistor till stilren PDF.
@@ -989,6 +1087,7 @@ class PDFExporter:
         session_due_date: str = "",
         ask_payment_date: bool = True,
         parent_widget: Any = None,
+        include_originals: bool = False,
     ) -> dict[str, Any]:
         self._refresh_lang()
         """
@@ -1140,6 +1239,34 @@ class PDFExporter:
                 batch_id,
                 effective_payment_date,   # ← betalningsdatum lagras
             )
+
+        # ── Bifoga originalfakturor (om valt) ─────────────────────
+        if include_originals and self._has_rl:
+            attachments = []
+            for inv in invoices:
+                raw = str(inv.get("attachment", "") or "").strip()
+                if not raw:
+                    continue
+                candidate = Path(raw)
+                if not candidate.is_absolute():
+                    candidate = APP_ROOT / candidate
+                label = " · ".join(x for x in (
+                    str(inv.get("supplier", "")),
+                    str(inv.get("invoice_number", "")),
+                    candidate.name,
+                ) if x)
+                attachments.append((label, candidate))
+            merged = merge_originals(
+                file_path, attachments,
+                divider_label=self._t("attachment_divider"),
+            )
+            result["attachments_included"] = merged["included"]
+            result["attachments_missing"] = merged["missing"]
+            if merged["included"]:
+                log.info(
+                    "PDF: %d original bifogade (+%d sidor)",
+                    merged["included"], merged["pages_added"],
+                )
 
         result.update({
             "success":           True,

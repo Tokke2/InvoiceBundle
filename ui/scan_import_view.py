@@ -364,7 +364,9 @@ class ScanImportView(QWidget):
             Path(templates_path) if templates_path else None
         )
         self._templates_cache: dict | None = None
+        self._watch = None
         self._build_ui()
+        self._init_watch()
         self._log_status()
 
     # ══════════════════════════════════════════════════════════════════
@@ -435,7 +437,44 @@ class ScanImportView(QWidget):
         btn_scan.setProperty("accent", True)
         btn_scan.setMinimumHeight(42)
         btn_scan.clicked.connect(self._scan_files)
-        self._lbl_status = QLabel()
+        # ── Bevakade mappar: auto-import från leverantörsmappar ──
+        box_watch = QGroupBox(tr("watch.title"))
+        self._box_watch = box_watch
+        bw = QVBoxLayout()
+        bw.setContentsMargins(10, 8, 10, 8)
+        lbl_winfo = QLabel(tr("watch.info"))
+        self._lbl_watch_info = lbl_winfo
+        lbl_winfo.setWordWrap(True)
+        lbl_winfo.setStyleSheet("color:#5a6b80;")
+        bw.addWidget(lbl_winfo)
+        self._lst_watch = QListWidget()
+        self._lst_watch.setMaximumHeight(96)
+        bw.addWidget(self._lst_watch)
+        wr = QHBoxLayout()
+        self._btn_add_folder = QPushButton(tr("watch.add_folder"))
+        self._btn_add_folder.clicked.connect(self._add_watch_folder)
+        self._btn_remove_folder = QPushButton(tr("watch.remove_folder"))
+        self._btn_remove_folder.clicked.connect(self._remove_watch_folder)
+        self._chk_auto_watch = QCheckBox(tr("watch.auto_create"))
+        self._chk_auto_watch.setChecked(True)
+        self._chk_auto_watch.stateChanged.connect(self._toggle_watch_auto)
+        wr.addWidget(self._btn_add_folder)
+        wr.addWidget(self._btn_remove_folder)
+        wr.addWidget(self._chk_auto_watch)
+        wr.addStretch(1)
+        bw.addLayout(wr)
+        wr2 = QHBoxLayout()
+        self._lbl_watch_parked = QLabel()
+        self._btn_review_parked = QPushButton(tr("watch.review"))
+        self._btn_review_parked.clicked.connect(self._review_parked)
+        wr2.addWidget(self._lbl_watch_parked)
+        wr2.addWidget(self._btn_review_parked)
+        wr2.addStretch(1)
+        bw.addLayout(wr2)
+        box_watch.setLayout(bw)
+        root.addWidget(box_watch)
+
+        self._lbl_status = QLabel(tr("scan.ready"))
         self._lbl_status.setStyleSheet("color:#8b949e;background:transparent;")
         row2.addWidget(btn_scan)
         row2.addWidget(self._lbl_status, stretch=1)
@@ -576,6 +615,14 @@ class ScanImportView(QWidget):
         _scan_headers = tr_list("scan.columns")
         if len(_scan_headers) == len(COLUMNS):
             self._tbl.setHorizontalHeaderLabels(_scan_headers)
+        if hasattr(self, "_box_watch"):
+            self._box_watch.setTitle(tr("watch.title"))
+            self._lbl_watch_info.setText(tr("watch.info"))
+            self._btn_add_folder.setText(tr("watch.add_folder"))
+            self._btn_remove_folder.setText(tr("watch.remove_folder"))
+            self._chk_auto_watch.setText(tr("watch.auto_create"))
+            self._btn_review_parked.setText(tr("watch.review"))
+            self._refresh_watch_ui()
         self._refresh_table()
 
     @staticmethod
@@ -588,6 +635,111 @@ class ScanImportView(QWidget):
     # ══════════════════════════════════════════════════════════════════
     #  STATUS / LOGG
     # ══════════════════════════════════════════════════════════════════
+
+    # ── Bevakade mappar (auto-import) ───────────────────────────────
+    def _init_watch(self) -> None:
+        """Startar mappbevakningen; får aldrig krascha vyn."""
+        try:
+            from ui.watch_folders import WatchManager
+            cfg = self._templates_file().parent / "watch_folders.json"
+            self._watch = WatchManager(
+                cfg,
+                app=self._app,
+                templates_provider=self._get_templates,
+                parent=self,
+            )
+            self._watch.invoice_ready.connect(self._on_watch_invoice)
+            self._watch.file_parked.connect(
+                lambda _info: self._refresh_watch_ui()
+            )
+            self._watch.changed.connect(self._refresh_watch_ui)
+            self._chk_auto_watch.setChecked(self._watch.auto_create)
+            self._refresh_watch_ui()
+        except Exception as exc:
+            log.warning("WatchManager start: %s", exc)
+
+    def _refresh_watch_ui(self) -> None:
+        if not hasattr(self, "_lst_watch"):
+            return
+        watch = self._watch
+        self._lst_watch.clear()
+        if not watch or not watch.folders:
+            self._lst_watch.addItem(tr("watch.no_folders"))
+        else:
+            for f in watch.folders:
+                sup = f.get("supplier") or tr("watch.folder_no_supplier")
+                self._lst_watch.addItem(
+                    tr("watch.folder_entry", supplier=sup,
+                       path=f.get("path", ""))
+                )
+        n = len(watch.parked) if watch else 0
+        self._lbl_watch_parked.setText(
+            tr("watch.parked", n=n) if n else ""
+        )
+        self._btn_review_parked.setEnabled(bool(n))
+
+    def _add_watch_folder(self) -> None:
+        if not self._watch:
+            return
+        from ui.watch_folders import WatchFolderDialog
+        names = sorted(
+            {s.get("name", "") for s in self._suppliers()
+             if s.get("name")}
+        )
+        dlg = WatchFolderDialog(self, names)
+        if dlg.exec() and dlg.result_data:
+            self._watch.set_folders(
+                list(self._watch.folders) + [dlg.result_data]
+            )
+
+    def _remove_watch_folder(self) -> None:
+        if not self._watch:
+            return
+        row = self._lst_watch.currentRow()
+        folders = list(self._watch.folders)
+        if 0 <= row < len(folders):
+            del folders[row]
+            self._watch.set_folders(folders)
+
+    def _toggle_watch_auto(self, state) -> None:
+        if self._watch:
+            self._watch.set_auto_create(bool(state))
+
+    def _on_watch_invoice(self, row: dict, path: str) -> None:
+        """Ny komplett faktura från bevakad mapp → registrera direkt."""
+        try:
+            from ui.watch_folders import copy_attachment
+            data_dir = self._templates_file().parent
+            attachment = copy_attachment(
+                Path(path), data_dir, str(row.get("supplier", ""))
+            ) or str(path)
+        except Exception as exc:
+            log.warning("watch bilaga: %s", exc)
+            attachment = str(path)
+        data = self._invoice_data_from_row(row, attachment=attachment)
+        if self._save_invoice(
+            data, source=row.get("file", ""), silent=True
+        ):
+            self._lbl_status.setText(
+                tr("watch.imported", file=row.get("file", ""))
+            )
+
+    def _review_parked(self) -> None:
+        """Flyttar parkerade filer till granskningstabellen."""
+        if not self._watch:
+            return
+        for parked in list(self._watch.parked):
+            parsed = dict(parked.get("parsed", {}))
+            parsed["file"] = parked.get("file", "")
+            parsed["_path"] = parked.get("path", "")
+            parsed["method"] = parked.get("method", "")
+            parsed["_text"] = parked.get("text", "")
+            parsed["status"] = self._compute_status(
+                parsed, bool(parked.get("text"))
+            )
+            self._rows.append(parsed)
+            self._watch.remove_parked(parked.get("hash", ""))
+        self._refresh_table()
 
     def _log_status(self) -> None:
         """Visar vilka textkällor som är tillgängliga på maskinen."""
@@ -1038,28 +1190,7 @@ class ScanImportView(QWidget):
                     f"'Öppna i fakturadialogen'.",
                 )
                 continue
-            data = {
-                "supplier": str(row.get("supplier", "")),
-                "invoice_number": str(row.get("invoice_number", "")),
-                "ocr": str(row.get("ocr", "")),
-                "date": str(row.get("date", ""))
-                or datetime.date.today().isoformat(),
-                "due_date": str(row.get("due_date", "")),
-                "payment_date": "",
-                "total_amount": round(float(row.get("total_amount", 0.0)), 2),
-                "vat_amount": 0.0,
-                "amount_ex_vat": round(
-                    float(row.get("total_amount", 0.0)), 2
-                ),
-                "vat_percent": 0,
-                "currency": "SEK",
-                "status": "Obetald",
-                "category": "",
-                "reference": "",
-                "note": f"Importerad från {row.get('file', '')}"
-                        f" ({row.get('method', '')})",
-                "attachment": row.get("_path", ""),
-            }
+            data = self._invoice_data_from_row(row)
             if self._save_invoice(data, source=row.get("file", "")):
                 created += 1
                 self._rows.pop(i)
@@ -1073,6 +1204,37 @@ class ScanImportView(QWidget):
                 f"registrerade och inräknade i ATT BETALA.",
             )
 
+    def _invoice_data_from_row(
+        self, row: dict, attachment: str | None = None
+    ) -> dict:
+        """Rad → fakturadata (samma fält som manuell registrering)."""
+        return {
+            "supplier": str(row.get("supplier", "")),
+            "invoice_number": str(row.get("invoice_number", "")),
+            "ocr": str(row.get("ocr", "")),
+            "date": str(row.get("date", ""))
+            or datetime.date.today().isoformat(),
+            "due_date": str(row.get("due_date", "")),
+            "payment_date": "",
+            "total_amount": round(
+                float(row.get("total_amount", 0.0)), 2
+            ),
+            "vat_amount": 0.0,
+            "amount_ex_vat": round(
+                float(row.get("total_amount", 0.0)), 2
+            ),
+            "vat_percent": 0,
+            "currency": "SEK",
+            "status": "Obetald",
+            "category": "",
+            "reference": "",
+            "note": f"Importerad från {row.get('file', '')}"
+                    f" ({row.get('method', '')})",
+            "attachment": (
+                row.get("_path", "") if attachment is None else attachment
+            ),
+        }
+
     def _supplier_exists(self, name: str) -> bool:
         target = str(name or "").strip().lower()
         if not target:
@@ -1082,11 +1244,19 @@ class ScanImportView(QWidget):
             for s in self._suppliers()
         )
 
-    def _save_invoice(self, data: dict, source: str = "") -> bool:
-        """Sparar via app-kärnan (samma väg som manuell registrering)."""
+    def _save_invoice(
+        self, data: dict, source: str = "", silent: bool = False
+    ) -> bool:
+        """Sparar via app-kärnan (samma väg som manuell registrering).
+
+        silent=True (auto-import): inga dialoger — bara logg.
+        """
         try:
             if self._app is None:
-                QMessageBox.warning(self, "Import", "App-kärnan saknas.")
+                if not silent:
+                    QMessageBox.warning(
+                        self, "Import", "App-kärnan saknas."
+                    )
                 return False
             rec = self._app.add_invoice(data)
             log.info(
@@ -1100,9 +1270,10 @@ class ScanImportView(QWidget):
             return True
         except Exception as exc:
             log.error("SCAN_CREATE misslyckades: %s", exc, exc_info=True)
-            QMessageBox.warning(
-                self, "Import", f"Kunde inte spara fakturan:\n{exc}"
-            )
+            if not silent:
+                QMessageBox.warning(
+                    self, "Import", f"Kunde inte spara fakturan:\n{exc}"
+                )
             return False
 
     # ══════════════════════════════════════════════════════════════════

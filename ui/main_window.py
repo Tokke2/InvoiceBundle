@@ -1674,6 +1674,18 @@ class MainWindow(QMainWindow):
         )
         m_set.addAction(self._act_close_to_tray)
 
+        self._act_include_originals = QAction(
+            tr("menu.include_originals"), self
+        )
+        self._act_include_originals.setCheckable(True)
+        self._act_include_originals.setChecked(
+            bool(self._settings.get("export_include_originals", False))
+        )
+        self._act_include_originals.triggered.connect(
+            self._toggle_include_originals
+        )
+        m_set.addAction(self._act_include_originals)
+
         self._act_trace = QAction(tr("menu.trace"), self)
         self._act_trace.setCheckable(True)
         self._act_trace.setChecked(
@@ -2167,6 +2179,13 @@ class MainWindow(QMainWindow):
                 tr("main.autostart"),
                 tr("autostart.method_failed"),
             )
+
+    def _toggle_include_originals(self, checked: bool) -> None:
+        """Kryss i Inställningar-menyn: original i betal-PDF:en."""
+        try:
+            self._settings.set("export_include_originals", checked)
+        except Exception as exc:
+            log.warning("_toggle_include_originals: %s", exc)
 
     def _toggle_close_to_tray(self, checked: bool) -> None:
         """Kryssruta: göm till tray vid kryss."""
