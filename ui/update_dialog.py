@@ -72,6 +72,7 @@ class UpdateWorker(QThread):
     apply_done = Signal(dict)
     failed = Signal(str)
     progress = Signal(int, int)
+    install_progress = Signal(int, int)
 
     def __init__(self, mode: str, root: Path, release: dict | None = None,
                  parent=None) -> None:
@@ -97,11 +98,11 @@ class UpdateWorker(QThread):
                 url, zip_path,
                 progress=lambda d, t: self.progress.emit(d, t),
             )
-            self.progress.emit(0, 0)  # 0/0 = installationsfasen
             report = updater.apply_update(
                 zip_path, self._root,
                 version=str(release.get("tag", "")).lstrip("vV"),
                 sha=release.get("sha", ""),
+                progress=lambda d, t: self.install_progress.emit(d, t),
             )
             try:
                 zip_path.unlink(missing_ok=True)
@@ -205,6 +206,7 @@ class UpdateDialog(QDialog):
     # ── Flöde ────────────────────────────────────────────────────────
     def _start_check(self) -> None:
         self._lbl_status.setText(tr("update.checking"))
+        self._progress.setFormat("")
         self._progress.setRange(0, 0)
         self._worker = UpdateWorker("check", self._root, parent=self)
         self._worker.check_done.connect(self._on_check)
@@ -245,31 +247,51 @@ class UpdateDialog(QDialog):
     def _install(self) -> None:
         self._btn_install.hide()
         self._lbl_status.setText(tr("update.applying"))
+        self._progress.setFormat("0 %")
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
         self._worker = UpdateWorker(
             "apply", self._root, self._release, parent=self
         )
         self._worker.progress.connect(self._on_progress)
+        self._worker.install_progress.connect(self._on_install_progress)
         self._worker.apply_done.connect(self._on_applied)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
 
+    @staticmethod
+    def _fmt_bytes(n: int) -> str:
+        return f"{n / 1_000_000:.1f} MB" if n >= 100_000 else f"{n} B"
+
     def _on_progress(self, done: int, total: int) -> None:
-        if total == 0:  # installationsfasen (efter hämtningen)
-            self._progress.setRange(0, 0)
-            self._lbl_status.setText(tr("update.applying"))
+        """Nedladdning: procent + MB direkt i balken och statusen."""
+        if total <= 0:
             return
+        pct = int(done * 100 / total)
         self._progress.setRange(0, 100)
-        if total > 0:
-            pct = int(done * 100 / total)
-            self._progress.setValue(pct)
-            self._lbl_status.setText(
-                tr("update.downloading", percent=pct)
-            )
+        self._progress.setValue(pct)
+        self._progress.setFormat(f"{pct} %")
+        self._lbl_status.setText(
+            tr("update.downloading", percent=pct)
+            + f"  ({self._fmt_bytes(done)} / {self._fmt_bytes(total)})"
+        )
+
+    def _on_install_progress(self, done: int, total: int) -> None:
+        """Installation: riktig procent (fil X av Y) — ingen spinner."""
+        if total <= 0:
+            return
+        pct = int(done * 100 / total)
+        self._progress.setRange(0, 100)
+        self._progress.setValue(pct)
+        self._progress.setFormat(f"{pct} %")
+        self._lbl_status.setText(
+            tr("update.installing_files", done=done, total=total)
+        )
 
     def _on_applied(self, report: dict) -> None:
+        self._progress.setRange(0, 100)
         self._progress.setValue(100)
+        self._progress.setFormat("100 %")
         n = (
             report.get("replaced", 0) + report.get("added", 0)
             + report.get("removed", 0)
@@ -279,6 +301,7 @@ class UpdateDialog(QDialog):
         self._btn_restart.show()
 
     def _on_failed(self, error: str) -> None:
+        self._progress.setFormat("")
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
         self._lbl_status.setText(tr("update.failed", error=error))

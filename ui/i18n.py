@@ -411,6 +411,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "update.published": {"sv": "Släppt: {date}", "en": "Released: {date}"},
     "update.install": {"sv": "⬇️  Hämta och installera", "en": "⬇️  Download and install"},
     "update.downloading": {"sv": "Hämtar uppdateringen … {percent}%", "en": "Downloading the update … {percent}%"},
+    "update.installing_files": {"sv": "Installerar … fil {done} av {total}", "en": "Installing … file {done} of {total}"},
     "update.applying": {"sv": "Installerar …", "en": "Installing …"},
     "update.safe_note": {"sv": "✓ Bara programfilerna byts. Dina fakturor och data (data/, ui/data/), settings.json, loggar och exporter rörs aldrig. En backup sparas i bak/.", "en": "✓ Only program files are replaced. Your invoices and data (data/, ui/data/), settings.json, logs and exports are never touched. A backup is saved in bak/."},
     "update.done": {"sv": "✅  Uppdateringen är installerad ({n} filer utbytta). Starta om appen för att köra den nya versionen.", "en": "✅  The update is installed ({n} files replaced). Restart the app to run the new version."},

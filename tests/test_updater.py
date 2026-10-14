@@ -170,3 +170,17 @@ def test_restore_backup_roundtrip(tmp_path):
     assert (root / "data" / "invoices.json").read_text(
         encoding="utf-8") == "[]"
     assert up.find_backups(tmp_path / "tom") == []
+
+
+def test_apply_update_reports_file_progress(tmp_path):
+    root = tmp_path / "app"
+    root.mkdir()
+    zipp = _zip(tmp_path / "ny.zip", {
+        "app.py": "a", "ui/x.py": "b", "plugins/y.py": "c",
+        "data/invoices.json": "bevaras",   # räknas inte som arbete
+    })
+    calls = []
+    up.apply_update(zipp, root, sha="s",
+                    progress=lambda d, t: calls.append((d, t)))
+    assert calls == [(1, 3), (2, 3), (3, 3)]
+    assert not (root / "data" / "invoices.json").exists()

@@ -263,7 +263,8 @@ def restore_backup(backup_dir: Path, root: Path) -> dict:
 
 def apply_update(zip_path: Path, root: Path, *,
                  version: str = "",
-                 sha: str = "") -> dict:
+                 sha: str = "",
+                 progress: ProgressFn = None) -> dict:
     """
     Ersätter programfiler i `root` med zipens innehåll.
 
@@ -283,6 +284,8 @@ def apply_update(zip_path: Path, root: Path, *,
 
     with tempfile.TemporaryDirectory(prefix="fb-update-") as tmp:
         stage = _safe_extract(Path(zip_path), Path(tmp) / "stage")
+        # Samla arbetet först så förloppet kan visa fil X av Y
+        work: list[tuple[Path, str]] = []
         new_files: list[str] = []
         for src in sorted(stage.rglob("*")):
             if not src.is_file():
@@ -292,6 +295,9 @@ def apply_update(zip_path: Path, root: Path, *,
                 report["skipped"] += 1
                 continue
             new_files.append(rel)
+            work.append((src, rel))
+        total_files = len(work)
+        for done_files, (src, rel) in enumerate(work, start=1):
             dst = root / rel
             try:
                 if dst.exists():
@@ -305,6 +311,8 @@ def apply_update(zip_path: Path, root: Path, *,
             except Exception as exc:
                 log.warning("UPDATE %s misslyckades: %s", rel, exc)
                 report["skipped"] += 1
+            if progress:
+                progress(done_files, total_files)
 
         # Stale: spårade programfiler som inte finns i nya builden
         for rel in old_files:
