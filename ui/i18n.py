@@ -381,6 +381,26 @@ _STRINGS: dict[str, dict[str, str]] = {
 
     "scan.no_text": {"sv": "ingen text hittad", "en": "no text found"},
 
+    # ── Dashboard ─────────────────────────────────────────────────────
+    "dashboard.title": {"sv": "🏠  Dashboard", "en": "🏠  Dashboard"},
+    "dashboard.open_invoices": {"sv": "🧾  Öppna Fakturor", "en": "🧾  Open Invoices"},
+    "dashboard.to_pay": {"sv": "ATT BETALA", "en": "TO PAY"},
+    "dashboard.to_pay_sub": {"sv": "{n} obetalda fakturor", "en": "{n} unpaid invoices"},
+    "dashboard.overdue": {"sv": "FÖRFALLET", "en": "OVERDUE"},
+    "dashboard.overdue_sub": {"sv": "{n} fakturor passerade", "en": "{n} invoices past due"},
+    "dashboard.due_week": {"sv": "FÖRFALLER 7 DAGAR", "en": "DUE IN 7 DAYS"},
+    "dashboard.due_week_sub": {"sv": "{n} fakturor på väg", "en": "{n} invoices coming up"},
+    "dashboard.suppliers": {"sv": "LEVERANTÖRER", "en": "SUPPLIERS"},
+    "dashboard.suppliers_sub": {"sv": "{n} fakturor totalt", "en": "{n} invoices in total"},
+    "dashboard.upcoming": {"sv": "Förfaller snart", "en": "Due soon"},
+    "dashboard.col_due": {"sv": "Förfaller", "en": "Due"},
+    "dashboard.col_supplier": {"sv": "Leverantör", "en": "Supplier"},
+    "dashboard.col_invoice": {"sv": "Fakturanr", "en": "Invoice no."},
+    "dashboard.col_amount": {"sv": "Belopp", "en": "Amount"},
+    "dashboard.currency": {"sv": "kr", "en": "SEK"},
+    "dashboard.hint": {"sv": "Dubbelklicka eller använd knappen för att öppna Fakturor.", "en": "Double-click or use the button to open Invoices."},
+    "dashboard.all_clear": {"sv": "🎉  Inget förfaller den närmaste veckan — allt är under kontroll.", "en": "🎉  Nothing due in the next week — everything is under control."},
+
     # ── Loggfliken (felsökning) ───────────────────────────────────────
     "log.title": {"sv": "🪵  Systemlogg — hitta fel på sekunder", "en": "🪵  System log — find errors in seconds"},
     "log.level": {"sv": "Nivå:", "en": "Level:"},

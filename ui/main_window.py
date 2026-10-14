@@ -1361,6 +1361,7 @@ class MainWindow(QMainWindow):
         "suppliers": ("SuppliersView", ["ui.suppliers_view", "suppliers_view"]),
         "invoices": ("InvoicesView", ["ui.invoices_view", "invoices_view"]),
         "log_tab": ("LogView", ["ui.log_view", "log_view"]),
+        "dashboard": ("DashboardView", ["ui.dashboard_view", "dashboard_view"]),
     }
 
     def _load_builtin_views(self) -> None:

@@ -1,5 +1,14 @@
 # Ändringslogg / Changelog
 
+## Ej släppt / Unreleased
+
+### Svenska
+- **Riktig Dashboard** — startsidan är inte längre en platshållare: fyra nyckeltalskort (ATT BETALA, FÖRFALLET, FÖRFALLER 7 DAGAR, LEVERANTÖRER) i marinblått/guld plus listan "Förfaller snart" med dubbelklick direkt till Fakturor. Samma statusregler och beloppsformat som Fakturor-fliken.
+
+### English
+- **A real Dashboard** — the start page is no longer a placeholder: four stat cards (TO PAY, OVERDUE, DUE IN 7 DAYS, SUPPLIERS) in navy/gold plus a "Due soon" list with double-click straight to Invoices. Same status rules and amount format as the Invoices tab.
+
+
 ## v1.0.0 — 2026-10-14 (uppdaterad / updated)
 
 ### Svenska
