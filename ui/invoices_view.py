@@ -76,13 +76,13 @@ from PySide6.QtWidgets import (
     QDialog,
     QSizePolicy,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QSize
+from PySide6.QtCore import Qt, QTimer, Signal, QSize, QItemSelectionModel
 
 try:
     from ui.i18n import tr, tr_list, tr_status, tr_type
 except ImportError:  # fristående körning av filen
     from i18n import tr, tr_list, tr_status, tr_type  # type: ignore[no-redef]
-from PySide6.QtGui import QColor, QWheelEvent
+from PySide6.QtGui import QColor, QKeySequence, QShortcut, QWheelEvent
 
 # ═════════════════════════════════════════════════════════════════════
 #  IMPORTER FRÅN HELPERS
@@ -101,6 +101,8 @@ try:
         ExportHistoryManager,
         ExportHistoryDialog,
         InvoiceDialog,
+        due_within,
+        payment_info_text,
         is_dark_theme,
         make_btn,
         make_cell,
@@ -129,6 +131,8 @@ except ImportError:
         ExportHistoryManager,
         ExportHistoryDialog,
         InvoiceDialog,
+        due_within,
+        payment_info_text,
         make_btn,
         make_cell,
         make_font,
@@ -278,6 +282,7 @@ class InvoicesView(QWidget):
         super().__init__(parent)
         self._app = app
         self._all_data: list[dict] = []
+        self._undo_stack: list[list[tuple[str, str, str]]] = []
         self._current_theme: dict = {}
         self._favorite_names: set[str] = set()
         self._initialised = False
@@ -300,6 +305,14 @@ class InvoicesView(QWidget):
 
         # Bygg UI + initial data
         self._build_ui()
+
+        # Ångra senaste statusändringen med Ctrl+Z
+        self._sc_undo = QShortcut(QKeySequence.StandardKey.Undo, self)
+        self._sc_undo.setContext(
+            Qt.ShortcutContext.WidgetWithChildrenShortcut
+        )
+        self._sc_undo.activated.connect(self._undo_last_status)
+
         self._do_refresh()
 
         # Lyssna på dataändringar (säker koppling)
@@ -486,11 +499,25 @@ class InvoicesView(QWidget):
         row_actions.addWidget(self._btn_duplicate)
         row_actions.addWidget(self._btn_mark_paid)
         row_actions.addWidget(self._btn_combine)
+
+        self._btn_pay_today = make_btn(
+            tr("invoices.pay_today"),
+            tr("invoices.pay_today_tip"),
+            success=True,
+        )
+        self._btn_pay_today.clicked.connect(self._pay_today)
+        row_actions.addWidget(self._btn_pay_today)
         row_actions.addStretch()
 
         self._btn_refresh = make_btn("🔄", "Uppdatera vyn", width=50)
         self._btn_refresh.clicked.connect(self._do_refresh)
         row_actions.addWidget(self._btn_refresh)
+
+        self._btn_undo = make_btn(
+            "↩", tr("invoices.undo_tip"), width=50
+        )
+        self._btn_undo.clicked.connect(self._undo_last_status)
+        row_actions.addWidget(self._btn_undo)
         root.addLayout(row_actions)
 
         # ── Export-rad ─────────────────────────────────────────────────
@@ -584,6 +611,14 @@ class InvoicesView(QWidget):
         meta.addStretch()
         summary_layout.addLayout(meta)
         root.addWidget(summary_frame)
+
+        # Beständig rad: markeringens summa (eller totalen att betala).
+        # Ersätter den kortlivade statusradstexten så summan av det
+        # man markerat alltid syns medan man arbetar.
+        self._lbl_selection = QLabel("")
+        self._lbl_selection.setFont(make_font(12, True))
+        self._lbl_selection.setStyleSheet("background:transparent;")
+        root.addWidget(self._lbl_selection)
 
         # ── Tabell ─────────────────────────────────────────────────────
         self._table = QTableWidget()
@@ -1026,6 +1061,7 @@ class InvoicesView(QWidget):
         self._lbl_overdue.setText(
             tr("invoices.overdue", amount=fmt_amount(overdue))
         )
+        self._refresh_selection_label()
 
     # ══════════════════════════════════════════════════════════════════
     #  MARKERING
@@ -1067,6 +1103,7 @@ class InvoicesView(QWidget):
                     ),
                     timeout=6000,
                 )
+        self._refresh_selection_label()
 
     def _selected_id(self) -> str | None:
         items = self._table.selectedItems()
@@ -1772,6 +1809,7 @@ class InvoicesView(QWidget):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
+        self._record_undo(ids)
         count = self._safe_mark_paid(ids)
         self._do_refresh()
         self._status(
@@ -1780,12 +1818,167 @@ class InvoicesView(QWidget):
 
     def _set_status_selected(self, status: str) -> None:
         """Sätter status på alla markerade fakturor."""
-        for rid in self._selected_ids():
+        ids = self._selected_ids()
+        self._record_undo(ids)
+        for rid in ids:
             try:
                 self._app.update_invoice(rid, {"status": status})
             except Exception as exc:
                 log.error("_set_status_selected %s: %s", rid, exc)
         self._do_refresh()
+
+    # ══════════════════════════════════════════════════════════════════
+    #  BETALA IDAG / KOPIERA BETALINFO / ÅNGRA
+    # ══════════════════════════════════════════════════════════════════
+
+    def _refresh_selection_label(self) -> None:
+        """Beständig summarad: markerat netto, annars totalen att betala."""
+        lbl = getattr(self, "_lbl_selection", None)
+        if lbl is None:
+            return
+        ids = self._selected_ids()
+        if ids:
+            picked = self._selected_invoices()
+            summary = combine_invoices(picked)
+            if summary["earliest_due"]:
+                lbl.setText(
+                    tr(
+                        "invoices.selected_sum",
+                        n=summary["count"],
+                        amount=fmt_amount(summary["net"]),
+                        due=summary["earliest_due"],
+                    )
+                )
+            else:
+                lbl.setText(
+                    tr(
+                        "invoices.selected_sum_no_due",
+                        n=summary["count"],
+                        amount=fmt_amount(summary["net"]),
+                    )
+                )
+        else:
+            unpaid = sum(
+                _to_float(r.get("total_amount"))
+                for r in self._all_data
+                if str(r.get("status", "")) not in NON_UNPAID_STATUSES
+            )
+            lbl.setText(
+                tr(
+                    "invoices.att_betala_total",
+                    amount=fmt_amount(round(unpaid, 2)),
+                )
+            )
+
+    def _pay_today(self) -> None:
+        """Ett klick: markerar allt som förfaller idag eller i morgon."""
+        targets = due_within(
+            self._all_data, datetime.date.today(), horizon_days=1
+        )
+        ids = {str(i.get("id")) for i in targets if i.get("id")}
+        if not ids:
+            self._status(tr("invoices.pay_today_none"), timeout=6000)
+            return
+        # Visa alla träffar: nollställ sök/filter först
+        try:
+            self._search.setText("")
+            self._filter_type.setCurrentIndex(0)
+            idx = self._filter_status.findData("__active__")
+            if idx >= 0:
+                self._filter_status.setCurrentIndex(idx)
+            self._filter_supplier.setCurrentIndex(0)
+        except Exception as exc:
+            log.debug("_pay_today filterreset: %s", exc)
+        self._do_refresh()
+
+        model = self._table.selectionModel()
+        flags = (
+            QItemSelectionModel.SelectionFlag.Select
+            | QItemSelectionModel.SelectionFlag.Rows
+        )
+        model.clearSelection()
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 0)
+            if item and str(
+                item.data(Qt.ItemDataRole.UserRole)
+            ) in ids:
+                model.select(self._table.model().index(row, 0), flags)
+
+        picked = self._selected_invoices()
+        net = combine_invoices(picked)["net"] if picked else 0.0
+        self._status(
+            tr(
+                "invoices.pay_today_found",
+                n=len(picked),
+                amount=fmt_amount(net),
+            ),
+            timeout=8000,
+        )
+        if len(picked) >= 2:
+            self._show_combine_dialog()
+
+    def _copy_payment_info(self) -> None:
+        """Kopierar BG/PG/IBAN + OCR + belopp för markerad faktura."""
+        inv = self._selected_invoice()
+        if not inv:
+            return
+        sup = None
+        try:
+            target = str(inv.get("supplier", "")).strip().casefold()
+            for rec in self._app.get_suppliers():
+                if str(rec.get("name", "")).strip().casefold() == target:
+                    sup = rec
+                    break
+        except Exception as exc:
+            log.debug("_copy_payment_info leverantör: %s", exc)
+        QApplication.clipboard().setText(payment_info_text(inv, sup))
+        self._status(
+            tr(
+                "invoices.payinfo_copied",
+                nr=inv.get("invoice_number", ""),
+            ),
+            timeout=6000,
+        )
+
+    def _record_undo(self, ids: list[str]) -> None:
+        """Sparar nuvarande status/betalningsdatum före en ändring."""
+        by_id = {str(r.get("id")): r for r in self._all_data}
+        batch: list[tuple[str, str, str]] = []
+        for rid in ids:
+            rec = by_id.get(str(rid))
+            if rec is not None:
+                batch.append(
+                    (
+                        str(rid),
+                        str(rec.get("status", "")),
+                        str(rec.get("payment_date", "") or ""),
+                    )
+                )
+        if batch:
+            self._undo_stack.append(batch)
+            del self._undo_stack[:-20]  # max 20 ångringar bakåt
+
+    def _undo_last_status(self) -> None:
+        """Ångrar senaste statusändringen (markera betald m.m.)."""
+        if not self._undo_stack:
+            self._status(tr("invoices.undo_empty"))
+            return
+        batch = self._undo_stack.pop()
+        count = 0
+        for rid, old_status, old_payment_date in batch:
+            try:
+                self._app.update_invoice(
+                    rid,
+                    {
+                        "status": old_status,
+                        "payment_date": old_payment_date,
+                    },
+                )
+                count += 1
+            except Exception as exc:
+                log.error("_undo_last_status %s: %s", rid, exc)
+        self._do_refresh()
+        self._status(tr("invoices.undo_done", n=count))
 
     # ══════════════════════════════════════════════════════════════════
     #  EXPORTERA ALLA TILL PDF — med betalningsdatum per export
@@ -2074,6 +2267,9 @@ class InvoicesView(QWidget):
         menu = QMenu(self)
         menu.addAction("✏️  Redigera", self._edit_invoice)
         menu.addAction("📋  Duplicera", self._duplicate_invoice)
+        menu.addAction(
+            tr("invoices.copy_payinfo"), self._copy_payment_info
+        )
         menu.addSeparator()
 
         status_menu = menu.addMenu("📊  Ändra status")
@@ -2087,6 +2283,7 @@ class InvoicesView(QWidget):
         menu.addAction(
             "✅  Markera betald", self._mark_selected_paid
         )
+        menu.addAction("↩  Ångra statusändring", self._undo_last_status)
         menu.addSeparator()
         menu.addAction("🗑  Ta bort", self._delete_invoice)
         menu.exec(self._table.viewport().mapToGlobal(pos))

@@ -101,6 +101,21 @@ def summarize(invoices: list[dict], today: date) -> dict[str, Any]:
             upcoming.append(entry)
     upcoming.sort(key=lambda e: e["_due"])
     overdue.sort(key=lambda e: e["_due"])
+
+    # Krediter som legat okvittade länge: de ska dra av på ATT BETALA,
+    # så en bortglömd kredit ger en för hög summa. Flagga > 30 dagar.
+    stale_credits: list[dict] = []
+    for inv in unpaid:
+        amount = _to_float(inv.get("total_amount"))
+        itype = str(inv.get("invoice_type", "")).strip().lower()
+        if amount >= 0 and itype not in ("kredit", "kreditfaktura"):
+            continue
+        ref = _parse_day(inv.get("due_date")) or _parse_day(
+            inv.get("date")
+        )
+        if ref is not None and (today - ref).days > 30:
+            stale_credits.append(inv)
+
     return {
         "to_pay": to_pay,
         "unpaid_count": len(unpaid),
@@ -111,6 +126,10 @@ def summarize(invoices: list[dict], today: date) -> dict[str, Any]:
         "upcoming": upcoming,
         "upcoming_7d_sum": sum(
             _to_float(i.get("total_amount")) for i in upcoming
+        ),
+        "stale_credits": stale_credits,
+        "stale_credits_sum": abs(
+            sum(_to_float(i.get("total_amount")) for i in stale_credits)
         ),
     }
 
@@ -232,6 +251,11 @@ class DashboardView(QWidget):
             cards.addWidget(card, stretch=1)
         root.addLayout(cards)
 
+        self._lbl_credit_warn = QLabel()
+        self._lbl_credit_warn.setWordWrap(True)
+        self._lbl_credit_warn.setVisible(False)
+        root.addWidget(self._lbl_credit_warn)
+
         self._lbl_upcoming = QLabel()
         self._lbl_upcoming.setFont(header_font())
         root.addWidget(self._lbl_upcoming)
@@ -297,6 +321,19 @@ class DashboardView(QWidget):
             tr("dashboard.suppliers_sub", n=len(invoices)),
         )
 
+        stale = stats.get("stale_credits", [])
+        self._lbl_credit_warn.setVisible(bool(stale))
+        if stale:
+            self._lbl_credit_warn.setText(
+                tr(
+                    "dashboard.credits_stale",
+                    n=len(stale),
+                    amount=fmt_amount(
+                        stats["stale_credits_sum"], suffix
+                    ),
+                )
+            )
+
         rows = (stats["overdue"] + stats["upcoming"])[:12]
         self._table.setRowCount(len(rows))
         for r, inv in enumerate(rows):
@@ -340,6 +377,10 @@ class DashboardView(QWidget):
         for card in (self._card_pay, self._card_overdue,
                      self._card_week, self._card_suppliers):
             card.apply_variant(light)
+        self._lbl_credit_warn.setStyleSheet(
+            f"color:{'#b45309' if light else '#f0b35c'};"
+            " background:transparent; font-weight:700; font-size:13px;"
+        )
         self._lbl_hint.setStyleSheet(
             f"color:{'#334155' if light else '#c9d9ee'};"
             " background:transparent; font-weight:600; font-size:13px;"

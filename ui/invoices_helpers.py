@@ -295,6 +295,126 @@ def combine_invoices(rows: list[dict]) -> dict:
     }
 
 
+#: Statusar som INTE ska betalas (samma regel som vyerna).
+_PAID_LIKE_STATUSES: tuple[str, ...] = ("Betald", "Makulerad", "Arkiverad")
+
+
+def ocr_luhn_status(ocr: Any) -> str:
+    """
+    Kontrollerar OCR-numrets kontrollsiffra (Luhn/mod-10).
+
+    Returnerar:
+      "empty"          – inget ifyllt
+      "invalid_format" – inte bara siffror (t.ex. en referens) → ingen
+                         kontroll möjlig, ingen varning visas
+      "ok"             – kontrollsiffran stämmer
+      "bad_check"      – siffror, men kontrollsiffran stämmer INTE
+                         (troligen en felskriven siffra)
+    """
+    text = str(ocr or "").replace(" ", "").strip()
+    if not text:
+        return "empty"
+    if not text.isdigit() or len(text) < 2:
+        return "invalid_format"
+    total = 0
+    for idx, ch in enumerate(reversed(text)):
+        d = ord(ch) - 48
+        if idx % 2 == 1:  # varannan siffra (från höger) dubblas
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return "ok" if total % 10 == 0 else "bad_check"
+
+
+def find_invoice_duplicate(
+    invoices: list[dict],
+    invoice_number: str,
+    supplier: str,
+    exclude_id: str = "",
+) -> dict | None:
+    """
+    Returnerar befintlig faktura med samma nummer+leverantör
+    (skiftläges- och mellanslags-okänsligt), annars None.
+    *exclude_id* används vid redigering så fakturan inte
+    matchar sig själv.
+    """
+    nr = str(invoice_number or "").strip().casefold()
+    sup = str(supplier or "").strip().casefold()
+    if not nr or not sup:
+        return None
+    for inv in invoices:
+        if exclude_id and str(inv.get("id", "")) == str(exclude_id):
+            continue
+        if (
+            str(inv.get("invoice_number", "")).strip().casefold() == nr
+            and str(inv.get("supplier", "")).strip().casefold() == sup
+        ):
+            return inv
+    return None
+
+
+def payment_info_text(invoice: dict, supplier: dict | None) -> str:
+    """
+    Betalinfo för en faktura som färdig text till urklipp —
+    exakt det som knappas in i internetbanken.
+    """
+    sup = supplier or {}
+    lines = [tr("payinfo.title")]
+    name = str(invoice.get("supplier", "") or sup.get("name", "")).strip()
+    if name:
+        lines.append(f"{tr('payinfo.supplier')}: {name}")
+    for key, label_key in (
+        ("bg", "payinfo.bankgiro"),
+        ("pg", "payinfo.plusgiro"),
+        ("iban", "payinfo.iban"),
+    ):
+        val = str(sup.get(key, "") or "").strip()
+        if val:
+            lines.append(f"{tr(label_key)}: {val}")
+    nr = str(invoice.get("invoice_number", "") or "").strip()
+    if nr:
+        lines.append(f"{tr('payinfo.invoice_number')}: {nr}")
+    ocr = str(invoice.get("ocr", "") or "").strip()
+    ref = str(invoice.get("reference", "") or "").strip()
+    if ocr:
+        lines.append(f"{tr('payinfo.ocr')}: {ocr}")
+    elif ref:
+        lines.append(f"{tr('payinfo.reference')}: {ref}")
+    due = str(invoice.get("due_date", "") or "").strip()
+    if due:
+        lines.append(f"{tr('payinfo.due')}: {due[:10]}")
+    amount = _to_float(invoice.get("total_amount"))
+    lines.append(f"{tr('payinfo.amount')}: {fmt_amount(amount)}")
+    return "\n".join(lines)
+
+
+def due_within(
+    invoices: list[dict],
+    today: datetime.date,
+    horizon_days: int = 1,
+) -> list[dict]:
+    """
+    Obetalda fakturor som förfaller senast idag + *horizon_days*
+    (förfallna ingår), sorterade på förfallodatum. Krediter tas
+    med — de dras av i summeringen.
+    """
+    limit = today + datetime.timedelta(days=horizon_days)
+    hits: list[tuple[str, dict]] = []
+    for inv in invoices:
+        if str(inv.get("status", "")) in _PAID_LIKE_STATUSES:
+            continue
+        raw = str(inv.get("due_date", "") or "")[:10]
+        try:
+            due = datetime.date.fromisoformat(raw)
+        except ValueError:
+            continue
+        if due <= limit:
+            hits.append((raw, inv))
+    hits.sort(key=lambda t: t[0])
+    return [inv for _raw, inv in hits]
+
+
 def _to_float(value: Any, default: float = 0.0) -> float:
     """Säker float-konvertering."""
     try:
@@ -1953,6 +2073,9 @@ class InvoiceDialog(QDialog):
                 lambda _t: self._refresh_supplier_info()
             )
             sup_layout.addWidget(self._combo_supplier, stretch=1)
+            self._combo_supplier.currentTextChanged.connect(
+                lambda *_: self._refresh_dup_warning()
+            )
             self._lbl_supplier.setVisible(False)
         else:
             self._combo_supplier = None
@@ -2116,10 +2239,25 @@ class InvoiceDialog(QDialog):
         self._warn_ocr.setVisible(False)
         root.addWidget(self._warn_ocr)
 
+        self._warn_ocr_check = QLabel(tr("invdialog.ocr_check_warning"))
+        self._warn_ocr_check.setStyleSheet(
+            "color:#ff9800;font-weight:700;background:transparent;"
+        )
+        self._warn_ocr_check.setVisible(False)
+        root.addWidget(self._warn_ocr_check)
+
+        self._warn_dup = QLabel("")
+        self._warn_dup.setStyleSheet(
+            "color:#ff9800;font-weight:700;background:transparent;"
+        )
+        self._warn_dup.setVisible(False)
+        root.addWidget(self._warn_dup)
+
         self.f_ocr.textChanged.connect(
-            lambda *_: self._warn_ocr.setVisible(
-                not self.f_ocr.text().strip()
-            )
+            lambda *_: self._refresh_ocr_warnings()
+        )
+        self.f_inv_nr.textChanged.connect(
+            lambda *_: self._refresh_dup_warning()
         )
 
         # ── Dialog-knappar ─────────────────────────────────────────────
@@ -2164,6 +2302,45 @@ class InvoiceDialog(QDialog):
             ],
             on_last=self._validate_and_accept,
         )
+
+    # ── Live-varningar: OCR-kontrollsiffra + dubblett ────────────────
+
+    def _refresh_ocr_warnings(self) -> None:
+        """Visar OCR-varningar medan man skriver (saknas/kontrollsiffra)."""
+        text = self.f_ocr.text().strip()
+        self._warn_ocr.setVisible(not text)
+        self._warn_ocr_check.setVisible(
+            ocr_luhn_status(text) == "bad_check"
+        )
+
+    def _refresh_dup_warning(self) -> None:
+        """Varnar direkt om fakturanumret redan finns för leverantören."""
+        lbl = getattr(self, "_warn_dup", None)
+        if lbl is None:
+            return
+        nr = self.f_inv_nr.text().strip()
+        try:
+            supplier = self._get_supplier()
+        except Exception:
+            supplier = ""
+        dup = None
+        if nr and supplier and self._app_core is not None:
+            try:
+                dup = find_invoice_duplicate(
+                    list(self._app_core.get_invoices()),
+                    nr,
+                    supplier,
+                    exclude_id=str(self._existing.get("id", "")),
+                )
+            except Exception as exc:
+                log.debug("_refresh_dup_warning: %s", exc)
+        if dup:
+            lbl.setText(
+                tr("invdialog.dup_warning", nr=nr, supplier=supplier)
+            )
+            lbl.setVisible(True)
+        else:
+            lbl.setVisible(False)
 
     # ── Teckenindikator ──────────────────────────────────────────────────
 
@@ -2254,6 +2431,22 @@ class InvoiceDialog(QDialog):
             )
             self.f_total.setFocus()
             return
+
+        # OCR-kontrollsiffra (Luhn) – varna, men blockera inte helt
+        ocr_text = self.f_ocr.text().strip()
+        if ocr_luhn_status(ocr_text) == "bad_check":
+            reply = QMessageBox.question(
+                self,
+                tr("invdialog.ocr_check_title"),
+                tr("invdialog.ocr_check_body", ocr=ocr_text),
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                self.f_ocr.setFocus()
+                self.f_ocr.selectAll()
+                return
 
         # Förfallodatum passerat + Obetald → erbjud statusändring
         if (
