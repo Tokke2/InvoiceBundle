@@ -937,6 +937,58 @@ def _make_tray_icon(color: str = "#e8b030") -> QIcon:
     return QIcon(pix)
 
 
+def ensure_window_on_screen(window: QWidget) -> bool:
+    """
+    Flyttar tillbaka *window* om det ligger utanför alla skärmar.
+
+    Bakgrund: Qt kan anse ett fönster vara synligt (``isVisible()``)
+    trots att det fysiskt ligger på en skärm som kopplats bort
+    (dockningsstation, DisplayPort-skärm i vila m.m.). Då blir
+    ``show()``/``activateWindow()`` verkningslösa — tray-klick
+    loggas och fönstret "aktiveras", men användaren ser ingenting
+    eftersom fönstret visas på fantomskärmen. Här upptäcks läget
+    och fönstret centreras på primärskärmen i stället.
+
+    Returnerar True om fönstret flyttades.
+    """
+    try:
+        screens = QApplication.screens()
+        if not screens:
+            return False
+        frame = window.frameGeometry()
+        for scr in screens:
+            overlap = scr.availableGeometry().intersected(frame)
+            # Minst titelraden + en bit av bredden måste synas
+            if overlap.width() >= 100 and overlap.height() >= 40:
+                return False
+        primary = QApplication.primaryScreen()
+        if primary is None:
+            return False
+        avail = primary.availableGeometry()
+        was_maximized = bool(window.isMaximized())
+        if was_maximized:
+            window.showNormal()
+            frame = window.frameGeometry()
+        w = min(max(frame.width(), 200), avail.width())
+        h = min(max(frame.height(), 150), avail.height())
+        window.resize(w, h)
+        window.move(
+            avail.x() + max(0, (avail.width() - w) // 2),
+            avail.y() + max(0, (avail.height() - h) // 2),
+        )
+        log.warning(
+            "Fönstret låg utanför alla skärmar (%sx%s @ %s,%s) → "
+            "centrerat på primärskärmen",
+            frame.width(), frame.height(), frame.x(), frame.y(),
+        )
+        if was_maximized:
+            window.showMaximized()
+        return True
+    except Exception as exc:  # vakten får aldrig krascha visningen
+        log.debug("ensure_window_on_screen: %s", exc)
+        return False
+
+
 def _wrap_scroll(widget: QWidget) -> QScrollArea:
     """Wrappar en widget i QScrollArea — mushjul-scroll i alla flikar."""
     sa = QScrollArea()
@@ -2735,6 +2787,10 @@ class MainWindow(QMainWindow):
             # show() respekterar sparat tillstånd (maximerat/normalt) —
             # showNormal() skulle tvinga ner ett maximerat fönster.
             self.show()
+        # Även ett "synligt" fönster kan ligga på en bortkopplad
+        # skärm — då är raise/activate verkningslösa. Skärmvakten
+        # flyttar tillbaka det så tray-klick ALLTID visar fönstret.
+        ensure_window_on_screen(self)
         self.raise_()
         self.activateWindow()
 

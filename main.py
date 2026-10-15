@@ -715,6 +715,23 @@ def _verify_window_visible(window: Any) -> None:
                     x=geo.x(), y=geo.y(),
                 )
             if visible:
+                # Synligt enligt Qt — men det kan ändå ligga utanför
+                # alla anslutna skärmar (bortkopplad extern skärm).
+                # Skärmvakten i huvudfönstret flyttar i så fall
+                # tillbaka det och vi loggar vad som hände.
+                moved = False
+                try:
+                    from ui.main_window import ensure_window_on_screen
+                    moved = ensure_window_on_screen(window)
+                except Exception:
+                    moved = False
+                if moved and alog_fn is not None:
+                    alog_fn(
+                        "WINDOW_OFFSCREEN_GUARD",
+                        "Fönstret låg utanför alla skärmar → centrerat "
+                        "på primärskärmen",
+                        logger="FakturaMain",
+                    )
                 return
 
             log.warning(
