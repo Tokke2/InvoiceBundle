@@ -15,8 +15,12 @@ Direktglas). När en ny fakturafil dyker upp i mappen:
      på). Originalfilen lämnas kvar i mappen — fakturan i JSON
      pekar på den där (ingen kopia). Betal-PDF:en hämtar
      originalet via sökvägen; saknas filen då varnar exporten.
-  5. Ofullständig tolkning → parkeras för granskning i Import-vyn.
-     Aldrig tyst tappad, aldrig gissad.
+  5. Ofullständig tolkning, eller komplett tolkning UTAN träff
+     på en inlärd leverantörsmall → parkeras för granskning och
+     manuell matchning i Import-vyn. Alla leverantörer har egen
+     layout, så naken heuristik får aldrig registrera automatiskt
+     — först när användaren lärt appen leverantören (mall) blir
+     mappen automatisk. Aldrig tyst tappad, aldrig gissad.
 
 Konfiguration + bearbetningsregister bor i
 data/watch_folders.json. Allt loggas (SCAN_WATCH).
@@ -351,14 +355,23 @@ class WatchManager(QObject):
             )
             return
 
-        if parsed.get("missing") or not self.auto_create:
-            reason = (
-                "missing: " + ", ".join(parsed.get("missing", []))
-                if parsed.get("missing") else "review"
-            )
+        # Auto-registrering kräver en inlärd leverantörsmall
+        # som faktiskt träffar på filen (se punkt 5 ovan).
+        untaught = not parsed.get("template")
+        if parsed.get("missing") or not self.auto_create or untaught:
+            if parsed.get("missing"):
+                reason = "missing: " + ", ".join(
+                    parsed.get("missing", [])
+                )
+            elif not self.auto_create:
+                reason = "review"
+            else:
+                reason = "no-template"
             parked = {
                 **base_info, "reason": reason,
-                "text": (text or "")[:4000],
+                # Flersidiga fakturor: betalblocket ligger ofta på
+                # sista sidan — spara hela texten (3-sidorsbudget)
+                "text": (text or "")[:30_000],
                 "parsed": parsed, "method": method,
             }
             self._config["parked"].append(parked)
@@ -374,7 +387,7 @@ class WatchManager(QObject):
         row = {
             **parsed,
             "file": path.name, "_path": str(path),
-            "method": method, "_text": (text or "")[:4000],
+            "method": method, "_text": (text or "")[:30_000],
         }
         self._config["processed"][digest] = {
             **base_info, "result": "imported",

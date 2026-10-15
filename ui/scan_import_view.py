@@ -839,8 +839,52 @@ class ScanImportView(QWidget):
             except Exception as exc:
                 log.warning("teach rescan: %s", exc)
 
+    def _apply_template_to_row(self, parsed: dict, text: str) -> dict:
+        """Applicerar leverantörsmallen på en (parkerad) rad.
+
+        Mallen kan ha lärts in EFTER att filen parkerades — då ska
+        granskningen visa mallens värden (och mallmarkören), inte
+        den gamla heuristik-tolkningen från parkeringstillfället.
+        """
+        supplier = str(parsed.get("supplier", "") or "")
+        if not supplier or not text:
+            return parsed
+        try:
+            si = _scan_module()
+            tmpl = si.find_template(self._get_templates(), supplier)
+            if not tmpl:
+                return parsed
+            found = si.apply_template(text, tmpl)
+        except Exception as exc:
+            log.warning("apply template on parked: %s", exc)
+            return parsed
+        for field, value in found.items():
+            if value not in (None, "", 0, 0.0):
+                parsed[field] = value
+        if found:
+            parsed["template"] = supplier
+            try:
+                amount_ok = (
+                    float(parsed.get("total_amount") or 0) > 0
+                )
+            except (TypeError, ValueError):
+                amount_ok = False
+            parsed["missing"] = [
+                label for ok, label in (
+                    (amount_ok, "belopp"),
+                    (bool(parsed.get("invoice_number")),
+                     "fakturanummer"),
+                    (bool(parsed.get("supplier")), "leverantör"),
+                ) if not ok
+            ]
+        return parsed
+
     def _review_parked(self) -> None:
-        """Flyttar parkerade filer till granskningstabellen."""
+        """Flyttar parkerade filer till granskningstabellen.
+
+        Filer som parkerades före inlärningen tolkas om med den
+        mall som eventuellt finns nu (se _apply_template_to_row).
+        """
         if not self._watch:
             return
         for parked in list(self._watch.parked):
@@ -849,6 +893,9 @@ class ScanImportView(QWidget):
             parsed["_path"] = parked.get("path", "")
             parsed["method"] = parked.get("method", "")
             parsed["_text"] = parked.get("text", "")
+            parsed = self._apply_template_to_row(
+                parsed, str(parked.get("text", "") or "")
+            )
             parsed["status"] = self._compute_status(
                 parsed, bool(parked.get("text"))
             )
@@ -1087,7 +1134,7 @@ class ScanImportView(QWidget):
             parsed["file"] = path.name
             parsed["_path"] = str(path)
             parsed["method"] = method
-            parsed["_text"] = (text or "")[:4000]
+            parsed["_text"] = (text or "")[:30_000]
             status = (
                 "redo" if not parsed["missing"]
                 else "saknas: " + ", ".join(parsed["missing"])
@@ -1131,7 +1178,7 @@ class ScanImportView(QWidget):
         parsed["file"] = "(inklistrad text)"
         parsed["_path"] = ""
         parsed["method"] = "manuell text"
-        parsed["_text"] = text[:4000]
+        parsed["_text"] = text[:30_000]
         parsed["status"] = (
             "redo" if not parsed["missing"]
             else "saknas: " + ", ".join(parsed["missing"])

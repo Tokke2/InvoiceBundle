@@ -236,3 +236,43 @@ def test_exporter_include_originals_flag(tmp_path):
     )
     assert med["success"] and med["attachments_included"] == 1
     assert len(PdfReader(med["file_path"]).pages) == n_plain + 2
+
+
+def test_watch_untaught_supplier_parked_until_taught(tmp_path):
+    """Ingen inlärd mall → aldrig auto, hur komplett allt ser ut.
+
+    Alla leverantörer har egen layout: först när användaren lärt
+    appen leverantören (mall sparad och träffar) registrerar
+    mappen automatiskt.
+    """
+    _qapp()
+    from ui.watch_folders import WatchManager
+
+    holder = {"templates": {}}
+    folder = tmp_path / "PilkingtonIn"
+    folder.mkdir(parents=True, exist_ok=True)
+    mgr = WatchManager(
+        tmp_path / "watch_folders.json",
+        app=FakeApp(),
+        extract_fn=lambda path: (TEXT, "test"),
+        templates_provider=lambda: holder["templates"],
+    )
+    mgr.set_folders([{"supplier": "Pilkington", "path": str(folder)}])
+    ready, parked = [], []
+    mgr.invoice_ready.connect(lambda row, path: ready.append(row))
+    mgr.file_parked.connect(lambda info: parked.append(info))
+
+    (folder / "f1.pdf").write_bytes(b"%PDF-fake-1")
+    mgr.scan_all()
+    # Heuristiken hittar allt — men utan inlärd mall: parkera
+    assert not ready
+    assert len(parked) == 1
+    assert parked[0]["reason"] == "no-template"
+    assert parked[0]["parsed"]["invoice_number"] == "9911"
+
+    # Användaren lär appen (mall sparas) → nästa fil blir auto
+    holder["templates"] = TEMPLATES
+    (folder / "f2.pdf").write_bytes(b"%PDF-fake-2")
+    mgr.scan_all()
+    assert len(ready) == 1
+    assert ready[0]["template"] == "Pilkington"

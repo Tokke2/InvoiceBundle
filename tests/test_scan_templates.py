@@ -336,3 +336,74 @@ def test_teach_button_without_folder_sets_status(tmp_path):
         assert view._lbl_status.text()  # status sattes
     finally:
         view.close()
+
+
+def test_review_parked_applies_learned_template(tmp_path):
+    """Parkerad FÖRE inlärning → granskningen visar mallens värden."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import ScanImportView
+
+    templates_file = tmp_path / "invoice_templates.json"
+    si.save_templates(templates_file, {
+        "Nordlys Energi AB": {"fields": {
+            "total_amount": {"label": "SLUTSUMMA ATT BETALA"},
+            "invoice_number": {"label": "Er ref hos oss"},
+            "due_date": {"label": "Betalas senast"},
+        }},
+    })
+
+    view = ScanImportView(
+        app=_fake_core(), templates_path=templates_file
+    )
+    try:
+        # Som det såg ut vid parkeringen: heuristiken räckte inte
+        parsed_then = {
+            "supplier": "Nordlys Energi AB",
+            "invoice_number": "", "ocr": "",
+            "date": "", "due_date": "",
+            "total_amount": 0.0,
+            "missing": ["belopp", "fakturanummer"],
+        }
+        view._watch._config["parked"] = [{
+            "hash": "h123", "path": str(tmp_path / "x.pdf"),
+            "file": "x.pdf", "reason": "no-template",
+            "text": WEIRD_LAYOUT, "parsed": parsed_then,
+            "method": "test",
+        }]
+        view._review_parked()
+
+        assert len(view._rows) == 1
+        row = view._rows[0]
+        assert row["invoice_number"] == "NL-2026-0771"
+        assert row["total_amount"] == 1125.0
+        assert row["due_date"] == "2026-10-01"
+        assert row["template"] == "Nordlys Energi AB"
+        assert row["status"] == "redo"
+        assert not view._watch.parked
+    finally:
+        view.close()
+
+
+def test_multipage_pdf_extract_covers_all_pages(tmp_path):
+    """Flersidig faktura: värdena på SISTA sidan måste hittas."""
+    from reportlab.pdfgen import canvas
+
+    pdf = tmp_path / "flersidig.pdf"
+    c = canvas.Canvas(str(pdf))
+    c.drawString(72, 750, "PILKINGTON GLAS AB")
+    c.drawString(72, 720, "Fakturanr: 9911")
+    c.showPage()
+    c.drawString(72, 750, "Specifikation sida 2")
+    c.drawString(72, 720, "Att betala: 5 000,00 SEK")
+    c.drawString(72, 700, "OCR: 99110012345")
+    c.save()
+
+    text, _method = si.extract_text(pdf)
+    assert "Specifikation sida 2" in text
+    parsed = si.parse_invoice_text(
+        text, [{"name": "Pilkington", "short_name": "Pilkington"}]
+    )
+    assert parsed["invoice_number"] == "9911"
+    assert parsed["total_amount"] == 5000.0
