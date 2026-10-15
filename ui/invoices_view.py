@@ -2215,6 +2215,11 @@ class InvoicesView(QWidget):
                 "invoices.attachments_note",
                 n=result["attachments_included"],
             )
+        n_missing_att = int(result.get("attachments_missing", 0) or 0)
+        if n_missing_att:
+            attach_note += (
+                "  " + tr("invoices.attachments_missing", n=n_missing_att)
+            )
         self._status(
             f"📄  {archived} poster exporterade"
             f" → {fmt_amount(att_betala)}"
@@ -2226,9 +2231,18 @@ class InvoicesView(QWidget):
         payment_line = (
             f"  Betalningsdatum: {export_pd}\n" if export_pd else ""
         )
+        missing_line = ""
+        if n_missing_att:
+            missing_line = (
+                "\n\n  "
+                + tr("invoices.attachments_missing", n=n_missing_att)
+            )
         box = QMessageBox(self)
         box.setWindowTitle("Export klar")
-        box.setIcon(QMessageBox.Icon.Information)
+        box.setIcon(
+            QMessageBox.Icon.Warning
+            if n_missing_att else QMessageBox.Icon.Information
+        )
         box.setText(
             f"✅  {archived} poster exporterade och arkiverade.\n\n"
             f"  Fakturor  (+)    {fmt_amount(total_invoices)}\n"
@@ -2237,6 +2251,7 @@ class InvoicesView(QWidget):
             f"  ATT BETALA       {fmt_amount(att_betala)}\n"
             f"{payment_line}\n"
             f"Fil: {actual_path}"
+            f"{missing_line}"
         )
         btn_open_file = box.addButton(
             "📄  Öppna filen", QMessageBox.ButtonRole.AcceptRole

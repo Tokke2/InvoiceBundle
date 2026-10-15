@@ -139,6 +139,12 @@ def export_batches(
                 include_originals=True,
             )
             ok = bool(result.get("success"))
+            if result.get("attachments_missing"):
+                log.warning(
+                    "AUTOBATCH %s: %s originalfiler saknas på disk "
+                    "— kunde inte bifogas i PDF:en",
+                    batch["supplier"], result["attachments_missing"],
+                )
             results.append({
                 "batch": batch,
                 "success": ok,

@@ -432,6 +432,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "watch.need_folder": {"sv": "Välj en befintlig mapp först.", "en": "Choose an existing folder first."},
     "menu.include_originals": {"sv": "📎  Inkludera originalfakturor i PDF-export", "en": "📎  Include original invoices in PDF export"},
     "invoices.attachments_note": {"sv": "  📎 {n} original bifogade", "en": "  📎 {n} originals attached"},
+    "invoices.attachments_missing": {"sv": "⚠ {n} original kunde inte bifogas (saknas på disk — flyttade eller raderade)", "en": "⚠ {n} originals could not be attached (missing on disk — moved or deleted)"},
 
     # ── Uppdatering i appen ───────────────────────────────────────────
     "menu.update": {"sv": "🔄  Sök ny version …", "en": "🔄  Check for updates …"},

@@ -706,17 +706,14 @@ class ScanImportView(QWidget):
             self._watch.set_auto_create(bool(state))
 
     def _on_watch_invoice(self, row: dict, path: str) -> None:
-        """Ny komplett faktura från bevakad mapp → registrera direkt."""
-        try:
-            from ui.watch_folders import copy_attachment
-            data_dir = self._templates_file().parent
-            attachment = copy_attachment(
-                Path(path), data_dir, str(row.get("supplier", ""))
-            ) or str(path)
-        except Exception as exc:
-            log.warning("watch bilaga: %s", exc)
-            attachment = str(path)
-        data = self._invoice_data_from_row(row, attachment=attachment)
+        """Ny komplett faktura från bevakad mapp → registrera direkt.
+
+        Originalfilen lämnas kvar i den bevakade mappen; fakturans
+        attachment-fält i JSON pekar på den där (ingen kopia i
+        data/attachments/). Flyttas filen före export varnar
+        exporten att originalet saknas.
+        """
+        data = self._invoice_data_from_row(row, attachment=str(path))
         if self._save_invoice(
             data, source=row.get("file", ""), silent=True
         ):

@@ -12,8 +12,9 @@ Direktglas). När en ny fakturafil dyker upp i mappen:
   3. Dubblett mot registret (samma leverantör + fakturanummer)
      stoppas alltid.
   4. Komplett faktura → registreras automatiskt (om auto-läget är
-     på) och originalet kopieras till data/attachments/ så att det
-     kan bifogas i betal-PDF:en även om källfilen tas bort.
+     på). Originalfilen lämnas kvar i mappen — fakturan i JSON
+     pekar på den där (ingen kopia). Betal-PDF:en hämtar
+     originalet via sökvägen; saknas filen då varnar exporten.
   5. Ofullständig tolkning → parkeras för granskning i Import-vyn.
      Aldrig tyst tappad, aldrig gissad.
 
@@ -25,7 +26,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -72,42 +72,6 @@ def file_hash(path: Path) -> str:
         for chunk in iter(lambda: fh.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
-
-
-def copy_attachment(src: Path, data_dir: Path, supplier: str) -> str:
-    """
-    Kopierar originalet till data/attachments/<leverantör>/ och
-    returnerar sökvägen relativt projektroten (portabel vid flytt).
-    Vid namnkrock läggs hash-prefix till. Returnerar "" vid fel.
-    """
-    try:
-        safe = "".join(
-            c if c.isalnum() or c in "._-" else "_"
-            for c in (supplier or "okand")
-        ).strip("._") or "okand"
-        target_dir = Path(data_dir) / "attachments" / safe
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / Path(src).name
-        if target.exists():
-            try:
-                if file_hash(target) != file_hash(src):
-                    target = target_dir / (
-                        f"{file_hash(src)[:8]}_{Path(src).name}"
-                    )
-            except Exception:
-                target = target_dir / (
-                    f"{datetime.now():%H%M%S}_{Path(src).name}"
-                )
-        if not target.exists():
-            shutil.copy2(src, target)
-        try:
-            from ui.design import PROJECT_DIR
-            return str(target.relative_to(PROJECT_DIR))
-        except Exception:
-            return str(target)
-    except Exception as exc:
-        log.warning("copy_attachment: %s", exc)
-        return ""
 
 
 def invoice_exists(

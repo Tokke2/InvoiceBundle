@@ -137,18 +137,49 @@ def test_watch_manual_mode_parks_everything(tmp_path):
     assert again.folders[0]["supplier"] == "Pilkington"
 
 
-def test_copy_attachment_keeps_original(tmp_path):
-    from ui.watch_folders import copy_attachment
-    src = tmp_path / "orig.pdf"
-    src.write_bytes(b"%PDF-original")
-    rel = copy_attachment(src, tmp_path / "data", "Pilkington AB")
-    assert rel is not None
-    dest = Path(rel) if Path(rel).is_absolute() else (
-        tmp_path / "data" / "attachments" / "Pilkington_AB" / "orig.pdf"
-    )
-    assert dest.exists()
-    # Andra gången: samma innehåll → ingen felkrasch, sökväg tillbaka
-    assert copy_attachment(src, tmp_path / "data", "Pilkington AB")
+def test_watch_registration_references_original_no_copy(tmp_path):
+    """Auto-registrering från bevakad mapp pekar på ORIGINALET.
+
+    Ingen kopia i data/attachments/: fakturans attachment-fält i
+    JSON ska vara sökvägen till filen i användarens egen mapp,
+    och originalfilen där ska vara orörd.
+    """
+    _qapp()
+    from ui.scan_import_view import ScanImportView
+
+    folder = tmp_path / "PilkingtonIn"
+    folder.mkdir(parents=True)
+    src = folder / "f1.pdf"
+    src.write_bytes(b"%PDF-original-i-egen-mapp")
+
+    saved = {}
+
+    class _Label:
+        def setText(self, _text):
+            pass
+
+    view = ScanImportView.__new__(ScanImportView)
+    view._lbl_status = _Label()
+
+    def _fake_save(data, source="", silent=False):
+        saved.update(data)
+        return True
+
+    view._save_invoice = _fake_save
+    row = {
+        "supplier": "Pilkington", "invoice_number": "9911",
+        "ocr": "99118", "date": "2026-09-01",
+        "due_date": "2026-10-01", "total_amount": 1250.0,
+        "file": "f1.pdf", "method": "test", "_path": str(src),
+    }
+    view._on_watch_invoice(row, str(src))
+
+    # JSON pekar på originalet i användarens egen mapp
+    assert saved.get("attachment") == str(src)
+    # Ingen kopia hamnade i data/attachments/
+    assert not (tmp_path / "data").exists()
+    # Originalfilen orörd
+    assert src.read_bytes() == b"%PDF-original-i-egen-mapp"
 
 
 def _base_pdf(path: Path) -> None:
