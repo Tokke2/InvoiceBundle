@@ -389,6 +389,66 @@ def payment_info_text(invoice: dict, supplier: dict | None) -> str:
     return "\n".join(lines)
 
 
+#: Snabbfilterlägen för förfallofönster i Fakturor-vyn.
+DUE_WINDOW_MODES: tuple[str, ...] = ("overdue", "today", "week")
+
+
+def due_window_filter(
+    rows: list[dict],
+    mode: str,
+    today: datetime.date,
+) -> list[dict]:
+    """
+    Snabbfilter på förfallodatum (bara obetalda rader):
+
+      "overdue" – förfallna (datum passerat eller status Förfallen)
+      "today"   – förfaller idag eller i morgon
+      "week"    – förfaller inom 7 dagar (idag inräknad)
+
+    Rader utan giltigt förfallodatum faller bort i alla lägen.
+    """
+    if mode not in DUE_WINDOW_MODES:
+        return list(rows)
+    out: list[dict] = []
+    for r in rows:
+        if str(r.get("status", "")) in _PAID_LIKE_STATUSES:
+            continue
+        try:
+            due = datetime.date.fromisoformat(
+                str(r.get("due_date", "") or "")[:10]
+            )
+        except ValueError:
+            continue
+        if mode == "overdue":
+            if due < today or str(r.get("status", "")) == "Förfallen":
+                out.append(r)
+        elif mode == "today":
+            if today <= due <= today + datetime.timedelta(days=1):
+                out.append(r)
+        else:  # week
+            if today <= due <= today + datetime.timedelta(days=7):
+                out.append(r)
+    return out
+
+
+def att_betala_summary(invoices: list[dict]) -> dict:
+    """
+    Kärnsiffran: vad ska betalas just nu.
+
+    {"total": nettosumma obetalda (krediter avdragna), "count": antal}
+    Samma regel som Dashboard och Fakturor: Betald/Makulerad/
+    Arkiverad räknas inte.
+    """
+    total = 0.0
+    count = 0
+    for inv in invoices:
+        if str(inv.get("status", "")) in _PAID_LIKE_STATUSES:
+            continue
+        total += _to_float(inv.get("total_amount"))
+        count += 1
+    return {"total": round(total, 2), "count": count}
+
+
 def due_within(
     invoices: list[dict],
     today: datetime.date,

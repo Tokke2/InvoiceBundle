@@ -1398,6 +1398,24 @@ class MainWindow(QMainWindow):
             log.debug("auto_batch store-hook: %s", exc)
         QTimer.singleShot(7_000, self._maybe_auto_batch)
 
+        # ── ATT BETALA i statusraden + tray (appens kärnsiffra) ────
+        self._lbl_att_betala_bar: QLabel | None = None
+        self._att_betala_timer = QTimer(self)
+        self._att_betala_timer.setSingleShot(True)
+        self._att_betala_timer.setInterval(400)
+        self._att_betala_timer.timeout.connect(
+            self._update_att_betala_bar
+        )
+        try:
+            _store_ab = getattr(self._app, "invoices_store", None)
+            if _store_ab is not None and hasattr(_store_ab, "on_change"):
+                _store_ab.on_change(
+                    lambda *_a: self._att_betala_timer.start()
+                )
+        except Exception as exc:
+            log.debug("att_betala store-hook: %s", exc)
+        self._update_att_betala_bar()
+
     def _watch_data_folder(self) -> None:
         """
         Om suppliers.json sparas i en editor läser appen om den själv.
@@ -2111,6 +2129,68 @@ class MainWindow(QMainWindow):
     def set_status(self, msg: str, timeout: int = 4000) -> None:
         """Visar ett meddelande i statusfältet."""
         self.statusBar().showMessage(msg, timeout)
+
+    def _update_att_betala_bar(self) -> None:
+        """
+        Uppdaterar kärnsiffran i statusraden + tray-tooltipen.
+
+        Appens enda jobb är att räkna ihop fakturor som ska
+        betalas — därför står ATT BETALA permanent i huvudfönstrets
+        statusrad (oavsett vald flik) och i tray-ikonens tooltip.
+        Uppdateras vid varje fakturaändring via store-hooken.
+        """
+        try:
+            from ui.invoices_helpers import (
+                att_betala_summary,
+                fmt_amount,
+            )
+        except Exception:
+            try:
+                from invoices_helpers import (  # type: ignore
+                    att_betala_summary,
+                    fmt_amount,
+                )
+            except Exception:
+                return
+        try:
+            invoices = list(self._app.get_invoices() or [])
+        except Exception:
+            invoices = []
+        summary = att_betala_summary(invoices)
+        amount = fmt_amount(summary["total"])
+        try:
+            lbl = getattr(self, "_lbl_att_betala_bar", None)
+            if lbl is None:
+                lbl = QLabel()
+                lbl.setFont(_font(11, True))
+                self.statusBar().addPermanentWidget(lbl)
+                self._lbl_att_betala_bar = lbl
+            lbl.setText(
+                tr(
+                    "main.to_pay_bar",
+                    amount=amount,
+                    n=summary["count"],
+                )
+            )
+        except Exception as exc:
+            log.debug("_update_att_betala_bar statusrad: %s", exc)
+        try:
+            if hasattr(self, "tray"):
+                if summary["count"]:
+                    self.tray.setToolTip(
+                        tr(
+                            "tray.tooltip_due",
+                            app=APP_NAME,
+                            amount=amount,
+                            n=summary["count"],
+                        )
+                    )
+                else:
+                    self.tray.setToolTip(
+                        tr("tray.tooltip", app=APP_NAME)
+                    )
+        except Exception as exc:
+            log.debug("_update_att_betala_bar tray: %s", exc)
 
     def get_invoices_view(self) -> QWidget | None:
         return self._invoices_view
@@ -2863,6 +2943,7 @@ class MainWindow(QMainWindow):
         self.set_status(
             f"✅  {summary}" if summary else "✅  Uppdaterad", 6000
         )
+        self._update_att_betala_bar()
 
     def _manual_backup(self) -> None:
         """Skapar en backup via app.backup."""

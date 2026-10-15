@@ -102,6 +102,7 @@ try:
         ExportHistoryDialog,
         InvoiceDialog,
         due_within,
+        due_window_filter,
         payment_info_text,
         is_dark_theme,
         make_btn,
@@ -132,6 +133,7 @@ except ImportError:
         ExportHistoryDialog,
         InvoiceDialog,
         due_within,
+        due_window_filter,
         payment_info_text,
         make_btn,
         make_cell,
@@ -283,6 +285,7 @@ class InvoicesView(QWidget):
         self._app = app
         self._all_data: list[dict] = []
         self._undo_stack: list[list[tuple[str, str, str]]] = []
+        self._chip_mode: str = ""  # snabbfilter: "" / overdue / today / week
         self._current_theme: dict = {}
         self._favorite_names: set[str] = set()
         self._initialised = False
@@ -447,6 +450,25 @@ class InvoicesView(QWidget):
         row_search.addWidget(self._filter_status)
         row_search.addWidget(self._filter_supplier)
         root.addLayout(row_search)
+
+        # ── Snabbfilter-chips: förfallofönster ──────────────────────
+        row_chips = QHBoxLayout()
+        row_chips.setSpacing(8)
+        self._chip_btns: dict[str, Any] = {}
+        for mode, key in (
+            ("overdue", "invoices.chip_overdue"),
+            ("today", "invoices.chip_today"),
+            ("week", "invoices.chip_week"),
+        ):
+            chip = make_btn(tr(key), tr(key))
+            chip.setCheckable(True)
+            chip.clicked.connect(
+                lambda _checked=False, m=mode: self._on_chip(m)
+            )
+            self._chip_btns[mode] = chip
+            row_chips.addWidget(chip)
+        row_chips.addStretch()
+        root.addLayout(row_chips)
 
         # ── CRUD-knappar ───────────────────────────────────────────────
         row_actions = QHBoxLayout()
@@ -826,7 +848,33 @@ class InvoicesView(QWidget):
         if sup_f:
             data = [r for r in data if r.get("supplier") == sup_f]
 
+        # Snabbfilter (chips): förfallofönster ovanpå övriga filter
+        mode = getattr(self, "_chip_mode", "")
+        if mode:
+            data = due_window_filter(data, mode, datetime.date.today())
+
         return data
+
+    # ══════════════════════════════════════════════════════════════════
+    #  SNABBFILTER-CHIPS
+    # ══════════════════════════════════════════════════════════════════
+
+    def _on_chip(self, mode: str) -> None:
+        """Växlar snabbfilter — samma chip igen stänger av filtret."""
+        self._chip_mode = "" if self._chip_mode == mode else mode
+        self._sync_chip_styles()
+        self._do_refresh()
+
+    def _sync_chip_styles(self) -> None:
+        """Aktivt chip i guld (syns i både ljust och mörkt tema)."""
+        for mode, btn in getattr(self, "_chip_btns", {}).items():
+            active = mode == self._chip_mode
+            btn.setChecked(active)
+            btn.setStyleSheet(
+                "background:#d4a017;color:#111111;font-weight:800;"
+                if active
+                else ""
+            )
 
     # ══════════════════════════════════════════════════════════════════
     #  LEVERANTÖRSVÄLJARE
@@ -1181,6 +1229,11 @@ class InvoicesView(QWidget):
         self._btn_delete.setText(tr("invoices.delete"))
         self._btn_duplicate.setText(tr("invoices.duplicate"))
         self._btn_mark_paid.setText(tr("invoices.mark_paid"))
+        self._btn_pay_today.setText(tr("invoices.pay_today"))
+        self._btn_pay_today.setToolTip(tr("invoices.pay_today_tip"))
+        for _mode, _btn in getattr(self, "_chip_btns", {}).items():
+            _btn.setText(tr(f"invoices.chip_{_mode}"))
+            _btn.setToolTip(tr(f"invoices.chip_{_mode}"))
         self._btn_combine.setText(tr("combine.button"))
         self._btn_combine.setToolTip(tr("combine.tip"))
         self._btn_export_all.setText(tr("invoices.export_all"))

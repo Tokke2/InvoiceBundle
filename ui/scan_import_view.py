@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
     QDialog, QListWidget, QPlainTextEdit,
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor, QFont
 
 try:
     from ui.design import ICON_HEADER_PX, app_icon_pixmap
@@ -1048,7 +1048,9 @@ class ScanImportView(QWidget):
                     align | Qt.AlignmentFlag.AlignVCenter
                 )
                 if key == "status":
-                    if row.get("missing") or text == tr("scan.no_text"):
+                    if self._ocr_check_bad(row):
+                        item.setForeground(QColor("#ef6c00"))
+                    elif row.get("missing") or text == tr("scan.no_text"):
                         item.setForeground(
                             QApplication.palette().mid()
                         )
@@ -1062,21 +1064,42 @@ class ScanImportView(QWidget):
         self._tbl.resizeRowsToContents()
 
     @staticmethod
+    def _ocr_check_bad(row: dict) -> bool:
+        """True om radens OCR-nummer har fel kontrollsiffra (Luhn)."""
+        try:
+            from ui.invoices_helpers import ocr_luhn_status
+        except Exception:
+            try:
+                from invoices_helpers import ocr_luhn_status
+            except Exception:
+                return False
+        try:
+            return ocr_luhn_status(row.get("ocr", "")) == "bad_check"
+        except Exception:
+            return False
+
+    @staticmethod
     def _display_status(row: dict) -> str:
         """Statuscell på aktuellt språk (internt värde är svenska)."""
         raw = str(row.get("status", "") or "")
         if raw == "redo" and row.get("template"):
-            return tr("scan.template_used")
-        if raw == "redo":
-            return tr("scan.ready")
-        if raw.startswith("saknas:"):
-            return tr(
+            text = tr("scan.template_used")
+        elif raw == "redo":
+            text = tr("scan.ready")
+        elif raw.startswith("saknas:"):
+            text = tr(
                 "scan.missing",
                 fields=tr_missing(list(row.get("missing") or [])),
             )
-        if raw == "ingen text hittad":
-            return tr("scan.no_text")
-        return raw
+        elif raw == "ingen text hittad":
+            text = tr("scan.no_text")
+        else:
+            text = raw
+        # Dålig kontrollsiffra syns direkt i listan — fångas här
+        # i stället för först vid betalning hos banken.
+        if ScanImportView._ocr_check_bad(row):
+            text += "  ·  " + tr("scan.ocr_warn")
+        return text
 
     def _update_sum(self) -> None:
         total = sum(float(r.get("total_amount", 0.0)) for r in self._rows)
