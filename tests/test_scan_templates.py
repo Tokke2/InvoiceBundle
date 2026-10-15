@@ -164,3 +164,175 @@ def test_scan_view_uses_templates_and_reparses(tmp_path):
         assert "🧩" in view._tbl.item(0, 8).text()
     finally:
         view.close()
+
+
+def _fake_core():
+    class FakeCore:
+        def get_suppliers(self):
+            return []
+
+        def get_setting(self, key, default=None):
+            return default
+
+    return FakeCore()
+
+
+def test_supported_invoice_files_sorted_and_filtered(tmp_path):
+    from ui.watch_folders import supported_invoice_files
+
+    d = tmp_path / "in"
+    d.mkdir()
+    (d / "b.pdf").write_bytes(b"%PDF")
+    (d / "A.PDF").write_bytes(b"%PDF")
+    (d / "c.png").write_bytes(b"PNG")
+    (d / "notering.txt").write_text("hej", encoding="utf-8")
+    (d / "undermapp").mkdir()
+    names = [p.name for p in supported_invoice_files(d)]
+    assert names == ["A.PDF", "b.pdf", "c.png"]
+    assert supported_invoice_files(tmp_path / "saknas") == []
+
+
+def test_teach_from_folder_saves_template(tmp_path, monkeypatch):
+    """Lär-flödet: en PDF ur mappen → manuell matchning → JSON."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as sv
+    from ui.scan_import_view import ScanImportView
+
+    folder = tmp_path / "NordlysIn"
+    folder.mkdir()
+    (folder / "exempel.pdf").write_bytes(b"%PDF-fejk")
+    templates_file = tmp_path / "invoice_templates.json"
+
+    view = ScanImportView(
+        app=_fake_core(), templates_path=templates_file
+    )
+    try:
+        entry = {"supplier": "Nordlys Energi AB", "path": str(folder)}
+        view._watch.set_folders([entry])
+
+        monkeypatch.setattr(
+            si, "extract_text", lambda path: (WEIRD_LAYOUT, "test")
+        )
+
+        seen = {}
+
+        class FakeTemplateDialog:
+            def __init__(self, parent, text, supplier="",
+                         existing=None):
+                seen["text"] = text
+                seen["supplier"] = supplier
+                self.result_template = {
+                    "supplier": "Nordlys Energi AB",
+                    "fields": {
+                        "invoice_number": {"label": "Er ref hos oss"},
+                        "due_date": {"label": "Betalas senast"},
+                    },
+                }
+
+            def exec(self):
+                return 1
+
+        monkeypatch.setattr(sv, "TemplateDialog", FakeTemplateDialog)
+        rescanned = []
+        monkeypatch.setattr(
+            view._watch, "scan_folder",
+            lambda e: rescanned.append(e),
+        )
+
+        view._teach_from_folder(entry)
+
+        # Dialogen fick texten ur mappens egen fil + mappens namn
+        assert seen["text"] == WEIRD_LAYOUT
+        assert seen["supplier"] == "Nordlys Energi AB"
+        # Mallen ligger i minnet OCH i invoice_templates.json
+        templates = view._get_templates()
+        assert templates["Nordlys Energi AB"]["fields"]["due_date"] \
+            == {"label": "Betalas senast"}
+        saved = si.load_templates(templates_file)
+        assert "Nordlys Energi AB" in saved
+        # Mappen skannades om direkt med den nya mallen
+        assert any(
+            r.get("path") == str(folder) for r in rescanned
+        )
+        # ...och mallen tolkar nästa faktura från leverantören
+        parsed = si.parse_invoice_text(
+            WEIRD_LAYOUT, [], templates=templates
+        )
+        assert parsed["invoice_number"] == "NL-2026-0771"
+    finally:
+        view.close()
+
+
+def test_offer_teach_only_without_template(tmp_path, monkeypatch):
+    """Erbjudandet efter mapp-tillägg: bara när mall saknas."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as sv
+    from ui.scan_import_view import ScanImportView
+
+    folder = tmp_path / "NordlysIn"
+    folder.mkdir()
+    (folder / "en.pdf").write_bytes(b"%PDF")
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        entry = {"supplier": "Nordlys Energi AB", "path": str(folder)}
+
+        class FakeMessageBox:
+            asked = []
+
+            class StandardButton:
+                Yes = "Yes"
+                No = "No"
+
+            @staticmethod
+            def question(parent, title, text):
+                FakeMessageBox.asked.append(text)
+                return FakeMessageBox.StandardButton.Yes
+
+        monkeypatch.setattr(sv, "QMessageBox", FakeMessageBox)
+        taught = []
+        monkeypatch.setattr(
+            view, "_teach_from_folder", lambda e: taught.append(e)
+        )
+
+        # Ingen mall ännu → frågan ställs, Ja → lär-flödet startar
+        view._maybe_offer_teach(entry)
+        assert len(FakeMessageBox.asked) == 1
+        assert "Nordlys Energi AB" in FakeMessageBox.asked[0]
+        assert taught == [entry]
+
+        # Mall finns nu → ingen fråga, inget tjat
+        view._get_templates()["Nordlys Energi AB"] = {
+            "fields": {"invoice_number": {"label": "X"}}
+        }
+        view._maybe_offer_teach(entry)
+        assert len(FakeMessageBox.asked) == 1
+        assert taught == [entry]
+    finally:
+        view.close()
+
+
+def test_teach_button_without_folder_sets_status(tmp_path):
+    """Lär-knappen utan vald mapp: meddelande, ingen krasch."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import ScanImportView
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        assert not view._watch.folders
+        view._teach_from_folder_clicked()
+        assert view._lbl_status.text()  # status sattes
+    finally:
+        view.close()

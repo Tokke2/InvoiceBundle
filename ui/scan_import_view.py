@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QGroupBox, QTextEdit, QMessageBox, QFileDialog, QFrame,
-    QLineEdit, QCheckBox, QApplication,
+    QLineEdit, QCheckBox, QApplication, QInputDialog,
     QDialog, QListWidget, QPlainTextEdit,
 )
 from PySide6.QtCore import Qt
@@ -469,6 +469,11 @@ class ScanImportView(QWidget):
         self._btn_review_parked.clicked.connect(self._review_parked)
         wr2.addWidget(self._lbl_watch_parked)
         wr2.addWidget(self._btn_review_parked)
+        self._btn_teach_folder = QPushButton(tr("watch.learn"))
+        self._btn_teach_folder.clicked.connect(
+            self._teach_from_folder_clicked
+        )
+        wr2.addWidget(self._btn_teach_folder)
         wr2.addStretch(1)
         bw.addLayout(wr2)
         box_watch.setLayout(bw)
@@ -622,6 +627,7 @@ class ScanImportView(QWidget):
             self._btn_remove_folder.setText(tr("watch.remove_folder"))
             self._chk_auto_watch.setText(tr("watch.auto_create"))
             self._btn_review_parked.setText(tr("watch.review"))
+            self._btn_teach_folder.setText(tr("watch.learn"))
             self._refresh_watch_ui()
         self._refresh_table()
 
@@ -691,6 +697,7 @@ class ScanImportView(QWidget):
             self._watch.set_folders(
                 list(self._watch.folders) + [dlg.result_data]
             )
+            self._maybe_offer_teach(dlg.result_data)
 
     def _remove_watch_folder(self) -> None:
         if not self._watch:
@@ -720,6 +727,117 @@ class ScanImportView(QWidget):
             self._lbl_status.setText(
                 tr("watch.imported", file=row.get("file", ""))
             )
+
+    def _selected_watch_entry(self) -> dict | None:
+        """Markerad bevakad mapp (finns bara en används den)."""
+        if not self._watch:
+            return None
+        folders = list(self._watch.folders)
+        if not folders:
+            return None
+        row = self._lst_watch.currentRow()
+        if 0 <= row < len(folders):
+            return folders[row]
+        if len(folders) == 1:
+            return folders[0]
+        return None
+
+    def _teach_from_folder_clicked(self) -> None:
+        entry = self._selected_watch_entry()
+        if entry is None:
+            self._lbl_status.setText(tr("watch.learn_need_folder"))
+            return
+        self._teach_from_folder(entry)
+
+    def _maybe_offer_teach(self, entry: dict) -> None:
+        """Efter mapp-tillägg: erbjud att lära appen leverantören.
+
+        Bara om mappen har en leverantör, innehåller minst en
+        fakturafil och det inte redan finns en mall för den —
+        aldrig tjat, aldrig gissning.
+        """
+        supplier = str(entry.get("supplier", "") or "").strip()
+        if not supplier:
+            return
+        try:
+            from ui.watch_folders import supported_invoice_files
+            if not supported_invoice_files(entry.get("path", "")):
+                return
+            si = _scan_module()
+            if si.find_template(self._get_templates(), supplier):
+                return  # mallen finns redan
+        except Exception as exc:
+            log.warning("teach offer: %s", exc)
+            return
+        answer = QMessageBox.question(
+            self,
+            tr("watch.learn_title"),
+            tr("watch.learn_offer", supplier=supplier),
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._teach_from_folder(entry)
+
+    def _teach_from_folder(self, entry: dict) -> None:
+        """Lär appen läsa mappens fakturor från en exempel-PDF.
+
+        Appen skannar en av filerna i mappen; användaren matchar
+        manuellt vad som är fakturanummer/belopp/förfallo i
+        TemplateDialog ("visa vad som hör till vad"). Mallen
+        sparas i data/invoice_templates.json under leverantören
+        och används direkt av mappbevakningen.
+        """
+        from ui.watch_folders import supported_invoice_files
+        files = supported_invoice_files(entry.get("path", ""))
+        if not files:
+            self._lbl_status.setText(tr("watch.learn_no_files"))
+            return
+        chosen = files[0]
+        if len(files) > 1:
+            names = [f.name for f in files]
+            name, ok = QInputDialog.getItem(
+                self,
+                tr("watch.learn_title"),
+                tr("watch.learn_pick"),
+                names, 0, False,
+            )
+            if not ok:
+                return
+            chosen = files[names.index(name)]
+        si = _scan_module()
+        try:
+            text, _method = si.extract_text(chosen)
+        except Exception as exc:
+            log.warning("teach extract %s: %s", chosen, exc)
+            text = ""
+        if not str(text or "").strip():
+            self._lbl_status.setText(
+                tr("watch.learn_no_text", file=chosen.name)
+            )
+            return
+        supplier = str(entry.get("supplier", "") or "")
+        templates = self._get_templates()
+        existing = (
+            si.find_template(templates, supplier) if supplier else None
+        )
+        dlg = TemplateDialog(
+            self, str(text), supplier=supplier, existing=existing
+        )
+        if not dlg.exec() or not dlg.result_template:
+            return
+        name = dlg.result_template["supplier"]
+        templates[name] = {"fields": dlg.result_template["fields"]}
+        self._save_templates_file()
+        self._lbl_status.setText(tr("tmpl.saved", supplier=name))
+        log.info(
+            "SCAN_TEMPLATE: mall inlärd från mapp %s → %s",
+            entry.get("path", ""), name,
+        )
+        # Använd mallen direkt på nytt som ligger i mappen
+        if self._watch is not None:
+            try:
+                self._watch.scan_folder(entry)
+            except Exception as exc:
+                log.warning("teach rescan: %s", exc)
 
     def _review_parked(self) -> None:
         """Flyttar parkerade filer till granskningstabellen."""

@@ -65,6 +65,25 @@ def supported_file(path: Path) -> bool:
     return Path(path).suffix.lower() in SUPPORTED_SUFFIXES
 
 
+def supported_invoice_files(folder) -> list[Path]:
+    """
+    PDF/bild-filerna i en (bevakad) mapp, sorterade på filnamn.
+
+    Används av lär-flödet (välj en exempelfaktura att visa appen)
+    och för att avgöra om en mapp alls har något att lära från.
+    """
+    try:
+        return sorted(
+            (
+                p for p in Path(str(folder)).iterdir()
+                if p.is_file() and supported_file(p)
+            ),
+            key=lambda p: p.name.lower(),
+        )
+    except Exception:
+        return []
+
+
 def file_hash(path: Path) -> str:
     """sha256 av filinnehållet (chunkad läsning)."""
     h = hashlib.sha256()
