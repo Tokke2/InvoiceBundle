@@ -113,6 +113,7 @@ try:
         fmt_amount,
         combine_invoices,
         build_export_path,
+        chunk_export_rows,
         get_export_base,
         open_file,
         open_folder,
@@ -143,6 +144,7 @@ except ImportError:
         fmt_amount,
         combine_invoices,
         build_export_path,
+        chunk_export_rows,
         get_export_base,
         open_file,
         open_folder,
@@ -761,17 +763,18 @@ class InvoicesView(QWidget):
         ]
 
     def _include_originals(self) -> bool:
-        """Inställningen export_include_originals (standard: av)."""
+        """Inställningen export_include_originals (standard: PÅ —
+        originalen ska följa med i betal-PDF:en)."""
         try:
             if hasattr(self._app, "get_setting"):
                 return bool(
                     self._app.get_setting(
-                        "export_include_originals", False
+                        "export_include_originals", True
                     )
                 )
             return bool(
                 self._app.settings.get(
-                    "export_include_originals", False
+                    "export_include_originals", True
                 )
             )
         except Exception:
@@ -2138,10 +2141,6 @@ class InvoicesView(QWidget):
             fmt_amount(att_betala),
         )
 
-        # ── Bygg filsökväg: exports/<Leverantör>/<YYYY-MM-DD>/ ─────────
-        target_dir, filename = build_export_path(suppliers)
-        full_path = target_dir / filename
-
         # ── Hämta PDF-exportern ────────────────────────────────────────
         exporter = getattr(self._app, "pdf_exporter", None)
         if exporter is None:
@@ -2153,75 +2152,130 @@ class InvoicesView(QWidget):
             )
             return
 
-        # ── Exportera till PDF ─────────────────────────────────────────
-        try:
-            result = exporter.export_invoice_list(
-                exportable,
-                filename=str(full_path),
-                title=tr("invoices.export_title"),
-                check_duplicates=False,
-                mark_exported=True,
-                force_export=True,
-                payment_date=payment_date,
-                ask_payment_date=False,   # dialog redan visad ovan
-                include_originals=self._include_originals(),
-            )
-        except Exception as exc:
-            QMessageBox.critical(
-                self, "Export-fel", f"PDF-export misslyckades:\n{exc}"
-            )
-            return
-
-        if not result.get("success"):
-            if result.get("cancelled"):
-                self._status("Export avbruten.")
-                return
-            QMessageBox.warning(
-                self,
-                "Export misslyckades",
-                "\n".join(result.get("errors", ["Okänt fel"])),
-            )
-            return
-
-        actual_path = result.get("file_path", str(full_path))
-        export_pd = result.get("payment_date", payment_date)
-
-        # ── Spara i exporthistorik (inkl betalningsdatum) ──────────────
-        self._export_history.record_export(
-            invoices=exportable,
-            file_path=actual_path,
-            total_inv=total_invoices,
-            total_cred=total_credits,
-            att_betala=att_betala,
-            suppliers=suppliers,
-            payment_date=export_pd,   # betalningsdatum sparas
-        )
-
-        # ── Arkivera alla exporterade fakturor ─────────────────────────
+        # ── Exportera i filer om MAX 10 fakturarader ───────────────────
+        # Varje faktura är en egen rad i PDF:en; fler än 10 rader
+        # delas i flera filer (…-del1avN.pdf, …-del2avN.pdf, …)
+        # med originalen fördelade på sina egna fakturor. Samma
+        # betalningsdatum gäller alla delfiler i exporten, och
+        # historik + arkivering sker per fil. Misslyckas en delfil
+        # stannar exporten där — resten förblir oexporterat.
+        chunks = chunk_export_rows(exportable)
+        made_files: list[str] = []
+        total_included_att = 0
+        n_missing_att = 0
         archived = 0
-        for inv in exportable:
-            try:
-                self._app.update_invoice(
-                    inv["id"], {"status": "Arkiverad"}
+        export_pd = payment_date
+        failed_note = ""
+        aborted = False
+        for idx, chunk in enumerate(chunks):
+            chunk_suppliers = sorted(
+                {
+                    str(i.get("supplier", "")).strip()
+                    for i in chunk if i.get("supplier")
+                }
+            )
+            target_dir, filename = build_export_path(chunk_suppliers)
+            if len(chunks) > 1:
+                filename = (
+                    f"{Path(filename).stem}"
+                    f"-del{idx + 1}av{len(chunks)}.pdf"
                 )
-                archived += 1
-            except Exception:
-                pass
+            full_path = target_dir / filename
+            try:
+                result = exporter.export_invoice_list(
+                    chunk,
+                    filename=str(full_path),
+                    title=tr("invoices.export_title"),
+                    check_duplicates=False,
+                    mark_exported=True,
+                    force_export=True,
+                    payment_date=payment_date,
+                    ask_payment_date=False,   # dialog redan visad ovan
+                    include_originals=self._include_originals(),
+                )
+            except Exception as exc:
+                failed_note = str(exc)
+                break
+            if not result.get("success"):
+                if result.get("cancelled"):
+                    aborted = True
+                else:
+                    failed_note = "\n".join(
+                        result.get("errors", ["Okänt fel"])
+                    )
+                break
+
+            actual_path = result.get("file_path", str(full_path))
+            made_files.append(actual_path)
+            export_pd = result.get("payment_date", payment_date)
+            total_included_att += int(
+                result.get("attachments_included", 0) or 0
+            )
+            n_missing_att += int(
+                result.get("attachments_missing", 0) or 0
+            )
+
+            # Summor för just DENNA fil (historiken är per fil)
+            c_inv = 0.0
+            c_cred = 0.0
+            for i in chunk:
+                val = _to_float(i.get("total_amount"))
+                if val > 0:
+                    c_inv += val
+                elif val < 0:
+                    c_cred += val
+            self._export_history.record_export(
+                invoices=chunk,
+                file_path=actual_path,
+                total_inv=round(c_inv, 2),
+                total_cred=round(c_cred, 2),
+                att_betala=round(c_inv + c_cred, 2),
+                suppliers=chunk_suppliers,
+                payment_date=export_pd,   # betalningsdatum sparas
+            )
+
+            # Arkivera just den här filens fakturor
+            for inv in chunk:
+                try:
+                    self._app.update_invoice(
+                        inv["id"], {"status": "Arkiverad"}
+                    )
+                    archived += 1
+                except Exception:
+                    pass
+
+        if not made_files:
+            if aborted:
+                self._status("Export avbruten.")
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Export misslyckades",
+                    failed_note or "Okänt fel",
+                )
+            return
 
         self._do_refresh()
         attach_note = ""
-        if result.get("attachments_included"):
+        if total_included_att:
             attach_note = tr(
                 "invoices.attachments_note",
-                n=result["attachments_included"],
+                n=total_included_att,
             )
-        n_missing_att = int(result.get("attachments_missing", 0) or 0)
         if n_missing_att:
             attach_note += (
                 "  " + tr("invoices.attachments_missing", n=n_missing_att)
             )
+        if n_missing_att:
+            attach_note += (
+                "  " + tr("invoices.attachments_missing", n=n_missing_att)
+            )
+        files_note = (
+            f" i {len(made_files)} filer (max 10/fil)"
+            if len(made_files) > 1 else ""
+        )
         self._status(
-            f"📄  {archived} poster exporterade"
+            f"📄  {archived} poster exporterade{files_note}"
             f" → {fmt_amount(att_betala)}"
             + (f"  (betaldatum: {export_pd})" if export_pd else "")
             + attach_note
@@ -2237,11 +2291,24 @@ class InvoicesView(QWidget):
                 "\n\n  "
                 + tr("invoices.attachments_missing", n=n_missing_att)
             )
+        files_line = (
+            f"Fil: {made_files[0]}"
+            if len(made_files) == 1
+            else "Filer (max 10 fakturor/fil):\n" + "\n".join(
+                f"  • {f}" for f in made_files
+            )
+        )
+        partial_line = (
+            f"\n\n⚠  Exporten avbröts ({failed_note}) — "
+            "övriga poster är INTE exporterade eller arkiverade."
+            if failed_note else ""
+        )
         box = QMessageBox(self)
         box.setWindowTitle("Export klar")
         box.setIcon(
             QMessageBox.Icon.Warning
-            if n_missing_att else QMessageBox.Icon.Information
+            if (n_missing_att or partial_line)
+            else QMessageBox.Icon.Information
         )
         box.setText(
             f"✅  {archived} poster exporterade och arkiverade.\n\n"
@@ -2250,8 +2317,9 @@ class InvoicesView(QWidget):
             f"  {'─' * 38}\n"
             f"  ATT BETALA       {fmt_amount(att_betala)}\n"
             f"{payment_line}\n"
-            f"Fil: {actual_path}"
+            f"{files_line}"
             f"{missing_line}"
+            f"{partial_line}"
         )
         btn_open_file = box.addButton(
             "📄  Öppna filen", QMessageBox.ButtonRole.AcceptRole
@@ -2264,16 +2332,17 @@ class InvoicesView(QWidget):
 
         clicked = box.clickedButton()
         if clicked is btn_open_file:
-            open_file(actual_path)
+            open_file(made_files[0])
         elif clicked is btn_open_folder:
-            open_folder(Path(actual_path).parent)
+            open_folder(Path(made_files[0]).parent)
 
         # Betalningsdatum nollställs implicit — variabeln payment_date
         # existerar bara i denna funktion. Nästa export frågar igen.
         log.info(
-            "Export klar: %d fakturor arkiverade, "
+            "Export klar: %d fakturor arkiverade i %d fil(er), "
             "betalningsdatum '%s' nollställt",
             archived,
+            len(made_files),
             export_pd,
         )
 

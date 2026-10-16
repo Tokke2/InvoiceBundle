@@ -83,21 +83,47 @@ def plan_batches(
         ]
         earliest = min(dues) if dues else None
         if len(rows) >= count_threshold:
-            reason = "count"
+            # Max `count_threshold` fakturor per exportfil — fler
+            # delas i delfiler (tidigaste förfall först) med eget
+            # betalningsdatum (tidigaste förfallet) per delfil.
+            ordered = sorted(
+                rows,
+                key=lambda r: (
+                    str(r.get("due_date", "") or "9999-99-99"),
+                    str(r.get("invoice_number", "") or ""),
+                ),
+            )
+            for start in range(0, len(ordered), count_threshold):
+                part = ordered[start:start + count_threshold]
+                pdues = [
+                    d for d in (
+                        _parse_day(r.get("due_date")) for r in part
+                    ) if d is not None
+                ]
+                pearliest = min(pdues) if pdues else None
+                batches.append({
+                    "supplier": supplier,
+                    "invoices": part,
+                    "reason": "count",
+                    "earliest_due": (
+                        pearliest.isoformat() if pearliest else ""
+                    ),
+                    "payment_date": (
+                        pearliest.isoformat() if pearliest
+                        else today.isoformat()
+                    ),
+                })
         elif earliest is not None and (earliest - today).days <= due_days:
-            reason = "due"
-        else:
-            continue
-        batches.append({
-            "supplier": supplier,
-            "invoices": rows,
-            "reason": reason,
-            "earliest_due": earliest.isoformat() if earliest else "",
-            "payment_date": (
-                earliest.isoformat() if earliest
-                else today.isoformat()
-            ),
-        })
+            batches.append({
+                "supplier": supplier,
+                "invoices": rows,
+                "reason": "due",
+                "earliest_due": earliest.isoformat() if earliest else "",
+                "payment_date": (
+                    earliest.isoformat() if earliest
+                    else today.isoformat()
+                ),
+            })
     return batches
 
 

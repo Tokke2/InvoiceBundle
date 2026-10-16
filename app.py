@@ -147,7 +147,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "autostart_method": "auto",
     "start_minimized":  True,
     "close_to_tray":    True,
-    "export_include_originals": False,
+    "export_include_originals": True,
     "update_auto_check": True,
     "auto_batch":      False,
     "update_last_check": "",

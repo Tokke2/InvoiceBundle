@@ -1775,7 +1775,7 @@ class MainWindow(QMainWindow):
         )
         self._act_include_originals.setCheckable(True)
         self._act_include_originals.setChecked(
-            bool(self._settings.get("export_include_originals", False))
+            bool(self._settings.get("export_include_originals", True))
         )
         self._act_include_originals.triggered.connect(
             self._toggle_include_originals

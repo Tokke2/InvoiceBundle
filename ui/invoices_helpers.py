@@ -621,6 +621,37 @@ def build_export_path(suppliers: list[str]) -> tuple[Path, str]:
     return target, filename
 
 
+#: Max antal fakturarader i EN exportfil (betal-PDF). Fler rader
+#: → flera filer (…-del1avN.pdf, …-del2avN.pdf, …). Varje faktura
+#: är alltid en egen rad i PDF:en — taket gäller per fil, det
+#: betyder aldrig att fakturor slås ihop till en gemensam rad.
+MAX_PER_EXPORT_FILE = 10
+
+
+def chunk_export_rows(
+    rows: list[dict], size: int = MAX_PER_EXPORT_FILE
+) -> list[list[dict]]:
+    """
+    Delar exportrader i filer om högst `size` stycken, i samma
+    ordning som betal-PDF:en sorterar (leverantör → förfallodatum
+    → fakturanummer). Uppdelningen blir därmed förutsägbar och
+    samma leverantörs rader hålls ihop så långt taket tillåter.
+    """
+    def _key(r: dict) -> tuple[str, str, str]:
+        return (
+            str(r.get("supplier", "") or "").strip().lower(),
+            str(r.get("due_date", "") or ""),
+            str(r.get("invoice_number", "") or ""),
+        )
+
+    ordered = sorted(rows or [], key=_key)
+    if size < 1:
+        size = MAX_PER_EXPORT_FILE
+    return [
+        ordered[i:i + size] for i in range(0, len(ordered), size)
+    ]
+
+
 # ═════════════════════════════════════════════════════════════════════
 #  SESSION-BETALNINGSDATUM
 # ═════════════════════════════════════════════════════════════════════
