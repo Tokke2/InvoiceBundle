@@ -441,3 +441,74 @@ def test_parse_normal_invoice_stays_positive_and_credit_detector():
     assert si.is_credit_note("KREDITNOTA nr 5")
     assert si.is_credit_note("Credit Note")
     assert not si.is_credit_note(text)
+
+
+# ── Punkt som tusentalsavskiljare (NSG/Pilkington-format) ────────
+
+PILKINGTON_TEXT = """\
+0846825945|46817|BILRUTAN SVERIGE / TADEGA AB|ORMESTAGATAN 1A|702 83
+FAKTURA
+Pilkington Automotive Sweden AB / AGR
+Bankgiro 572-3457
+Nummer 2075214774
+Datum (tax point) 2026.10.15
+PILKINGTON NSG Group Flat Glass Business
+Vårt kundnr 46817
+Betalningsvillkor T.o.m. 14.11.2026 utan avdrag
+Vårt ordernummer: 481489812 - 2026.10.15
+Pris SEK 4.999,00 Kundrabatt -30% Belopp 3.499,30
+SUMMA BILRUTOR 3.499,30
+BELOPP EXKL MOMS 3.499,30 MOMS BELOPP 874,83
+TOTALT FAKTURABELOPP 4.374,00
+"""
+
+
+def test_norm_amount_dot_thousands_swedish():
+    # Svenskt: punkt = tusental, komma = decimal. Att blanda ihop
+    # det med US-format gav 3.5 av 3.499,30 — sista skiljetecknet
+    # är alltid decimaltecknet.
+    assert si._norm_amount("3.499,30") == 3499.30
+    assert si._norm_amount("4.374,00") == 4374.00
+    assert si._norm_amount("3.499.250,75") == 3499250.75
+    # US-formatet ska fortsätta fungera
+    assert si._norm_amount("1,234.56") == 1234.56
+    assert si._norm_amount("1 250,00") == 1250.00
+    assert si._norm_amount("900,00") == 900.00
+
+
+def test_parse_date_year_first_with_dots():
+    assert si._parse_date("2026.10.15") == "2026-10-15"
+    assert si._parse_date("2026/10/15") == "2026-10-15"
+    assert si._parse_date("2026-10-15") == "2026-10-15"
+    # Dag-först-formaten orörda
+    assert si._parse_date("14.11.2026") == "2026-11-14"
+    assert si._parse_date("20261015") == "2026-10-15"
+
+
+def test_pilkington_layout_generic_parks_template_nails_it():
+    suppliers = [{"name": "Pilkington", "short_name": "Pilkington"}]
+
+    # Utan inlärning: leverantören känns igen, men fakturanumret
+    # ("Nummer") missas → filen parkeras i stället för att
+    # registreras med gissad totalsumma (3499,30 exkl. moms).
+    raw = si.parse_invoice_text(PILKINGTON_TEXT, suppliers)
+    assert raw["supplier"] == "Pilkington"
+    assert "fakturanummer" in raw["missing"]
+
+    # Efter EN manuell matchning (mall) sitter allt, inklusive
+    # punkt-formaten för belopp och datum.
+    templates = {"Pilkington": {"fields": {
+        "invoice_number": {"label": "Nummer"},
+        "total_amount": {"label": "TOTALT FAKTURABELOPP"},
+        "date": {"label": "Datum (tax point)"},
+        "due_date": {"label": "T.o.m."},
+    }}}
+    parsed = si.parse_invoice_text(
+        PILKINGTON_TEXT, suppliers, templates=templates
+    )
+    assert parsed["invoice_number"] == "2075214774"
+    assert parsed["total_amount"] == 4374.00
+    assert parsed["date"] == "2026-10-15"
+    assert parsed["due_date"] == "2026-11-14"
+    assert parsed["missing"] == []
+    assert parsed["template"] == "Pilkington"

@@ -172,10 +172,16 @@ def _norm_amount(raw: str) -> float:
     """'71 144,00' / '1 638.50' → float; 0.0 vid skräp."""
     t = re.sub(r"[ \u00a0\u2009]", "", raw or "")
     t = t.replace("kr", "").replace("SEK", "").strip()
-    if t.count(",") == 1 and "." not in t:
+    if "," in t and "." in t:
+        # Båda skiljetecknen finns: det SISTA är decimaltecknet.
+        # Svenskt 3.499,30 (punkt = tusental, t.ex. NSG/Pilkington)
+        # och US-format 1,234.56 (komma = tusental) blir båda rätt.
+        if t.rfind(",") > t.rfind("."):
+            t = t.replace(".", "").replace(",", ".")
+        else:
+            t = t.replace(",", "")
+    elif t.count(",") == 1:
         t = t.replace(",", ".")
-    elif "," in t and "." in t:
-        t = t.replace(",", "")          # 1,234.56-stil
     try:
         return abs(float(t))
     except ValueError:
@@ -238,7 +244,7 @@ def parse_ocr(text: str) -> str:
 def _parse_date(raw: str) -> str:
     """Normaliserar svenska datumformat till YYYY-MM-DD ('' vid fel)."""
     raw = (raw or "").strip()
-    m = re.match(r"^(\d{4})-?(\d{2})-?(\d{2})$", raw)
+    m = re.match(r"^(\d{4})[-./]?(\d{2})[-./]?(\d{2})$", raw)
     if m:
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
     m = re.match(r"^(\d{1,2})[./\-](\d{1,2})[./\-](\d{2,4})$", raw)
@@ -423,7 +429,7 @@ TEMPLATE_FIELD_KINDS: dict[str, str] = {
 _AMOUNT_AFTER = re.compile(
     r"\d{1,3}(?:[ .\u00a0]\d{3})+(?:[,.]\d{2})?|\d+[,.]\d{2}"
 )
-_DATE_AFTER = re.compile(r"\d{4}-?\d{2}-?\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}")
+_DATE_AFTER = re.compile(r"\d{4}[-./]?\d{2}[-./]?\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}")
 _TOKEN_AFTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-/.]{1,29}")
 _DIGITS_AFTER = re.compile(r"\d[\d \-]{4,28}\d")
 
