@@ -192,11 +192,33 @@ def _norm_amount(raw: str) -> float:
 _TOTAL_PATTERNS: tuple[str, ...] = (
     r"ATT\s*BETALA[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
     r"TOTALT\s*ATT\s*BETALA[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
+    r"TILLGODO[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
     r"SUMMA[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
     r"TOTALT[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
 )
 
 _ALL_AMOUNTS = re.compile(r"\d{1,3}(?:[ .\u00a0]\d{3})+,\d{2}|\d+,\d{2}")
+
+
+def _amount_from_group(group: str) -> float:
+    """
+    Tolkar beloppsgruppen efter en total-etikett. Vissa layouter
+    (Saint-Gobain) skriver "Summa Glas 1 2.642,50" — ett ensamt
+    heltal (ANTAL) framför beloppet som annars klistras ihop
+    till 12.642,50. Står ett ensamt heltal före det sista
+    fullständiga beloppet är det sista beloppet det rätta.
+    """
+    g = (group or "").strip()
+    hits = list(_ALL_AMOUNTS.finditer(g))
+    if hits:
+        last = hits[-1]
+        if (
+            last.start() > 0
+            and last.end() == len(g)
+            and re.fullmatch(r"[\d\s]+", g[: last.start()])
+        ):
+            return _norm_amount(last.group(0))
+    return _norm_amount(g)
 
 
 def parse_total(text: str) -> float:
@@ -209,7 +231,7 @@ def parse_total(text: str) -> float:
     for pat in _TOTAL_PATTERNS:
         m = re.search(pat, upper)
         if m:
-            v = _norm_amount(m.group(1))
+            v = _amount_from_group(m.group(1))
             if v > 0:
                 return round(v, 2)
     amounts = [_norm_amount(a) for a in _ALL_AMOUNTS.findall(text)]

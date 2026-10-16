@@ -512,3 +512,106 @@ def test_pilkington_layout_generic_parks_template_nails_it():
     assert parsed["due_date"] == "2026-11-14"
     assert parsed["missing"] == []
     assert parsed["template"] == "Pilkington"
+
+
+# ── Saint-Gobain Autover: två sidor + kreditnota ─────────────────
+
+SAINT_GOBAIN_INVOICE = """\
+SAINT-GOBAIN Faktura
+Saint-Gobain Autover Sverige AB
+Nummer 9750271120
+Datum 13.03.2020
+Kundnummer: 468118
+Förfallodatum: 2020-04-12
+0010 8302501100 3390A M/GD 1 PC 4.481,00 -55,0% 2.016,45
+0016 9201137400 T2098 1 PC 120,00 120,00
+Nummer/Datum 9750271120 / 13.03.2020
+Sida: 2 / 2
+Summa Glas 4 12.031,20
+Summa Övrigt 2 308,80
+Varuvärde 12.340,00
+Moms (SEK) 3.085,00
+Att Betala (SEK) 15.425,00
+Bankgiro: 942-2817 Organisationsnummer: 556274-6114
+"""
+
+SAINT_GOBAIN_CREDIT = """\
+SAINT-GOBAIN Kreditnota
+Saint-Gobain Autover Sverige AB
+Nummer 9750269328
+Datum 21.02.2020
+Referens faktura/Datum: 9750268598 / 14.02.2020
+Kundnummer: 467996
+Förfallodatum: 22.03.2020
+0020 7505800301 2920E M/GEL 1 PC Retur 3.775,00 2.642,50
+Faktura nr. 9750268598 from 14.02.2020
+Summa Glas 1 2.642,50
+Summa Övrigt 0
+Varuvärde 2.642,50
+Moms (SEK) 660,63
+Utj. 0,13-
+Er Tillgodo (SEK) 3.303,00
+Bankgiro: 942-2817 Organisationsnummer: 556274-6114
+"""
+
+SAINT_GOBAIN_TEMPLATES = {"Saint-Gobain Autover": {"fields": {
+    "invoice_number": {"label": "Nummer"},
+    "total_amount": {"label": "Att Betala (SEK)"},
+    "date": {"label": "Datum"},
+    "due_date": {"label": "Förfallodatum"},
+}}}
+
+
+def test_saint_gobain_two_page_invoice_with_template():
+    # Totalen ("Att Betala") ligger på SIDA 2 — flersidig
+    # textextraktion måste slå ihop sidorna innan tolkning.
+    parsed = si.parse_invoice_text(
+        SAINT_GOBAIN_INVOICE,
+        [{"name": "Saint-Gobain Autover"}],
+        templates=SAINT_GOBAIN_TEMPLATES,
+    )
+    assert parsed["invoice_number"] == "9750271120"
+    assert parsed["total_amount"] == 15425.00
+    assert parsed["date"] == "2020-03-13"
+    assert parsed["due_date"] == "2020-04-12"
+    assert parsed["missing"] == []
+    assert parsed["template"] == "Saint-Gobain Autover"
+
+
+def test_saint_gobain_generic_finds_total_but_parks():
+    parsed = si.parse_invoice_text(
+        SAINT_GOBAIN_INVOICE, [{"name": "Saint-Gobain Autover"}]
+    )
+    # "Att Betala" hittas generiskt; numret ("Nummer") inte
+    # → parkeras, aldrig auto-registrerad.
+    assert parsed["total_amount"] == 15425.00
+    assert "fakturanummer" in parsed["missing"]
+
+
+def test_saint_gobain_credit_note_nets_to_tillgodo():
+    # Kreditnotans total är "Er Tillgodo" (3.303,00 inkl moms)
+    # och ska räknas NEGATIVT. Mallen hittar inget "Att Betala"
+    # på kreditnotan — den generiska Tillgodo-vägen måste ge
+    # rätt belopp ändå, annars nettas ATT BETALA fel.
+    parsed = si.parse_invoice_text(
+        SAINT_GOBAIN_CREDIT,
+        [{"name": "Saint-Gobain Autover"}],
+        templates=SAINT_GOBAIN_TEMPLATES,
+    )
+    assert parsed["invoice_number"] == "9750269328"
+    assert parsed["total_amount"] == -3303.00
+    assert parsed["date"] == "2020-02-21"
+    assert parsed["due_date"] == "2020-03-22"
+    assert parsed["missing"] == []
+
+
+def test_amount_from_group_quantity_not_glued():
+    # "Summa Glas 1 2.642,50": antalet (1) klistrades förut
+    # ihop med nettobeloppet → 12.642,50.
+    assert si._amount_from_group("1 2.642,50") == 2642.50
+    assert si._amount_from_group("4 12.031,20") == 12031.20
+    assert si.parse_total("Summa Glas 1 2.642,50") == 2642.50
+    # Mellanslags-tusental och US-format får inte förstöras.
+    assert si._amount_from_group("12 031,20") == 12031.20
+    assert si._amount_from_group("3.499,30") == 3499.30
+    assert si._amount_from_group("1,234.56") == 1234.56
