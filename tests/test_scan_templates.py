@@ -407,3 +407,37 @@ def test_multipage_pdf_extract_covers_all_pages(tmp_path):
     )
     assert parsed["invoice_number"] == "9911"
     assert parsed["total_amount"] == 5000.0
+
+
+def test_parse_credit_note_gets_negative_total():
+    """Kreditfaktura vid inskanning → NEGATIVT belopp.
+
+    Annars skulle krediten ÖKA att betala i stället för att
+    minska klumpen — registret sätter Kredittotal via tecknet.
+    """
+    text = (
+        "PILKINGTON GLAS AB\n"
+        "Kreditfaktura\n"
+        "Fakturanr: K-77\n"
+        "Att betala: -1 250,00\n"
+    )
+    parsed = si.parse_invoice_text(
+        text, [{"name": "Pilkington", "short_name": "Pilkington"}]
+    )
+    assert parsed["total_amount"] == -1250.0
+    assert "belopp" not in parsed["missing"]
+
+
+def test_parse_normal_invoice_stays_positive_and_credit_detector():
+    text = (
+        "PILKINGTON GLAS AB\nFaktura\nFakturanr: 8811\n"
+        "Betalningsvillkor: 30 dagar netto\n"
+        "Att betala: 1 250,00\n"
+    )
+    parsed = si.parse_invoice_text(
+        text, [{"name": "Pilkington", "short_name": "Pilkington"}]
+    )
+    assert parsed["total_amount"] == 1250.0
+    assert si.is_credit_note("KREDITNOTA nr 5")
+    assert si.is_credit_note("Credit Note")
+    assert not si.is_credit_note(text)

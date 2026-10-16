@@ -249,6 +249,20 @@ def _parse_date(raw: str) -> str:
     return ""
 
 
+#: Markörer för kreditdokument. Ordet "kreditfaktura/-nota" på
+#: dokumentet är den pålitliga signalen — nakna siffror säger
+#: inte om beloppet ska öka eller MINSKA att betala.
+_CREDIT_MARKERS = (
+    "kreditfaktura", "kreditnota",
+    "credit note", "credit memo", "credit invoice",
+)
+
+
+def is_credit_note(text: str) -> bool:
+    """True om dokumentet ser ut att vara en kreditfaktura/-nota."""
+    t = (text or "").lower()
+    return any(m in t for m in _CREDIT_MARKERS)
+
 def parse_dates(text: str) -> tuple[str, str]:
     """
     Returnerar (fakturadatum, förfallodatum).
@@ -361,6 +375,11 @@ def parse_invoice_text(
             (bool(supplier), "leverantör"),
         ) if not ok
     ]
+    # Kreditfaktura/-nota: beloppet ska MINSKA att betala,
+    # aldrig öka den. Missbedömningen sker lätt annars eftersom
+    # både heuristiken och mallarna bara ser nakna siffror.
+    if total > 0 and is_credit_note(text or ""):
+        total = -total
     result: dict[str, Any] = {
         "total_amount": total,
         "invoice_number": inv_nr,

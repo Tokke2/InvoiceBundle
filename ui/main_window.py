@@ -2415,9 +2415,14 @@ class MainWindow(QMainWindow):
     def _on_auto_batch_done(self, results: list) -> None:
         """Applicerar Betald + historik + utskrift på huvudtråden."""
         from ui.invoices_helpers import (
-            ExportHistoryManager, combine_invoices, print_file,
+            ExportHistoryManager, archive_original_file,
+            combine_invoices, print_file, read_watch_folders,
         )
 
+        # Original från bevakade mappar → Arkiv/<år>/ vid betalning
+        watch_folders = read_watch_folders(
+            self._auto_batch_data_dir() / "watch_folders.json"
+        )
         messages: list[str] = []
         for item in results or []:
             batch = item["batch"]
@@ -2432,7 +2437,12 @@ class MainWindow(QMainWindow):
                     12000,
                 )
                 continue
+            try:
+                batch_year = int(str(batch["payment_date"])[:4])
+            except Exception:
+                batch_year = datetime.date.today().year
             paid = 0
+            moved = 0
             for inv in batch["invoices"]:
                 try:
                     self._app.update_invoice(
@@ -2443,9 +2453,27 @@ class MainWindow(QMainWindow):
                         },
                     )
                     paid += 1
+                    # Originalet till Arkiv/<år>/ (bara om det
+                    # ligger i en bevakad mapp) + peka om i JSON
+                    old_att = str(inv.get("attachment", "") or "")
+                    if old_att and watch_folders:
+                        new_att = archive_original_file(
+                            old_att, watch_folders, batch_year
+                        )
+                        if new_att and new_att != old_att:
+                            self._app.update_invoice(
+                                inv["id"],
+                                {"attachment": new_att},
+                            )
+                            moved += 1
                 except Exception as exc:
                     log.warning("AUTOBATCH betald %s: %s",
                                 inv.get("id"), exc)
+            if moved:
+                log.info(
+                    "AUTOBATCH %s: %d original flyttade till "
+                    "Arkiv/%d", supplier, moved, batch_year,
+                )
             try:
                 summary = combine_invoices(batch["invoices"])
                 ExportHistoryManager(

@@ -49,6 +49,7 @@ import logging
 import math
 import os
 import platform
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -650,6 +651,66 @@ def chunk_export_rows(
     return [
         ordered[i:i + size] for i in range(0, len(ordered), size)
     ]
+
+
+def read_watch_folders(config_file) -> list[dict]:
+    """folders-listan ur watch_folders.json ([] vid alla fel)."""
+    try:
+        cfg = json.loads(
+            Path(config_file).read_text(encoding="utf-8")
+        )
+        folders = cfg.get("folders", [])
+        return [f for f in folders if isinstance(f, dict)]
+    except Exception:
+        return []
+
+
+def archive_original_file(
+    attachment: str, watched_folders: list[dict], year: int
+) -> str:
+    """
+    Flyttar en exporterad fakturas original från den bevakade
+    mappen till <mapp>/Arkiv/<år>/ och returnerar nya sökvägen.
+
+    Bara filer som ligger DIREKT i en bevakad mapp flyttas;
+    allt annat (annan plats, saknad fil, fel under vägen) lämnas
+    orört och den gamla sökvägen returneras oförändrad. Funktionen
+    kastar aldrig undantag — exporten får inte fallera på en
+    arkivflytt.
+    """
+    old = str(attachment or "")
+    try:
+        src = Path(old.strip())
+        if not old.strip() or not src.is_file():
+            return old
+        root = None
+        for entry in watched_folders or []:
+            pth = str(entry.get("path", "") or "").strip()
+            if not pth:
+                continue
+            try:
+                if src.resolve().parent == Path(pth).resolve():
+                    root = Path(pth)
+                    break
+            except Exception:
+                continue
+        if root is None:
+            return old
+        target_dir = root / "Arkiv" / str(year)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / src.name
+        if target.exists():
+            if target.resolve() == src.resolve():
+                return str(src)
+            stem, suffix = src.stem, src.suffix
+            n = 2
+            while target.exists():
+                target = target_dir / f"{stem}_{n}{suffix}"
+                n += 1
+        shutil.move(str(src), str(target))
+        return str(target)
+    except Exception:
+        return old
 
 
 # ═════════════════════════════════════════════════════════════════════

@@ -114,6 +114,8 @@ try:
         combine_invoices,
         build_export_path,
         chunk_export_rows,
+        archive_original_file,
+        read_watch_folders,
         get_export_base,
         open_file,
         open_folder,
@@ -145,6 +147,8 @@ except ImportError:
         combine_invoices,
         build_export_path,
         chunk_export_rows,
+        archive_original_file,
+        read_watch_folders,
         get_export_base,
         open_file,
         open_folder,
@@ -2159,6 +2163,24 @@ class InvoicesView(QWidget):
         # betalningsdatum gäller alla delfiler i exporten, och
         # historik + arkivering sker per fil. Misslyckas en delfil
         # stannar exporten där — resten förblir oexporterat.
+        # Original från BEVAKADE mappar flyttas till
+        # <mapp>/Arkiv/<exportår>/ i samband med exporten och
+        # fakturorna pekas om dit i registret (JSON).
+        try:
+            _data_dir = Path(self._app.settings.get("db_path", "data"))
+        except Exception:
+            _data_dir = Path("data")
+        if not _data_dir.is_absolute():
+            _data_dir = Path(__file__).parent.parent / _data_dir
+        watch_folders = read_watch_folders(
+            _data_dir / "watch_folders.json"
+        )
+        try:
+            export_year = int(str(payment_date)[:4])
+        except Exception:
+            export_year = datetime.date.today().year
+        moved_originals = 0
+
         chunks = chunk_export_rows(exportable)
         made_files: list[str] = []
         total_included_att = 0
@@ -2244,6 +2266,25 @@ class InvoicesView(QWidget):
                 except Exception:
                     pass
 
+            # ... och flytta originalen till Arkiv/<år>/
+            if watch_folders:
+                for inv in chunk:
+                    old_att = str(inv.get("attachment", "") or "")
+                    if not old_att:
+                        continue
+                    new_att = archive_original_file(
+                        old_att, watch_folders, export_year
+                    )
+                    if new_att and new_att != old_att:
+                        try:
+                            self._app.update_invoice(
+                                inv["id"],
+                                {"attachment": new_att},
+                            )
+                            moved_originals += 1
+                        except Exception:
+                            pass
+
         if not made_files:
             if aborted:
                 self._status("Export avbruten.")
@@ -2274,11 +2315,22 @@ class InvoicesView(QWidget):
             f" i {len(made_files)} filer (max 10/fil)"
             if len(made_files) > 1 else ""
         )
+        moved_note = ""
+        if moved_originals:
+            log.info(
+                "Export: %d original flyttade till Arkiv/%d",
+                moved_originals, export_year,
+            )
+            moved_note = tr(
+                "invoices.originals_archived",
+                n=moved_originals, year=export_year,
+            )
         self._status(
             f"📄  {archived} poster exporterade{files_note}"
             f" → {fmt_amount(att_betala)}"
             + (f"  (betaldatum: {export_pd})" if export_pd else "")
             + attach_note
+            + moved_note
         )
 
         # ── Resultatdialog: Öppna filen / Öppna mappen / Stäng ─────────
