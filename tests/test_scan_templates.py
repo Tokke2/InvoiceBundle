@@ -554,7 +554,15 @@ Er Tillgodo (SEK) 3.303,00
 Bankgiro: 942-2817 Organisationsnummer: 556274-6114
 """
 
-SAINT_GOBAIN_TEMPLATES = {"Saint-Gobain Autover": {"fields": {
+#: I registret heter leverantören Direktglas (på papperet står
+#: Saint-Gobain Autover) — träffen sker via bankgiro/org.nr.
+DIREKTGLAS = [{
+    "name": "Direktglas",
+    "org_number": "556274-6114",
+    "bg": "942-2817",
+}]
+
+SAINT_GOBAIN_TEMPLATES = {"Direktglas": {"fields": {
     "invoice_number": {"label": "Nummer"},
     "total_amount": {"label": "Att Betala (SEK)"},
     "date": {"label": "Datum"},
@@ -566,8 +574,7 @@ def test_saint_gobain_two_page_invoice_with_template():
     # Totalen ("Att Betala") ligger på SIDA 2 — flersidig
     # textextraktion måste slå ihop sidorna innan tolkning.
     parsed = si.parse_invoice_text(
-        SAINT_GOBAIN_INVOICE,
-        [{"name": "Saint-Gobain Autover"}],
+        SAINT_GOBAIN_INVOICE, DIREKTGLAS,
         templates=SAINT_GOBAIN_TEMPLATES,
     )
     assert parsed["invoice_number"] == "9750271120"
@@ -575,13 +582,12 @@ def test_saint_gobain_two_page_invoice_with_template():
     assert parsed["date"] == "2020-03-13"
     assert parsed["due_date"] == "2020-04-12"
     assert parsed["missing"] == []
-    assert parsed["template"] == "Saint-Gobain Autover"
+    assert parsed["supplier"] == "Direktglas"
+    assert parsed["template"] == "Direktglas"
 
 
 def test_saint_gobain_generic_finds_total_but_parks():
-    parsed = si.parse_invoice_text(
-        SAINT_GOBAIN_INVOICE, [{"name": "Saint-Gobain Autover"}]
-    )
+    parsed = si.parse_invoice_text(SAINT_GOBAIN_INVOICE, DIREKTGLAS)
     # "Att Betala" hittas generiskt; numret ("Nummer") inte
     # → parkeras, aldrig auto-registrerad.
     assert parsed["total_amount"] == 15425.00
@@ -594,8 +600,7 @@ def test_saint_gobain_credit_note_nets_to_tillgodo():
     # på kreditnotan — den generiska Tillgodo-vägen måste ge
     # rätt belopp ändå, annars nettas ATT BETALA fel.
     parsed = si.parse_invoice_text(
-        SAINT_GOBAIN_CREDIT,
-        [{"name": "Saint-Gobain Autover"}],
+        SAINT_GOBAIN_CREDIT, DIREKTGLAS,
         templates=SAINT_GOBAIN_TEMPLATES,
     )
     assert parsed["invoice_number"] == "9750269328"
@@ -615,3 +620,13 @@ def test_amount_from_group_quantity_not_glued():
     assert si._amount_from_group("12 031,20") == 12031.20
     assert si._amount_from_group("3.499,30") == 3499.30
     assert si._amount_from_group("1,234.56") == 1234.56
+
+
+def test_supplier_matched_via_bankgiro_not_printed_name():
+    parsed = si.parse_invoice_text(
+        SAINT_GOBAIN_INVOICE,
+        [{"name": "Direktglas"}],
+        templates=SAINT_GOBAIN_TEMPLATES,
+    )
+    assert parsed["supplier"] == ""
+    assert "leverantör" in parsed["missing"]
