@@ -759,11 +759,18 @@ class InvoicesView(QWidget):
         self._update_export_buttons()
 
     def _get_exportable(self) -> list[dict]:
-        """Alla fakturor som är aktiva (ej arkiverade/makulerade)."""
+        """
+        Underlaget till "Exportera alla": obetalda och aktiva.
+
+        Betald/Arkiverad/Makulerad är ALLTID uteslutna — markerar
+        man en faktura som betald försvinner den alltså ur
+        exporten och kan inte betalas dubbelt av misstag.
+        (Exportknappens antal använder samma urval.)
+        """
         return [
             r
             for r in self._all_data
-            if r.get("status") not in HIDDEN_STATUSES
+            if r.get("status") not in NON_UNPAID_STATUSES
         ]
 
     def _include_originals(self) -> bool:
