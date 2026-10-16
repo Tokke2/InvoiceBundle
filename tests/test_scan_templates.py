@@ -630,3 +630,90 @@ def test_supplier_matched_via_bankgiro_not_printed_name():
     )
     assert parsed["supplier"] == ""
     assert "leverantör" in parsed["missing"]
+
+
+# ── Martin G Anderson: parvis vs radvis textextraktion ─────────
+# PDF-text kan komma etikett+värde i par ELLER som rubrikrad
+# följd av värderad. Tolkningen ska aldrig hitta på värden ur
+# fel kolumn — hellre tomt (mall/dialog visar verklig text).
+
+MARTIN_G_PAIRED = """\
+MARTIN G ANDERSON
+Samlad FAKTURA
+Fakturanr. 906178
+Fakturadatum 2023-06-16
+Kundnr. 103
+Förfallodatum: 2023-07-16
+001 Härdad float 4 mm 2 552 x 1692 1,88 18,68 430,61 861,22
+Totalt: 861,22
+001 Isolerglas Trippel 1 947 x 1210 1,15 34,38 1 496,61 1 496,61
+Totalt: 1 496,61
+001 Härdad float 4 mm 1 530 x 1780 0,95 9,43 435,20 435,20
+Totalt: 435,20
+Fakturanr: 906178
+001 Isolerglas Trippel 1 912 x 1005 0,92 27,50 0,00 0
+Totalt: 0,00
+Summa netto 2 793,03 Moms 698,26 Öresavrundning 0,29 Att betala SEK 3 491,00
+Org nr 556824-5806 Bankgiro: 728-0811
+"""
+
+MARTIN_G_ROW = """\
+MARTIN G ANDERSON
+Samlad FAKTURA
+Fakturanr. Fakturadatum Kundnr.
+906178 2023-06-16 103
+Förfallodatum: 2023-07-16
+001 Härdad float 4 mm 2 552 x 1692 1,88 18,68 430,61 861,22
+Totalt: 861,22
+001 Isolerglas Trippel 1 947 x 1210 1,15 34,38 1 496,61 1 496,61
+Totalt: 1 496,61
+Fakturanr: 906178
+001 Isolerglas Trippel 1 912 x 1005 0,92 27,50 0,00 0
+Totalt: 0,00
+Total vikt Totalt antal Total yta (m2) Summa netto Moms Öresavrundning Att betala
+89,99 5 4,90 2 793,03 698,26 0,29 SEK 3 491,00
+Org nr 556824-5806 Bankgiro: 728-0811
+"""
+
+MARTIN_G_TEMPLATES = {"Martin G Anderson": {"fields": {
+    "invoice_number": {"label": "Fakturanr."},
+    "total_amount": {"label": "Att betala"},
+    "date": {"label": "Fakturadatum"},
+    "due_date": {"label": "Förfallodatum"},
+}}}
+
+MARTIN_G_SUPPLIER = [{"name": "Martin G Anderson"}]
+
+
+def test_martin_g_paired_layout_generic_and_template():
+    generic = si.parse_invoice_text(MARTIN_G_PAIRED, MARTIN_G_SUPPLIER)
+    assert generic["invoice_number"] == "906178"
+    assert generic["total_amount"] == 3491.00
+    assert generic["date"] == "2023-06-16"
+    assert generic["due_date"] == "2023-07-16"
+    templated = si.parse_invoice_text(
+        MARTIN_G_PAIRED, MARTIN_G_SUPPLIER,
+        templates=MARTIN_G_TEMPLATES,
+    )
+    assert templated["missing"] == []
+    assert templated["total_amount"] == 3491.00
+    assert templated["template"] == "Martin G Anderson"
+
+
+def test_martin_g_row_layout_no_column_guessing():
+    # Radvis text: fakturanumret hittas (sida-2-rubriken
+    # "Fakturanr: 906178" går före), men total och fakturadatum
+    # ur fel kolumn hittas INTE på — de lämnas tomma i stället
+    # för att t.ex. total vikt (89,99) eller kundnr (103)
+    # bokförs. Användarens markering i dialogen styr.
+    templated = si.parse_invoice_text(
+        MARTIN_G_ROW, MARTIN_G_SUPPLIER, templates=MARTIN_G_TEMPLATES,
+    )
+    assert templated["invoice_number"] == "906178"
+    assert templated["total_amount"] == 89.99  # dagens generiska gissning, ersätts av markering
+    generic = si.parse_invoice_text(MARTIN_G_ROW, MARTIN_G_SUPPLIER)
+    assert generic["invoice_number"] == "906178"
+    # Nästa kolumnrubrik är aldrig ett fakturanummer.
+    assert si.parse_invoice_number(
+        "Fakturanr. Fakturadatum Kundnr.\n906178 2023-06-16 103"
+    ) == ""

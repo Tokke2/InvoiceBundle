@@ -248,12 +248,23 @@ def _search(text: str, patterns: tuple[str, ...]) -> str:
 
 
 def parse_invoice_number(text: str) -> str:
-    return _search(text, (
-        r"Fakturanr\.?\s*[:#]?\s*([A-Za-z0-9\-/ .]{2,25})",
-        r"Fakturanummer\s*[:#]?\s*([A-Za-z0-9\-/ .]{2,25})",
-        r"Invoice\s*no\.?\s*[:#]?\s*([A-Za-z0-9\-/ .]{2,25})",
-        r"Vår\s*referens\s*[:#]?\s*([A-Za-z0-9\-/ .]{2,25})",
-    ))
+    for pat in (
+        r"Fakturanr\.?\s*[:#]?\s*(\S{2,25})",
+        r"Fakturanummer\s*[:#]?\s*(\S{2,25})",
+        r"Invoice\s*no\.?\s*[:#]?\s*(\S{2,25})",
+        r"Vår\s*referens\s*[:#]?\s*(\S{2,25})",
+    ):
+        for m in re.finditer(pat, text, re.IGNORECASE):
+            tok = _INVOICE_NR_RE.match(m.group(1))
+            cand = tok.group(0) if tok else ""
+            if len(cand) >= 2 and cand.upper() not in _INVOICE_NR_STOPWORDS:
+                return cand
+            # Siffrigt nummer separerat med streck ("NL-2026-0771"
+            # via etiketten "Vår referens") är också ett nummer.
+            num = re.match(r"\d[\d\-/]*\d|\d", m.group(1))
+            if num and len(num.group(0)) >= 4:
+                return num.group(0)
+    return ""
 
 
 def parse_ocr(text: str) -> str:
@@ -453,6 +464,15 @@ _AMOUNT_AFTER = re.compile(
 )
 _DATE_AFTER = re.compile(r"\d{4}[-./]?\d{2}[-./]?\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}")
 _TOKEN_AFTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-/.]{1,29}")
+#: Ett fakturanummer är EN token (inga mellanslag) — annars följer
+#: resten av raden med, eller nästa kolumnrubrik vid radvis text.
+_INVOICE_NR_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-/.]*")
+#: Ord som aldrig är ett fakturanummer (kolumnrubriker vid radvis
+#: extraktion: "Fakturanr. Fakturadatum Kundnr." → nästa rubrik).
+_INVOICE_NR_STOPWORDS = frozenset({
+    "FAKTURADATUM", "FAKTURANR", "FAKTURANUMMER", "KUNDNR",
+    "KUNDNUMMER", "ORDERNR", "ORDERNUMMER", "DATUM", "SIDA",
+})
 _DIGITS_AFTER = re.compile(r"\d[\d \-]{4,28}\d")
 
 
@@ -469,19 +489,49 @@ def extract_with_label(text: str, label: str, kind: str) -> str:
     lab = re.sub(r"\s+", " ", str(label)).strip().rstrip(":#").strip()
     if not lab:
         return ""
-    m = re.search(re.escape(lab), flat, re.IGNORECASE)
-    if not m:
-        return ""
-    window = flat[m.end(): m.end() + 160]
-    same_line = window.split("\n", 1)[0]
-    hit = _extract_kind(same_line, kind)
-    if hit:
-        return hit
-    return _extract_kind(window, kind)
+    for m in re.finditer(re.escape(lab), flat, re.IGNORECASE):
+        window = flat[m.end(): m.end() + 160]
+        same_line = window.split("\n", 1)[0]
+        hit = _extract_kind(same_line, kind, m.group(0))
+        if hit:
+            return hit
+        if same_line.strip() and kind != "token":
+            # Text finns på etikettens rad men värdet saknas —
+            # troligen en kolumnrubrik i en rubrikrad ("Fakturanr.
+            # Fakturadatum Kundnr."): nästa förekomst. För token
+            # gäller rubrik-hoppet i stället (stopporden) — ett
+            # nummer kan aldrig stå på nästa rad i radvis text.
+            continue
+        if kind != "token":
+            hit = _extract_kind(window, kind, m.group(0))
+            if hit:
+                return hit
+    return ""
 
 
-def _extract_kind(chunk: str, kind: str) -> str:
+def _extract_kind(chunk: str, kind: str, label: str = "") -> str:
     if not chunk:
+        return ""
+    if kind == "token":
+        parts = chunk.strip().lstrip(":#").strip().split(None, 1)
+        line = parts[0] if parts else ""
+        if label and line.rstrip(":#").lower() == label.rstrip(":#").lower():
+            # Fönsterformen direkt efter etiketten ("Fakturanr:
+            # 906178"): första biten ÄR rubriken — nästa bit är
+            # värdet. Bara när chunk börjar med etiketten.
+            rest = chunk[len(line):]
+            if not rest or not (rest[0].isalnum()):
+                parts = rest.strip().split(None, 1)
+                line = parts[0] if parts else ""
+        tok = _INVOICE_NR_RE.match(line)
+        cand = tok.group(0) if tok else ""
+        if len(cand) >= 2 and cand.upper() not in _INVOICE_NR_STOPWORDS:
+            return cand
+        # Siffrigt nummer separerat med streck/snedstreck
+        # ("NL-2026-0771" via "Er ref hos oss"/"Vår referens").
+        num = re.match(r"\d[\d\-/]*\d|\d", line)
+        if num and len(num.group(0)) >= 4:
+            return num.group(0)
         return ""
     if kind == "amount":
         m = _AMOUNT_AFTER.search(chunk)
