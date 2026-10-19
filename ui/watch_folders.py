@@ -318,6 +318,16 @@ class WatchManager(QObject):
         self._save()
         self.changed.emit()
 
+    def unprocess(self, file_hash_value: str) -> None:
+        """Tar bort en fil ur bearbetade-registret så nästa
+        skanning prövar den igen. Används när registreringen av en
+        tolkad faktura misslyckades: filen får ALDRIG bli kvar som
+        'importerad' utan att fakturan faktiskt finns i registret
+        — då skulle den varken synas eller någonsin prövas om."""
+        if self._config.get("processed", {}).pop(file_hash_value, None) is not None:
+            self._save()
+            self.changed.emit()
+
     def remove_parked(self, file_hash_value: str) -> None:
         self._config["parked"] = [
             p for p in self._config.get("parked", [])
@@ -664,6 +674,7 @@ class WatchManager(QObject):
             **parsed,
             "file": path.name, "_path": str(final_path),
             "method": method, "_text": (text or "")[:30_000],
+            "_hash": digest,
         }
         self._config["processed"][digest] = {
             **base_info, "path": str(final_path),

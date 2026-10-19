@@ -671,3 +671,24 @@ def test_overdue_chip_shows_unpaid_overdue_only(tmp_path):
     ]
     out = due_window_filter(rows, "overdue", today)
     assert out == [rows[0]]
+
+
+def test_watch_unprocess_retries_after_failed_registration(tmp_path):
+    """Om registreringen av en tolkad faktura misslyckas får filen
+    inte bli kvar som 'importerad' i bearbetade-registret — då
+    skulle fakturan vara osynlig OCH aldrig prövas igen. unprocess
+    markerar om filen så nästa skanning gör ett nytt försök."""
+    _qapp()
+    mgr, folder = _manager(tmp_path)
+    ready = []
+    mgr.invoice_ready.connect(lambda row, path: ready.append(row))
+    (folder / "f1.pdf").write_bytes(b"%PDF-fake-1")
+    mgr.scan_all()
+    assert len(ready) == 1
+    assert ready[0].get("_hash")  # hash följer med för ommarkering
+    digest = next(iter(mgr.processed))
+    mgr.unprocess(digest)
+    assert digest not in mgr.processed
+    mgr.scan_all()
+    assert len(ready) == 2
+    assert mgr.last_scan_stats["imported"] == 1

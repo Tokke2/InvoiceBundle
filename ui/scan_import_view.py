@@ -786,6 +786,20 @@ class ScanImportView(QWidget):
             self._lbl_status.setText(
                 tr("watch.imported", file=row.get("file", ""))
             )
+        elif self._watch is not None and row.get("_hash"):
+            # Registreringen misslyckades — filen får inte bli kvar
+            # som bearbetad/importerad utan faktura i registret.
+            # Markera om den så nästa skanning prövar igen, och
+            # säg det högt i stället för att tappa den tyst.
+            self._watch.unprocess(str(row["_hash"]))
+            log.error(
+                "SCAN_WATCH: registrering av %s misslyckades — "
+                "filen prövas igen vid nästa skanning",
+                row.get("file", ""),
+            )
+            self._lbl_status.setText(
+                tr("watch.register_failed", file=row.get("file", ""))
+            )
 
     def _selected_watch_entry(self) -> dict | None:
         """Markerad bevakad mapp (finns bara en används den)."""
