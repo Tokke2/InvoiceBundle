@@ -72,11 +72,27 @@ def _manager(tmp_path, invoices=None, auto=True, text=TEXT):
     return mgr, folder
 
 
+def _persist_emitted(mgr):
+    """Simulerar appens registrering: en emitterad faktura hamnar
+    i fejk-registret precis som _on_watch_invoice gör via
+    app-kärnan. Utan detta ser självläkningen (med rätta) ut som
+    att registreringen försvann."""
+    def _save(row, path):
+        mgr._app._invoices.append({
+            "supplier": row.get("supplier", ""),
+            "invoice_number": row.get("invoice_number", ""),
+            "attachment": str(path),
+            "status": "Obetald",
+        })
+    mgr.invoice_ready.connect(_save)
+
+
 def test_watch_complete_invoice_ready_once(tmp_path):
     _qapp()
     mgr, folder = _manager(tmp_path)
     ready, parked = [], []
     mgr.invoice_ready.connect(lambda row, path: ready.append((row, path)))
+    _persist_emitted(mgr)
     mgr.file_parked.connect(lambda info: parked.append(info))
     (folder / "f1.pdf").write_bytes(b"%PDF-fake-1")
     mgr.scan_all()
@@ -260,6 +276,7 @@ def test_watch_untaught_supplier_parked_until_taught(tmp_path):
     mgr.set_folders([{"supplier": "Pilkington", "path": str(folder)}])
     ready, parked = [], []
     mgr.invoice_ready.connect(lambda row, path: ready.append(row))
+    _persist_emitted(mgr)
     mgr.file_parked.connect(lambda info: parked.append(info))
 
     (folder / "f1.pdf").write_bytes(b"%PDF-fake-1")
@@ -280,7 +297,10 @@ def test_watch_untaught_supplier_parked_until_taught(tmp_path):
     assert not mgr.parked
     (folder / "f2.pdf").write_bytes(b"%PDF-fake-2")
     mgr.scan_all()
-    assert len(ready) == 2
+    # f2 är en kopia av samma faktura (samma filinnehåll)
+    # — den registreras aldrig en andra gång;
+    # dubblettskyddet stoppar den.
+    assert len(ready) == 1
 
 
 # ── Inbyggt verifierat format: ingen inlärning krävs ────────
@@ -325,6 +345,7 @@ def test_watch_folder_short_name_resolves_to_register(tmp_path):
     mgr.set_folders([{"supplier": "Martin G", "path": str(folder)}])
     ready, parked = [], []
     mgr.invoice_ready.connect(lambda row, path: ready.append(row))
+    _persist_emitted(mgr)
     mgr.file_parked.connect(lambda info: parked.append(info))
 
     (folder / "m1.pdf").write_bytes(b"%PDF-fake-m1")
@@ -360,6 +381,7 @@ def test_watch_builtin_format_registers_without_teaching(tmp_path):
     }])
     ready, parked = [], []
     mgr.invoice_ready.connect(lambda row, path: ready.append(row))
+    _persist_emitted(mgr)
     mgr.file_parked.connect(lambda info: parked.append(info))
 
     (folder / "m1.pdf").write_bytes(b"%PDF-fake-m1")
@@ -423,6 +445,7 @@ def test_watch_year_sort_new_invoice(tmp_path):
     mgr, folder = _year_manager(tmp_path, app)
     ready = []
     mgr.invoice_ready.connect(lambda row, path: ready.append((row, path)))
+    _persist_emitted(mgr)
     (folder / "f2023.pdf").write_bytes(b"%PDF-2023")
     mgr.scan_all()
     assert len(ready) == 1
@@ -514,6 +537,7 @@ def test_watch_recursive_scan_and_arkiv_skipped(tmp_path):
     mgr, folder = _year_manager(tmp_path, app)
     ready = []
     mgr.invoice_ready.connect(lambda row, path: ready.append((row, path)))
+    _persist_emitted(mgr)
     (folder / "2023").mkdir()
     (folder / "2023" / "direkt.pdf").write_bytes(b"%PDF-dir")
     arkiv = folder / "Arkiv" / "2023"
@@ -549,6 +573,7 @@ SUMMA 1 250,00
     mgr.set_folders([{"supplier": "Pilkington", "path": str(folder)}])
     ready, parked = [], []
     mgr.invoice_ready.connect(lambda row, path: ready.append((row, path)))
+    _persist_emitted(mgr)
     (folder / "f0.pdf").write_bytes(b"%PDF-nodate")
     mgr.scan_all()
     # Utan datum saknas "belopp"? Nej — SUMMA ger belopp; utan
@@ -692,3 +717,44 @@ def test_watch_unprocess_retries_after_failed_registration(tmp_path):
     mgr.scan_all()
     assert len(ready) == 2
     assert mgr.last_scan_stats["imported"] == 1
+
+
+def test_watch_heals_import_marked_file_without_invoice(tmp_path):
+    """Självläkning: en fil som står som importerad i bearbetade-
+    registret men saknar faktura i registret (äldre version kunde
+    markera före bekräftad sparning) prövas igen vid skanning —
+    den får inte vara borta för alltid. Finns fakturan däremot i
+    registret med originalets sökväg rörs ingenting."""
+    _qapp()
+    mgr, folder = _manager(tmp_path)  # fejk-register utan fakturor
+    ready = []
+    mgr.invoice_ready.connect(lambda row, path: ready.append(row))
+    (folder / "f1.pdf").write_bytes(b"%PDF-fake-1")
+    mgr.scan_all()
+    assert len(ready) == 1
+    # Registret fick aldrig fakturan (fejk-appen sparar inget
+    # här) → nästa skanning måste pröva registreringen igen
+    mgr.scan_all()
+    assert len(ready) == 2
+    assert mgr.last_scan_stats["imported"] == 1
+
+    # Men: finns en faktura i registret som pekar på originalet
+    # (årssorterat vid registreringen) ska filen lämnas ifred
+    final = folder / "2026" / "f1.pdf"
+    assert final.is_file()  # årssorterad vid importen
+    mgr2, _f2 = _manager(
+        tmp_path / "b",
+        invoices=[{"supplier": "Pilkington",
+                   "invoice_number": "5555",
+                   "attachment": str(final)}],
+    )
+    import shutil as _sh
+    src_dir = tmp_path / "b" / "PilkingtonIn"
+    _sh.copy(final, src_dir / "f1.pdf")
+    ready2 = []
+    mgr2.invoice_ready.connect(lambda row, path: ready2.append(row))
+    mgr2.scan_all()
+    assert len(ready2) == 1  # ny faktura (annat nummer) registreras
+    mgr2.scan_all()
+    assert len(ready2) == 1  # ingen omprövning — sökvägen finns ju
+    assert mgr2.last_scan_stats["already"] == 1

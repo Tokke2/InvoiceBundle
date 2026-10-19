@@ -398,10 +398,19 @@ class WatchManager(QObject):
         except Exception:
             return []
 
+    @property
+    def last_scan_stats(self) -> dict[str, int]:
+        """Utfall av senaste skanning: nyregistrerade, dubblettar
+        (fanns redan i registret — rörs inte), parkerade och filer
+        som var bearbetade sedan tidigare. 'Bearbetad' ensamt säger
+        ingenting: en dubblett skapar ingen ny faktura."""
+        return dict(self._scan_stats)
+
     def scan_all(self) -> None:
         self._scan_stats = {
             "imported": 0, "duplicate": 0, "parked": 0, "already": 0,
         }
+        self._heal_missing_imports()
         for entry in self.folders:
             try:
                 self.scan_folder(entry)
@@ -418,13 +427,96 @@ class WatchManager(QObject):
                 self._scan_stats["already"],
             )
 
-    @property
-    def last_scan_stats(self) -> dict[str, int]:
-        """Utfall av senaste skanning: nyregistrerade, dubblettar
-        (fanns redan i registret — rörs inte), parkerade och filer
-        som var bearbetade sedan tidigare. 'Bearbetad' ensamt säger
-        ingenting: en dubblett skapar ingen ny faktura."""
-        return dict(self._scan_stats)
+    def _heal_missing_imports(self) -> None:
+        """Självläkning: filer som står som importerade i
+        bearbetade-registret men saknar faktura i registret prövas
+        igen. Äldre versioner markerade filen som importerad innan
+        sparandet bekräftats — misslyckades det fanns varken
+        faktura eller omprövning. Nu rättas det vid nästa
+        skanning i stället för att fakturan är borta för alltid.
+
+        En fil anses höra till en registerfaktura om NÅGOT av:
+        sökvägen (normaliserad) = fakturans original, filens hash
+        = originalets hash (samma fil under annat namn), eller
+        samma leverantör (efter mappens koppling) + fakturanummer.
+        Kastar aldrig: ett läkningsfel får inte stoppa skanningen."""
+        try:
+            invoices = self._invoices()
+            known_paths: set[str] = set()
+            known_hashes: set[str] = set()
+            known_numbers: set[tuple[str, str]] = set()
+            for inv in invoices:
+                sup_l = str(
+                    inv.get("supplier", "") or ""
+                ).strip().lower()
+                nr_l = str(
+                    inv.get("invoice_number", "") or ""
+                ).strip().lower()
+                if sup_l and nr_l:
+                    known_numbers.add((sup_l, nr_l))
+                att = str(inv.get("attachment", "") or "")
+                if att:
+                    known_paths.add(_norm_path_key(att))
+                    if Path(att).is_file():
+                        try:
+                            known_hashes.add(file_hash(Path(att)))
+                        except Exception:
+                            pass
+            folder_supplier: dict[str, str] = {}
+            for f in self._config.get("folders", []) or []:
+                sup = self._resolve_register_supplier(
+                    str(f.get("supplier", "") or "")
+                )
+                folder_supplier[
+                    _norm_path_key(str(f.get("path", "") or ""))
+                ] = str(sup or "").strip().lower()
+
+            def _supplier_of(fpath: str) -> str:
+                key = _norm_path_key(fpath)
+                return next(
+                    (
+                        sup_name
+                        for fkey, sup_name in folder_supplier.items()
+                        if fkey and key.startswith(fkey)
+                    ),
+                    "",
+                )
+
+            healed = 0
+            for digest, info in list(
+                self._config.get("processed", {}).items()
+            ):
+                if info.get("result") != "imported":
+                    continue
+                fpath = str(info.get("path", "") or "")
+                if not fpath or not Path(fpath).is_file():
+                    continue
+                if _norm_path_key(fpath) in known_paths:
+                    continue
+                if digest in known_hashes:
+                    continue
+                nr = str(
+                    info.get("invoice_number", "") or ""
+                ).strip().lower()
+                if nr and (
+                    _supplier_of(fpath), nr
+                ) in known_numbers:
+                    continue
+                log.warning(
+                    "SCAN_WATCH: %s står som importerad men "
+                    "fakturan saknas i registret — prövar "
+                    "registreringen igen",
+                    info.get("file", fpath),
+                )
+                self.unprocess(digest)
+                healed += 1
+            if healed:
+                log.warning(
+                    "SCAN_WATCH: %d fil(er) omprövas efter "
+                    "tidigare missad registrering", healed,
+                )
+        except Exception as exc:
+            log.warning("SCAN_WATCH självläkning: %s", exc)
 
     def _templates_fingerprint(self) -> str:
         """Fingeravtryck av mall-läget (egna mallar; inbyggda
@@ -679,6 +771,7 @@ class WatchManager(QObject):
         self._config["processed"][digest] = {
             **base_info, "path": str(final_path),
             "result": "imported",
+            "invoice_number": str(parsed.get("invoice_number", "") or ""),
         }
         self._save()
         self.invoice_ready.emit(row, str(final_path))
