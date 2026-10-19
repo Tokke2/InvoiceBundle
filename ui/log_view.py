@@ -202,6 +202,45 @@ def format_entries_text(entries: list[dict]) -> str:
     return "\n".join(format_entry_text(e) for e in entries)
 
 
+_UI_NOISE_ACTIONS = {"UI_CLICK", "UI_FOCUS", "UI_WHEEL"}
+
+
+def _is_ui_noise(e: dict) -> bool:
+    """Ren UI-trace (klick/fokus/skroll) — buller i ett
+    felsökningspaket; den riktiga loggen finns kvar i filen."""
+    return (
+        str(e.get("logger", "")) == "QtUI"
+        and str(e.get("action", "")) in _UI_NOISE_ACTIONS
+    )
+
+
+def _error_key(e: dict) -> str:
+    """Gruppnyckel för likadana fel: meddelandets början före
+    tillfälliga detaljer (t.ex. temporärfilens slumpnamn i
+    "JSON save error (...): [WinError 5] ... 'x.tmp'")."""
+    msg = str(e.get("msg", ""))
+    head = msg.split(": [", 1)[0]
+    return f"{e.get('level', '')}/{e.get('logger', '')}/{head[:110]}"
+
+
+def _collapse_errors(
+    errors: list[dict],
+) -> list[tuple[int, dict]]:
+    """Slår ihop på varandra följande likadana fel → (antal,
+    senaste posten). En felstorm (antivirus-låsning som ger
+    samma WinError 5 femton gånger) blir EN rad med ×N i
+    paketet i stället för att dränka alla andra fel."""
+    groups: list[tuple[str, int, dict]] = []
+    for e in errors:
+        key = _error_key(e)
+        if groups and groups[-1][0] == key:
+            k, n, _prev = groups[-1]
+            groups[-1] = (k, n + 1, e)
+        else:
+            groups.append((key, 1, e))
+    return [(n, e) for _k, n, e in groups]
+
+
 def format_diagnostics(
     entries: list[dict], meta: dict[str, Any]
 ) -> str:
@@ -214,7 +253,8 @@ def format_diagnostics(
     for key in (
         "generated", "app", "os", "python", "qt",
         "language", "theme", "log_file", "log_size_kb",
-        "suppliers", "invoices",
+        "suppliers", "invoices", "invoices_active",
+        "invoices_archived", "watch_folders",
     ):
         if meta.get(key) not in (None, ""):
             lines.append(f"{key}: {meta[key]}")
@@ -222,26 +262,61 @@ def format_diagnostics(
     if marker:
         lines.append(f"marker: {marker}")
 
-    errors = [
+    if marker:
+        scope = [e for e in entries if str(e.get("ts", "")) >= marker]
+    else:
+        scope = entries
+
+    all_errors = [
         e for e in entries
         if LEVEL_ORDER.get(str(e.get("level", "")).upper(), 0)
         >= LEVEL_ORDER["ERROR"]
-    ][-15:]
+    ]
+    shown_errors = _collapse_errors(all_errors)[-15:]
     lines.append("")
-    lines.append(f"── Senaste fel ({len(errors)}) ──")
-    lines.extend(format_entry_text(e) for e in errors)
-    if not errors:
+    lines.append(f"── Senaste fel ({len(shown_errors)}) ──")
+    for times, entry in shown_errors:
+        text = format_entry_text(entry)
+        if times > 1:
+            text += f"  (samma fel ×{times})"
+        lines.append(text)
+    if not shown_errors:
         lines.append("(inga ERROR/CRITICAL i inläst logg)")
 
+    watch_lines = [
+        str(x) for x in (meta.get("watch_lines") or [])
+    ]
+    if watch_lines:
+        lines.append("")
+        lines.append("── Bevakade mappar ──")
+        lines.extend(watch_lines)
+
+    scan_entries = [
+        e for e in scope
+        if "SCAN_WATCH" in str(e.get("msg", ""))
+        or "SCAN_WATCH" in str(e.get("action", ""))
+    ][-25:]
+    lines.append("")
+    lines.append("── Skanning bevakade mappar (SCAN_WATCH) ──")
+    if scan_entries:
+        lines.extend(format_entry_text(e) for e in scan_entries)
+    else:
+        lines.append(
+            "(inga SCAN_WATCH-rader i inläst logg — ingen "
+            "bevakningsskanning har loggats i den här loggfilen)"
+        )
+
     if marker:
-        scope = [e for e in entries if str(e.get("ts", "")) >= marker]
         lines.append("")
         lines.append("── Logg efter markering ──")
     else:
-        scope = entries
         lines.append("")
         lines.append("── Loggens slut (senaste 60) ──")
-    lines.extend(format_entry_text(e) for e in scope[-60:])
+    tail = scope[-60:]
+    cleaned = [e for e in scope if not _is_ui_noise(e)][-60:]
+    if cleaned:
+        tail = cleaned
+    lines.extend(format_entry_text(e) for e in tail)
     lines.append("═══ SLUT ═══")
     return "\n".join(lines)
 
@@ -622,6 +697,31 @@ class LogView(QWidget):
                 meta[key] = len(getattr(app, fn_name)())
             except Exception:
                 pass
+        for key, fn_name in (
+            ("invoices_active", "get_active_invoices"),
+            ("invoices_archived", "get_archived_invoices"),
+        ):
+            try:
+                meta[key] = len(getattr(app, fn_name)())
+            except Exception:
+                pass
+        try:
+            from ui.watch_folders import watch_diagnostic_lines
+
+            from app import DATA_DIR as _data_dir
+
+            cfg_path = _data_dir / "watch_folders.json"
+            wcfg: dict = {}
+            if cfg_path.is_file():
+                loaded = json.loads(
+                    cfg_path.read_text(encoding="utf-8")
+                )
+                if isinstance(loaded, dict):
+                    wcfg = loaded
+            meta["watch_folders"] = len(wcfg.get("folders", []) or [])
+            meta["watch_lines"] = watch_diagnostic_lines(wcfg)
+        except Exception:
+            pass
         meta["log_file"] = str(self._log_file)
         try:
             meta["log_size_kb"] = (

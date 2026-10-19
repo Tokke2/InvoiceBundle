@@ -899,6 +899,25 @@ def _same_record_set(
     return lk == rk and len(lk) == len(left)
 
 
+def _replace_with_retry(tmp: Path, path: Path) -> None:
+    """os.replace med tålamod för WinError 5 (Åtkomst nekad):
+    på Windows håller antivirus/indexering ibland
+    destinationsfilen en kort stund. Några korta omförsök
+    förvandlar ett tappat skrivfel till en lyckad skrivning."""
+    import time as _time
+
+    last: OSError | None = None
+    for attempt in range(6):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as exc:
+            last = exc
+            _time.sleep(0.05 * (attempt + 1))
+    assert last is not None
+    raise last
+
+
 def _atomic_write_bytes(path: Path, payload: bytes) -> None:
     """
     Skriver en fil HELT atomärt med fsync:
@@ -921,7 +940,7 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
             fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        _replace_with_retry(tmp, path)
         try:
             dir_fd = os.open(str(path.parent), os.O_RDONLY)
             try:
@@ -3530,6 +3549,23 @@ def collect_diagnostics(app_core: Any) -> str:
         add(f"Ändringslogg  : {len(app_core.changelog.all())} rader")
     except Exception as exc:
         add(f"Data räknare  : fel — {exc}")
+
+    # ── Bevakade mappar (varför en fil inte lästs in) ────────────
+    add("")
+    add("── Bevakade mappar ──")
+    try:
+        from ui.watch_folders import watch_diagnostic_lines
+
+        wcfg_path = DATA_DIR / "watch_folders.json"
+        wcfg: dict = {}
+        if wcfg_path.is_file():
+            loaded = _load_json(wcfg_path)
+            if isinstance(loaded, dict):
+                wcfg = loaded
+        for wline in watch_diagnostic_lines(wcfg):
+            add(wline)
+    except Exception as exc:
+        add(f"Bevakningsdiagnos: fel — {exc}")
 
     # ── Plugins (3-strikes-hälsa) ────────────────────────────────────
     add("")

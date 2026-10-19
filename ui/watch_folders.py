@@ -156,6 +156,163 @@ def _norm_supplier_name(name: str) -> frozenset:
     )
 
 
+_PARK_REASON_SV = {
+    "no-template": (
+        "okänt format för leverantören — appen har ingen inlärd "
+        "mall och inget inbyggt verifierat format träffar"
+    ),
+    "review": (
+        "auto-registrering avstängd — väntar på manuell granskning"
+    ),
+}
+
+
+def _park_reason_sv(reason: str) -> str:
+    reason = str(reason or "").strip()
+    if reason.startswith("missing:"):
+        return "saknar uppgifter: " + reason.split(":", 1)[1].strip()
+    return _PARK_REASON_SV.get(reason, reason or "okänd orsak")
+
+
+def watch_diagnostic_lines(
+    config: dict | None, stats: dict | None = None
+) -> list[str]:
+    """Diagnosrader om bevakningen för felsökningspaketet.
+
+    Det viktiga: inte bara ATT något inte lästs in, utan VARFÖR.
+    Per bevakad mapp: finns den, hur många fakturafiler ser
+    skanningen, senaste skanningens utfall, varje parkerad fil
+    med sin orsak — och filer som setts men inte hunnit läsas.
+    config är watch_folders-strukturen (folders/parked/processed)
+    antingen från den levande WatchManager eller filen på disk.
+    """
+    cfg = config if isinstance(config, dict) else {}
+    folders = [f for f in cfg.get("folders", []) if isinstance(f, dict)]
+    parked = [p for p in cfg.get("parked", []) if isinstance(p, dict)]
+    processed = cfg.get("processed", {}) or {}
+    lines: list[str] = []
+    if stats:
+        lines.append(
+            "senaste skanning: {imported} nya fakturor, "
+            "{duplicate} dubbletter (fanns redan — rördes inte), "
+            "{parked} parkerade, {already} redan bearbetade".format(
+                **{
+                    k: int((stats or {}).get(k, 0) or 0)
+                    for k in (
+                        "imported", "duplicate", "parked", "already"
+                    )
+                }
+            )
+        )
+    lines.append(
+        "auto-registrering: "
+        + ("PÅ" if cfg.get("auto_create", True) else "AV")
+        + f" · bearbetade filer i registret: {len(processed)}"
+        + f" · parkerade just nu: {len(parked)}"
+    )
+    parked_by_hash = {
+        str(p.get("hash", "")): p for p in parked if p.get("hash")
+    }
+    parked_keys = {_norm_path_key(p.get("path", "")) for p in parked}
+    shown_parked: set[str] = set()
+
+    def _folder_of(entry_path: str) -> str:
+        key = _norm_path_key(entry_path)
+        for f in folders:
+            root = _norm_path_key(f.get("path", ""))
+            if root and (
+                key == root or key.startswith(root + os.sep)
+            ):
+                return str(f.get("path", ""))
+        return ""
+
+    for entry in folders:
+        folder = Path(str(entry.get("path", "")))
+        supplier = str(entry.get("supplier") or "?")
+        if not folder.is_dir():
+            lines.append(
+                f"✗ {folder} (leverantör {supplier}) — MAPPEN "
+                "SAKNAS eller kan inte öppnas; dess filer läses "
+                "inte in alls"
+            )
+            continue
+        try:
+            files = [
+                f for f in supported_invoice_files(folder) if f.is_file()
+            ]
+        except Exception as exc:
+            lines.append(
+                f"✗ {folder} (leverantör {supplier}) — kunde inte "
+                f"lista filer: {exc}"
+            )
+            continue
+        mine = [
+            p for p in parked
+            if _folder_of(str(p.get("path", ""))) == str(folder)
+        ]
+        lines.append(
+            f"• {folder} (leverantör {supplier}) — {len(files)} "
+            f"fakturafil(er) sedda av skanningen, {len(mine)} "
+            "parkerade här"
+        )
+        unread: list[str] = []
+        for fpath in files:
+            try:
+                digest = file_hash(fpath)
+            except Exception:
+                continue
+            if digest in processed or digest in parked_by_hash:
+                continue
+            if _norm_path_key(str(fpath)) in parked_keys:
+                continue
+            unread.append(fpath.name)
+        for p in mine[:15]:
+            shown_parked.add(_norm_path_key(p.get("path", "")))
+            lines.append(
+                "    parkerad: {} — {} (sedan {})".format(
+                    p.get("file") or Path(
+                        str(p.get("path", ""))
+                    ).name,
+                    _park_reason_sv(p.get("reason", "")),
+                    str(p.get("ts", "") or "?")[:16],
+                )
+            )
+        if len(mine) > 15:
+            lines.append(
+                f"    … och {len(mine) - 15} parkerade till "
+                "(se Import-flikens parkerade filer)"
+            )
+        for name in unread[:10]:
+            lines.append(
+                f"    ej inläst ännu: {name} — skanningen har "
+                "sett filen men inte läst in den; prövas vid "
+                "nästa skanning (eller Import → 🔍 Skanna nu)"
+            )
+        if len(unread) > 10:
+            lines.append(
+                f"    … och {len(unread) - 10} filer till som "
+                "väntar på inläsning"
+            )
+    stray = [
+        p for p in parked
+        if _norm_path_key(p.get("path", "")) not in shown_parked
+        and not _folder_of(str(p.get("path", "")))
+    ]
+    for p in stray[:10]:
+        lines.append(
+            "parkerad (annan mapp): {} — {}".format(
+                p.get("file") or "?",
+                _park_reason_sv(p.get("reason", "")),
+            )
+        )
+    if not folders:
+        lines.append(
+            "inga bevakade mappar konfigurerade — lägg till i "
+            "Import-fliken; då läses inga filer in automatiskt"
+        )
+    return lines
+
+
 class WatchManager(QObject):
     """
     Bevakar mappar, tolkar nya filer och signalerar resultatet.
@@ -397,6 +554,11 @@ class WatchManager(QObject):
             return list(self._app.get_invoices()) if self._app else []
         except Exception:
             return []
+
+    def status_lines(self) -> list[str]:
+        """Diagnosrader till felsökningspaketet (Logg-fliken):
+        varför filer i bevakade mappar inte lästs in."""
+        return watch_diagnostic_lines(self._config, self.last_scan_stats)
 
     @property
     def last_scan_stats(self) -> dict[str, int]:
