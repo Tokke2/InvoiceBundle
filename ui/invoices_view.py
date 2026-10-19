@@ -740,7 +740,13 @@ class InvoicesView(QWidget):
     def _do_refresh(self) -> None:
         """Hämtar data, uppdaterar väljare, filter, tabell och summering."""
         try:
-            raw = self._app.get_invoices()
+            # Fakturor-fliken visar BARA huvudregistret — det
+            # exporterade/betalda bor i data/betalda/ och syns i
+            # Historik-fliken i stället (aldrig i ATT BETALA).
+            if hasattr(self._app, "get_active_invoices"):
+                raw = self._app.get_active_invoices()
+            else:
+                raw = self._app.get_invoices()
             self._all_data = list(raw) if raw else []
         except Exception as exc:
             log.error("refresh error: %s", exc)
@@ -753,6 +759,29 @@ class InvoicesView(QWidget):
         self._populate_table(filtered)
         self._update_summary(filtered)
         self._update_export_buttons()
+
+    def _archive_exported(self, chunk: list[dict]) -> int:
+        """Flyttar exporterade fakturor till leverantörsarkivet
+        (motorn flyttar posten till data/betalda/<leverantör>.json
+        när status sätts till Arkiverad). Faller tillbaka på
+        motor-metoden om den finns. Aldrig ett exportfel."""
+        ids = [str(i.get("id", "")) for i in chunk if i.get("id")]
+        if not ids:
+            return 0
+        engine = getattr(self._app, "invoices", None)
+        if engine is not None and hasattr(engine, "mark_archived"):
+            try:
+                return int(engine.mark_archived(ids))
+            except Exception as exc:
+                log.warning("ARKIV mark_archived: %s", exc)
+        count = 0
+        for rid in ids:
+            try:
+                self._app.update_invoice(rid, {"status": "Arkiverad"})
+                count += 1
+            except Exception:
+                pass
+        return count
 
     def _get_exportable(self) -> list[dict]:
         """
@@ -2255,15 +2284,9 @@ class InvoicesView(QWidget):
                 payment_date=export_pd,   # betalningsdatum sparas
             )
 
-            # Arkivera just den här filens fakturor
-            for inv in chunk:
-                try:
-                    self._app.update_invoice(
-                        inv["id"], {"status": "Arkiverad"}
-                    )
-                    archived += 1
-                except Exception:
-                    pass
+            # Arkivera just den här filens fakturor → de flyttas
+            # till leverantörens fil i data/betalda/ (Historik)
+            archived += self._archive_exported(chunk)
 
         if not made_files:
             if aborted:

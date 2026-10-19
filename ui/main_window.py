@@ -1257,6 +1257,8 @@ class MainWindow(QMainWindow):
          "🏠", "Översikt och nyckeltal"),
         ("invoices",     "Fakturor",      "🧾  Fakturor",
          "🧾", "Hantera inkommande fakturor"),
+        ("history",      "Historik",      "🗂  Historik",
+         "🗂", "Exporterade/betalda per leverantör"),
         ("suppliers",    "Leverantörer",  "🏢  Leverantörer",
          "🏢", "Leverantörsregister"),
         ("payments",     "Betalningar",   "💳  Betalningar",
@@ -1434,6 +1436,9 @@ class MainWindow(QMainWindow):
                 f = folder / name
                 if f.is_file():
                     self._data_watch.addPath(str(f))
+            betalda = folder / "betalda"
+            if betalda.is_dir():
+                self._data_watch.addPath(str(betalda))
         self._data_watch.fileChanged.connect(self._on_data_file_changed)
         self._data_watch.directoryChanged.connect(self._on_data_file_changed)
 
@@ -1446,6 +1451,10 @@ class MainWindow(QMainWindow):
                 f = folder / name
                 if f.is_file() and str(f) not in self._data_watch.files():
                     self._data_watch.addPath(str(f))
+            betalda = folder / "betalda"
+            if betalda.is_dir() and str(betalda) not in \
+                    self._data_watch.directories():
+                self._data_watch.addPath(str(betalda))
         self._data_watch_timer.start()
 
     # ══════════════════════════════════════════════════════════════════
@@ -1457,6 +1466,7 @@ class MainWindow(QMainWindow):
         "suppliers": ("SuppliersView", ["ui.suppliers_view", "suppliers_view"]),
         "invoices": ("InvoicesView", ["ui.invoices_view", "invoices_view"]),
         "log_tab": ("LogView", ["ui.log_view", "log_view"]),
+        "history": ("HistoryView", ["ui.history_view", "history_view"]),
         "dashboard": ("DashboardView", ["ui.dashboard_view", "dashboard_view"]),
     }
 
@@ -2437,7 +2447,7 @@ class MainWindow(QMainWindow):
                     self._app.update_invoice(
                         inv["id"],
                         {
-                            "status": "Betald",
+                            "status": "Arkiverad",
                             "payment_date": batch["payment_date"],
                         },
                     )

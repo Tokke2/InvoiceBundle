@@ -61,6 +61,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "tab.reports": {"sv": "📊  Rapporter", "en": "📊  Reports"},
     "tab.settings_tab": {"sv": "⚙️  Inställningar", "en": "⚙️  Settings"},
     "tab.log_tab": {"sv": "🪵  Logg", "en": "🪵  Log"},
+    "tab.history": {"sv": "🗂  Historik", "en": "🗂  History"},
     "tab.dashboard.sub": {"sv": "Översikt och nyckeltal", "en": "Overview and key figures"},
     "tab.invoices.sub": {"sv": "Hantera inkommande fakturor", "en": "Manage incoming invoices"},
     "tab.suppliers.sub": {"sv": "Leverantörsregister", "en": "Supplier register"},
@@ -69,6 +70,13 @@ _STRINGS: dict[str, dict[str, str]] = {
     "tab.reports.sub": {"sv": "Månads- och leverantörsrapporter", "en": "Monthly and supplier reports"},
     "tab.settings_tab.sub": {"sv": "Program- och företagsinställningar", "en": "App and company settings"},
     "tab.log_tab.sub": {"sv": "Systemlogg — hitta fel på sekunder", "en": "System log — find errors in seconds"},
+    "tab.history.sub": {"sv": "Exporterade/betalda per leverantör (data/betalda/)", "en": "Exported/paid per supplier (data/betalda/)"},
+    "history.title": {"sv": "🗂  Exporterade & betalda fakturor — en fil per leverantör", "en": "🗂  Exported & paid invoices — one file per supplier"},
+    "history.search": {"sv": "Sök fakturanummer, leverantör, OCR, referens …", "en": "Search invoice number, supplier, OCR, reference …"},
+    "history.all_suppliers": {"sv": "Alla leverantörer", "en": "All suppliers"},
+    "history.count": {"sv": "Poster: {shown} av {total}  ·  Betalt totalt: {sum}", "en": "Entries: {shown} of {total}  ·  Total paid: {sum}"},
+    "history.open_folder": {"sv": "📂 Öppna arkivmappen (data/betalda)", "en": "📂 Open archive folder (data/betalda)"},
+    "history.empty": {"sv": "Inga exporterade/betalda fakturor ännu — de hamnar här efter första exporten.", "en": "No exported/paid invoices yet — they appear here after the first export."},
 
     # ── Menyer ───────────────────────────────────────────────────────
     "menu.file": {"sv": "&Arkiv", "en": "&File"},

@@ -41,6 +41,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -110,6 +111,14 @@ VALID_INVOICE_STATUSES: list[str] = [
 
 #: Statusar som INTE räknas som obetalda.
 NON_UNPAID_STATUSES: tuple[str, ...] = ("Betald", "Makulerad", "Arkiverad")
+
+#: Exporterade (Arkiverad) OCH manuellt betald-markerade (Betald)
+#: fakturor lever per leverantör i data/betalda/. De räknas aldrig
+#: in i ATT BETALA; Fakturor-fliken läser bara huvudfilen, den egna
+#: Historik-fliken arkivet. Vid import/skanning söks BÅDA registren
+#: igenom (dubblettskyddet gäller alltså även betalda).
+ARCHIVE_STATUSES: tuple[str, ...] = ("Arkiverad", "Betald")
+ARCHIVE_DIR_NAME = "betalda"
 
 #: Statusar som INTE räknas som aktiva.
 NON_ACTIVE_STATUSES: tuple[str, ...] = ("Arkiverad", "Makulerad")
@@ -960,6 +969,17 @@ def _timestamp_sort_key(record: dict[str, Any]) -> str:
 def _sort_newest_last(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Sorterar äldst → nyast. Senast ändrad post hamnar ALLTID sist."""
     return sorted(records, key=_timestamp_sort_key)
+
+
+def _slugify_supplier(name: str) -> str:
+    """Leverantörsnamn → säkert filnamn: "Martin G Anderson" →
+    "martin-g-anderson". Å/Ä/Ö mappas till a/a/o (aldrig tomt)."""
+    text = str(name or "").strip().lower()
+    for src, dst in (("å", "a"), ("ä", "a"), ("ö", "o"),
+                     ("é", "e"), ("ü", "u")):
+        text = text.replace(src, dst)
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    return text or "okand-leverantor"
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -2268,6 +2288,186 @@ class DataStore:
 
 
 # ═════════════════════════════════════════════════════════════════════
+class SupplierArchiveStore:
+    """Exporterade/betalda fakturor — en JSON-fil per leverantör.
+
+    Filerna bor i <datamapp>/betalda/<leverantör>.json och är
+    registret bakom Historik-fliken. EN post bor i exakt EN av
+    huvudfilen och leverantörsfilen (InvoiceEngine håller det så).
+    Vid import/skanning söks BÅDA registren igenom så en redan
+    betald faktura känns igen som dubblett och aldrig registreras
+    igen. En oläsbar fil skrivs aldrig över (samma skydd som
+    DataStore har).
+    """
+
+    def __init__(self, archive_dir: Path, changelog: Any = None) -> None:
+        self._dir = Path(archive_dir)
+        self._log = changelog
+        self._lock = threading.RLock()
+        self._files: dict[str, Path] = {}
+        self._records: dict[str, list[dict]] = {}
+        self._load_ok: dict[str, bool] = {}
+        self._load_all()
+
+    # ── Lastning/sparning ──────────────────────────────────────────
+
+    def _load_all(self) -> None:
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
+            paths = sorted(self._dir.glob("*.json"))
+        except Exception as exc:
+            log.warning("ARKIV: kan inte lista %s: %s", self._dir, exc)
+            return
+        for path in paths:
+            slug = path.stem
+            data, status = read_json_any(path)
+            if status == "parse_error":
+                self._load_ok[slug] = False
+                self._files[slug] = path
+                log.error("ARKIV: %s oläsbar — skrivs aldrig över", path)
+                continue
+            self._files[slug] = path
+            self._records[slug] = (
+                unwrap_records(data, path.name) if status == "ok" else []
+            )
+            self._load_ok[slug] = True
+        total = sum(len(v) for v in self._records.values())
+        log.info(
+            "ARKIV: %d betalda/exporterade i %d leverantörsfil(er) (%s)",
+            total, len(self._records), self._dir,
+        )
+
+    def _save_slug(self, slug: str) -> None:
+        records = self._records.get(slug, [])
+        if not self._load_ok.get(slug, True):
+            log.error(
+                "DATA_SKYDD: skriver inte över oläsbar "
+                "arkivfil för %s",
+                slug,
+            )
+            return
+        path = self._files.get(slug) or (self._dir / f"{slug}.json")
+        self._files[slug] = path
+        _save_json(path, records)
+        self._load_ok[slug] = True
+
+    @classmethod
+    def memory(cls) -> "SupplierArchiveStore":
+        """Tomt minnesarkiv (fristående användning/tester):
+        rör aldrig disk."""
+        obj = cls.__new__(cls)
+        obj._dir = Path(ARCHIVE_DIR_NAME)
+        obj._log = None
+        obj._lock = threading.RLock()
+        obj._files = {}
+        obj._records = {}
+        obj._load_ok = {}
+
+        def _noop_save(slug: str) -> None:
+            return None
+
+        obj._save_slug = _noop_save  # type: ignore[method-assign]
+        return obj
+
+    def reload(self) -> None:
+        """Läser om alla leverantörsfiler från disk."""
+        with self._lock:
+            self._files = {}
+            self._records = {}
+            self._load_ok = {}
+            self._load_all()
+
+    # ── Läsning ────────────────────────────────────────────────────
+
+    def get(self, record_id: str) -> dict | None:
+        with self._lock:
+            for records in self._records.values():
+                for r in records:
+                    if r.get("id") == record_id:
+                        return dict(r)
+        return None
+
+    def all(self) -> list[dict]:
+        with self._lock:
+            out = [
+                dict(r) for recs in self._records.values() for r in recs
+            ]
+        return _sort_newest_last(out)
+
+    def by_supplier(self, supplier: str) -> list[dict]:
+        with self._lock:
+            recs = self._records.get(_slugify_supplier(supplier), [])
+            out = [dict(r) for r in recs]
+        return _sort_newest_last(out)
+
+    def count(self) -> int:
+        with self._lock:
+            return sum(len(v) for v in self._records.values())
+
+    def files(self) -> dict[str, Path]:
+        """slug → fil (diagnostik/gränssnitt)."""
+        return dict(self._files)
+
+    # ── Mutationer ─────────────────────────────────────────────────
+
+    def move_in(self, record: dict) -> dict:
+        """Tar emot en post (id/timestamps bevaras). Samma id
+        ersätter — aldrig två kopior av samma faktura i arkivet."""
+        with self._lock:
+            rid = str(record.get("id") or "")
+            slug = _slugify_supplier(str(record.get("supplier", "")))
+            recs = self._records.setdefault(slug, [])
+            if rid:
+                recs[:] = [r for r in recs if r.get("id") != rid]
+            recs.append(dict(record))
+            self._save_slug(slug)
+        if self._log is not None:
+            try:
+                self._log.record(
+                    "ARCHIVE_IN", "invoices_archive",
+                    str(record.get("id", "")), {},
+                )
+            except Exception:
+                pass
+        return dict(record)
+
+    def update(self, record_id: str, data: dict) -> dict | None:
+        """Uppdaterar en arkiverad post på plats i sin fil."""
+        with self._lock:
+            for slug, records in self._records.items():
+                for r in records:
+                    if r.get("id") == record_id:
+                        r.update(data)
+                        r["id"] = record_id
+                        r["updated_at"] = _now_iso()
+                        result = dict(r)
+                        self._save_slug(slug)
+                        return result
+        log.warning("ARKIV UPDATE — ej funnen: %s", record_id)
+        return None
+
+    def take_out(self, record_id: str) -> dict | None:
+        """Plockar ut en post ur arkivet (återställning till
+        huvudregistret). Tom leverantörsfil tas bort."""
+        with self._lock:
+            for slug, records in list(self._records.items()):
+                for i, r in enumerate(records):
+                    if r.get("id") == record_id:
+                        rec = records.pop(i)
+                        if not records:
+                            del self._records[slug]
+                            path = self._files.pop(slug, None)
+                            if path is not None:
+                                try:
+                                    path.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+                        else:
+                            self._save_slug(slug)
+                        return dict(rec)
+        return None
+
+
 #  INVOICE ENGINE — affärslogik ovanpå DataStore
 # ═════════════════════════════════════════════════════════════════════
 
@@ -2275,8 +2475,18 @@ class DataStore:
 class InvoiceEngine:
     """Faktura-affärslogik: typer, filter, summor, status, dubbletter."""
 
-    def __init__(self, store: DataStore) -> None:
+    def __init__(
+        self,
+        store: DataStore,
+        archive: "SupplierArchiveStore | None" = None,
+    ) -> None:
         self._store = store
+        # Arkivet (data/betalda/): FakturaApp skickar in den
+        # riktiga filbutiken. Utan angivet arkiv används ett tomt
+        # minnesarkiv — fristående motoranvändning (tester) rör
+        # aldrig disk oombedd.
+        self._archive = archive if archive is not None else \
+            SupplierArchiveStore.memory()
 
     # ── CRUD ─────────────────────────────────────────────────────────────
 
@@ -2284,40 +2494,89 @@ class InvoiceEngine:
         data.setdefault("status", "Obetald")
         data.setdefault("invoice_type", "Faktura")
         self._sync_type(data)
+        if data.get("status") == "Arkiverad":
+            rec = dict(data)
+            if not rec.get("id"):
+                rec["id"] = _new_id()
+            rec.setdefault("created_at", _now_iso())
+            rec["updated_at"] = _now_iso()
+            return self._archive.move_in(rec)
         return self._store.add(data)
 
     def update(self, record_id: str, data: dict) -> dict | None:
         if "total_amount" in data:
             self._sync_type(data)
-        return self._store.update(record_id, data)
+        if self._store.get(record_id) is not None:
+            if data.get("status") == "Arkiverad":
+                # Exporterad → flytta till leverantörsfilen
+                self.mark_archived([record_id])
+                return self._archive.get(record_id)
+            return self._store.update(record_id, data)
+        # Posten bor i arkivet — uppdatera på plats där
+        return self._archive.update(record_id, data)
 
     def delete(self, record_id: str) -> bool:
-        return self._store.delete(record_id)
+        if self._store.get(record_id) is not None:
+            return self._store.delete(record_id)
+        return self._archive.take_out(record_id) is not None
 
     def get(self, record_id: str) -> dict | None:
-        return self._store.get(record_id)
+        return (
+            self._store.get(record_id)
+            or self._archive.get(record_id)
+        )
 
     def all(self) -> list[dict]:
-        return self._store.all()
+        """Hela registret: huvudfil + arkiv (samma id → huvudfilen
+        vinner; en post bor normalt i exakt en av dem)."""
+        merged: dict[str, dict] = {}
+        for r in self._archive.all():
+            merged[str(r.get("id", ""))] = r
+        for r in self._store.all():
+            merged[str(r.get("id", ""))] = r
+        return _sort_newest_last(list(merged.values()))
 
     def count(self) -> int:
-        return self._store.count()
+        return self._store.count() + self._archive.count()
+
+    def archived_records(self) -> list[dict]:
+        """Bara arkivet: betalda/exporterade (Historik-fliken)."""
+        return self._archive.all()
+
+    def main_records(self) -> list[dict]:
+        """Bara huvudfilen: det aktiva registret (Fakturor)."""
+        return self._store.all()
+
+    def archive_files(self) -> dict[str, Path]:
+        return self._archive.files()
+
+    _SEARCH_FIELDS = [
+        "supplier",
+        "invoice_number",
+        "ocr",
+        "invoice_type",
+        "reference",
+        "note",
+        "category",
+        "status",
+        "payment_date",
+    ]
 
     def search(self, query: str) -> list[dict]:
-        return self._store.search(
-            query,
-            fields=[
-                "supplier",
-                "invoice_number",
-                "ocr",
-                "invoice_type",
-                "reference",
-                "note",
-                "category",
-                "status",
-                "payment_date",
-            ],
-        )
+        """Söker i BÅDA registren — även vid import ska en redan
+        betald faktura hittas (dubblettskyddet)."""
+        hits = self._store.search(query, fields=self._SEARCH_FIELDS)
+        seen = {str(r.get("id", "")) for r in hits}
+        q = str(query or "").strip().lower()
+        for r in self._archive.all():
+            if str(r.get("id", "")) in seen:
+                continue
+            if not q or any(
+                q in str(r.get(f, "")).lower()
+                for f in self._SEARCH_FIELDS
+            ):
+                hits.append(r)
+        return _sort_newest_last(hits)
 
     # ── Typsynk ──────────────────────────────────────────────────────────
 
@@ -2339,9 +2598,13 @@ class InvoiceEngine:
     # ── Filter ───────────────────────────────────────────────────────────
 
     def active(self) -> list[dict]:
-        """Alla utom Arkiverad / Makulerad."""
+        """Aktiva för ATT BETALA: bara HUVUDFILEN, utom
+        Arkiverad/Makulerad. Arkivet (data/betalda/) räknas aldrig
+        in — ATT BETALA gäller bara det som ska betalas."""
         return [
-            r for r in self.all() if r.get("status") not in NON_ACTIVE_STATUSES
+            r
+            for r in self._store.all()
+            if r.get("status") not in NON_ACTIVE_STATUSES
         ]
 
     def archived(self) -> list[dict]:
@@ -2511,12 +2774,25 @@ class InvoiceEngine:
         supplier: str,
         exclude_id: str = "",
     ) -> list[dict]:
-        """Samma fakturanummer + leverantör = möjlig dubblett."""
-        return self._store.find_duplicates(
+        """Samma fakturanummer + leverantör = möjlig dubblett.
+        Söker i BÅDA registren: en redan exporterad/betald faktura
+        i data/betalda/ är fortfarande en dubblett."""
+        hits = self._store.find_duplicates(
             ["invoice_number", "supplier"],
             {"invoice_number": invoice_number, "supplier": supplier},
             exclude_id=exclude_id,
         )
+        num = str(invoice_number or "").strip().lower()
+        sup = str(supplier or "").strip().lower()
+        for r in self._archive.all():
+            if exclude_id and r.get("id") == exclude_id:
+                continue
+            if (
+                str(r.get("invoice_number", "")).strip().lower() == num
+                and str(r.get("supplier", "")).strip().lower() == sup
+            ):
+                hits.append(r)
+        return hits
 
     def check_duplicate_amount(
         self,
@@ -2545,7 +2821,11 @@ class InvoiceEngine:
     # ── Statusändringar ──────────────────────────────────────────────────
 
     def mark_paid(self, ids: list[str], payment_date: str = "") -> int:
-        """Markerar fakturor som Betalda + sätter betalningsdatum."""
+        """Markerar betalda + sätter betalningsdatum. Posten
+        STANNAR i huvudfilen tills den exporteras — flytten till
+        leverantörsfilen (data/betalda/) sker först vid export
+        (status Arkiverad). Markera betald ensam flyttar alltså
+        aldrig posten ur huvudregistret."""
         date = payment_date or datetime.date.today().isoformat()
         count = 0
         for rid in ids:
@@ -2554,29 +2834,50 @@ class InvoiceEngine:
         return count
 
     def mark_archived(self, ids: list[str]) -> int:
-        """Arkiverar fakturor (sätts automatiskt efter PDF-export)."""
+        """Arkiverar fakturor (sätts automatiskt efter PDF-export):
+        posten FLYTTAS till leverantörens fil i data/betalda/."""
         count = 0
         for rid in ids:
-            if self.update(rid, {"status": "Arkiverad"}):
-                count += 1
+            rec = self._store.get(rid)
+            if rec is None:
+                continue
+            moved = dict(rec)
+            moved["status"] = "Arkiverad"
+            self._archive.move_in(moved)
+            self._store.delete(rid)
+            count += 1
         return count
 
     def restore_from_archive(self, ids: list[str]) -> int:
-        """Återställer Arkiverade fakturor till Obetald."""
+        """Återställer arkiverade/betalda till Obetald — posten
+        flyttas tillbaka till huvudfilen."""
         count = 0
         for rid in ids:
-            rec = self.get(rid)
-            if rec and rec.get("status") == "Arkiverad":
-                if self.update(rid, {"status": "Obetald"}):
-                    count += 1
+            rec = self._archive.take_out(rid)
+            if rec is None:
+                continue
+            rec["status"] = "Obetald"
+            self._store.add(rec)
+            count += 1
         return count
 
     def mark_status(self, ids: list[str], status: str) -> int:
-        """Sätter valfri giltig status på flera fakturor."""
+        """Sätter valfri giltig status på flera fakturor.
+        Arkiverad flyttar posten till leverantörsfilen; annan
+        status på en arkiverad post flyttar tillbaka den."""
         if status not in VALID_INVOICE_STATUSES:
             raise ValueError(f"Ogiltig status: {status}")
+        if status == "Arkiverad":
+            return self.mark_archived(ids)
         count = 0
         for rid in ids:
+            if self._archive.get(rid) is not None:
+                back = self._archive.take_out(rid)
+                if back is not None:
+                    back["status"] = status
+                    self._store.add(back)
+                    count += 1
+                continue
             if self.update(rid, {"status": status}):
                 count += 1
         return count
@@ -3377,7 +3678,18 @@ class FakturaApp:
         _t.stop()
 
         # ── Motorer ──────────────────────────────────────────────────────
-        self.invoices = InvoiceEngine(self.invoices_store)
+        self.invoices_archive = SupplierArchiveStore(
+            db_path / ARCHIVE_DIR_NAME, self.changelog
+        )
+        self.invoices = InvoiceEngine(
+            self.invoices_store, self.invoices_archive
+        )
+        # Engångsflytt: befintliga exporterade/betalda ur
+        # huvudfilen till en JSON per leverantör i data/betalda/.
+        try:
+            self._migrate_invoice_archive()
+        except Exception as exc:
+            log.warning("ARKIV-migrering: %s", exc)
         self.payments = PaymentEngine(self.payments_store, self.invoices)
 
         # ── Backup + plugins (3-strikes-recovery) ───────────────────────
@@ -3529,6 +3841,52 @@ class FakturaApp:
     def get_invoices(self) -> list[dict]:
         return self.invoices.all()
 
+    def get_archived_invoices(self) -> list[dict]:
+        """Betalda/exporterade ur leverantörsfilerna i
+        data/betalda/ — underlaget för Historik-fliken."""
+        return self.invoices.archived_records()
+
+    def get_active_invoices(self) -> list[dict]:
+        """Bara huvudfilen (det som ännu inte exporterats) —
+        Fakturor-flikens register."""
+        return self.invoices.main_records()
+
+    def _migrate_invoice_archive(self) -> None:
+        """Engångsflytt av befintliga Arkiverad/Betald-poster ur
+        huvudfilen till data/betalda/<leverantör>.json. Backup av
+        huvudfilen sparas först (invoices.json.bak-arkivflytt);
+        arkivfilerna följer sedan med i den vanliga ZIP-backupen.
+        Idempotent: finns inget att flytta händer ingenting."""
+        main = [
+            r for r in self.invoices_store.all()
+            if r.get("status") in ARCHIVE_STATUSES
+        ]
+        if not main:
+            return
+        try:
+            shutil.copy2(
+                self.invoices_store.file,
+                self.invoices_store.file.with_name(
+                    "invoices.json.bak-arkivflytt"
+                ),
+            )
+        except Exception as exc:
+            log.warning("ARKIV backup före flytt: %s", exc)
+        moved = 0
+        for rec in main:
+            try:
+                self.invoices_archive.move_in(dict(rec))
+                self.invoices_store.delete(str(rec.get("id", "")))
+                moved += 1
+            except Exception as exc:
+                log.warning("ARKIV flytt %s: %s", rec.get("id"), exc)
+        if moved:
+            log.info(
+                "ARKIV: %d befintliga betalda/exporterade flyttade "
+                "till leverantörsfiler i data/betalda/",
+                moved,
+            )
+
     def get_invoice(self, record_id: str) -> dict | None:
         return self.invoices.get(record_id)
 
@@ -3572,6 +3930,11 @@ class FakturaApp:
             except Exception as exc:
                 log.error("rescan_data %s: %s", fname, exc)
                 parts.append(f"{kind} fel")
+        try:
+            self.invoices_archive.reload()
+            parts.append(f"arkiv {self.invoices_archive.count()}")
+        except Exception as exc:
+            log.error("rescan_data arkiv: %s", exc)
         summary = "Läste om data/: " + ", ".join(parts)
         log.info("DATA_RESCAN: %s", summary)
         return summary
