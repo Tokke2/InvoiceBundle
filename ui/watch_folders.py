@@ -58,6 +58,9 @@ except Exception:  # pragma: no cover
 
 log = logging.getLogger("WatchFolders")
 
+import os
+import re
+
 #: Filtyper som bevakningen tar (PDF/bilder — .txt räknas inte,
 #: extraktorn känner inte igen den).
 SUPPORTED_SUFFIXES: tuple[str, ...] = (
@@ -69,21 +72,37 @@ def supported_file(path: Path) -> bool:
     return Path(path).suffix.lower() in SUPPORTED_SUFFIXES
 
 
+def _invoice_year(date_str) -> str:
+    """
+    Året ur fakturadatumet ("2023-06-16" → "2023"); "" om det
+    saknas eller inte ser rimligt ut. Ingen gissning härifrån:
+    utan år får originalet ligga kvar överst i mappen.
+    """
+    m = re.match(r"^(?:19|20)\d{2}", str(date_str or "").strip())
+    return str(date_str or "").strip()[:4] if m else ""
+
+
 def supported_invoice_files(folder) -> list[Path]:
     """
-    PDF/bild-filerna i en (bevakad) mapp, sorterade på filnamn.
+    PDF/bild-filerna i en (bevakad) mapp — även i årsmappar
+    (<år>/), sorterade på filnamn. Arkiv/ hoppas över: betalda
+    original ska aldrig skannas om som nya fakturor.
 
-    Används av lär-flödet (välj en exempelfaktura att visa appen)
-    och för att avgöra om en mapp alls har något att lära från.
+    Används av bevakningen själv samt av lär-flödet (välj en
+    exempelfaktura att visa appen) och för att avgöra om en
+    mapp alls har något att lära från.
     """
     try:
-        return sorted(
-            (
-                p for p in Path(str(folder)).iterdir()
-                if p.is_file() and supported_file(p)
-            ),
-            key=lambda p: p.name.lower(),
-        )
+        root = Path(str(folder))
+        found = []
+        for dirpath, dirs, names in os.walk(root):
+            # Arkiv/ = betalda original — plocka bort hela trädet
+            dirs[:] = [d for d in dirs if d.lower() != "arkiv"]
+            for name in names:
+                cand = Path(dirpath) / name
+                if cand.is_file() and supported_file(cand):
+                    found.append(cand)
+        return sorted(found, key=lambda p: p.name.lower())
     except Exception:
         return []
 
@@ -278,9 +297,10 @@ class WatchManager(QObject):
         folder = Path(str(entry.get("path", "")))
         if not folder.is_dir():
             return
+        self._sort_registered_backlog(folder)
         si = None
-        for path in sorted(folder.iterdir()):
-            if not path.is_file() or not supported_file(path):
+        for path in supported_invoice_files(folder):
+            if not path.is_file():
                 continue
             try:
                 digest = file_hash(path)
@@ -296,6 +316,57 @@ class WatchManager(QObject):
             if si is None:
                 si = self._scan_module()
             self._process_file(si, entry, path, digest)
+
+    def _sort_registered_backlog(self, folder: Path) -> None:
+        """
+        Eftersortering: redan registrerade original som
+        fortfarande ligger direkt i den bevakade mappen flyttas
+        till sin årsmapp (<år>/ efter fakturadatum) och registrets
+        sökväg pekas om. Parkerade rörs inte — sorteringen
+        gäller bara registrerade fakturor, precis som valt.
+        Kastar aldrig: ett sorteringsfel får inte stoppa
+        skanningen.
+        """
+        try:
+            invoices = self._invoices()
+            if not invoices:
+                return
+            by_path = {
+                str(inv.get("attachment", "") or ""): inv
+                for inv in invoices
+                if str(inv.get("attachment", "") or "")
+            }
+            if not by_path:
+                return
+            from invoices_helpers import sort_into_year_folder
+
+            for child in sorted(folder.iterdir()):
+                if not child.is_file() or not supported_file(child):
+                    continue
+                inv = by_path.get(str(child))
+                if inv is None:
+                    continue
+                year = _invoice_year(inv.get("date", ""))
+                if not year:
+                    continue
+                new_path = sort_into_year_folder(
+                    str(child), str(folder), year
+                )
+                if new_path == str(child):
+                    continue
+                try:
+                    self._app.update_invoice(
+                        inv["id"], {"attachment": new_path}
+                    )
+                    inv["attachment"] = new_path
+                    by_path[new_path] = inv
+                except Exception as exc:
+                    log.warning(
+                        "SCAN_WATCH årssortering registry-update"
+                        " %s: %s", child.name, exc
+                    )
+        except Exception as exc:
+            log.warning("SCAN_WATCH årssortering: %s", exc)
 
     def _process_file(self, si: Any, entry: dict, path: Path,
                       digest: str) -> None:
@@ -384,16 +455,32 @@ class WatchManager(QObject):
             )
             return
 
+        # Årssortering: det nya originalet får sin årsmapp
+        # direkt (<bevakad mapp>/<fakturaår>/) — innan raden
+        # ens når registret, så alla sökvägar pekar rätt från
+        # början. Utan läsbart år ligger det kvar överst.
+        final_path = path
+        year = _invoice_year(parsed.get("date", ""))
+        if year:
+            from invoices_helpers import sort_into_year_folder
+
+            moved = sort_into_year_folder(
+                str(path), str(Path(str(entry.get("path", "")))), year
+            )
+            if moved != str(path):
+                final_path = Path(moved)
+
         row = {
             **parsed,
-            "file": path.name, "_path": str(path),
+            "file": path.name, "_path": str(final_path),
             "method": method, "_text": (text or "")[:30_000],
         }
         self._config["processed"][digest] = {
-            **base_info, "result": "imported",
+            **base_info, "path": str(final_path),
+            "result": "imported",
         }
         self._save()
-        self.invoice_ready.emit(row, str(path))
+        self.invoice_ready.emit(row, str(final_path))
         log.info(
             "SCAN_WATCH: %s tolkad (mall=%s) → registreras",
             path.name, parsed.get("template", "-"),

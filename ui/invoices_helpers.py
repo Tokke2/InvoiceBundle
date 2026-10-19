@@ -689,13 +689,20 @@ def archive_original_file(
             if not pth:
                 continue
             try:
-                if src.resolve().parent == Path(pth).resolve():
+                parent = src.resolve().parent
+                top = Path(pth).resolve()
+                # Direkt i mappen ELLER i dess årsmapp (<år>/) —
+                # årssorterade original arkiveras likadant.
+                if parent == top or parent.parent == top:
                     root = Path(pth)
                     break
             except Exception:
                 continue
         if root is None:
             return old
+        if parent.parent == root.resolve() \
+                and parent.name == "Arkiv":
+            return old  # redan arkiverad
         target_dir = root / "Arkiv" / str(year)
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / src.name
@@ -2673,3 +2680,60 @@ class InvoiceDialog(QDialog):
             "status": self.f_status.currentData() or "Obetald",
             "note": self.f_note.toPlainText().strip(),
         }
+
+
+def invoice_year(date_str) -> str:
+    """
+    Året ur ett datumfält ("2023-06-16" → "2023"); "" om det
+    inte ser ut som ett rimligt datum. Året blir mappnamnet när
+    en registrerad faktura sorteras i bevakade mappen
+    (/pilkington/2023/…), så det måste vara ett äkta fyrsiffrigt
+    år — aldrig en gissning.
+    """
+    import re as _re
+
+    m = _re.match(r"^(?:19|20)\d{2}", str(date_str or "").strip())
+    return str(date_str).strip()[:4] if m else ""
+
+
+def sort_into_year_folder(
+    attachment: str, watch_folder: str, year: str
+) -> str:
+    """
+    Flyttar ett registrerat original in i årsmappen
+    <bevakad mapp>/<år>/ och returnerar nya sökvägen.
+
+    Bara filer DIREKT i den bevakade mappen flyttas (parkerade
+    och allt annat lämnas orört — sorteringsvalet gäller bara
+    registrerade fakturor). Redan sorterade filer (samma mål)
+    returneras oförändrade. Funktionen kastar aldrig undantag
+    och ger tillbaka den gamla sökvägen vid varje fel — precis
+    som archive_original_file.
+    """
+    old = str(attachment or "")
+    try:
+        if not year:
+            return old
+        src = Path(old.strip())
+        if not old.strip() or not src.is_file():
+            return old
+        root = Path(str(watch_folder or "").strip())
+        if not root.is_dir():
+            return old
+        if src.resolve().parent != root.resolve():
+            return old
+        target_dir = root / str(year)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / src.name
+        if target.exists():
+            if target.resolve() == src.resolve():
+                return str(src)
+            stem, suffix = src.stem, src.suffix
+            n = 2
+            while target.exists():
+                target = target_dir / f"{stem}_{n}{suffix}"
+                n += 1
+        shutil.move(str(src), str(target))
+        return str(target)
+    except Exception:
+        return old

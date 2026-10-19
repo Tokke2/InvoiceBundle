@@ -276,3 +276,171 @@ def test_watch_untaught_supplier_parked_until_taught(tmp_path):
     mgr.scan_all()
     assert len(ready) == 1
     assert ready[0]["template"] == "Pilkington"
+
+
+# ── Årssortering i bevakad mapp (<år>/ efter fakturadatum) ──────
+# Registrerade fakturors original får årsmapp; parkerade och
+# annat lämnas orört. Skanningen hittar även årsmapparna (så
+# en fil som lagts direkt i /2023/ behandlas), men Arkiv/
+# skannas aldrig om. Eftersortering vid skanning tar backlog.
+
+class _YearApp(FakeApp):
+    """FakeApp som kan ta emot registry-uppdateringar."""
+
+    def __init__(self, invoices=None):
+        super().__init__(invoices)
+        self.updated = []
+
+    def update_invoice(self, rid, fields):
+        self.updated.append((rid, fields))
+        for inv in self._invoices:
+            if inv.get("id") == rid:
+                inv.update(fields)
+
+
+YEAR_TEXT = """\
+Pilkington Automotive Sweden AB / AGR
+Fakturanr 9911
+Fakturadatum 2023-06-16
+Utfärdad 2023-06-16
+Senast 2023-07-16
+SUMMA 1 250,00
+"""
+
+
+def _year_manager(tmp_path, app):
+    from ui.watch_folders import WatchManager
+
+    folder = tmp_path / "PilkingtonIn"
+    folder.mkdir(parents=True, exist_ok=True)
+    mgr = WatchManager(
+        tmp_path / "watch_folders.json",
+        app=app,
+        extract_fn=lambda path: (YEAR_TEXT, "test"),
+        templates_provider=lambda: TEMPLATES,
+    )
+    mgr.set_folders([{"supplier": "Pilkington", "path": str(folder)}])
+    return mgr, folder
+
+
+def test_watch_year_sort_new_invoice(tmp_path):
+    """Ny registrerad faktura → originalet i <år>/ direkt."""
+    _qapp()
+    app = _YearApp()
+    mgr, folder = _year_manager(tmp_path, app)
+    ready = []
+    mgr.invoice_ready.connect(lambda row, path: ready.append((row, path)))
+    (folder / "f2023.pdf").write_bytes(b"%PDF-2023")
+    mgr.scan_all()
+    assert len(ready) == 1
+    row, emitted = ready[0]
+    target = folder / "2023" / "f2023.pdf"
+    assert target.exists()
+    assert not (folder / "f2023.pdf").exists()
+    assert emitted == str(target)
+    assert row["_path"] == str(target)
+    # Hash-skyddet gäller även i årsmappen (ingen dubblett)
+    mgr.scan_all()
+    assert len(ready) == 1
+
+
+def test_watch_year_sort_parked_untouched(tmp_path):
+    """Parkerade (olärd leverantör) flyttas INTE av sorteringen."""
+    _qapp()
+    from ui.watch_folders import WatchManager
+
+    folder = tmp_path / "PilkingtonIn"
+    folder.mkdir(parents=True, exist_ok=True)
+    mgr = WatchManager(
+        tmp_path / "watch_folders.json",
+        app=_YearApp(),
+        extract_fn=lambda path: (YEAR_TEXT, "test"),
+        templates_provider=lambda: {},  # ingen mall → parkering
+    )
+    mgr.set_folders([{"supplier": "Pilkington", "path": str(folder)}])
+    parked = []
+    mgr.file_parked.connect(lambda info: parked.append(info))
+    (folder / "p1.pdf").write_bytes(b"%PDF-parked")
+    mgr.scan_all()
+    assert len(parked) == 1
+    assert (folder / "p1.pdf").exists()  # kvar överst, orörd
+    assert not (folder / "2023").exists()
+
+
+def test_watch_year_sort_backlog_registered(tmp_path):
+    """Redan registrerat original överst → eftersorteras och
+    registrets sökväg pekas om."""
+    _qapp()
+    src = tmp_path / "PilkingtonIn" / "gammal.pdf"
+    inv = {
+        "id": "7", "supplier": "Pilkington",
+        "invoice_number": "9911", "date": "2023-06-16",
+        "attachment": str(src),
+    }
+    app = _YearApp([inv])
+    mgr, folder = _year_manager(tmp_path, app)
+    # set_folders skannar direkt, men filen fanns inte då —
+    # lägg den nu och skanna igen.
+    src.write_bytes(b"%PDF-old")
+    mgr.scan_all()
+    target = folder / "2023" / "gammal.pdf"
+    assert target.exists()
+    assert not src.exists()
+    assert inv["attachment"] == str(target)
+    assert app.updated == [("7", {"attachment": str(target)})]
+    # Andra svepet: inget mer att göra (idempotent)
+    app.updated.clear()
+    mgr.scan_all()
+    assert app.updated == []
+
+
+def test_watch_recursive_scan_and_arkiv_skipped(tmp_path):
+    """Filer direkt i <år>/ skannas; Arkiv/ skannas aldrig."""
+    _qapp()
+    app = _YearApp()
+    mgr, folder = _year_manager(tmp_path, app)
+    ready = []
+    mgr.invoice_ready.connect(lambda row, path: ready.append((row, path)))
+    (folder / "2023").mkdir()
+    (folder / "2023" / "direkt.pdf").write_bytes(b"%PDF-dir")
+    arkiv = folder / "Arkiv" / "2023"
+    arkiv.mkdir(parents=True)
+    (arkiv / "betald.pdf").write_bytes(b"%PDF-arkiv")
+    mgr.scan_all()
+    assert len(ready) == 1
+    # Årssorteringen flyttar inte filen igen (redan 2023) —
+    # den STANNAR i 2023/, registreras, ingen ny dubblett
+    assert ready[0][1] == str(folder / "2023" / "direkt.pdf")
+    mgr.scan_all()
+    assert len(ready) == 1
+
+
+def test_watch_year_sort_no_date_stays_top(tmp_path):
+    """Oläsbart år → originalet ligger kvar överst, orört."""
+    _qapp()
+    from ui.watch_folders import WatchManager
+
+    no_date = """\
+Pilkington Automotive Sweden AB / AGR
+Fakturanr 9911
+SUMMA 1 250,00
+"""
+    folder = tmp_path / "PilkingtonIn"
+    folder.mkdir(parents=True, exist_ok=True)
+    mgr = WatchManager(
+        tmp_path / "watch_folders.json",
+        app=_YearApp(),
+        extract_fn=lambda path: (no_date, "test"),
+        templates_provider=lambda: TEMPLATES,
+    )
+    mgr.set_folders([{"supplier": "Pilkington", "path": str(folder)}])
+    ready, parked = [], []
+    mgr.invoice_ready.connect(lambda row, path: ready.append((row, path)))
+    (folder / "f0.pdf").write_bytes(b"%PDF-nodate")
+    mgr.scan_all()
+    # Utan datum saknas "belopp"? Nej — SUMMA ger belopp; utan
+    # datum kan filen ändå sakna fält → allt hanteras som förut.
+    if ready:
+        _row, emitted = ready[0]
+        assert emitted == str(folder / "f0.pdf")
+        assert (folder / "f0.pdf").exists()

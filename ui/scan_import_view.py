@@ -712,6 +712,33 @@ class ScanImportView(QWidget):
         if self._watch:
             self._watch.set_auto_create(bool(state))
 
+    def _maybe_year_sort(self, row: dict, path: str) -> str:
+        """Årssortera ett original vars faktura just registrerats
+        ur granskningen — samma årsmapp (<år>/ under den bevakade
+        mappen) som auto-registreringar får. Parkerade rörs inte;
+        sker bara när fakturan faktiskt registreras och datumet
+        är läsbart. Aldrig ett fel som stoppar registreringen."""
+        try:
+            from pathlib import Path as _P
+
+            from invoices_helpers import (
+                invoice_year, read_watch_folders, sort_into_year_folder,
+            )
+
+            year = invoice_year(row.get("date", ""))
+            if not year:
+                return path
+            cfg = _P(self._templates_file()).parent / "watch_folders.json"
+            for entry in read_watch_folders(cfg):
+                moved = sort_into_year_folder(
+                    str(path), str(entry.get("path", "")), year
+                )
+                if moved != str(path):
+                    return moved
+        except Exception:
+            pass
+        return path
+
     def _on_watch_invoice(self, row: dict, path: str) -> None:
         """Ny komplett faktura från bevakad mapp → registrera direkt.
 
@@ -1326,6 +1353,12 @@ class ScanImportView(QWidget):
 
             if dlg.exec() == QDialogAccepted:
                 data = dlg.get_data()
+                if row.get("_path"):
+                    moved = self._maybe_year_sort(
+                        row, str(row["_path"])
+                    )
+                    if moved != str(row["_path"]):
+                        data["attachment"] = moved
                 self._save_invoice(data, source=row.get("file", ""))
                 self._rows.pop(idxs[0])
                 self._refresh_table()
@@ -1375,6 +1408,10 @@ class ScanImportView(QWidget):
                     f"'Öppna i fakturadialogen'.",
                 )
                 continue
+            if row.get("_path"):
+                row["_path"] = self._maybe_year_sort(
+                    row, str(row.get("_path", ""))
+                )
             data = self._invoice_data_from_row(row)
             if self._save_invoice(data, source=row.get("file", "")):
                 created += 1
