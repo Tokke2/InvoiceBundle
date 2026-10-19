@@ -270,13 +270,14 @@ def test_export_4_rows_keeps_single_plain_filename(
         tmp_path, monkeypatch):
     import json
 
-    # En av fakturorna har original i en bevakad mapp → den ska
-    # flyttas till Arkiv/<exportår>/ efter exporten (separat test
-    # för hela sviten vore tyngre än den är värd i den här
-    # testmiljön, så fallet bor här).
+    # En av fakturorna har originalet i sin årsmapp (2023/)
+    # under en bevakad mapp. Exporten får ALDRIG flytta
+    # originalet igen — det flyttas bara EN gång i livet,
+    # till årsmappen vid registrering. Betalt-spårning sker i
+    # registret (JSON), inte i mappstrukturen.
     wf = tmp_path / "PilkingtonIn"
-    wf.mkdir()
-    src = wf / "fk-1001.pdf"
+    (wf / "2023").mkdir(parents=True)
+    src = wf / "2023" / "fk-1001.pdf"
     src.write_bytes(b"%PDF-original")
     (tmp_path / "watch_folders.json").write_text(
         json.dumps({"folders": [
@@ -298,57 +299,25 @@ def test_export_4_rows_keeps_single_plain_filename(
     assert len(status_updates) == 4
     assert len(view._export_history.calls) == 1
 
-    # Originalet flyttat till Arkiv/2026 (betaldatum 2026-09-18)
-    # och fakturan pekar dit i registret
-    target = wf / "Arkiv" / "2026" / "fk-1001.pdf"
-    assert target.exists() and not src.exists()
+    # Originalet ligger KVAR i årsmappen, orört; inga
+    # sökvägsuppdateringar alls vid exporten
+    assert src.exists()
+    assert not (wf / "Arkiv").exists()
     att_updates = [
         (rid, f) for rid, f in app.archived if f.get("attachment")
     ]
-    assert att_updates == [("1", {"attachment": str(target)})]
+    assert att_updates == []
 
 
-# ── Arkivflytt av original (Arkiv/<år>, bara bevakade) ──────────
+# ── Konfigurationsläsaren för bevakade mappar ─────────────────
 
-def test_archive_original_file_rules(tmp_path):
+def test_read_watch_folders_tolerant(tmp_path):
     import json
 
-    from ui.invoices_helpers import (
-        archive_original_file, read_watch_folders,
-    )
+    from ui.invoices_helpers import read_watch_folders
 
-    wf = tmp_path / "PilkingtonIn"
-    wf.mkdir()
-    src = wf / "fk.pdf"
-    src.write_bytes(b"A")
-    folders = [{"supplier": "Pilkington", "path": str(wf)}]
-
-    newp = archive_original_file(str(src), folders, 2026)
-    target = wf / "Arkiv" / "2026" / "fk.pdf"
-    assert newp == str(target)
-    assert target.exists() and not src.exists()
-
-    # Fil UTANFÖR bevakad mapp rörs aldrig
-    other = tmp_path / "o.pdf"
-    other.write_bytes(b"B")
-    assert archive_original_file(
-        str(other), folders, 2026) == str(other)
-    assert other.exists()
-
-    # Tom/saknad sökväg → oförändrad, ingen krasch
-    assert archive_original_file("", folders, 2026) == ""
-    borta = str(wf / "borta.pdf")
-    assert archive_original_file(borta, folders, 2026) == borta
-
-    # Namnkrock i arkivet → eget namn, inget skrivs över
-    src2 = wf / "fk.pdf"
-    src2.write_bytes(b"C")
-    newp2 = archive_original_file(str(src2), folders, 2026)
-    assert newp2.endswith("fk_2.pdf") and Path(newp2).exists()
-    assert target.exists()
-
-    # Konfigurationsläsaren är fel-tolerant
     cfg = tmp_path / "watch_folders.json"
+    folders = [{"supplier": "Pilkington", "path": "x"}]
     cfg.write_text(json.dumps({"folders": folders}),
                    encoding="utf-8")
     assert read_watch_folders(cfg) == folders

@@ -665,65 +665,6 @@ def read_watch_folders(config_file) -> list[dict]:
         return []
 
 
-def archive_original_file(
-    attachment: str, watched_folders: list[dict], year: int
-) -> str:
-    """
-    Flyttar en exporterad fakturas original från den bevakade
-    mappen till <mapp>/Arkiv/<år>/ och returnerar nya sökvägen.
-
-    Bara filer som ligger DIREKT i en bevakad mapp flyttas;
-    allt annat (annan plats, saknad fil, fel under vägen) lämnas
-    orört och den gamla sökvägen returneras oförändrad. Funktionen
-    kastar aldrig undantag — exporten får inte fallera på en
-    arkivflytt.
-    """
-    old = str(attachment or "")
-    try:
-        src = Path(old.strip())
-        if not old.strip() or not src.is_file():
-            return old
-        root = None
-        for entry in watched_folders or []:
-            pth = str(entry.get("path", "") or "").strip()
-            if not pth:
-                continue
-            try:
-                parent = src.resolve().parent
-                top = Path(pth).resolve()
-                # Direkt i mappen ELLER i dess årsmapp (<år>/) —
-                # årssorterade original arkiveras likadant.
-                if parent == top or parent.parent == top:
-                    root = Path(pth)
-                    break
-            except Exception:
-                continue
-        if root is None:
-            return old
-        if parent.parent == root.resolve() \
-                and parent.name == "Arkiv":
-            return old  # redan arkiverad
-        target_dir = root / "Arkiv" / str(year)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / src.name
-        if target.exists():
-            if target.resolve() == src.resolve():
-                return str(src)
-            stem, suffix = src.stem, src.suffix
-            n = 2
-            while target.exists():
-                target = target_dir / f"{stem}_{n}{suffix}"
-                n += 1
-        shutil.move(str(src), str(target))
-        return str(target)
-    except Exception:
-        return old
-
-
-# ═════════════════════════════════════════════════════════════════════
-#  SESSION-BETALNINGSDATUM
-# ═════════════════════════════════════════════════════════════════════
-
 
 def get_session_due_date_str(app_core: Any) -> str:
     """
@@ -2707,8 +2648,7 @@ def sort_into_year_folder(
     och allt annat lämnas orört — sorteringsvalet gäller bara
     registrerade fakturor). Redan sorterade filer (samma mål)
     returneras oförändrade. Funktionen kastar aldrig undantag
-    och ger tillbaka den gamla sökvägen vid varje fel — precis
-    som archive_original_file.
+    och ger tillbaka den gamla sökvägen vid varje fel.
     """
     old = str(attachment or "")
     try:
