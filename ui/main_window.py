@@ -2823,6 +2823,10 @@ class MainWindow(QMainWindow):
         a_exports = QAction(tr("tray.exports"), self)
         a_exports.triggered.connect(self._open_export_folder)
         m.addAction(a_exports)
+
+        a_update_tray = QAction(tr("menu.update"), self)
+        a_update_tray.triggered.connect(self._tray_check_updates)
+        m.addAction(a_update_tray)
         m.addSeparator()
 
         a_hide = QAction(tr("tray.minimize"), self)
@@ -2838,6 +2842,13 @@ class MainWindow(QMainWindow):
         a_quit.triggered.connect(self._force_exit)
         m.addAction(a_quit)
         return m
+
+    def _tray_check_updates(self) -> None:
+        # Uppdateringsdialogen behöver ett synligt fönster —
+        # ta fram appen först, kör sedan samma flöde som
+        # Hjälp → Sök ny version.
+        self._bring_to_front()
+        self._check_updates()
 
     def _tray_new_supplier(self) -> None:
         self._bring_to_front()
