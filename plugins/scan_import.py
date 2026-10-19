@@ -421,11 +421,24 @@ def parse_invoice_text(
             found = apply_template(text or "", btmpl)
             # Strikt krav: fakturanummer OCH att betala måste
             # komma ur själva formatet (på kreditnotor ger
-            # Tillgodo-vägen beloppet i stället). En radvis/
-            # kolumnbruten text parkeras därför som förut —
-            # gissade värden bokförs aldrig automatiskt.
+            # Tillgodo-vägen beloppet i stället). Att betala
+            # måste dessutom stå på SAMMA RAD som sin etikett:
+            # i en radvis/kolumnbruten text (rubrikrad följd av
+            # värderad) är första beloppet efter etiketten en
+            # annan kolumn (netto/exkl. moms) och får aldrig
+            # bokföras. Sådan text parkeras som förut — gissade
+            # värden registreras aldrig automatiskt.
+            total_label = str(
+                btmpl.get("fields", {})
+                .get("total_amount", {}).get("label", "")
+            )
+            total_ok = (
+                "total_amount" in found
+                and _label_same_line_amount(text or "", total_label)
+                == found["total_amount"]
+            )
             if "invoice_number" in found and (
-                "total_amount" in found or is_credit_note(text or "")
+                total_ok or is_credit_note(text or "")
             ):
                 for field, value in found.items():
                     if field == "total_amount":
@@ -672,6 +685,36 @@ BUILTIN_FORMATS: list[dict] = [
             "due_date": {"label": "T.o.m."},
         },
     },
+    {
+        "name": "Swede Glass United",
+        "aliases": [
+            "Swede Glass United", "Swede Glass",
+        ],
+        "org": "5566371588",
+        "bg": "55921449",
+        "printed": ["swede glass united"],
+        "fields": {
+            "invoice_number": {"label": "Fakturanummer / Kundnummer"},
+            "total_amount": {"label": "ATT BETALA"},
+            "date": {"label": "Fakturadatum"},
+            "due_date": {"label": "Förfallodatum"},
+        },
+    },
+    {
+        "name": "AAG Automotive AB",
+        "aliases": [
+            "AAG Automotive AB", "AAG Automotive",
+        ],
+        "org": "5591400816",
+        "bg": "4030706",
+        "printed": ["aag automotive"],
+        "fields": {
+            "invoice_number": {"label": "Fakturanr"},
+            "total_amount": {"label": "ATT BETALA"},
+            "date": {"label": "Fakturadatum"},
+            "due_date": {"label": "Förfallodatum"},
+        },
+    },
 ]
 
 
@@ -693,6 +736,28 @@ def builtin_template_for(text: str) -> tuple[str, dict] | None:
             return fmt["name"], {"fields": dict(fmt["fields"])}
         if any(p in flat for p in fmt["printed"]):
             return fmt["name"], {"fields": dict(fmt["fields"])}
+    return None
+
+
+def _label_same_line_amount(text: str, label: str) -> float | None:
+    """Beloppet på SAMMA RAD som etiketten, eller None.
+
+    Skiljer en äkta etikett+värde-rad ("ATT BETALA 706,00")
+    från en kolumnrubrikrad där värdena står på nästa rad i
+    kolumner — där är första beloppet efter etiketten nästan
+    alltid fel kolumn (netto i stället för att betala).
+    """
+    if not text or not label:
+        return None
+    flat = re.sub(r"[ \t]+", " ", text)
+    lab = re.sub(r"\s+", " ", str(label)).strip().rstrip(":#").strip()
+    if not lab:
+        return None
+    for m in re.finditer(re.escape(lab), flat, re.IGNORECASE):
+        same_line = flat[m.end():].split("\n", 1)[0]
+        hit = _extract_kind(same_line, "amount", m.group(0))
+        if hit:
+            return float(hit)
     return None
 
 

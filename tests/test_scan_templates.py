@@ -798,3 +798,122 @@ def test_builtin_unknown_format_still_untaught():
     assert si.has_builtin_format("AB Martin G Anderson")
     assert si.has_builtin_format("Martin G Anderson")
     assert not si.has_builtin_format("Okänd Leverantör AB")
+
+
+# ── Swede Glass United + AAG Automotive (inbyggda format) ────
+# Verifierade mot riktiga fakturor: Swede Glass United 19072
+# (706,00) och AAG Automotive 1019 (6 344,00). Båda har
+# kolumnsummor i sidfoten (rubrikrad + värderad) — den inbyggda
+# träffen kräver därför att ATT BETALA står på samma rad som
+# etiketten, annars parkeras filen i stället för att bokföra
+# netto/exkl. moms ur fel kolumn.
+
+SWEDE_PAIRED = """\
+SWEDE GLASS UNITED
+Faktura
+Fakturanummer / Kundnummer 19072 318
+Fakturadatum 2020-06-22
+Tadega AB Ormesgatan 1 A 702 83 Örebro
+Betalningsvillkor 30 dagar netto
+Förfallodatum 2020-07-22
+300 Hyra av behållare 1 st 3 mån 180,00 540,00
+ATT BETALA 706,00
+Bankgiro 5592-1449
+Organisationsnr 556637-1588
+www.swedeglassunited.com
+"""
+
+SWEDE_ROW = """\
+SWEDE GLASS UNITED
+Faktura
+Fakturanummer / Kundnummer
+19072 318
+Fakturadatum
+2020-06-22
+Förfallodatum 2020-07-22
+300 Hyra av behållare 1 st 3 mån 180,00 540,00
+Netto Exp avg Exkl moms Moms % Moms kr Öresavr ATT BETALA
+540,00 25,00 565,00 25 141,25 -0,25 706,00
+Bankgiro 5592-1449
+Organisationsnr 556637-1588
+"""
+
+SWEDE_REGISTER = [{
+    "name": "Swede Glass United",
+    "org_number": "556637-1588", "bg": "5592-1449",
+}]
+
+AAG_PAIRED = """\
+AAG Automotive AB
+Faktura
+Fakturadatum 2026-04-01
+Fakturanr 1019
+Tadega AB Ormestagatan 1 A 70283 ÖREBRO Sverige
+Kundnr 1
+Förfallodatum 2026-04-16
+DEO Delar enligt ovan 1,00 St 18 126,00 72,00% 5 075,28
+Exkl. moms 5 075,28
+Moms 1 268,82
+Öresavr -0,10
+Totalt 6 344,00
+ATT BETALA SEK 6 344,00
+Bankgiro 403-0706
+Organisationsnr 559140-0816
+"""
+
+AAG_ROW = """\
+AAG Automotive AB
+Faktura
+Fakturadatum 2026-04-01
+Fakturanr 1019
+Kundnr 1
+Förfallodatum 2026-04-16
+DEO Delar enligt ovan 1,00 St 18 126,00 72,00% 5 075,28
+Exkl. moms Moms Öresavr Totalt ATT BETALA
+5 075,28 1 268,82 -0,10 6 344,00 SEK 6 344,00
+Bankgiro 403-0706
+Organisationsnr 559140-0816
+"""
+
+AAG_REGISTER = [{
+    "name": "AAG Automotive AB",
+    "org_number": "559140-0816", "bg": "403-0706",
+}]
+
+
+def test_builtin_swede_glass_united():
+    parsed = si.parse_invoice_text(SWEDE_PAIRED, SWEDE_REGISTER)
+    assert parsed["supplier"] == "Swede Glass United"
+    assert parsed["invoice_number"] == "19072"
+    assert parsed["total_amount"] == 706.00
+    assert parsed["date"] == "2020-06-22"
+    assert parsed["due_date"] == "2020-07-22"
+    assert parsed["missing"] == []
+    assert parsed["template"]
+
+
+def test_builtin_swede_glass_row_layout_parks():
+    # Kolumnsummorna radvis: 706,00 får inte ersättas av
+    # netto 540,00 ur fel kolumn → ingen inbyggd träff.
+    parsed = si.parse_invoice_text(SWEDE_ROW, SWEDE_REGISTER)
+    assert not parsed.get("template")
+
+
+def test_builtin_aag_automotive():
+    parsed = si.parse_invoice_text(AAG_PAIRED, AAG_REGISTER)
+    assert parsed["supplier"] == "AAG Automotive AB"
+    assert parsed["invoice_number"] == "1019"
+    assert parsed["total_amount"] == 6344.00
+    assert parsed["date"] == "2026-04-01"
+    assert parsed["due_date"] == "2026-04-16"
+    assert parsed["missing"] == []
+    assert parsed["template"]
+
+
+def test_builtin_aag_row_layout_parks():
+    # Radvis sidfot: första beloppet efter ATT BETALA är
+    # exkl. moms (5 075,28) — bokförs aldrig automatiskt.
+    parsed = si.parse_invoice_text(AAG_ROW, AAG_REGISTER)
+    assert not parsed.get("template")
+    assert si.has_builtin_format("Swede Glass United")
+    assert si.has_builtin_format("AAG Automotive AB")
