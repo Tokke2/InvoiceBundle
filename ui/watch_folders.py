@@ -215,8 +215,16 @@ class WatchManager(QObject):
                 data.setdefault("processed", {})
                 data.setdefault("parked", [])
                 return data
-        except Exception:
-            pass
+        except Exception as exc:
+            # Saknad fil är normalt vid allra första körningen;
+            # en OLIKLIG fil varnas däremot — den får aldrig
+            # tyst nollställa bevakningen.
+            if self._config_file.exists():
+                log.warning(
+                    "SCAN_WATCH: kunde inte läsa %s (%s) — "
+                    "startar med tom bevakning",
+                    self._config_file, exc,
+                )
         return {
             "folders": [], "auto_create": True,
             "processed": {}, "parked": [],
@@ -224,6 +232,34 @@ class WatchManager(QObject):
 
     def _save(self) -> None:
         try:
+            # Skydd: en instans som aldrig satt mapparna själv
+            # får inte skriva över mappar som finns på disk
+            # (t.ex. tillagda i en annan vy/session) med en
+            # tom lista. Uttrycklig borttagning via set_folders
+            # sätter _folders_touched och gäller alltid.
+            if (
+                not self._config.get("folders")
+                and not getattr(self, "_folders_touched", False)
+                and self._config_file.exists()
+            ):
+                try:
+                    disk = json.loads(
+                        self._config_file.read_text(encoding="utf-8")
+                    )
+                    disk_folders = (
+                        disk.get("folders", [])
+                        if isinstance(disk, dict) else []
+                    )
+                    if disk_folders:
+                        log.warning(
+                            "SCAN_WATCH: behöll %d mapp(ar) från "
+                            "disk i stället för att skriva över "
+                            "med tom lista",
+                            len(disk_folders),
+                        )
+                        self._config["folders"] = disk_folders
+                except Exception:
+                    pass
             self._config_file.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._config_file.with_suffix(".tmp")
             tmp.write_text(
@@ -246,7 +282,12 @@ class WatchManager(QObject):
     def parked(self) -> list[dict]:
         return list(self._config.get("parked", []))
 
+    @property
+    def processed(self) -> dict:
+        return dict(self._config.get("processed", {}))
+
     def set_folders(self, folders: list[dict]) -> None:
+        self._folders_touched = True
         self._config["folders"] = [
             {"supplier": str(f.get("supplier", "")),
              "path": str(f.get("path", ""))}

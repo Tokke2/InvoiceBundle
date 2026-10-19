@@ -564,3 +564,38 @@ def test_watch_dialog_supplier_picked_not_typed(tmp_path):
         }
     finally:
         dlg.close()
+
+
+def test_save_never_clobbers_folders_with_empty(tmp_path):
+    """En WatchManager som aldrig satt mappar själv får inte
+    skriva över mappar på disk med tom lista (skyddet mot att
+    bevakningen "tappade" mappen mellan sessioner). Uttrycklig
+    borttagning via set_folders gäller däremot alltid."""
+    import json
+
+    cfg = tmp_path / "watch_folders.json"
+    folder = tmp_path / "MartinIn"
+    folder.mkdir()
+    cfg.write_text(json.dumps({
+        "folders": [{"supplier": "Pilkington",
+                     "path": str(folder)}],
+        "auto_create": True, "processed": {}, "parked": [],
+    }), encoding="utf-8")
+
+    mgr, _f = _manager(tmp_path)
+    # _manager skapar en manager mot ny config — bygg vår egen
+    from ui.watch_folders import WatchManager
+    mgr = WatchManager(
+        cfg, app=FakeApp(),
+        extract_fn=lambda path: (TEXT, "test"),
+        templates_provider=lambda: TEMPLATES,
+    )
+    assert mgr.folders  # mappen laddades från disk
+    # Spara utan att ha rört mapparna → de blir kvar
+    mgr._save()
+    on_disk = json.loads(cfg.read_text(encoding="utf-8"))
+    assert on_disk["folders"], "mapparna skrevs över med tom lista!"
+    # Uttrycklig borttagning gäller
+    mgr.set_folders([])
+    on_disk = json.loads(cfg.read_text(encoding="utf-8"))
+    assert on_disk["folders"] == []

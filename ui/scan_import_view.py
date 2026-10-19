@@ -474,6 +474,9 @@ class ScanImportView(QWidget):
             self._teach_from_folder_clicked
         )
         wr2.addWidget(self._btn_teach_folder)
+        self._btn_scan_watch = QPushButton(tr("watch.scan_now"))
+        self._btn_scan_watch.clicked.connect(self._scan_watch_now)
+        wr2.addWidget(self._btn_scan_watch)
         wr2.addStretch(1)
         bw.addLayout(wr2)
         box_watch.setLayout(bw)
@@ -707,6 +710,38 @@ class ScanImportView(QWidget):
         if 0 <= row < len(folders):
             del folders[row]
             self._watch.set_folders(folders)
+
+    def _scan_watch_now(self) -> None:
+        """Manuell skanning av alla bevakade mappar (knapp).
+
+        Samma skanning som annars sker vid start, mappändring
+        och var 30:e sekund — men på begäran, med återkoppling
+        i statusraden. Detaljer per fil hamnar i loggen
+        (SCAN_WATCH)."""
+        if not self._watch:
+            return
+        if not self._watch.folders:
+            self._lbl_status.setText(tr("watch.scan_none"))
+            return
+        before = len(self._watch.parked)
+        self._watch.scan_all()
+        self._refresh_watch_ui()
+        done = len(self._watch.processed) + (
+            len(self._watch.parked) - before
+            if len(self._watch.parked) > before else 0
+        )
+        self._lbl_status.setText(
+            tr(
+                "watch.scan_done",
+                done=done,
+                parked=len(self._watch.parked),
+            )
+        )
+        log.info(
+            "SCAN_WATCH: manuell skanning klar — %d bearbetade "
+            "totalt, %d parkerade",
+            len(self._watch.processed), len(self._watch.parked),
+        )
 
     def _toggle_watch_auto(self, state) -> None:
         if self._watch:
