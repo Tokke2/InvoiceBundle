@@ -270,12 +270,17 @@ def test_watch_untaught_supplier_parked_until_taught(tmp_path):
     assert parked[0]["reason"] == "no-template"
     assert parked[0]["parsed"]["invoice_number"] == "9911"
 
-    # Användaren lär appen (mall sparas) → nästa fil blir auto
+    # Användaren lär appen (mall sparas) → den PARKERADE filen
+    # prövas på nytt vid nästa skanning och registreras, och
+    # nya filer går direkt
     holder["templates"] = TEMPLATES
-    (folder / "f2.pdf").write_bytes(b"%PDF-fake-2")
     mgr.scan_all()
     assert len(ready) == 1
     assert ready[0]["template"] == "Pilkington"
+    assert not mgr.parked
+    (folder / "f2.pdf").write_bytes(b"%PDF-fake-2")
+    mgr.scan_all()
+    assert len(ready) == 2
 
 
 # ── Inbyggt verifierat format: ingen inlärning krävs ────────

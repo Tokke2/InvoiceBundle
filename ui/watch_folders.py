@@ -163,6 +163,16 @@ class WatchManager(QObject):
         self._templates_provider = templates_provider
         self._extract_fn = extract_fn
         self._config: dict[str, Any] = self._load()
+        self._warned_missing: set[str] = set()
+        self._parked_retry_marks: dict[str, str] = {}
+        log.info(
+            "SCAN_WATCH: bevakning startad — %d mapp(ar): %s",
+            len(self._config.get("folders", [])),
+            ", ".join(
+                f"{f.get('supplier') or '?'} → {f.get('path', '')}"
+                for f in self._config.get("folders", [])
+            ) or "inga",
+        )
 
         from PySide6.QtCore import QFileSystemWatcher
 
@@ -295,9 +305,51 @@ class WatchManager(QObject):
             except Exception as exc:
                 log.warning("SCAN_WATCH scan %s: %s", entry, exc)
 
+    def _templates_fingerprint(self) -> str:
+        """Fingeravtryck av mall-läget (egna mallar; inbyggda
+        format ändras bara vid appuppdatering = ny process)."""
+        try:
+            if self._templates_provider is not None:
+                return repr(sorted(
+                    (self._templates_provider() or {}).items()
+                ))
+        except Exception:
+            pass
+        return ""
+
+    def _should_retry_parked(self, parked_entry: dict,
+                             digest: str) -> bool:
+        """Parkerade filer prövas EN gång till när mall-läget
+        ändrats (appen har lärt sig leverantören, eller ett
+        inbyggt format har tillkommit via uppdatering).
+
+        En parkering får inte bli en återvändsgränd: filen
+        parkerades för att appen inte kunde formatet DÅ.
+        Skäl som beror på filens innehåll (dubblett m.m.)
+        prövas inte om.
+        """
+        reason = str(parked_entry.get("reason", ""))
+        if not (
+            reason == "no-template" or reason.startswith("missing")
+        ):
+            return False
+        fp = self._templates_fingerprint()
+        if self._parked_retry_marks.get(digest) == fp:
+            return False
+        self._parked_retry_marks[digest] = fp
+        return True
+
     def scan_folder(self, entry: dict) -> None:
         folder = Path(str(entry.get("path", "")))
         if not folder.is_dir():
+            key = str(folder)
+            if key not in self._warned_missing:
+                self._warned_missing.add(key)
+                log.warning(
+                    "SCAN_WATCH: bevakad mapp saknas — %s "
+                    "(leverantör %s) hoppas över",
+                    folder, entry.get("supplier", "?"),
+                )
             return
         self._sort_registered_backlog(folder)
         si = None
@@ -310,11 +362,23 @@ class WatchManager(QObject):
                 continue
             if digest in self._config["processed"]:
                 continue
-            if any(
-                p.get("hash") == digest
-                for p in self._config.get("parked", [])
-            ):
-                continue
+            parked_entry = next(
+                (
+                    p for p in self._config.get("parked", [])
+                    if p.get("hash") == digest
+                ),
+                None,
+            )
+            if parked_entry is not None:
+                if not self._should_retry_parked(parked_entry, digest):
+                    continue
+                log.info(
+                    "SCAN_WATCH: %s var parkerad (%s) — prövar "
+                    "igen, appen kan ha lärt sig formatet",
+                    path.name, parked_entry.get("reason", ""),
+                )
+                self._config["parked"].remove(parked_entry)
+                self._save()
             if si is None:
                 si = self._scan_module()
             self._process_file(si, entry, path, digest)
