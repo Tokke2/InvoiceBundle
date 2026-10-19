@@ -135,6 +135,15 @@ def invoice_exists(
     return False
 
 
+def _norm_supplier_name(name: str) -> frozenset:
+    """Namn som ordmängd utan bolagsform/tecken: "AB Martin G
+    Anderson" och "Martin G" → samma respektive delmängd."""
+    words = re.findall(r"[a-zåäö0-9]+", str(name or "").lower())
+    return frozenset(
+        w for w in words if w not in ("ab", "aktiebolag", "och", "&")
+    )
+
+
 class WatchManager(QObject):
     """
     Bevakar mappar, tolkar nya filer och signalerar resultatet.
@@ -285,6 +294,31 @@ class WatchManager(QObject):
         import scan_import as si
 
         return si
+
+    def _resolve_register_supplier(self, wanted: str) -> str:
+        """Slår upp mappens leverantörsnamn mot registret tolerant.
+
+        Mappen kan heta "Martin G" medan registerposten heter
+        "AB Martin G Anderson" — exakt namnmatchning fick då
+        registreringen att stoppa med "leverantör saknas" trots
+        att användaren pekat ut rätt leverantör. Nu jämförs
+        namnen normaliserade (bolagsform/punkt borta, ordmängd):
+        exakt eller entydig delmängd ger träff, annars "".
+        """
+        want = _norm_supplier_name(wanted)
+        if not want:
+            return ""
+        candidates = []
+        for sup in self._suppliers():
+            name = str(sup.get("name", "")).strip()
+            have = _norm_supplier_name(name)
+            if not have:
+                continue
+            if have == want:
+                return name
+            if want <= have or have <= want:
+                candidates.append(name)
+        return candidates[0] if len(candidates) == 1 else ""
 
     def _suppliers(self) -> list[dict]:
         try:
@@ -451,6 +485,14 @@ class WatchManager(QObject):
         )
         folder_supplier = str(entry.get("supplier", "")).strip()
         if folder_supplier:
+            resolved = self._resolve_register_supplier(folder_supplier)
+            if resolved and resolved != folder_supplier:
+                log.info(
+                    "SCAN_WATCH: mappens leverantör '%s' → "
+                    "registerposten '%s'",
+                    folder_supplier, resolved,
+                )
+                folder_supplier = resolved
             parsed["supplier"] = folder_supplier
             parsed["missing"] = [
                 m for m in parsed.get("missing", [])

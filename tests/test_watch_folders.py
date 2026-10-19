@@ -299,6 +299,40 @@ Org nr 556824-5806 Bankgiro: 728-0811
 """
 
 
+def test_watch_folder_short_name_resolves_to_register(tmp_path):
+    """Mappen heter "Martin G" men registerposten "AB Martin G
+    Anderson" — bevakningen ska ändå registrera (användaren
+    har pekat ut leverantören; exakt namnmatchning får inte
+    stoppa med "leverantör saknas")."""
+    _qapp()
+    from ui.watch_folders import WatchManager
+
+    class MartinApp(FakeApp):
+        def get_suppliers(self):
+            return [{
+                "name": "AB Martin G Anderson",
+                "org_number": "556824-5806", "bg": "728-0811",
+            }]
+
+    folder = tmp_path / "MartinIn"
+    folder.mkdir(parents=True, exist_ok=True)
+    mgr = WatchManager(
+        tmp_path / "watch_folders.json",
+        app=MartinApp(),
+        extract_fn=lambda path: (MARTIN_TEXT, "test"),
+        templates_provider=lambda: {},
+    )
+    mgr.set_folders([{"supplier": "Martin G", "path": str(folder)}])
+    ready, parked = [], []
+    mgr.invoice_ready.connect(lambda row, path: ready.append(row))
+    mgr.file_parked.connect(lambda info: parked.append(info))
+
+    (folder / "m1.pdf").write_bytes(b"%PDF-fake-m1")
+    mgr.scan_all()
+    assert len(ready) == 1 and not parked
+    assert ready[0]["supplier"] == "AB Martin G Anderson"
+
+
 def test_watch_builtin_format_registers_without_teaching(tmp_path):
     """Martin G:s format är inbyggt efter manuell verifiering
     mot riktiga exempelfakturor — bevakningen registrerar

@@ -815,6 +815,18 @@ class ScanImportView(QWidget):
         sparas i data/invoice_templates.json under leverantören
         och används direkt av mappbevakningen.
         """
+        supplier0 = str(entry.get("supplier", "") or "").strip()
+        if supplier0:
+            _si0 = _scan_module()
+            if _si0.has_builtin_format(supplier0):
+                # Inbyggt verifierat format (matchat mot riktiga
+                # exempelfakturor i förväg) — ingen inlärning,
+                # ingen dialog. Meddela bara och låt bevakningen
+                # sköta resten.
+                self._lbl_status.setText(
+                    tr("watch.learn_builtin", supplier=supplier0)
+                )
+                return
         from ui.watch_folders import supported_invoice_files
         files = supported_invoice_files(entry.get("path", ""))
         if not files:
