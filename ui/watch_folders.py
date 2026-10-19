@@ -613,9 +613,19 @@ class WatchFolderDialog(QDialog):
         row1 = QHBoxLayout()
         row1.addWidget(QLabel(tr("watch.supplier")))
         self._cmb_supplier = QComboBox()
-        self._cmb_supplier.setEditable(True)
+        # INTE redigerbar: leverantören VÄLJS ur registret.
+        # Fri text ("AAG Automotive" mot registerpostens
+        # "AAG Automotive AB") gjorde att kopplingen aldrig
+        # tog — mappens namn spelar ingen roll, bara vilken
+        # registerpost man kopplar den till.
+        self._cmb_supplier.setEditable(False)
         self._cmb_supplier.addItems(suppliers)
         if supplier:
+            if self._cmb_supplier.findText(supplier) < 0:
+                # Redan kopplat namn som saknas i registret —
+                # visa det som det är (bevakningen slår upp
+                # registerposten tolerant vid skanning).
+                self._cmb_supplier.addItem(supplier)
             self._cmb_supplier.setCurrentText(supplier)
         row1.addWidget(self._cmb_supplier, stretch=1)
         root.addLayout(row1)

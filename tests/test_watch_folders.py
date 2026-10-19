@@ -537,3 +537,30 @@ SUMMA 1 250,00
         _row, emitted = ready[0]
         assert emitted == str(folder / "f0.pdf")
         assert (folder / "f0.pdf").exists()
+
+
+# ── Kopplingsdialogen: leverantör väljs, skrivs inte ────────
+
+def test_watch_dialog_supplier_picked_not_typed(tmp_path):
+    """Leverantören i bevaka-mapp-dialogen ska VÄLJAS ur
+    registret — fri text ("AAG Automotive" i stället för
+    registerpostens "AAG Automotive AB") gjorde att
+    kopplingen aldrig tog. Mappens namn spelar ingen roll,
+    bara registerposten man kopplar till."""
+    _qapp()
+    from ui.watch_folders import WatchFolderDialog
+
+    dlg = WatchFolderDialog(
+        None, ["AAG Automotive AB", "Pilkington"]
+    )
+    try:
+        assert not dlg._cmb_supplier.isEditable()
+        dlg._cmb_supplier.setCurrentText("AAG Automotive AB")
+        dlg._edit_path.setText(str(tmp_path))
+        dlg._accept()
+        assert dlg.result_data == {
+            "supplier": "AAG Automotive AB",
+            "path": str(tmp_path),
+        }
+    finally:
+        dlg.close()
