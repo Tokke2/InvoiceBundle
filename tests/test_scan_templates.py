@@ -488,12 +488,15 @@ def test_parse_date_year_first_with_dots():
 def test_pilkington_layout_generic_parks_template_nails_it():
     suppliers = [{"name": "Pilkington", "short_name": "Pilkington"}]
 
-    # Utan inlärning: leverantören känns igen, men fakturanumret
-    # ("Nummer") missas → filen parkeras i stället för att
-    # registreras med gissad totalsumma (3499,30 exkl. moms).
+    # Pilkingtons format är inbyggt efter manuell verifiering
+    # mot riktiga exempelfakturor — bankgirot (572-3457) på
+    # fakturan identifierar det: allt läses utan egen mall.
     raw = si.parse_invoice_text(PILKINGTON_TEXT, suppliers)
     assert raw["supplier"] == "Pilkington"
-    assert "fakturanummer" in raw["missing"]
+    assert raw["invoice_number"] == "2075214774"
+    assert raw["total_amount"] == 4374.00
+    assert "fakturanummer" not in raw["missing"]
+    assert raw["template"]
 
     # Efter EN manuell matchning (mall) sitter allt, inklusive
     # punkt-formaten för belopp och datum.
@@ -587,11 +590,15 @@ def test_saint_gobain_two_page_invoice_with_template():
 
 
 def test_saint_gobain_generic_finds_total_but_parks():
-    parsed = si.parse_invoice_text(SAINT_GOBAIN_INVOICE, DIREKTGLAS)
-    # "Att Betala" hittas generiskt; numret ("Nummer") inte
-    # → parkeras, aldrig auto-registrerad.
+    # Utan bankgiro/org.nr kan registerposten inte identifiera
+    # fakturan: totalen hittas generiskt, numret ("Nummer")
+    # inte → numret kommer aldrig ur registermatchningen.
+    parsed = si.parse_invoice_text(
+        SAINT_GOBAIN_INVOICE, [{"name": "Direktglas"}]
+    )
     assert parsed["total_amount"] == 15425.00
-    assert "fakturanummer" in parsed["missing"]
+    assert parsed["invoice_number"] == "9750271120"
+    assert parsed["supplier"] == "Saint-Gobain Autover Sverige AB"
 
 
 def test_saint_gobain_credit_note_nets_to_tillgodo():
@@ -623,13 +630,18 @@ def test_amount_from_group_quantity_not_glued():
 
 
 def test_supplier_matched_via_bankgiro_not_printed_name():
+    # Registerposten saknar bankgiro/org.nr → namnet Direktglas
+    # tilldelas INTE. I stället föreslås det tryckta namnet via
+    # det inbyggda Saint-Gobain-formatet. Matchning mot
+    # Direktglas i registret kräver bankgiro/org.nr på posten.
     parsed = si.parse_invoice_text(
         SAINT_GOBAIN_INVOICE,
         [{"name": "Direktglas"}],
         templates=SAINT_GOBAIN_TEMPLATES,
     )
-    assert parsed["supplier"] == ""
-    assert "leverantör" in parsed["missing"]
+    assert parsed["supplier"] == "Saint-Gobain Autover Sverige AB"
+    assert parsed["invoice_number"] == "9750271120"
+    assert parsed["total_amount"] == 15425.00
 
 
 # ── Martin G Anderson: parvis vs radvis textextraktion ─────────
@@ -717,3 +729,72 @@ def test_martin_g_row_layout_no_column_guessing():
     assert si.parse_invoice_number(
         "Fakturanr. Fakturadatum Kundnr.\n906178 2023-06-16 103"
     ) == ""
+
+
+# ── Inbyggda verifierade format ─────────────────────────────────
+# Format som matchats mot riktiga exempelfakturor tillsammans
+# med användaren (i chatten) är inbyggda i appen: bevakningen
+# registrerar dem utan separat inlärning i appen. Identifiering
+# via org.nr/bankgiro på fakturan — användarens egna mallar
+# har alltid företräde.
+
+MARTIN_G_REGISTER = [{
+    "name": "AB Martin G Anderson",
+    "org_number": "556824-5806", "bg": "728-0811",
+}]
+
+
+def test_builtin_martin_g_registers_without_user_template():
+    parsed = si.parse_invoice_text(MARTIN_G_PAIRED, MARTIN_G_REGISTER)
+    assert parsed["supplier"] == "AB Martin G Anderson"
+    assert parsed["invoice_number"] == "906178"
+    assert parsed["total_amount"] == 3491.00
+    assert parsed["date"] == "2023-06-16"
+    assert parsed["due_date"] == "2023-07-16"
+    assert parsed["missing"] == []
+    assert parsed["template"]
+
+
+def test_builtin_martin_g_row_layout_still_parks():
+    # Radvis/kolumnbruten text: beloppet kommer inte ur
+    # formatet → ingen inbyggd träff → parkeras, aldrig
+    # auto-registrerad med gissad total (t.ex. 89,99).
+    parsed = si.parse_invoice_text(MARTIN_G_ROW, MARTIN_G_REGISTER)
+    assert not parsed.get("template")
+
+
+def test_builtin_saint_gobain_and_credit_without_template():
+    inv = si.parse_invoice_text(SAINT_GOBAIN_INVOICE, DIREKTGLAS)
+    assert inv["supplier"] == "Direktglas"
+    assert inv["invoice_number"] == "9750271120"
+    assert inv["total_amount"] == 15425.00
+    assert inv["missing"] == []
+    assert inv["template"]
+    cred = si.parse_invoice_text(SAINT_GOBAIN_CREDIT, DIREKTGLAS)
+    assert cred["invoice_number"] == "9750269328"
+    assert cred["total_amount"] == -3303.00
+    assert cred["template"]
+
+
+def test_builtin_pilkington_registers_without_user_template():
+    parsed = si.parse_invoice_text(
+        PILKINGTON_TEXT,
+        [{"name": "Pilkington", "bg": "572-3457"}],
+    )
+    assert parsed["invoice_number"] == "2075214774"
+    assert parsed["total_amount"] == 4374.00
+    assert parsed["date"] == "2026-10-15"
+    assert parsed["due_date"] == "2026-11-14"
+    assert parsed["missing"] == []
+    assert parsed["template"]
+
+
+def test_builtin_unknown_format_still_untaught():
+    parsed = si.parse_invoice_text(
+        "FAKTURA\nFakturanr: 12345\nAtt betala 100,00\n", []
+    )
+    assert not parsed.get("template")
+    assert si.has_builtin_format("Direktglas")
+    assert si.has_builtin_format("AB Martin G Anderson")
+    assert si.has_builtin_format("Martin G Anderson")
+    assert not si.has_builtin_format("Okänd Leverantör AB")

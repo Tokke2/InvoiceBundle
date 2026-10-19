@@ -793,6 +793,8 @@ class ScanImportView(QWidget):
             si = _scan_module()
             if si.find_template(self._get_templates(), supplier):
                 return  # mallen finns redan
+            if si.has_builtin_format(supplier):
+                return  # inbyggt verifierat format — inget att lära
         except Exception as exc:
             log.warning("teach offer: %s", exc)
             return
@@ -879,6 +881,9 @@ class ScanImportView(QWidget):
         try:
             si = _scan_module()
             tmpl = si.find_template(self._get_templates(), supplier)
+            if not tmpl:
+                builtin = si.builtin_template_for(text)
+                tmpl = builtin[1] if builtin else None
             if not tmpl:
                 return parsed
             found = si.apply_template(text, tmpl)

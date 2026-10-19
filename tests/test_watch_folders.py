@@ -278,6 +278,60 @@ def test_watch_untaught_supplier_parked_until_taught(tmp_path):
     assert ready[0]["template"] == "Pilkington"
 
 
+# ── Inbyggt verifierat format: ingen inlärning krävs ────────
+
+MARTIN_TEXT = """\
+MARTIN G ANDERSON
+Samlad FAKTURA
+Fakturanr. 906178
+Fakturadatum 2023-06-16
+Kundnr. 103
+Förfallodatum: 2023-07-16
+001 Härdad float 4 mm 2 552 x 1692 1,88 18,68 430,61 861,22
+Fakturanr: 906178
+Summa netto 2 793,03 Moms 698,26 Öresavrundning 0,29 Att betala SEK 3 491,00
+Org nr 556824-5806 Bankgiro: 728-0811
+"""
+
+
+def test_watch_builtin_format_registers_without_teaching(tmp_path):
+    """Martin G:s format är inbyggt efter manuell verifiering
+    mot riktiga exempelfakturor — bevakningen registrerar
+    direkt, utan inlärd mall i appen."""
+    _qapp()
+    from ui.watch_folders import WatchManager
+
+    class MartinApp(FakeApp):
+        def get_suppliers(self):
+            return [{
+                "name": "AB Martin G Anderson",
+                "org_number": "556824-5806", "bg": "728-0811",
+            }]
+
+    folder = tmp_path / "MartinIn"
+    folder.mkdir(parents=True, exist_ok=True)
+    mgr = WatchManager(
+        tmp_path / "watch_folders.json",
+        app=MartinApp(),
+        extract_fn=lambda path: (MARTIN_TEXT, "test"),
+        templates_provider=lambda: {},
+    )
+    mgr.set_folders([{
+        "supplier": "AB Martin G Anderson", "path": str(folder),
+    }])
+    ready, parked = [], []
+    mgr.invoice_ready.connect(lambda row, path: ready.append(row))
+    mgr.file_parked.connect(lambda info: parked.append(info))
+
+    (folder / "m1.pdf").write_bytes(b"%PDF-fake-m1")
+    mgr.scan_all()
+    assert len(ready) == 1 and not parked
+    assert ready[0]["invoice_number"] == "906178"
+    assert ready[0]["total_amount"] == 3491.00
+    assert ready[0]["supplier"] == "AB Martin G Anderson"
+    assert ready[0]["template"]
+
+
 # ── Årssortering i bevakad mapp (<år>/ efter fakturadatum) ──────
 # Registrerade fakturors original får årsmapp; parkerade och
 # annat lämnas orört. Skanningen hittar även årsmapparna (så

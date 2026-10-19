@@ -375,6 +375,13 @@ def parse_invoice_text(
     etiketter vinner alltid över den generiska heuristiken. Mallens
     leverantörsnamn kan också kännas igen direkt i texten, även om
     leverantören inte finns i registret än.
+
+    Saknas egen mall prövas de inbyggda, verifierade formaten
+    (BUILTIN_FORMATS): leverantörer vars layout matchats mot
+    riktiga exempelfakturor i förväg. De identifieras via
+    org.nr/bankgiro eller tryckt namn på själva fakturan och
+    kräver fakturanummer + belopp ur formatet för att räknas —
+    annars parkeras filen som vanligt.
     """
     total = parse_total(text or "")
     inv_nr = parse_invoice_number(text or "")
@@ -405,6 +412,35 @@ def parse_invoice_text(
                     due = str(value)
                 template_fields.append(field)
             if found:
+                template_name = supplier
+
+    if not template_name:
+        builtin = builtin_template_for(text or "")
+        if builtin:
+            bname, btmpl = builtin
+            found = apply_template(text or "", btmpl)
+            # Strikt krav: fakturanummer OCH att betala måste
+            # komma ur själva formatet (på kreditnotor ger
+            # Tillgodo-vägen beloppet i stället). En radvis/
+            # kolumnbruten text parkeras därför som förut —
+            # gissade värden bokförs aldrig automatiskt.
+            if "invoice_number" in found and (
+                "total_amount" in found or is_credit_note(text or "")
+            ):
+                for field, value in found.items():
+                    if field == "total_amount":
+                        total = float(value)
+                    elif field == "invoice_number":
+                        inv_nr = str(value)
+                    elif field == "ocr":
+                        ocr = str(value)
+                    elif field == "date":
+                        date = str(value)
+                    elif field == "due_date":
+                        due = str(value)
+                    template_fields.append(field)
+                if not supplier:
+                    supplier = bname
                 template_name = supplier
 
     missing = [
@@ -576,6 +612,106 @@ def find_template(templates: dict, supplier: str) -> dict | None:
         if str(name).strip().lower() == low:
             return tmpl
     return None
+
+
+#: Inbyggda, verifierade leverantörsformat. Varje format har
+#: matchats manuellt mot riktiga exempelfakturor tillsammans
+#: med användaren INNAN det byggdes in — det är den manuella
+#: matchningen som annars sker i inlärningsdialogen. Därför
+#: får bevakningen registrera dem automatiskt utan att
+#: användaren lär appen samma leverantör en gång till.
+#: Identifiering sker via org.nr/bankgiro eller det tryckta
+#: namnet på fakturan (aldrig via registerpostens namn, som
+#: kan heta något annat — t.ex. Direktglas på Saint-Gobain-
+#: papper). Användarens egna mallar har alltid företräde.
+BUILTIN_FORMATS: list[dict] = [
+    {
+        "name": "Martin G Anderson",
+        "aliases": [
+            "Martin G Anderson", "AB Martin G Anderson", "Martin G",
+        ],
+        "org": "5568245806",
+        "bg": "7280811",
+        "printed": ["martin g anderson"],
+        "fields": {
+            "invoice_number": {"label": "Fakturanr."},
+            "total_amount": {"label": "Att betala"},
+            "date": {"label": "Fakturadatum"},
+            "due_date": {"label": "Förfallodatum"},
+        },
+    },
+    {
+        "name": "Saint-Gobain Autover Sverige AB",
+        "aliases": [
+            "Direktglas", "Saint-Gobain",
+            "Saint-Gobain Autover Sverige AB",
+        ],
+        "org": "5562746114",
+        "bg": "9422817",
+        "printed": ["saint-gobain autover", "saint-gobain"],
+        "fields": {
+            "invoice_number": {"label": "Nummer"},
+            "total_amount": {"label": "Att Betala (SEK)"},
+            "date": {"label": "Datum"},
+            "due_date": {"label": "Förfallodatum"},
+        },
+    },
+    {
+        "name": "Pilkington",
+        "aliases": [
+            "Pilkington", "Pilkington Sverige AB",
+            "Pilkington Automotive Sweden AB", "Pilkington Glas AB",
+        ],
+        "org": "",
+        "bg": "5723457",
+        "printed": ["pilkington automotive", "pilkington nsg"],
+        "fields": {
+            "invoice_number": {"label": "Nummer"},
+            "total_amount": {"label": "TOTALT FAKTURABELOPP"},
+            "date": {"label": "Datum (tax point)"},
+            "due_date": {"label": "T.o.m."},
+        },
+    },
+]
+
+
+def builtin_template_for(text: str) -> tuple[str, dict] | None:
+    """
+    Inbyggt verifierat format för texten → (namn, mall) eller
+    None. Träff kräver org.nr/bankgiro i texten eller det
+    tryckta leverantörsnamnet — registerpostens namn används
+    aldrig (det kan vara ett helt annat, t.ex. Direktglas).
+    """
+    if not text:
+        return None
+    digits = re.sub(r"\D", "", text)
+    flat = text.lower()
+    for fmt in BUILTIN_FORMATS:
+        if fmt["org"] and fmt["org"] in digits:
+            return fmt["name"], {"fields": dict(fmt["fields"])}
+        if fmt["bg"] and fmt["bg"] in digits:
+            return fmt["name"], {"fields": dict(fmt["fields"])}
+        if any(p in flat for p in fmt["printed"]):
+            return fmt["name"], {"fields": dict(fmt["fields"])}
+    return None
+
+
+def has_builtin_format(supplier: str) -> bool:
+    """True om leverantörsnamnet har ett inbyggt verifierat
+    format (namnvarianter tillåts, t.ex. 'AB Martin G Anderson'
+    för registerposten och 'Martin G Anderson' i formatet)."""
+    s = " ".join(str(supplier or "").lower().split())
+    if len(s) < 4:
+        return False
+    for fmt in BUILTIN_FORMATS:
+        for alias in fmt["aliases"]:
+            a = alias.lower()
+            if s == a:
+                return True
+            shorter = s if len(s) < len(a) else a
+            if len(shorter) >= 5 and (s in a or a in s):
+                return True
+    return False
 
 
 def load_templates(path: Path) -> dict:

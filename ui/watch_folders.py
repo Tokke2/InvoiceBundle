@@ -19,8 +19,10 @@ Direktglas). När en ny fakturafil dyker upp i mappen:
      på en inlärd leverantörsmall → parkeras för granskning och
      manuell matchning i Import-vyn. Alla leverantörer har egen
      layout, så naken heuristik får aldrig registrera automatiskt
-     — först när användaren lärt appen leverantören (mall) blir
-     mappen automatisk. Aldrig tyst tappad, aldrig gissad.
+     — först när användaren lärt appen leverantören (mall), eller
+     leverantörens format finns inbyggt efter manuell verifiering
+     mot riktiga exempelfakturor, blir mappen automatisk.
+     Aldrig tyst tappad, aldrig gissad.
 
 Konfiguration + bearbetningsregister bor i
 data/watch_folders.json. Allt loggas (SCAN_WATCH).
