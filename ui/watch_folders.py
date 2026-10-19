@@ -135,6 +135,18 @@ def invoice_exists(
     return False
 
 
+def _norm_path_key(path: str) -> str:
+    """Sökväg som jämförelsenyckel: "D:/gewgg/f.pdf" och
+    "D:\\gewgg\\f.pdf" är samma fil. Registrets sökvägar kan
+    komma från fil dialogs (/) medan skanningen bygger dem med
+    OS-separator — utan normalisering missar årssorteringen
+    tyst fast originalet ligger mitt i den bevakade mappen."""
+    try:
+        return os.path.normcase(str(Path(str(path))))
+    except Exception:
+        return str(path)
+
+
 def _norm_supplier_name(name: str) -> frozenset:
     """Namn som ordmängd utan bolagsform/tecken: "AB Martin G
     Anderson" och "Martin G" → samma respektive delmängd."""
@@ -473,7 +485,9 @@ class WatchManager(QObject):
             if not invoices:
                 return
             by_path = {
-                str(inv.get("attachment", "") or ""): inv
+                _norm_path_key(
+                    str(inv.get("attachment", "") or "")
+                ): inv
                 for inv in invoices
                 if str(inv.get("attachment", "") or "")
             }
@@ -484,7 +498,7 @@ class WatchManager(QObject):
             for child in sorted(folder.iterdir()):
                 if not child.is_file() or not supported_file(child):
                     continue
-                inv = by_path.get(str(child))
+                inv = by_path.get(_norm_path_key(str(child)))
                 if inv is None:
                     continue
                 year = _invoice_year(inv.get("date", ""))

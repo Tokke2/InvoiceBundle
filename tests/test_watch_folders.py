@@ -487,6 +487,26 @@ def test_watch_year_sort_backlog_registered(tmp_path):
     assert app.updated == []
 
 
+def test_watch_year_sort_path_separator_variants(tmp_path):
+    """Registrets sökväg kan ha / där skanningen bygger \ —
+    årssorteringen ska ändå hitta originalet i mappen."""
+    _qapp()
+    src = tmp_path / "PilkingtonIn" / "gammal.pdf"
+    inv = {
+        "id": "9", "supplier": "Pilkington",
+        "invoice_number": "9911", "date": "2023-06-16",
+        # Som från en Windows-fil dialog: framåtsnedstreck
+        "attachment": str(src).replace("\\", "/"),
+    }
+    app = _YearApp([inv])
+    mgr, folder = _year_manager(tmp_path, app)
+    src.write_bytes(b"%PDF-old")
+    mgr.scan_all()
+    target = folder / "2023" / "gammal.pdf"
+    assert target.exists()
+    assert inv["attachment"] == str(target)
+
+
 def test_watch_recursive_scan_and_arkiv_skipped(tmp_path):
     """Filer direkt i <år>/ skannas; Arkiv/ skannas aldrig."""
     _qapp()
