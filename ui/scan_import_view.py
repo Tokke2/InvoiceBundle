@@ -723,24 +723,21 @@ class ScanImportView(QWidget):
         if not self._watch.folders:
             self._lbl_status.setText(tr("watch.scan_none"))
             return
-        before = len(self._watch.parked)
         self._watch.scan_all()
         self._refresh_watch_ui()
-        done = len(self._watch.processed) + (
-            len(self._watch.parked) - before
-            if len(self._watch.parked) > before else 0
-        )
+        stats = self._watch.last_scan_stats
         self._lbl_status.setText(
             tr(
                 "watch.scan_done",
-                done=done,
-                parked=len(self._watch.parked),
+                imported=stats.get("imported", 0),
+                duplicate=stats.get("duplicate", 0),
+                parked=stats.get("parked", 0),
+                already=stats.get("already", 0),
             )
         )
         log.info(
-            "SCAN_WATCH: manuell skanning klar — %d bearbetade "
-            "totalt, %d parkerade",
-            len(self._watch.processed), len(self._watch.parked),
+            "SCAN_WATCH: manuell skanning klar — %s",
+            stats,
         )
 
     def _toggle_watch_auto(self, state) -> None:

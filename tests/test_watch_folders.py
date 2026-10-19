@@ -619,3 +619,55 @@ def test_save_never_clobbers_folders_with_empty(tmp_path):
     mgr.set_folders([])
     on_disk = json.loads(cfg.read_text(encoding="utf-8"))
     assert on_disk["folders"] == []
+
+
+def test_watch_scan_stats_distinguishes_new_from_duplicates(tmp_path):
+    """Skanningsbeskedet måste skilja nyregistrerade från dubblettar:
+    'bearbetad' ensamt säger ingenting — en faktura som redan finns
+    i registret (t.ex. exporterad → Arkiverad) skapar ingen ny rad
+    och ska räknas som dubblett, inte som ny faktura."""
+    _qapp()
+    mgr, folder = _manager(
+        tmp_path,
+        invoices=[{"supplier": "Pilkington", "invoice_number": "9911",
+                   "status": "Arkiverad"}],
+    )
+    (folder / "dup.pdf").write_bytes(b"%PDF-dup")
+    mgr.scan_all()
+    stats = mgr.last_scan_stats
+    assert stats["imported"] == 0
+    assert stats["duplicate"] == 1
+    assert stats["parked"] == 0
+    # Samma fil igen → redan bearbetad sedan tidigare (hash-skyddet)
+    mgr.scan_all()
+    stats = mgr.last_scan_stats
+    assert stats["duplicate"] == 0
+    assert stats["already"] == 1
+
+    # Ny komplett faktura räknas som nyregistrerad
+    mgr2, folder2 = _manager(tmp_path / "b")
+    (folder2 / "ny.pdf").write_bytes(b"%PDF-ny")
+    mgr2.scan_all()
+    stats2 = mgr2.last_scan_stats
+    assert stats2["imported"] == 1
+    assert stats2["duplicate"] == 0
+
+
+def test_overdue_chip_shows_unpaid_overdue_only(tmp_path):
+    """Förfallna-filtret: obetald + passerat datum visas; arkiverad
+    (redan exporterad) visas ALDRIG — det är hela poängen med
+    filtret. En skannad obetald faktura med gammalt förfallodatum
+    ska alltså synas här."""
+    import datetime as _dt
+
+    from ui.invoices_helpers import due_window_filter
+    today = _dt.date(2026, 10, 19)
+    rows = [
+        {"status": "Obetald", "due_date": "2024-05-01"},   # skannad, gammal
+        {"status": "Arkiverad", "due_date": "2024-05-01"},  # exporterad
+        {"status": "Betald", "due_date": "2024-05-01"},
+        {"status": "Obetald", "due_date": "2026-12-01"},   # ej förfallen än
+        {"status": "Obetald", "due_date": ""},             # saknar datum
+    ]
+    out = due_window_filter(rows, "overdue", today)
+    assert out == [rows[0]]

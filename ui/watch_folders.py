@@ -186,6 +186,9 @@ class WatchManager(QObject):
         self._config: dict[str, Any] = self._load()
         self._warned_missing: set[str] = set()
         self._parked_retry_marks: dict[str, str] = {}
+        self._scan_stats: dict[str, int] = {
+            "imported": 0, "duplicate": 0, "parked": 0, "already": 0,
+        }
         log.info(
             "SCAN_WATCH: bevakning startad — %d mapp(ar): %s",
             len(self._config.get("folders", [])),
@@ -386,11 +389,32 @@ class WatchManager(QObject):
             return []
 
     def scan_all(self) -> None:
+        self._scan_stats = {
+            "imported": 0, "duplicate": 0, "parked": 0, "already": 0,
+        }
         for entry in self.folders:
             try:
                 self.scan_folder(entry)
             except Exception as exc:
                 log.warning("SCAN_WATCH scan %s: %s", entry, exc)
+        if any(self._scan_stats.values()):
+            log.info(
+                "SCAN_WATCH skanning: %d nya registrerade, %d "
+                "dubblett(er) (fanns redan i registret), %d "
+                "parkerade, %d redan bearbetade sedan tidigare",
+                self._scan_stats["imported"],
+                self._scan_stats["duplicate"],
+                self._scan_stats["parked"],
+                self._scan_stats["already"],
+            )
+
+    @property
+    def last_scan_stats(self) -> dict[str, int]:
+        """Utfall av senaste skanning: nyregistrerade, dubblettar
+        (fanns redan i registret — rörs inte), parkerade och filer
+        som var bearbetade sedan tidigare. 'Bearbetad' ensamt säger
+        ingenting: en dubblett skapar ingen ny faktura."""
+        return dict(self._scan_stats)
 
     def _templates_fingerprint(self) -> str:
         """Fingeravtryck av mall-läget (egna mallar; inbyggda
@@ -448,6 +472,7 @@ class WatchManager(QObject):
             except Exception:
                 continue
             if digest in self._config["processed"]:
+                self._scan_stats["already"] += 1
                 continue
             parked_entry = next(
                 (
@@ -583,6 +608,7 @@ class WatchManager(QObject):
                 **base_info, "result": "duplicate-invoice",
             }
             self._save()
+            self._scan_stats["duplicate"] += 1
             log.info(
                 "SCAN_WATCH: %s redan registrerad (dubblett) — hoppar",
                 path.name,
@@ -612,6 +638,7 @@ class WatchManager(QObject):
             self._save()
             self.file_parked.emit(parked)
             self.changed.emit()
+            self._scan_stats["parked"] += 1
             log.info(
                 "SCAN_WATCH: %s parkerad för granskning (%s)",
                 path.name, reason,
@@ -644,6 +671,7 @@ class WatchManager(QObject):
         }
         self._save()
         self.invoice_ready.emit(row, str(final_path))
+        self._scan_stats["imported"] += 1
         log.info(
             "SCAN_WATCH: %s tolkad (mall=%s) → registreras",
             path.name, parsed.get("template", "-"),

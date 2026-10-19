@@ -424,7 +424,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "watch.parked": {"sv": "⏸  {n} fil(er) väntar på granskning", "en": "⏸  {n} file(s) awaiting review"},
     "watch.review": {"sv": "Granska i tabellen", "en": "Review in table"},
     "watch.scan_now": {"sv": "🔍 Skanna mapparna nu", "en": "🔍 Scan folders now"},
-    "watch.scan_done": {"sv": "Skanning klar: {done} fil(er) bearbetade, {parked} parkerade för granskning. Detaljer i Logg-fliken (sök SCAN_WATCH).", "en": "Scan done: {done} file(s) processed, {parked} parked for review. Details in the Log tab (search SCAN_WATCH)."},
+    "watch.scan_done": {"sv": "Skanning klar: {imported} nya fakturor registrerade, {duplicate} dubblett(er) — fanns redan i registret och rördes inte, {parked} parkerade för granskning, {already} redan bearbetade sedan tidigare. Nya fakturor finns i Fakturor-fliken; dubblettar som exporterats förblir arkiverade.", "en": "Scan done: {imported} new invoice(s) registered, {duplicate} duplicate(s) — already in the registry, untouched, {parked} parked for review, {already} already processed previously. New invoices are in the Invoices tab; duplicates that were exported stay archived."},
     "watch.scan_none": {"sv": "Inga bevakade mappar inlagda — lägg till en mapp med leverantör först.", "en": "No watched folders added — add a folder with a supplier first."},
     "watch.learn": {"sv": "🎓 Lär appen från mappen…", "en": "🎓 Teach the app from the folder…"},
     "watch.learn_title": {"sv": "Lär appen läsa fakturorna", "en": "Teach the app to read the invoices"},
