@@ -293,6 +293,23 @@ def watch_diagnostic_lines(
                     str(p.get("ts", "") or "?")[:16],
                 )
             )
+            _parsed = p.get("parsed") or {}
+            if _parsed or p.get("method"):
+                lines.append(
+                    "      tolkat: fakturanr={nr} belopp={amt} "
+                    "mall={tpl} saknar={mis} (metod={met}, "
+                    "{n} tecken text)".format(
+                        nr=_parsed.get("invoice_number") or "—",
+                        amt=_parsed.get("total_amount") or "—",
+                        tpl=_parsed.get("template") or "—",
+                        mis=(
+                            ", ".join(_parsed.get("missing") or [])
+                            or "—"
+                        ),
+                        met=p.get("method") or "—",
+                        n=len(p.get("text", "") or ""),
+                    )
+                )
         if len(mine) > 15:
             lines.append(
                 f"    … och {len(mine) - 15} parkerade till "
@@ -982,8 +999,14 @@ class WatchManager(QObject):
             self.changed.emit()
             self._scan_stats["parked"] += 1
             log.info(
-                "SCAN_WATCH: %s parkerad för granskning (%s)",
+                "SCAN_WATCH: %s parkerad för granskning (%s) — "
+                "tolkat: fakturanr=%s, belopp=%s, saknar=%s, "
+                "textuttag=%s (%d tecken)",
                 path.name, reason,
+                parsed.get("invoice_number") or "—",
+                parsed.get("total_amount") or "—",
+                ", ".join(parsed.get("missing", [])) or "—",
+                method or "—", len(text or ""),
             )
             return
 

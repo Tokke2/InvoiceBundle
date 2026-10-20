@@ -182,3 +182,33 @@ def test_watch_diag_attributes_parked_despite_path_variants(tmp_path):
     assert "parkerad: avvaktar.pdf" in text
     assert "auto-registrering avstängd" in text
     assert "väntar i parkering" in text
+
+
+def test_watch_diag_shows_parse_details(tmp_path):
+    """Parkerade rader ska berätta vad tolkningen faktiskt
+    hittade (nummer/belopp/metod) — det skiljer textfel från
+    format som inte träffar, helt utan att dela filer."""
+    from ui.watch_folders import file_hash, watch_diagnostic_lines
+
+    folder = tmp_path / "gewgg"
+    folder.mkdir()
+    pk = folder / "f.pdf"
+    pk.write_bytes(b"%PDF-x")
+    config = {
+        "folders": [{"path": str(folder), "supplier": "Martin G"}],
+        "auto_create": True, "processed": {},
+        "parked": [{
+            "hash": file_hash(pk), "path": str(pk), "file": "f.pdf",
+            "reason": "no-template", "ts": "2026-10-20T08:23:00",
+            "method": "textlager-pypdf", "text": "x" * 321,
+            "parsed": {
+                "invoice_number": "914180", "total_amount": 1250.0,
+                "template": "", "missing": [],
+            },
+        }],
+    }
+    text = "\n".join(watch_diagnostic_lines(config))
+    assert "tolkat: fakturanr=914180" in text
+    assert "belopp=1250.0" in text
+    assert "textlager-pypdf" in text
+    assert "321 tecken text" in text
