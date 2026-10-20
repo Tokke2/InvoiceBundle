@@ -140,11 +140,24 @@ def _norm_path_key(path: str) -> str:
     "D:\\gewgg\\f.pdf" är samma fil. Registrets sökvägar kan
     komma från fil dialogs (/) medan skanningen bygger dem med
     OS-separator — utan normalisering missar årssorteringen
-    tyst fast originalet ligger mitt i den bevakade mappen."""
-    try:
-        return os.path.normcase(str(Path(str(path))))
-    except Exception:
-        return str(path)
+    tyst fast originalet ligger mitt i den bevakade mappen.
+    Båda snedstrecksslagen slås ihop på alla plattformar (inte
+    bara Windows), så även felsökningsdiagnosens jämförelser
+    blir likadana överallt."""
+    raw = str(path or "").replace("\\", "/")
+    parts: list[str] = []
+    for seg in raw.split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(seg)
+    key = "/".join(parts)
+    if raw.startswith("/"):
+        key = "/" + key
+    return os.path.normcase(key)
 
 
 def _norm_supplier_name(name: str) -> frozenset:
@@ -195,11 +208,13 @@ def watch_diagnostic_lines(
         lines.append(
             "senaste skanning: {imported} nya fakturor, "
             "{duplicate} dubbletter (fanns redan — rördes inte), "
-            "{parked} parkerade, {already} redan bearbetade".format(
+            "{parked} parkerade, {already} redan bearbetade, "
+            "{waiting} väntar i parkering".format(
                 **{
                     k: int((stats or {}).get(k, 0) or 0)
                     for k in (
-                        "imported", "duplicate", "parked", "already"
+                        "imported", "duplicate", "parked", "already",
+                        "waiting",
                     )
                 }
             )
@@ -223,7 +238,7 @@ def watch_diagnostic_lines(
             if root and (
                 key == root or key.startswith(root + os.sep)
             ):
-                return str(f.get("path", ""))
+                return root
         return ""
 
     for entry in folders:
@@ -248,7 +263,8 @@ def watch_diagnostic_lines(
             continue
         mine = [
             p for p in parked
-            if _folder_of(str(p.get("path", ""))) == str(folder)
+            if _folder_of(str(p.get("path", "")))
+            == _norm_path_key(str(folder))
         ]
         lines.append(
             f"• {folder} (leverantör {supplier}) — {len(files)} "
@@ -345,7 +361,10 @@ class WatchManager(QObject):
         self._parked_retry_marks: dict[str, str] = {}
         self._scan_stats: dict[str, int] = {
             "imported": 0, "duplicate": 0, "parked": 0, "already": 0,
+            "waiting": 0,
         }
+        self._waiting_reasons: dict[str, int] = {}
+        self._last_logged_waiting: int = -1
         log.info(
             "SCAN_WATCH: bevakning startad — %d mapp(ar): %s",
             len(self._config.get("folders", [])),
@@ -474,6 +493,11 @@ class WatchManager(QObject):
         self._config["auto_create"] = bool(enabled)
         self._save()
         self.changed.emit()
+        if enabled:
+            # Filer som bara väntade på att auto-registreringen
+            # skulle slås på prövas direkt — annars låg de kvar
+            # i parkeringen i evighet trots att formatet läses.
+            self.scan_all()
 
     def unprocess(self, file_hash_value: str) -> None:
         """Tar bort en fil ur bearbetade-registret så nästa
@@ -571,23 +595,53 @@ class WatchManager(QObject):
     def scan_all(self) -> None:
         self._scan_stats = {
             "imported": 0, "duplicate": 0, "parked": 0, "already": 0,
+            "waiting": 0,
         }
+        self._waiting_reasons = {}
         self._heal_missing_imports()
         for entry in self.folders:
             try:
                 self.scan_folder(entry)
             except Exception as exc:
                 log.warning("SCAN_WATCH scan %s: %s", entry, exc)
-        if any(self._scan_stats.values()):
+        # Sammanfattningen loggas när något hände — eller när
+        # antalet i parkering-väntar ändrats — så den aldrig är
+        # tyst om varför filer inte läses in, men inte heller
+        # loggar samma rad var 30:e sekund när inget ändrats.
+        active = any(
+            v for k, v in self._scan_stats.items() if k != "waiting"
+        )
+        waiting = self._scan_stats.get("waiting", 0)
+        if active or waiting != self._last_logged_waiting:
+            self._last_logged_waiting = waiting
+            reason_txt = ""
+            if self._waiting_reasons:
+                reason_txt = " (" + ", ".join(
+                    f"{_park_reason_sv(k)} ×{n}"
+                    for k, n in sorted(self._waiting_reasons.items())
+                ) + ")"
             log.info(
                 "SCAN_WATCH skanning: %d nya registrerade, %d "
                 "dubblett(er) (fanns redan i registret), %d "
-                "parkerade, %d redan bearbetade sedan tidigare",
+                "parkerade, %d redan bearbetade sedan tidigare, "
+                "%d väntar i parkering%s",
                 self._scan_stats["imported"],
                 self._scan_stats["duplicate"],
                 self._scan_stats["parked"],
                 self._scan_stats["already"],
+                waiting,
+                reason_txt,
             )
+            if (
+                self._waiting_reasons.get("review")
+                and not self.auto_create
+            ):
+                log.info(
+                    "SCAN_WATCH: auto-registrering är AV — %d "
+                    "fil(er) ligger i parkering tills den slås "
+                    "på i Import-fliken (Bevakade mappar)",
+                    self._waiting_reasons["review"],
+                )
 
     def _heal_missing_imports(self) -> None:
         """Självläkning: filer som står som importerade i
@@ -704,6 +758,12 @@ class WatchManager(QObject):
         prövas inte om.
         """
         reason = str(parked_entry.get("reason", ""))
+        if reason == "review":
+            # Parkerades bara för att auto-registreringen var
+            # avstängd då. Så fort den är på prövas filen igen —
+            # annars blir parkeringen en återvändsgränd där en
+            # fullt läsbar faktura aldrig läses in.
+            return self.auto_create
         if not (
             reason == "no-template" or reason.startswith("missing")
         ):
@@ -747,6 +807,24 @@ class WatchManager(QObject):
             )
             if parked_entry is not None:
                 if not self._should_retry_parked(parked_entry, digest):
+                    # Aldrig tyst: skanningen räknar filen bland
+                    # "väntar i parkering" och sammanfattningen
+                    # säger varför (orsaken syns också i
+                    # felsökningspaketet per fil).
+                    self._scan_stats["waiting"] = (
+                        self._scan_stats.get("waiting", 0) + 1
+                    )
+                    raw_reason = str(
+                        parked_entry.get("reason", "") or ""
+                    )
+                    bucket = (
+                        "missing"
+                        if raw_reason.startswith("missing")
+                        else (raw_reason or "?")
+                    )
+                    self._waiting_reasons[bucket] = (
+                        self._waiting_reasons.get(bucket, 0) + 1
+                    )
                     continue
                 log.info(
                     "SCAN_WATCH: %s var parkerad (%s) — prövar "

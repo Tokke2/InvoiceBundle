@@ -758,3 +758,32 @@ def test_watch_heals_import_marked_file_without_invoice(tmp_path):
     mgr2.scan_all()
     assert len(ready2) == 1  # ingen omprövning — sökvägen finns ju
     assert mgr2.last_scan_stats["already"] == 1
+
+
+def test_watch_review_parked_registers_when_auto_enabled(tmp_path):
+    """Filer som parkerades BARA för att auto-registreringen var
+    AV får inte fastna: så fort den slås PÅ prövas de och (om
+    formatet läses) registreras de. Tidigare prövades parkerade
+    bara vid ändrat mall-fingeravtryck — review-filer var fast
+    i evighet trots att skanningarna såg helt tomma ut."""
+    _qapp()
+    mgr, folder = _manager(tmp_path, auto=False)
+    ready, parked = [], []
+    mgr.invoice_ready.connect(lambda row, path: ready.append(row))
+    _persist_emitted(mgr)
+    mgr.file_parked.connect(lambda info: parked.append(info))
+    (folder / "f.pdf").write_bytes(b"%PDF-review")
+    mgr.scan_all()
+    assert not ready and len(parked) == 1
+    assert parked[0]["reason"] == "review"
+    # Ny skanning med auto fortfarande AV: filen ska RÄKNAS som
+    # väntande (aldrig tyst hoppad över med 0 i statistiken)
+    ready.clear()
+    mgr.scan_all()
+    assert not ready
+    assert mgr.last_scan_stats["waiting"] == 1
+    # Slå PÅ auto → omgården släpps
+    mgr.set_auto_create(True)
+    assert len(ready) == 1
+    assert not mgr.parked
+    assert mgr.last_scan_stats["waiting"] == 0

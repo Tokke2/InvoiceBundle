@@ -145,3 +145,40 @@ def test_save_json_recovers_from_transient_access_denied(
     assert json.loads(target.read_text(encoding="utf-8")) == {
         "a": 1
     }
+
+
+def test_watch_diag_attributes_parked_despite_path_variants(tmp_path):
+    """Diagnosens mapp-matchning måste hitta parkerade filer
+    även när mappsökvägen lagrats med dubbla snedstreck (i
+    användarens data: 'D:/gewgg' i config mot 'D:\\gewgg\\...'
+    i parkerade rader gav felaktigt '0 parkerade här')."""
+    from ui.watch_folders import file_hash, watch_diagnostic_lines
+
+    folder = tmp_path / "gewgg"
+    folder.mkdir()
+    seen = folder / "faktura2024.pdf"
+    seen.write_bytes(b"%PDF-1.4 fake")
+    pk = folder / "avvaktar.pdf"
+    pk.write_bytes(b"%PDF-1.4 review")
+    config = {
+        # dubbel-separator i lagrad mappsökväg
+        "folders": [{
+            "path": str(folder).replace("/", "//"),
+            "supplier": "Martin G",
+        }],
+        "auto_create": False,
+        "processed": {},
+        "parked": [{
+            "hash": file_hash(pk), "path": str(pk),
+            "file": "avvaktar.pdf", "reason": "review",
+            "ts": "2026-10-20T07:50:00",
+        }],
+    }
+    text = "\n".join(watch_diagnostic_lines(config, {
+        "imported": 0, "duplicate": 0, "parked": 0,
+        "already": 0, "waiting": 1,
+    }))
+    assert "1 parkerade här" in text
+    assert "parkerad: avvaktar.pdf" in text
+    assert "auto-registrering avstängd" in text
+    assert "väntar i parkering" in text
