@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QCheckBox, QApplication, QInputDialog,
     QDialog, QListWidget, QPlainTextEdit,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont
 
 try:
@@ -657,15 +657,62 @@ class ScanImportView(QWidget):
                 templates_provider=self._get_templates,
                 parent=self,
             )
+            # Parkerade filer samlas och meddelas i EN dialog
+            # per skanningsomgång — otolkbara fakturor ska
+            # aldrig försvinna tyst i parkeringen.
+            self._parked_notify: list[dict] = []
+            self._parked_timer = QTimer(self)
+            self._parked_timer.setSingleShot(True)
+            self._parked_timer.timeout.connect(self._show_parked_dialog)
             self._watch.invoice_ready.connect(self._on_watch_invoice)
-            self._watch.file_parked.connect(
-                lambda _info: self._refresh_watch_ui()
-            )
+            self._watch.file_parked.connect(self._on_watch_parked)
             self._watch.changed.connect(self._refresh_watch_ui)
             self._chk_auto_watch.setChecked(self._watch.auto_create)
             self._refresh_watch_ui()
         except Exception as exc:
             log.warning("WatchManager start: %s", exc)
+
+    def _on_watch_parked(self, info: dict) -> None:
+        """Ny parkerad fil från bevakningen — samla till en
+        gemensam informationsdialog (startar om nedräkningen
+        så en skanningsrunda ger exakt en dialog)."""
+        self._refresh_watch_ui()
+        if not hasattr(self, "_parked_notify"):
+            return
+        self._parked_notify.append(dict(info or {}))
+        self._parked_timer.start(2500)
+
+    def _show_parked_dialog(self) -> None:
+        """Dialog: de här filerna kunde inte tolkas.
+
+        Visar filnamn + orsak på svenska och vägen vidare
+        (Granska i tabellen). Tömmer kön så samma filer
+        aldrig larmar igen.
+        """
+        infos = getattr(self, "_parked_notify", [])
+        self._parked_notify = []
+        if not infos:
+            return
+        from ui.watch_folders import _park_reason_sv
+        lines = []
+        for info in infos[:8]:
+            name = info.get("file") or Path(
+                str(info.get("path", ""))
+            ).name
+            lines.append(
+                f"• {name} — {_park_reason_sv(info.get('reason', ''))}"
+            )
+        if len(infos) > 8:
+            lines.append(
+                tr("watch.parked_dialog_more", n=len(infos) - 8)
+            )
+        QMessageBox.warning(
+            self, tr("watch.parked_dialog_title"),
+            tr(
+                "watch.parked_dialog",
+                n=len(infos), files="\n".join(lines),
+            ),
+        )
 
     def _refresh_watch_ui(self) -> None:
         if not hasattr(self, "_lst_watch"):

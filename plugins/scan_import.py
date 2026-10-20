@@ -432,10 +432,19 @@ def parse_invoice_text(
                 btmpl.get("fields", {})
                 .get("total_amount", {}).get("label", "")
             )
+            # Att betala verifieras mot sin rad: parvis layout
+            # lägger beloppet på etikettens egen rad, kolumn-
+            # layouten på värderaden under rubriken. Annat
+            # innehåll mellan etikett och belopp (fel kolumn)
+            # accepteras aldrig.
             total_ok = (
                 "total_amount" in found
-                and _label_same_line_amount(text or "", total_label)
-                == found["total_amount"]
+                and (
+                    _label_same_line_amount(text or "", total_label)
+                    == found["total_amount"]
+                    or _label_below_amount(text or "", total_label)
+                    == found["total_amount"]
+                )
             )
             if "invoice_number" in found and (
                 total_ok or is_credit_note(text or "")
@@ -599,6 +608,97 @@ def _extract_kind(chunk: str, kind: str, label: str = "") -> str:
     return m.group(0).strip(" .") if m else ""
 
 
+#: En datumtoken ("2024-05-08") får aldrig tas för ett
+#: fakturanummer i en värderad under kolumnrubriker.
+_DATE_TOKEN = re.compile(
+    r"\d{4}[-./]\d{2}[-./]\d{2}|\d{1,2}[-./]\d{1,2}[-./]\d{2,4}"
+)
+
+
+def _extract_below_line(line: str, kind: str) -> str:
+    """Värdet av given typ i en VÄRDERAD (raden under rubrikerna).
+
+    Rubrikerna styr vilken typ varje fält läser — aldrig "första
+    beloppet efter etiketten" (det är nästan alltid fel kolumn):
+    belopp = SISTA beloppet på raden (Att betala är sista
+    kolumnen i summablocket), datum = datumtoken, nummer =
+    första nummertoken som inte är ett datum.
+    """
+    line = (line or "").strip()
+    if not line:
+        return ""
+    if kind == "amount":
+        hits = _AMOUNT_AFTER.findall(line)
+        if hits:
+            v = _norm_amount(hits[-1])
+            if v > 0:
+                return f"{v:.2f}"
+        return ""
+    if kind == "date":
+        m = _DATE_AFTER.search(line)
+        return _parse_date(m.group(0)) if m else ""
+    if kind == "digits":
+        m = _DIGITS_AFTER.search(line)
+        return re.sub(r"\s", "", m.group(0)) if m else ""
+    if kind == "token":
+        for tok in line.split():
+            tok = tok.strip(" .,;:#")
+            if not tok or not any(c.isdigit() for c in tok):
+                continue
+            if _DATE_TOKEN.fullmatch(tok):
+                continue
+            if _INVOICE_NR_RE.fullmatch(tok) is None:
+                continue
+            if len(tok) >= 2 and tok.upper() not in _INVOICE_NR_STOPWORDS:
+                return tok
+        return ""
+    m = _TOKEN_AFTER.search(line)
+    return m.group(0).strip(" .") if m else ""
+
+
+def _extract_below_label(text: str, label: str, kind: str) -> str:
+    """Värdet på raden UNDER etikettens rubrikrad, eller "".
+
+    För layouten där etiketterna står som kolumnrubriker i en
+    rubrikrad ("Fakturanr. Fakturadatum Kundnr." / "… Summa
+    netto Moms Öresavrundning Att betala") och alla värden
+    samlade på raden under. Radvis/kolumnvis extraktion (PDF/
+    OCR) kan aldrig para etikett+värde på samma rad där.
+
+    Villkor (samma försiktighet som alltid): etikettens egen
+    rad får INTE innehålla ett värde av typen (då är det en
+    vanlig etikett+värde-rad, ingen rubrikrad) och värdet
+    måste stå i den omedelbart följande icke-tomma raden.
+    """
+    if not text or not label:
+        return ""
+    flat = re.sub(r"[ \t]+", " ", text)
+    lab = re.sub(r"\s+", " ", str(label)).strip().rstrip(":#").strip()
+    if not lab:
+        return ""
+    lines = flat.split("\n")
+    for m in re.finditer(re.escape(lab), flat, re.IGNORECASE):
+        rest_line = flat[m.end():].split("\n", 1)[0]
+        if _extract_kind(rest_line, kind, m.group(0)):
+            # Vanlig etikett+värde-rad — aldrig rubrikrad.
+            continue
+        lineno = flat.count("\n", 0, m.end())
+        for below in lines[lineno + 1:]:
+            if not below.strip():
+                continue
+            hit = _extract_below_line(below, kind)
+            if hit:
+                return hit
+            break
+    return ""
+
+
+def _label_below_amount(text: str, label: str) -> float | None:
+    """Beloppet i kolumnen under etiketten ("Att betala")."""
+    hit = _extract_below_label(text, label, "amount")
+    return float(hit) if hit else None
+
+
 def apply_template(text: str, template: dict) -> dict[str, Any]:
     """Kör en leverantörsmall på texten → {fält: värde} för träffar."""
     fields = (template or {}).get("fields", {})
@@ -607,7 +707,18 @@ def apply_template(text: str, template: dict) -> dict[str, Any]:
         kind = TEMPLATE_FIELD_KINDS.get(field)
         if kind is None or not isinstance(spec, dict):
             continue
-        raw = extract_with_label(text or "", str(spec.get("label", "")), kind)
+        label = str(spec.get("label", ""))
+        raw = extract_with_label(text or "", label, kind)
+        if spec.get("below"):
+            # Verifierad kolumnlayout (rubrikrad + värderad,
+            # t.ex. Martin G:s nyare fakturor): värdet på raden
+            # under rubriken VINNER över vanlig etikettläsning —
+            # annars norpar den första beloppet efter etiketten
+            # ur fel kolumn (t.ex. Total vikt i stället för Att
+            # betala). Saknas värderaden gäller vanlig läsning.
+            below_raw = _extract_below_label(text or "", label, kind)
+            if below_raw:
+                raw = below_raw
         if raw == "":
             continue
         found[field] = float(raw) if field == "total_amount" else raw
@@ -647,9 +758,12 @@ BUILTIN_FORMATS: list[dict] = [
         "bg": "7280811",
         "printed": ["martin g anderson"],
         "fields": {
-            "invoice_number": {"label": "Fakturanr."},
-            "total_amount": {"label": "Att betala"},
-            "date": {"label": "Fakturadatum"},
+            # Nya layouten (2024−, verifierad mot faktura 916336
+            # i chatten): rubrikrad + värderad — "below". Äldre
+            # parvis layout träffas av vanlig etikettläsning.
+            "invoice_number": {"label": "Fakturanr.", "below": True},
+            "total_amount": {"label": "Att betala", "below": True},
+            "date": {"label": "Fakturadatum", "below": True},
             "due_date": {"label": "Förfallodatum"},
         },
     },

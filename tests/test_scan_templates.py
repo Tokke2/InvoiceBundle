@@ -755,11 +755,74 @@ def test_builtin_martin_g_registers_without_user_template():
     assert parsed["template"]
 
 
-def test_builtin_martin_g_row_layout_still_parks():
-    # Radvis/kolumnbruten text: beloppet kommer inte ur
-    # formatet → ingen inbyggd träff → parkeras, aldrig
-    # auto-registrerad med gissad total (t.ex. 89,99).
+def test_builtin_martin_g_row_layout_registers():
+    # Kolumnlayouten (rubrikrad + värderad) är verifierad mot
+    # riktiga Martin G-fakturor i chatten och är numera en del
+    # av det inbyggda formatet ("below"): fakturanummer, datum
+    # och Att betala (sista beloppet på värderaden) läses ur
+    # sina kolumner — aldrig första beloppet efter etiketten
+    # (det vore Total vikt, 89,99).
     parsed = si.parse_invoice_text(MARTIN_G_ROW, MARTIN_G_REGISTER)
+    assert parsed["invoice_number"] == "906178"
+    assert parsed["total_amount"] == 3491.00
+    assert parsed["date"] == "2023-06-16"
+    assert parsed["due_date"] == "2023-07-16"
+    assert parsed["missing"] == []
+    assert parsed["template"]
+
+
+# Martin G:s layout från 2024 (faktura 916336, Laxå
+# Glasmästeri, verifierad av användaren i chatten): rubrikrad
+# "Fakturanr. Fakturadatum Kundnr." med värdena under, och
+# summablocket "… Summa netto Moms Öresavrundning Att betala"
+# med "SEK 478,00" som sista belopp på värderaden. Inget
+# upprepas på någon sida 2 — tidigare parkerades alla sådana.
+MARTIN_G_2024 = """\
+MARTIN G ANDERSON
+EN DEL AV GLASGRUPPEN
+FAKTURA
+Fakturanr. Fakturadatum Kundnr.
+916336 2024-05-08 103
+Leveransadress
+Laxå Glasmästeri
+Maskinvägen 4
+695 30 LAXÅ
+Betalningsvillkor: 30 dagar netto
+Förfallodatum: 2024-06-07
+ORDER: 243853
+Pos Varuslag Antal Bredd Höjd Yta (m2) Vikt Styckpris Summa
+001 Isolerglas Dubbel 1 438 x 743 0,50 6,51 382,50 382,50
+Totalt: 382,50
+Total vikt Totalt antal Total yta (m2) Summa netto Moms Öresavrundning Att betala
+6,51 1 0,50 382,50 95,63 0,13 SEK 478,00
+AB Martin G Anderson
+Box 1736
+701 17 ÖREBRO
+Org nr 556824-5806
+Bankgiro: 728-0811
+"""
+
+
+def test_builtin_martin_g_2024_single_page_layout():
+    parsed = si.parse_invoice_text(MARTIN_G_2024, MARTIN_G_REGISTER)
+    assert parsed["supplier"] == "AB Martin G Anderson"
+    assert parsed["invoice_number"] == "916336"
+    assert parsed["total_amount"] == 478.00
+    assert parsed["date"] == "2024-05-08"
+    assert parsed["due_date"] == "2024-06-07"
+    assert parsed["missing"] == []
+    assert parsed["template"]
+
+
+def test_builtin_martin_g_below_needs_value_row():
+    # Rubrikraden finns men värderaden under Att betala är en
+    # textrad utan belopp (t.ex. avklippt OCR) → ingen träff,
+    # filen parkeras i stället för att gissa ur annat håll.
+    text = MARTIN_G_2024.replace(
+        "6,51 1 0,50 382,50 95,63 0,13 SEK 478,00",
+        "Vid försenad betalning debiteras dröjsmålsränta",
+    )
+    parsed = si.parse_invoice_text(text, MARTIN_G_REGISTER)
     assert not parsed.get("template")
 
 
@@ -917,3 +980,49 @@ def test_builtin_aag_row_layout_parks():
     assert not parsed.get("template")
     assert si.has_builtin_format("Swede Glass United")
     assert si.has_builtin_format("AAG Automotive AB")
+
+
+def test_parked_dialog_batches_and_informs(monkeypatch):
+    """Otolkbara fakturor ska ge EN samlad dialog (inte en
+    per fil) med filnamn och orsak — testet fångar dialogen."""
+    import ui.scan_import_view as siv
+
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    class _FakeCore:
+        def get_suppliers(self):
+            return []
+
+        def get_setting(self, key, default=None):
+            return default
+
+    view = siv.ScanImportView(app=_FakeCore())
+    view._parked_notify = []
+    view._parked_timer = siv.QTimer(view)
+    view._parked_timer.setSingleShot(True)
+    view._parked_timer.timeout.connect(view._show_parked_dialog)
+
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        siv.QMessageBox, "warning",
+        lambda _parent, title, text: shown.append((title, text)),
+    )
+    view._on_watch_parked(
+        {"file": "a.pdf", "reason": "no-template"}
+    )
+    view._on_watch_parked(
+        {"file": "b.pdf", "reason": "missing: belopp"}
+    )
+    view._show_parked_dialog()
+
+    assert len(shown) == 1
+    title, body = shown[0]
+    assert title
+    assert "a.pdf" in body and "b.pdf" in body
+    assert "okänt format" in body
+    assert "saknar uppgifter" in body
+    # Kön är tömd — samma filer larmar inte igen.
+    view._show_parked_dialog()
+    assert len(shown) == 1

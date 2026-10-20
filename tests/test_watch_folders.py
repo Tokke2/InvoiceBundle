@@ -787,3 +787,58 @@ def test_watch_review_parked_registers_when_auto_enabled(tmp_path):
     assert len(ready) == 1
     assert not mgr.parked
     assert mgr.last_scan_stats["waiting"] == 0
+
+
+TEXT_2024 = """\
+MARTIN G ANDERSON
+FAKTURA
+Fakturanr. Fakturadatum Kundnr.
+916336 2024-05-08 103
+Förfallodatum: 2024-06-07
+001 1 438 x 743 0,50 6,51 382,50 382,50
+Total vikt Totalt antal Total yta (m2) Summa netto Moms Öresavrundning Att betala
+6,51 1 0,50 382,50 95,63 0,13 SEK 478,00
+Org nr 556824-5806
+Bankgiro: 728-0811
+"""
+
+
+def test_watch_new_martin_g_layout_registers(tmp_path):
+    """Hela kedjan: Martin G:s 2024-layout (916336) i bevakad
+    mapp registreras automatiskt via det inbyggda formatets
+    nedanläsning — fakturanummer, datum, förfallo och Att
+    betala 478,00 ur sina kolumner. Status blir Obetald (inte
+    betald) så användaren själv väljer ihopslagning/export."""
+    from ui.watch_folders import WatchManager
+
+    _qapp()
+    folder = tmp_path / "gewgg"
+    folder.mkdir()
+
+    class App2024(FakeApp):
+        def get_suppliers(self):
+            return [{
+                "name": "AB Martin G Anderson",
+                "org_number": "556824-5806", "bg": "728-0811",
+            }]
+
+    mgr = WatchManager(
+        tmp_path / "watch_folders.json",
+        app=App2024(),
+        extract_fn=lambda path: (TEXT_2024, "test"),
+        templates_provider=lambda: {},
+    )
+    mgr.set_folders([{"path": str(folder), "supplier": "Martin G"}])
+    ready: list[dict] = []
+    mgr.invoice_ready.connect(lambda row, path: ready.append(row))
+    (folder / "916336.pdf").write_bytes(b"%PDF-fake")
+
+    mgr.scan_all()
+
+    assert not mgr.parked
+    (inv,) = ready
+    assert inv["invoice_number"] == "916336"
+    assert inv["total_amount"] == 478.00
+    assert inv["date"] == "2024-05-08"
+    assert inv["due_date"] == "2024-06-07"
+    # Status sätts vid registreringen i vyn (alltid Obetald).
