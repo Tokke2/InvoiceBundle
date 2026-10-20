@@ -360,6 +360,7 @@ def parse_invoice_text(
     text: str,
     suppliers: list[dict] | None = None,
     templates: dict | None = None,
+    region_texts: dict | None = None,
 ) -> dict[str, Any]:
     """
     Tolkar en fakturatext och returnerar kandidater:
@@ -397,8 +398,31 @@ def parse_invoice_text(
                 text or "", [{"name": n} for n in templates.keys()]
             )
         template = find_template(templates, supplier) if supplier else None
+        if template is None and region_texts:
+            # Regionsmall (användaren har pekat ut värdena på
+            # fakturabilden): mallens ruttexter gav träffar —
+            # mallen identifierar då leverantören själv, även
+            # när löptexten saknar igenkännbart namn/nummer.
+            for cand_name, cand in templates.items():
+                if not isinstance(cand, dict):
+                    continue
+                if template_values_from_regions(
+                    cand, region_texts
+                ):
+                    template = cand
+                    if not supplier:
+                        supplier = str(cand_name)
+                    break
         if template:
             found = apply_template(text or "", template)
+            if region_texts:
+                # Utpekade rutor på fakturabilden vinner över
+                # etikettläsningen — platsen är explicit angiven.
+                found.update(
+                    template_values_from_regions(
+                        template, region_texts
+                    )
+                )
             for field, value in found.items():
                 if field == "total_amount":
                     total = float(value)
@@ -490,6 +514,39 @@ def parse_invoice_text(
         result["template"] = template_name
         result["template_fields"] = template_fields
     return result
+
+
+def parse_invoice_file(
+    path: Any,
+    text: str,
+    suppliers: list[dict] | None = None,
+    templates: dict | None = None,
+) -> dict[str, Any]:
+    """Tolkning av en FIL: löptext + eventuella regionsmallar.
+
+    Mallar vars fält pekar ut rutor på fakturabilden (region)
+    läses ur själva filen (textlager i rutan, annars OCR) och
+    får avgöra fälten. Första mallen vars rutor ger ett
+    fakturanummer eller ett att betala-belopp används — resten
+    av tolkningen är exakt densamma som för ren text.
+    """
+    tpl = templates or {}
+    for _name, cand in tpl.items():
+        if not isinstance(cand, dict):
+            continue
+        fields = cand.get("fields", {}) or {}
+        if not any(
+            isinstance(spec, dict) and spec.get("region")
+            for spec in fields.values()
+        ):
+            continue
+        rtext = extract_region_texts(path, cand)
+        vals = template_values_from_regions(cand, rtext)
+        if vals.get("invoice_number") or vals.get("total_amount"):
+            return parse_invoice_text(
+                text, suppliers, tpl, region_texts=rtext
+            )
+    return parse_invoice_text(text, suppliers, tpl)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -723,6 +780,295 @@ def apply_template(text: str, template: dict) -> dict[str, Any]:
             continue
         found[field] = float(raw) if field == "total_amount" else raw
     return found
+
+
+# ── Regionsmallar: värden pekas ut på fakturabilden ──────────
+# En malls fält kan i stället för etikett bära en RUTA på sidan:
+#   {"region": [x0, y0, x1, y1], "page": 0}
+# Koordinaterna är andelar (0–1) av sidans bredd/höjd, så samma
+# mall fungerar oavsett filens upplösning. Läsningen sker i
+# första hand ur PDF:ens textlager inuti rutan (PyMuPDF, pypdf
+# som reserv), annars OCR av den utklippta rutan. Poängen är
+# inlärningsdialogens bildmarkering: användaren drar en ruta
+# runt värdet — appen behöver inte gissa etiketter alls.
+
+
+def _value_from_region(raw: str, kind: str) -> str:
+    """Tolkar värdet ur en markerad rutas råtext.
+
+    Rutan ska innehålla i huvudsak själva värdet, men lite
+    etikett-text tolereras: nummer = första nummertoken som
+    inte är ett datum/rubrikord, belopp = sista fullständiga
+    beloppet, datum = första datumtoken, OCR = sifferserien.
+    """
+    text = " ".join(str(raw or "").split())
+    if not text:
+        return ""
+    if kind == "amount":
+        hits = _AMOUNT_AFTER.findall(text)
+        if hits:
+            v = _norm_amount(hits[-1])
+            if v > 0:
+                return f"{v:.2f}"
+        return ""
+    if kind == "date":
+        m = _DATE_AFTER.search(text)
+        return _parse_date(m.group(0)) if m else ""
+    if kind == "digits":
+        m = _DIGITS_AFTER.search(text)
+        if m:
+            return re.sub(r"\s", "", m.group(0))
+        digits = re.sub(r"\D", "", text)
+        return digits if len(digits) >= 4 else ""
+    if kind == "token":
+        return _extract_below_line(text, "token")
+    parts = text.split()
+    return parts[0] if parts else ""
+
+
+def _region_specs(template: dict | None) -> dict[str, dict]:
+    """{fält: spec} för fält i mallen som har en giltig ruta."""
+    out: dict[str, dict] = {}
+    for field, spec in ((template or {}).get("fields", {}) or {}).items():
+        if field not in TEMPLATE_FIELD_KINDS:
+            continue
+        if not isinstance(spec, dict):
+            continue
+        region = spec.get("region")
+        if (
+            isinstance(region, (list, tuple))
+            and len(region) == 4
+            and all(
+                isinstance(v, (int, float)) and 0.0 <= float(v) <= 1.0
+                for v in region
+            )
+        ):
+            out[field] = spec
+    return out
+
+
+def template_values_from_regions(
+    template: dict | None, region_texts: dict | None
+) -> dict[str, Any]:
+    """{fält: tolkat värde} ur rutornas råtexter."""
+    found: dict[str, Any] = {}
+    texts = region_texts or {}
+    for field, spec in _region_specs(template).items():
+        raw = _value_from_region(
+            str(texts.get(field, "") or ""),
+            TEMPLATE_FIELD_KINDS[field],
+        )
+        if raw == "":
+            continue
+        found[field] = (
+            float(raw) if field == "total_amount" else raw
+        )
+    return found
+
+
+def template_values(
+    path: Any, text: str, template: dict | None
+) -> dict[str, Any]:
+    """Mallens fältvärden för en konkret fil: etikettläsning ur
+    texten + bildrutorna (rutorna vinner — de är utpekade)."""
+    found = apply_template(text or "", template or {})
+    if path:
+        found.update(
+            template_values_from_regions(
+                template, extract_region_texts(path, template or {})
+            )
+        )
+    return found
+
+
+def _clamp_rect(region: Any) -> tuple[float, float, float, float]:
+    vals = [min(1.0, max(0.0, float(v))) for v in region]
+    x0, y0, x1, y1 = vals
+    return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+
+
+def _words_in_region_fitz(
+    path: Path, page_index: int, rect: tuple
+) -> str:
+    x0, y0, x1, y1 = rect
+    try:
+        with fitz.open(str(path)) as doc:
+            if not len(doc):
+                return ""
+            page = doc[min(max(page_index, 0), len(doc) - 1)]
+            w_pt, h_pt = page.rect.width, page.rect.height
+            if not w_pt or not h_pt:
+                return ""
+            hits = []
+            for word in page.get_text("words"):
+                wx0, wy0, wx1, wy1, text = (
+                    word[0], word[1], word[2], word[3], word[4],
+                )
+                cx = (wx0 + wx1) / 2 / w_pt
+                cy = (wy0 + wy1) / 2 / h_pt
+                if (
+                    x0 - 0.004 <= cx <= x1 + 0.004
+                    and y0 - 0.004 <= cy <= y1 + 0.004
+                ):
+                    hits.append((wy0, wx0, text))
+            hits.sort(key=lambda h: (round(h[0] / 4.0), h[1]))
+            return " ".join(h[2] for h in hits).strip()
+    except Exception as exc:
+        log.warning("region-fitz %s: %s", path, exc)
+        return ""
+
+
+def _words_in_region_pypdf(
+    path: Path, page_index: int, rect: tuple
+) -> str:
+    x0, y0, x1, y1 = rect
+    try:
+        reader = PdfReader(str(path))
+        if not reader.pages:
+            return ""
+        page = reader.pages[
+            min(max(page_index, 0), len(reader.pages) - 1)
+        ]
+        w_pt = float(page.mediabox.width)
+        h_pt = float(page.mediabox.height)
+        if not w_pt or not h_pt:
+            return ""
+        hits: list[str] = []
+
+        def _visitor(text, cm, tm, _font, _size):
+            chunk = " ".join(str(text or "").split())
+            if not chunk:
+                return
+            ux = tm[4] * cm[0] + tm[5] * cm[2] + cm[4]
+            uy = tm[4] * cm[1] + tm[5] * cm[3] + cm[5]
+            fx, fy = ux / w_pt, 1.0 - uy / h_pt
+            if (
+                x0 - 0.006 <= fx <= x1 + 0.006
+                and y0 - 0.006 <= fy <= y1 + 0.006
+            ):
+                hits.append(chunk)
+
+        page.extract_text(visitor_text=_visitor)
+        return " ".join(hits).strip()
+    except Exception as exc:
+        log.warning("region-pypdf %s: %s", path, exc)
+        return ""
+
+
+def _ocr_crop_text(path: Path, page_index: int, rect: tuple) -> str:
+    """OCR av den utklippta rutan (bildfil eller skannad PDF)."""
+    if not HAS_TESS:
+        return ""
+    x0, y0, x1, y1 = rect
+    try:
+        import io
+
+        if path.suffix.lower() == ".pdf":
+            if not HAS_FITZ:
+                return ""
+            with fitz.open(str(path)) as doc:
+                if not len(doc):
+                    return ""
+                page = doc[min(max(page_index, 0), len(doc) - 1)]
+                clip = fitz.Rect(
+                    x0 * page.rect.width, y0 * page.rect.height,
+                    x1 * page.rect.width, y1 * page.rect.height,
+                )
+                pix = page.get_pixmap(dpi=300, clip=clip)
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
+        else:
+            img = Image.open(str(path))
+            img = img.crop((
+                int(x0 * img.width), int(y0 * img.height),
+                int(x1 * img.width), int(y1 * img.height),
+            ))
+        text = pytesseract.image_to_string(img, lang="swe+eng")
+        return (text or "").strip()
+    except Exception as exc:
+        log.warning("region-ocr %s: %s", path, exc)
+        return ""
+
+
+def extract_region_texts(
+    path: Any, template: dict | None
+) -> dict[str, str]:
+    """{fält: råtext i rutan} för mallens regionsfält.
+
+    Textlager i rutan först (PyMuPDF, därefter pypdf); saknas
+    träffar provas OCR av den utklippta rutan. Aldrig undantag
+    utåt — misslyckad läsning ger bara färre nycklar.
+    """
+    specs = _region_specs(template)
+    if not specs or not path:
+        return {}
+    p = Path(path)
+    if not p.exists():
+        return {}
+    out: dict[str, str] = {}
+    for field, spec in specs.items():
+        rect = _clamp_rect(spec.get("region"))
+        page_index = 0
+        try:
+            page_index = int(spec.get("page", 0) or 0)
+        except (TypeError, ValueError):
+            page_index = 0
+        raw = ""
+        if p.suffix.lower() == ".pdf":
+            if HAS_FITZ:
+                raw = _words_in_region_fitz(p, page_index, rect)
+            if not raw and HAS_PYPDF:
+                raw = _words_in_region_pypdf(p, page_index, rect)
+        if not raw:
+            raw = _ocr_crop_text(p, page_index, rect)
+        if raw:
+            out[field] = raw
+    return out
+
+
+def page_image_count(path: Any) -> int:
+    """Antal sidor som kan visas som bild (0 = kan inte visas)."""
+    p = Path(path or "")
+    if not p.exists():
+        return 0
+    if p.suffix.lower() == ".pdf":
+        try:
+            if HAS_FITZ:
+                with fitz.open(str(p)) as doc:
+                    return len(doc)
+            if HAS_PYPDF:
+                return len(PdfReader(str(p)).pages)
+        except Exception as exc:
+            log.warning("sidor %s: %s", p, exc)
+        return 0
+    return 1 if p.suffix.lower() in SCAN_EXTENSIONS else 0
+
+
+def render_page_image(
+    path: Any, page_index: int = 0, dpi: int = 150
+) -> bytes | None:
+    """Sidans bild som PNG-bytes (PDF via PyMuPDF; bildfilen
+    själv). None när sidan inte kan renderas."""
+    p = Path(path or "")
+    if not p.exists():
+        return None
+    if p.suffix.lower() == ".pdf":
+        if not HAS_FITZ:
+            return None
+        try:
+            with fitz.open(str(p)) as doc:
+                if not len(doc):
+                    return None
+                page = doc[min(max(page_index, 0), len(doc) - 1)]
+                return page.get_pixmap(dpi=dpi).tobytes("png")
+        except Exception as exc:
+            log.warning("rendera %s: %s", p, exc)
+            return None
+    if p.suffix.lower() in SCAN_EXTENSIONS:
+        try:
+            return p.read_bytes()
+        except Exception as exc:
+            log.warning("bild %s: %s", p, exc)
+    return None
 
 
 def find_template(templates: dict, supplier: str) -> dict | None:

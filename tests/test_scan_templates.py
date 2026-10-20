@@ -93,37 +93,47 @@ def test_infer_label_from_selection_context():
     assert _infer_label("") == ""
 
 
-def test_template_dialog_infers_and_saves(tmp_path):
+def test_template_dialog_marks_regions_on_image(tmp_path):
+    """Bildmarkeringsdialogen: rutan som dras på fakturabilden
+    sparas som region + sida i mallen (andelar av sidan), och
+    en gammal etikettspec för ett omarkerat fält bevaras exakt
+    som den var."""
     from PySide6.QtWidgets import QApplication
 
     QApplication.instance() or QApplication([])
-    from PySide6.QtGui import QTextCursor
+    from PIL import Image
 
     from ui.scan_import_view import TemplateDialog
 
+    bild = tmp_path / "exempel.png"
+    Image.new("RGB", (600, 840), "white").save(bild)
+
+    existing = {"fields": {
+        "due_date": {"label": "Förfallodatum"},
+    }}
     dlg = TemplateDialog(
-        None, WEIRD_LAYOUT, supplier="Nordlys Energi AB", existing=None
+        None, "", supplier="Nordlys Energi AB",
+        existing=existing, path=bild,
     )
     try:
-        # Markera beloppet i texten, som användaren gör med musen
-        pos = WEIRD_LAYOUT.index("1 125,00")
-        cursor = dlg._txt.textCursor()
-        cursor.setPosition(pos)
-        cursor.setPosition(pos + len("1 125,00"),
-                           QTextCursor.MoveMode.KeepAnchor)
-        dlg._txt.setTextCursor(cursor)
-        dlg._use_selection("total_amount")
-        assert dlg._label_edits["total_amount"].text() \
-            == "SLUTSUMMA ATT BETALA"
-        # Förhandsvisningen visar det tolkade värdet
-        assert "1 125" in dlg._previews["total_amount"].text()
-
-        dlg._label_edits["invoice_number"].setText("Er ref hos oss")
+        assert dlg._page_count == 1
+        # Användaren drar en ruta runt beloppet på bilden
+        # (samma signal som musdragningen ger).
+        dlg._on_region_drawn(
+            "total_amount", 0, (0.70, 0.80, 0.97, 0.85)
+        )
+        assert dlg._regions["total_amount"] == (
+            0, (0.70, 0.80, 0.97, 0.85)
+        )
         dlg._save()
         assert dlg.result_template is not None
         assert dlg.result_template["supplier"] == "Nordlys Energi AB"
-        assert dlg.result_template["fields"]["invoice_number"] \
-            == {"label": "Er ref hos oss"}
+        fields = dlg.result_template["fields"]
+        assert fields["total_amount"] == {
+            "region": [0.70, 0.80, 0.97, 0.85], "page": 0,
+        }
+        # Omarkerat etikettfält bevaras oförändrat.
+        assert fields["due_date"] == {"label": "Förfallodatum"}
     finally:
         dlg.close()
 
@@ -202,7 +212,11 @@ def test_teach_from_folder_saves_template(tmp_path, monkeypatch):
 
     folder = tmp_path / "NordlysIn"
     folder.mkdir()
-    (folder / "exempel.pdf").write_bytes(b"%PDF-fejk")
+    import fitz
+    doc = fitz.open()
+    doc.new_page(width=595, height=842)
+    doc.save(folder / "exempel.pdf")
+    doc.close()
     templates_file = tmp_path / "invoice_templates.json"
 
     view = ScanImportView(
@@ -220,8 +234,8 @@ def test_teach_from_folder_saves_template(tmp_path, monkeypatch):
 
         class FakeTemplateDialog:
             def __init__(self, parent, text, supplier="",
-                         existing=None):
-                seen["text"] = text
+                         existing=None, path=None):
+                seen["path"] = path
                 seen["supplier"] = supplier
                 self.result_template = {
                     "supplier": "Nordlys Energi AB",
@@ -243,8 +257,8 @@ def test_teach_from_folder_saves_template(tmp_path, monkeypatch):
 
         view._teach_from_folder(entry)
 
-        # Dialogen fick texten ur mappens egen fil + mappens namn
-        assert seen["text"] == WEIRD_LAYOUT
+        # Dialogen fick mappens egen fil att visa + mappens namn
+        assert str(seen["path"]).endswith(".pdf")
         assert seen["supplier"] == "Nordlys Energi AB"
         # Mallen ligger i minnet OCH i invoice_templates.json
         templates = view._get_templates()
@@ -1026,3 +1040,88 @@ def test_parked_dialog_batches_and_informs(monkeypatch):
     # Kön är tömd — samma filer larmar inte igen.
     view._show_parked_dialog()
     assert len(shown) == 1
+
+
+# ── Regionsmallar: markering på fakturabilden ─────────────────
+# Användaren drar en ruta runt värdet i matchningsdialogen;
+# mallen sparar rutans plats (andel av sidan + sidnummer) och
+# läsningen sker sedan ur rutan — inga etiketter alls.
+
+import pytest
+
+
+def test_region_value_parsing():
+    assert si._value_from_region("SEK 478,00", "amount") == "478.00"
+    assert si._value_from_region("Fakturanr 916336", "token") == "916336"
+    assert si._value_from_region("916336 2024-05-08 103", "token") \
+        == "916336"
+    assert si._value_from_region("916336 2024-05-08 103", "date") \
+        == "2024-05-08"
+    assert si._value_from_region("OCR 123 4567", "digits") == "1234567"
+    assert si._value_from_region("", "amount") == ""
+    assert si._value_from_region("bara text", "amount") == ""
+
+
+REGION_TEMPLATES = {"Testleverantör AB": {"fields": {
+    "invoice_number": {"region": [0.47, 0.09, 0.56, 0.13], "page": 0},
+    "date": {"region": [0.56, 0.09, 0.70, 0.13], "page": 0},
+    "total_amount": {"region": [0.76, 0.79, 0.97, 0.84], "page": 0},
+}}}
+
+
+def test_region_template_identifies_supplier_without_text():
+    # Ren rutträff: löptexten är tom (t.ex. skannad faktura) —
+    # mallen identifierar leverantören via sina egna rutor.
+    parsed = si.parse_invoice_text(
+        "", [], templates=REGION_TEMPLATES,
+        region_texts={
+            "invoice_number": "916336",
+            "date": "2024-05-08",
+            "total_amount": "SEK 478,00",
+        },
+    )
+    assert parsed["supplier"] == "Testleverantör AB"
+    assert parsed["template"] == "Testleverantör AB"
+    assert parsed["invoice_number"] == "916336"
+    assert parsed["total_amount"] == 478.00
+    assert parsed["date"] == "2024-05-08"
+    assert parsed["missing"] == []
+
+
+def test_region_template_without_hits_does_not_claim():
+    parsed = si.parse_invoice_text(
+        "", [], templates=REGION_TEMPLATES,
+        region_texts={"invoice_number": "", "total_amount": "text"},
+    )
+    assert not parsed.get("template")
+
+
+def test_region_pdf_reads_values_end_to_end(tmp_path):
+    """Hela kedjan mot en riktig PDF: rutorna i mallen läses
+    ur textlagret på rätt platser och filen tolkas komplett."""
+    fitz = pytest.importorskip("fitz")
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((300, 92), "916336", fontsize=11)
+    page.insert_text((345, 92), "2024-05-08", fontsize=11)
+    page.insert_text((470, 690), "SEK 478,00", fontsize=11)
+    pdf = tmp_path / "faktura.pdf"
+    doc.save(pdf)
+    doc.close()
+
+    assert si.page_image_count(pdf) == 1
+    assert si.render_page_image(pdf)
+    parsed = si.parse_invoice_file(
+        pdf, "", [], templates=REGION_TEMPLATES
+    )
+    assert parsed["invoice_number"] == "916336"
+    assert parsed["total_amount"] == 478.00
+    assert parsed["date"] == "2024-05-08"
+    assert parsed["template"] == "Testleverantör AB"
+
+    # Ruta över tom yta träffar inget — ingen mallträff.
+    tom = {"Testleverantör AB": {"fields": {
+        "total_amount": {"region": [0.05, 0.40, 0.30, 0.45]},
+    }}}
+    parsed2 = si.parse_invoice_file(pdf, "", [], templates=tom)
+    assert not parsed2.get("template")

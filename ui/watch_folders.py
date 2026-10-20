@@ -919,9 +919,16 @@ class WatchManager(QObject):
                 templates = self._templates_provider() or {}
             except Exception:
                 templates = {}
-        parsed = si.parse_invoice_text(
-            text or "", self._suppliers(), templates=templates
-        )
+        parse_file = getattr(si, "parse_invoice_file", None)
+        if parse_file is not None:
+            parsed = parse_file(
+                path, text or "", self._suppliers(),
+                templates=templates,
+            )
+        else:
+            parsed = si.parse_invoice_text(
+                text or "", self._suppliers(), templates=templates
+            )
         folder_supplier = str(entry.get("supplier", "")).strip()
         if folder_supplier:
             resolved = self._resolve_register_supplier(folder_supplier)

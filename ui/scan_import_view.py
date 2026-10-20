@@ -38,8 +38,8 @@ from PySide6.QtWidgets import (
     QLineEdit, QCheckBox, QApplication, QInputDialog,
     QDialog, QListWidget, QPlainTextEdit,
 )
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import Qt, QTimer, Signal, QRectF
+from PySide6.QtGui import QColor, QFont, QPixmap, QPainter, QPen
 
 try:
     from ui.design import ICON_HEADER_PX, app_icon_pixmap
@@ -140,82 +140,313 @@ def _infer_label(text_before: str) -> str:
     return cand
 
 
+#: Fältfärger i bildmarkeringsdialogen.
+_FIELD_COLORS = {
+    "invoice_number": "#2563eb",
+    "date": "#059669",
+    "due_date": "#d97706",
+    "total_amount": "#dc2626",
+    "ocr": "#7c3aed",
+}
+
+
+class _RegionImageView(QWidget):
+    """Fakturabild där användaren drar rutor runt värden.
+
+    En sida i taget; rutorna hanteras som andelar (0–1) av
+    sidans bredd/höjd och ritas i fältens färger. Signalen
+    region_drawn(fält, sidindex, (x0, y0, x1, y1)) avges när
+    en ruta är färdigritad.
+    """
+
+    region_drawn = Signal(str, int, tuple)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMinimumSize(350, 420)
+        self._pixmap: QPixmap | None = None
+        self._page = 0
+        self._regions: dict[str, tuple[int, tuple]] = {}
+        self._active = ""
+        self._drag_a: tuple[float, float] | None = None
+        self._drag_b: tuple[float, float] | None = None
+
+    def set_page(self, pixmap: QPixmap | None, page: int) -> None:
+        self._pixmap = pixmap
+        self._page = page
+        self._drag_a = self._drag_b = None
+        self.update()
+
+    def set_regions(self, regions: dict) -> None:
+        self._regions = dict(regions or {})
+        self.update()
+
+    def set_active(self, field: str) -> None:
+        self._active = field or ""
+        self.update()
+
+    # ── Koordinater ───────────────────────────────────────────
+    def _img_rect(self) -> QRectF | None:
+        if self._pixmap is None or self._pixmap.isNull():
+            return None
+        area = QRectF(self.rect()).adjusted(8, 8, -8, -8)
+        size = self._pixmap.size().scaled(
+            area.size().toSize(), Qt.AspectRatioMode.KeepAspectRatio
+        )
+        return QRectF(
+            area.center().x() - size.width() / 2,
+            area.center().y() - size.height() / 2,
+            float(size.width()), float(size.height()),
+        )
+
+    def _fraction(self, pos) -> tuple[float, float] | None:
+        rect = self._img_rect()
+        if rect is None:
+            return None
+        x = min(max(pos.x(), rect.left()), rect.right())
+        y = min(max(pos.y(), rect.top()), rect.bottom())
+        return (
+            (x - rect.left()) / rect.width(),
+            (y - rect.top()) / rect.height(),
+        )
+
+    def _rect_px(self, frac: tuple) -> QRectF:
+        img = self._img_rect()
+        x0, y0, x1, y1 = frac
+        return QRectF(
+            img.left() + x0 * img.width(),
+            img.top() + y0 * img.height(),
+            (x1 - x0) * img.width(),
+            (y1 - y0) * img.height(),
+        )
+
+    @staticmethod
+    def _norm(
+        a: tuple[float, float], b: tuple[float, float]
+    ) -> tuple[float, float, float, float]:
+        return (
+            min(a[0], b[0]), min(a[1], b[1]),
+            max(a[0], b[0]), max(a[1], b[1]),
+        )
+
+    # ── Rita ──────────────────────────────────────────────────
+    def paintEvent(self, _event) -> None:  # noqa: N802 (Qt-namn)
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#dde2e8"))
+        img = self._img_rect()
+        if img is None:
+            painter.setPen(QColor("#5b6470"))
+            painter.drawText(
+                self.rect(), Qt.AlignmentFlag.AlignCenter,
+                tr("tmpl.no_image"),
+            )
+            return
+        painter.fillRect(img, QColor("white"))
+        painter.drawPixmap(img.toRect(), self._pixmap)
+        painter.setPen(QPen(QColor("#8a939e"), 1))
+        painter.drawRect(img)
+        font = QFont()
+        font.setPointSize(8)
+        font.setBold(True)
+        for field, (page, frac) in self._regions.items():
+            if page != self._page:
+                continue
+            color = QColor(_FIELD_COLORS.get(field, "#333333"))
+            rubrik = self._rect_px(frac)
+            fill = QColor(color)
+            fill.setAlpha(45)
+            painter.fillRect(rubrik, fill)
+            painter.setPen(QPen(color, 2.5))
+            painter.drawRect(rubrik)
+            label = tr(f"tmpl.field_{field}")
+            painter.setFont(font)
+            tw = painter.fontMetrics().horizontalAdvance(label) + 8
+            tag = QRectF(
+                rubrik.left(), max(img.top(), rubrik.top() - 16),
+                float(tw), 16.0,
+            )
+            painter.fillRect(tag, color)
+            painter.setPen(QColor("white"))
+            painter.drawText(
+                tag, Qt.AlignmentFlag.AlignCenter, label
+            )
+        if self._drag_a and self._drag_b and self._active:
+            color = QColor(_FIELD_COLORS.get(self._active, "#333333"))
+            rubrik = self._rect_px(
+                self._norm(self._drag_a, self._drag_b)
+            )
+            painter.setPen(QPen(color, 2, Qt.PenStyle.DashLine))
+            painter.drawRect(rubrik)
+
+    # ── Mus ───────────────────────────────────────────────────
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if not self._active:
+            return
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        frac = self._fraction(event.position())
+        if frac is not None:
+            self._drag_a = self._drag_b = frac
+            self.update()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._drag_a is None:
+            return
+        frac = self._fraction(event.position())
+        if frac is not None:
+            self._drag_b = frac
+            self.update()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._drag_a is None or self._drag_b is None:
+            return
+        rect = self._norm(self._drag_a, self._drag_b)
+        self._drag_a = self._drag_b = None
+        if rect[2] - rect[0] > 0.004 and rect[3] - rect[1] > 0.003:
+            self.region_drawn.emit(self._active, self._page, rect)
+        self.update()
+
+
 class TemplateDialog(QDialog):
     """
-    Skapa/redigera en leverantörsmall mot en konkret fakturatext.
+    Skapa/redigera en leverantörsmall mot fakturans BILD.
 
-    Flöde: markera värdet i texten → 🎯 vid rätt fält → etiketten
-    härleds automatiskt → testa → spara. result_template sätts vid OK:
-    {"supplier": namn, "fields": {fält: {"label": ...}}}.
+    Flöde: välj ett fält → dra en ruta runt värdet på bilden →
+    värdet i rutan visas direkt (samma läsning som skanningen
+    använder: textlager i rutan, annars OCR). Rutorna sparas
+    som andelar av sidan + sidnummer:
+
+        {"supplier": namn,
+         "fields": {fält: {"region": [x0, y0, x1, y1], "page": n}}}
+
+    Gamla etikettfält i en befintlig mall bevaras oförändrade
+    för fält som inte markeras om på bilden.
     """
 
     def __init__(
         self,
         parent: QWidget | None,
-        text: str,
+        text: str = "",
         supplier: str = "",
         existing: dict | None = None,
+        path: Any = None,
     ) -> None:
         super().__init__(parent)
         self._text = text or ""
+        self._path = Path(path) if path else None
         self.result_template: dict | None = None
-        self.setWindowTitle(tr("tmpl.title", supplier=supplier or "…"))
-        self.setMinimumSize(760, 560)
+        si = _scan_module()
+        self._page_count = (
+            si.page_image_count(self._path) if self._path else 0
+        )
+        self._page = 0
+        self._pixmaps: dict[int, QPixmap] = {}
+        self._existing_fields: dict = dict(
+            (existing or {}).get("fields", {}) or {}
+        )
+        self._regions: dict[str, tuple[int, tuple]] = {}
+        for field, spec in self._existing_fields.items():
+            if not isinstance(spec, dict):
+                continue
+            region = spec.get("region")
+            if (
+                isinstance(region, (list, tuple))
+                and len(region) == 4
+            ):
+                try:
+                    page = int(spec.get("page", 0) or 0)
+                except (TypeError, ValueError):
+                    page = 0
+                try:
+                    self._regions[field] = (
+                        page,
+                        tuple(float(v) for v in region),
+                    )
+                except (TypeError, ValueError):
+                    continue
+        self._active = ""
 
+        self.setWindowTitle(tr("tmpl.title", supplier=supplier or "…"))
+        self.setMinimumSize(980, 640)
         root = QVBoxLayout(self)
         root.setSpacing(8)
 
         row_sup = QHBoxLayout()
-        lbl_sup = QLabel(tr("tmpl.supplier"))
-        row_sup.addWidget(lbl_sup)
+        row_sup.addWidget(QLabel(tr("tmpl.supplier")))
         self._supplier_edit = QLineEdit(supplier)
         row_sup.addWidget(self._supplier_edit, stretch=1)
         root.addLayout(row_sup)
 
-        intro = QLabel(tr("tmpl.intro"))
+        intro = QLabel(tr("tmpl.intro_image"))
         intro.setWordWrap(True)
         root.addWidget(intro)
 
-        self._txt = QPlainTextEdit()
-        self._txt.setReadOnly(True)
-        self._txt.setPlainText(self._text)
-        self._txt.setFont(QFont("Consolas", 10))
-        root.addWidget(self._txt, stretch=1)
+        middle = QHBoxLayout()
+        middle.setSpacing(10)
 
-        self._label_edits: dict[str, QLineEdit] = {}
+        left = QVBoxLayout()
+        nav = QHBoxLayout()
+        self._btn_prev = QPushButton("◀")
+        self._btn_prev.clicked.connect(
+            lambda: self._goto_page(self._page - 1)
+        )
+        nav.addWidget(self._btn_prev)
+        self._lbl_page = QLabel()
+        self._lbl_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        nav.addWidget(self._lbl_page, stretch=1)
+        self._btn_next = QPushButton("▶")
+        self._btn_next.clicked.connect(
+            lambda: self._goto_page(self._page + 1)
+        )
+        nav.addWidget(self._btn_next)
+        left.addLayout(nav)
+        self._view = _RegionImageView()
+        self._view.region_drawn.connect(self._on_region_drawn)
+        left.addWidget(self._view, stretch=1)
+        middle.addLayout(left, stretch=3)
+
+        right = QVBoxLayout()
+        right.addWidget(QLabel(tr("tmpl.fields_header")))
         self._previews: dict[str, QLabel] = {}
-        existing_fields = (existing or {}).get("fields", {})
+        self._mark_buttons: dict[str, QPushButton] = {}
         for field in _TEMPLATE_FIELDS:
             row = QHBoxLayout()
-            lbl = QLabel(tr(f"tmpl.field_{field}"))
-            lbl.setMinimumWidth(130)
-            row.addWidget(lbl)
-            edit = QLineEdit()
-            edit.setPlaceholderText(tr("tmpl.label_ph"))
-            spec = existing_fields.get(field, {})
-            if isinstance(spec, dict):
-                edit.setText(str(spec.get("label", "")))
-            edit.textChanged.connect(
-                lambda _t, f=field: self._preview_field(f)
+            chip = QLabel("■")
+            chip.setStyleSheet(
+                f"color:{_FIELD_COLORS.get(field, '#333')};"
+                "font-size:15px;background:transparent;"
             )
-            row.addWidget(edit, stretch=1)
-            btn = QPushButton(tr("tmpl.use_selection"))
+            row.addWidget(chip)
+            texts = QVBoxLayout()
+            name_lbl = QLabel(tr(f"tmpl.field_{field}"))
+            name_lbl.setStyleSheet(
+                "font-weight:bold;background:transparent;"
+            )
+            texts.addWidget(name_lbl)
+            prev = QLabel()
+            prev.setMinimumWidth(120)
+            texts.addWidget(prev)
+            row.addLayout(texts, stretch=1)
+            btn = QPushButton(tr("tmpl.mark"))
             btn.clicked.connect(
-                lambda _c=False, f=field: self._use_selection(f)
+                lambda _c=False, f=field: self._set_active(f)
             )
             row.addWidget(btn)
-            prev = QLabel()
-            prev.setMinimumWidth(110)
-            row.addWidget(prev)
-            root.addLayout(row)
-            self._label_edits[field] = edit
+            right.addLayout(row)
             self._previews[field] = prev
+            self._mark_buttons[field] = btn
+        right.addStretch(1)
+        middle.addLayout(right, stretch=2)
+        root.addLayout(middle, stretch=1)
 
         self._lbl_hint = QLabel()
         self._lbl_hint.setWordWrap(True)
         root.addWidget(self._lbl_hint)
 
         row_btn = QHBoxLayout()
+        btn_clear = QPushButton(tr("tmpl.clear_marks"))
+        btn_clear.clicked.connect(self._clear_marks)
+        row_btn.addWidget(btn_clear)
         btn_test = QPushButton(tr("tmpl.test"))
         btn_test.clicked.connect(self._test_all)
         row_btn.addWidget(btn_test)
@@ -228,56 +459,143 @@ class TemplateDialog(QDialog):
         btn_save.clicked.connect(self._save)
         row_btn.addWidget(btn_save)
         root.addLayout(row_btn)
+
+        self._view.set_regions(self._regions)
+        self._reload_page()
+        self._set_active(
+            next(
+                (f for f in _TEMPLATE_FIELDS if f not in self._regions),
+                _TEMPLATE_FIELDS[0],
+            )
+        )
         self._test_all()
 
-    # ── Logik ─────────────────────────────────────────────────────────
+    # ── Sidor ─────────────────────────────────────────────────
+    def _goto_page(self, page: int) -> None:
+        self._page = min(max(page, 0), max(self._page_count - 1, 0))
+        self._reload_page()
 
-    def _rules(self) -> dict:
-        return {
-            f: {"label": e.text().strip()}
-            for f, e in self._label_edits.items()
-            if e.text().strip()
-        }
+    def _reload_page(self) -> None:
+        pixmap = self._pixmaps.get(self._page)
+        if pixmap is None and self._path is not None:
+            si = _scan_module()
+            data = si.render_page_image(self._path, self._page)
+            pixmap = QPixmap()
+            if data:
+                pixmap.loadFromData(data)
+            self._pixmaps[self._page] = pixmap
+        self._view.set_page(pixmap, self._page)
+        self._lbl_page.setText(
+            tr(
+                "tmpl.page", n=self._page + 1,
+                total=max(self._page_count, 1),
+            )
+        )
+        self._btn_prev.setEnabled(self._page > 0)
+        self._btn_next.setEnabled(self._page + 1 < self._page_count)
 
-    def _use_selection(self, field: str) -> None:
-        cursor = self._txt.textCursor()
-        selected = cursor.selectedText().strip()
-        if not selected:
-            self._lbl_hint.setText(tr("tmpl.no_selection"))
-            return
-        before = self._txt.toPlainText()[: cursor.selectionStart()]
-        label = _infer_label(before)
-        self._label_edits[field].setText(label)
+    # ── Markering ─────────────────────────────────────────────
+    def _set_active(self, field: str) -> None:
+        self._active = field
+        self._view.set_active(field)
+        for f, btn in self._mark_buttons.items():
+            btn.setText(
+                tr("tmpl.marked") if f in self._regions
+                else tr("tmpl.mark")
+            )
+            btn.setStyleSheet(
+                "font-weight:bold;" if f == field else ""
+            )
+
+    def _on_region_drawn(
+        self, field: str, page: int, rect: tuple
+    ) -> None:
+        self._regions[field] = (page, tuple(rect))
+        self._view.set_regions(self._regions)
         self._preview_field(field)
+        nxt = next(
+            (f for f in _TEMPLATE_FIELDS if f not in self._regions),
+            field,
+        )
+        self._set_active(nxt)
+
+    def _clear_marks(self) -> None:
+        self._regions = {}
+        self._view.set_regions(self._regions)
+        self._set_active(_TEMPLATE_FIELDS[0])
+        self._test_all()
+
+    # ── Förhandsvisning / spara ───────────────────────────────
+    def _rules(self) -> dict:
+        rules: dict[str, dict] = {}
+        for field in _TEMPLATE_FIELDS:
+            if field in self._regions:
+                page, rect = self._regions[field]
+                rules[field] = {
+                    "region": [round(float(v), 4) for v in rect],
+                    "page": page,
+                }
+            else:
+                spec = self._existing_fields.get(field)
+                if (
+                    isinstance(spec, dict)
+                    and str(spec.get("label", "")).strip()
+                ):
+                    rules[field] = {
+                        "label": str(spec["label"]).strip()
+                    }
+        return rules
 
     def _preview_field(self, field: str) -> None:
         si = _scan_module()
-        found = si.apply_template(
-            self._text, {"fields": self._rules()}
-        )
-        self._set_preview(field, found.get(field))
+        if field in self._regions:
+            page, rect = self._regions[field]
+            template = {
+                "fields": {
+                    field: {"region": list(rect), "page": page}
+                }
+            }
+            found = si.template_values_from_regions(
+                template,
+                si.extract_region_texts(self._path, template),
+            )
+            self._set_preview(field, found.get(field), page)
+            return
+        spec = self._existing_fields.get(field)
+        if isinstance(spec, dict) and spec.get("label"):
+            found = si.apply_template(
+                self._text, {"fields": {field: spec}}
+            )
+            self._set_preview(field, found.get(field))
+            return
+        self._set_preview(field, None)
 
     def _test_all(self) -> None:
-        si = _scan_module()
-        found = si.apply_template(
-            self._text, {"fields": self._rules()}
-        )
         for field in _TEMPLATE_FIELDS:
-            self._set_preview(field, found.get(field))
+            self._preview_field(field)
 
-    def _set_preview(self, field: str, value: Any) -> None:
+    def _set_preview(
+        self, field: str, value: Any, page: int | None = None
+    ) -> None:
         lbl = self._previews[field]
         if value in (None, "", 0, 0.0):
             lbl.setText(tr("tmpl.not_found"))
-            lbl.setStyleSheet("color:#d29922;background:transparent;")
+            lbl.setStyleSheet(
+                "color:#d29922;background:transparent;"
+            )
         else:
             shown = (
                 _fmt_amount(float(value))
                 if field == "total_amount"
                 else str(value)
             )
-            lbl.setText(tr("tmpl.found", value=shown))
-            lbl.setStyleSheet("color:#3fb950;background:transparent;")
+            text = tr("tmpl.found", value=shown)
+            if page:
+                text += " · " + tr("tmpl.page_note", n=page + 1)
+            lbl.setText(text)
+            lbl.setStyleSheet(
+                "color:#3fb950;background:transparent;"
+            )
 
     def _save(self) -> None:
         supplier = self._supplier_edit.text().strip()
@@ -287,9 +605,11 @@ class TemplateDialog(QDialog):
             return
         rules = self._rules()
         if not rules:
-            self._lbl_hint.setText(tr("tmpl.need_label"))
+            self._lbl_hint.setText(tr("tmpl.need_field"))
             return
-        self.result_template = {"supplier": supplier, "fields": rules}
+        self.result_template = {
+            "supplier": supplier, "fields": rules
+        }
         self.accept()
 
 
@@ -938,14 +1258,9 @@ class ScanImportView(QWidget):
                 return
             chosen = files[names.index(name)]
         si = _scan_module()
-        try:
-            text, _method = si.extract_text(chosen)
-        except Exception as exc:
-            log.warning("teach extract %s: %s", chosen, exc)
-            text = ""
-        if not str(text or "").strip():
+        if si.page_image_count(chosen) <= 0:
             self._lbl_status.setText(
-                tr("watch.learn_no_text", file=chosen.name)
+                tr("watch.learn_no_image", file=chosen.name)
             )
             return
         supplier = str(entry.get("supplier", "") or "")
@@ -954,7 +1269,8 @@ class ScanImportView(QWidget):
             si.find_template(templates, supplier) if supplier else None
         )
         dlg = TemplateDialog(
-            self, str(text), supplier=supplier, existing=existing
+            self, "", supplier=supplier, existing=existing,
+            path=chosen,
         )
         if not dlg.exec() or not dlg.result_template:
             return
@@ -1162,8 +1478,9 @@ class ScanImportView(QWidget):
         si = _scan_module()
         row = self._rows[idxs[0]]
         text = str(row.get("_text", "") or "")
-        if not text:
-            self._lbl_status.setText(tr("scan.select_row"))
+        path = str(row.get("_path", "") or "")
+        if si.page_image_count(path) <= 0:
+            self._lbl_status.setText(tr("tmpl.need_image"))
             return
         templates = self._get_templates()
         existing = si.find_template(
@@ -1173,6 +1490,7 @@ class ScanImportView(QWidget):
             self, text,
             supplier=str(row.get("supplier", "") or ""),
             existing=existing,
+            path=path or None,
         )
         if not dlg.exec() or not dlg.result_template:
             return
@@ -1182,7 +1500,9 @@ class ScanImportView(QWidget):
 
         # Den just sparade mallen appliceras ALLTID på den här raden
         # (även om leverantörsnamnet inte står ordagrant i texten).
-        found = si.apply_template(text, templates[supplier])
+        found = si.template_values(
+            path or None, text, templates[supplier]
+        )
         if found:
             for field, value in found.items():
                 row[field] = value
@@ -1264,8 +1584,8 @@ class ScanImportView(QWidget):
             except Exception as exc:
                 log.error("extract %s: %s", path.name, exc)
                 text, method = "", "fel"
-            parsed = si.parse_invoice_text(
-                text, suppliers,
+            parsed = si.parse_invoice_file(
+                path, text, suppliers,
                 templates=self._get_templates(),
             )
             parsed["file"] = path.name
