@@ -1297,6 +1297,96 @@ class ScanImportView(QWidget):
         if answer == QMessageBox.StandardButton.Yes:
             self._teach_from_folder(entry)
 
+    def _verification_rows(
+        self, supplier: str, template: dict, files: list
+    ) -> list[dict]:
+        """Kör mallen på väntande filer och sammanfattar exakt
+        vad den läser ur varje — underlaget för användarens
+        säkerhetskontroll. Registrerar ingenting."""
+        si = _scan_module()
+        rows: list[dict] = []
+        for fpath in list(files)[:8]:
+            fp = Path(fpath)
+            try:
+                text, _method = si.extract_text(fp)
+            except Exception as exc:
+                log.warning("verify extract %s: %s", fp, exc)
+                text = ""
+            try:
+                parsed = si.parse_invoice_file(
+                    fp, text or "", self._suppliers(),
+                    templates={supplier: template},
+                )
+            except Exception as exc:
+                log.warning("verify parse %s: %s", fp, exc)
+                continue
+            rows.append({
+                "file": fp.name, "path": str(fp),
+                "invoice_number": parsed.get("invoice_number", ""),
+                "total_amount": parsed.get("total_amount", 0),
+                "date": parsed.get("date", ""),
+                "due_date": parsed.get("due_date", ""),
+                "missing": list(parsed.get("missing", []) or []),
+            })
+        return rows
+
+    def _verify_template(
+        self, supplier: str, template: dict, files: list
+    ) -> str:
+        """Automatisk säkerhetskontroll av en nyss sparad mall.
+
+        Visar per faktura exakt vad mallen läser och låter
+        användaren bekräfta ("bekrafta"), gå tillbaka och
+        justera markeringarna ("justera") eller stänga
+        ("senare"). Känns mallen inte igen på någon faktura
+        sägs det rakt ut högst upp.
+        """
+        rows = self._verification_rows(supplier, template, files)
+        ok = sum(1 for r in rows if not r["missing"])
+        lines = [tr("tmpl.verify_intro", supplier=supplier), ""]
+        if rows and ok == 0:
+            lines.append(tr("tmpl.verify_none"))
+            lines.append("")
+        lines.append(
+            tr("tmpl.verify_counts", ok=ok, n=len(rows))
+        )
+        for r in rows:
+            if r["missing"]:
+                lines.append(tr(
+                    "tmpl.verify_missing", file=r["file"],
+                    missing=", ".join(r["missing"]),
+                ))
+            else:
+                lines.append(tr(
+                    "tmpl.verify_line", file=r["file"],
+                    nr=r["invoice_number"] or "—",
+                    amount=_fmt_amount(float(r["total_amount"] or 0)),
+                    date=r["date"] or "—",
+                    due=r["due_date"] or "—",
+                ))
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle(tr("tmpl.verify_title"))
+        box.setText("\n".join(lines))
+        btn_ok = box.addButton(
+            tr("tmpl.verify_ok"), QMessageBox.ButtonRole.AcceptRole
+        )
+        btn_adjust = box.addButton(
+            tr("tmpl.verify_adjust"),
+            QMessageBox.ButtonRole.ActionRole,
+        )
+        box.addButton(
+            tr("tmpl.verify_later"),
+            QMessageBox.ButtonRole.RejectRole,
+        )
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_ok:
+            return "bekrafta"
+        if clicked is btn_adjust:
+            return "justera"
+        return "senare"
+
     def _teach_from_folder(
         self, entry: dict, example: Any = None, force: bool = False
     ) -> bool:
@@ -1357,11 +1447,41 @@ class ScanImportView(QWidget):
         name = dlg.result_template["supplier"]
         templates[name] = {"fields": dlg.result_template["fields"]}
         self._save_templates_file()
-        self._lbl_status.setText(tr("tmpl.saved", supplier=name))
         log.info(
             "SCAN_TEMPLATE: mall inlärd från mapp %s → %s",
             entry.get("path", ""), name,
         )
+
+        # Säkerhetskontroll: appen visar automatiskt hur den
+        # nya mallen läser mapparnas väntande fakturor och ber
+        # användaren kontrollera värdena. Justera → tillbaka
+        # till markeringen med mallen ifylld, kontrollera igen.
+        action = self._verify_template(
+            name, templates[name],
+            self._pending_verification_files(name, chosen),
+        )
+        justera_path = Path(chosen)
+        while action == "justera":
+            dlg2 = TemplateDialog(
+                self, "", supplier=name,
+                existing=templates.get(name), path=justera_path,
+            )
+            if not dlg2.exec() or not dlg2.result_template:
+                break
+            name = dlg2.result_template["supplier"]
+            templates[name] = {
+                "fields": dlg2.result_template["fields"]
+            }
+            self._save_templates_file()
+            action = self._verify_template(
+                name, templates[name],
+                self._pending_verification_files(name, chosen),
+            )
+
+        # Minne: mallen ligger i invoice_templates.json och
+        # används av både bevakning och manuell import på alla
+        # kommande fakturor — det sägs rakt ut i statusraden.
+        self._lbl_status.setText(tr("tmpl.remembered", supplier=name))
         # Använd mallen direkt på nytt som ligger i mappen
         if self._watch is not None:
             try:
@@ -1369,6 +1489,58 @@ class ScanImportView(QWidget):
             except Exception as exc:
                 log.warning("teach rescan: %s", exc)
         return True
+
+    def _pending_verification_files(
+        self, supplier: str, first: Any = None
+    ) -> list[Path]:
+        """Exempelfilen + leverantörens parkerade filer (max 8)
+        — det säkerhetskontrollen ska pröva mallen mot."""
+        files: list[Path] = []
+        seen: set[str] = set()
+
+        def _add(fp: Any) -> None:
+            key = str(fp or "")
+            if key and key not in seen:
+                seen.add(key)
+                files.append(Path(key))
+
+        if first:
+            _add(first)
+        watch = getattr(self, "_watch", None)
+        if watch is not None:
+            try:
+                from ui.watch_folders import _norm_path_key
+                folders = [
+                    f for f in (watch.folders or [])
+                    if isinstance(f, dict)
+                    and str(f.get("supplier", "")).strip().lower()
+                    == supplier.strip().lower()
+                ]
+                roots = [
+                    _norm_path_key(str(f.get("path", "")))
+                    for f in folders
+                ]
+                for parked in list(watch.parked or []):
+                    ppath = str(parked.get("path", "") or "")
+                    if not ppath:
+                        continue
+                    key = _norm_path_key(ppath)
+                    psup = str(
+                        (parked.get("parsed") or {}).get(
+                            "supplier", ""
+                        ) or ""
+                    ).strip().lower()
+                    if (
+                        psup == supplier.strip().lower()
+                        or any(
+                            r and key.startswith(r + "/")
+                            for r in roots
+                        )
+                    ):
+                        _add(ppath)
+            except Exception as exc:
+                log.warning("verify files: %s", exc)
+        return files[:8]
 
     def _apply_template_to_row(self, parsed: dict, text: str) -> dict:
         """Applicerar leverantörsmallen på en (parkerad) rad.

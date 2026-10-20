@@ -249,6 +249,11 @@ def test_teach_from_folder_saves_template(tmp_path, monkeypatch):
                 return 1
 
         monkeypatch.setattr(sv, "TemplateDialog", FakeTemplateDialog)
+        # Säkerhetskontrollen stubbas — den testas separat
+        monkeypatch.setattr(
+            ScanImportView, "_verify_template",
+            lambda self, supplier, template, files: "bekrafta",
+        )
         rescanned = []
         monkeypatch.setattr(
             view._watch, "scan_folder",
@@ -1167,6 +1172,7 @@ def test_parked_dialog_offers_template_creation(tmp_path, monkeypatch):
 
         oppnad: dict = {}
 
+        monkeypatch.setattr(siv.ScanImportView, "_verify_template", lambda self, supplier, template, files: "bekrafta")
         class FakeTemplateDialog:
             def __init__(self, parent, text, supplier="",
                          existing=None, path=None):
@@ -1184,6 +1190,7 @@ def test_parked_dialog_offers_template_creation(tmp_path, monkeypatch):
             def exec(self):
                 return 1
 
+        monkeypatch.setattr(siv.ScanImportView, "_verify_template", lambda self, supplier, template, files: "bekrafta")
         monkeypatch.setattr(siv, "TemplateDialog", FakeTemplateDialog)
         omskannad: list = []
         monkeypatch.setattr(
@@ -1202,5 +1209,209 @@ def test_parked_dialog_offers_template_creation(tmp_path, monkeypatch):
         assert Path(oppnad["path"]) == pdf
         assert omskannad
         assert "Nordlys Energi AB" in view._get_templates()
+    finally:
+        view.close()
+
+
+def test_verify_template_reports_missing(tmp_path, monkeypatch):
+    """Säkerhetskontrollen: mallen prövas mot leverantörens filer —
+    den kompletta visas med värden, den trasiga flaggas med
+    vad som saknas. Registrerar ingenting."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as sv
+    from ui.scan_import_view import ScanImportView
+
+    folder = tmp_path / "TestIn"
+    folder.mkdir()
+    import fitz
+    good = folder / "faktura-2025.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((40, 40), "Fakturanummer 555777", fontsize=11)
+    page.insert_text((40, 80), "Summa att betala 1 250,00 kr",
+                     fontsize=11)
+    doc.save(str(good))
+    doc.close()
+    broken = folder / "faktura-broken.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(str(broken))
+    doc.close()
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        template = {"fields": {
+            "invoice_number": {"label": "Fakturanummer"},
+            "total_amount": {"label": "Summa att betala"},
+        }}
+        rows = view._verification_rows(
+            "Test AB", template, [str(good), str(broken)]
+        )
+        assert len(rows) == 2
+        ok_row = next(r for r in rows if set(r["missing"]) <= {"leverantör"})
+        assert {r["file"] for r in rows} == {"faktura-2025.pdf", "faktura-broken.pdf"}
+        assert ok_row["invoice_number"] == "555777"
+        bad_row = next(r for r in rows if r["file"] == "faktura-broken.pdf")
+        assert bad_row["file"] == "faktura-broken.pdf"
+        assert "belopp" in bad_row["missing"]
+    finally:
+        view.close()
+
+
+def test_teach_then_verify_and_remember(tmp_path, monkeypatch):
+    """Efter 🎓+drag: sparad mall säkerhetskontrolleras automatiskt
+    (visar avlästa värden) och bekräftad mall sägs vara ihågkommen
+    till nästa faktura — mappen skannas om direkt."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as sv
+    from ui.scan_import_view import ScanImportView
+
+    folder = tmp_path / "TestIn"
+    folder.mkdir()
+    import fitz
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((40, 80), "Summa att betala 1 250,00 kr",
+                     fontsize=11)
+    path = folder / "faktura-2025.pdf"
+    doc.save(str(path))
+    doc.close()
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        entry = {"supplier": "Test AB", "path": str(folder)}
+        view._watch.set_folders([entry])
+
+        matches = []
+        shown = {}
+
+        class FakeTemplateDialog:
+            def __init__(self, parent, text, supplier="",
+                         existing=None, path=None):
+                self.result_template = {
+                    "supplier": "Test AB",
+                    "fields": {
+                        "total_amount": {
+                            "region": [0.5, 0.6, 0.8, 0.7],
+                            "page": 0,
+                        },
+                    },
+                }
+
+            def exec(self):
+                matches.append(True)
+                return 1
+
+        real_verify = ScanImportView._verify_template
+
+        def fake_verify(self, supplier, template, files):
+            shown["supplier"] = supplier
+            shown["files"] = files
+            return "bekrafta"
+
+        monkeypatch.setattr(sv, "TemplateDialog", FakeTemplateDialog)
+        monkeypatch.setattr(
+            ScanImportView, "_verify_template", fake_verify)
+        try:
+            rescanned = []
+            monkeypatch.setattr(
+                view._watch, "scan_folder",
+                lambda e: rescanned.append(e),
+            )
+            assert view._teach_from_folder(entry) is True
+        finally:
+            monkeypatch.setattr(
+                ScanImportView, "_verify_template", real_verify)
+        assert matches == [True]
+        assert shown["supplier"] == "Test AB"
+        assert shown["files"] and str(shown["files"][0]) \
+            == str(path)
+        assert "Test AB" in view._get_templates()
+        status = view._lbl_status.text()
+        assert "minns den" in status and "Test AB" in status
+        assert any(r.get("path") == str(folder) for r in rescanned)
+    finally:
+        view.close()
+
+
+def test_teach_adjust_loop_recHECKS(tmp_path, monkeypatch):
+    """Väljer användaren Justera i säkerhetskontrollen öppnas
+    markeringen igen (mallen ifylld) och kontrollen körs om på
+    den justerade mallen; minnet + omskanning sker först efteråt."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as sv
+    from ui.scan_import_view import ScanImportView
+
+    folder = tmp_path / "TestIn"
+    folder.mkdir()
+    import fitz
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((40, 80), "Summa att betala 1 250,00 kr",
+                     fontsize=11)
+    path = folder / "faktura-2025.pdf"
+    doc.save(str(path))
+    doc.close()
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        entry = {"supplier": "Test AB", "path": str(folder)}
+        view._watch.set_folders([entry])
+
+        dialog_malls = []
+        answers = iter(["justera", "bekrafta"])
+        fields_seq = [
+            {"total_amount": {"label": "Summa att betala"}},
+            {"total_amount": {"label": "Summa exkl moms"}},
+        ]
+        calls = []
+
+        class FakeTemplateDialog:
+            def __init__(self, parent, text, supplier="",
+                         existing=None, path=None):
+                dialog_malls.append(existing)
+                idx = len(calls)
+                self.result_template = {
+                    "supplier": "Test AB",
+                    "fields": fields_seq[idx],
+                }
+
+            def exec(self):
+                calls.append(True)
+                return 1
+
+        real_verify = ScanImportView._verify_template
+
+        def fake_verify(self, supplier, template, files):
+            return next(answers)
+
+        monkeypatch.setattr(sv, "TemplateDialog", FakeTemplateDialog)
+        monkeypatch.setattr(
+            ScanImportView, "_verify_template", fake_verify)
+        try:
+            assert view._teach_from_folder(entry) is True
+        finally:
+            monkeypatch.setattr(
+                ScanImportView, "_verify_template", real_verify)
+        assert len(calls) == 2
+        assert dialog_malls[1] == {"fields": fields_seq[0]}
+        # Final mallen är den justerade
+        assert view._get_templates()["Test AB"]["fields"] == fields_seq[1]
+        assert "minns den" in view._lbl_status.text()
     finally:
         view.close()

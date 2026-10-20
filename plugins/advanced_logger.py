@@ -52,7 +52,7 @@ from typing import Any
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QFrame,
-    QMessageBox,
+    QFileDialog, QMessageBox,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QGroupBox, QLineEdit, QCheckBox,
 )
@@ -598,6 +598,7 @@ def attach_session_due_date_watcher(app: Any) -> None:
 
 def attach_app_watchers(app: Any) -> None:
     """CRUD/settings-watchers → varje datamutation loggas som AUDIT."""
+    log = logging.getLogger("AppWatcher")
 
     def _make_store_cb(store_name: str):
         def cb(name: str, records: list):
@@ -1006,9 +1007,11 @@ def log_system_info() -> None:
         pyside = meta.version("PySide6")
     except Exception:
         pyside = "okänd"
-    import importlib.util as _ilu
-
-    rl = "ja" if _ilu.find_spec("reportlab") else "nej (text-fallback)"
+    try:
+        import reportlab  # noqa: F401
+        rl = "ja"
+    except Exception:
+        rl = "nej (text-fallback)"
     alog(
         "SYSTEM_INFO",
         "Systeminfo vid start",
@@ -1554,19 +1557,6 @@ def register_ui(main_window: Any) -> None:
         _install_ui_signal_loggers(main_window)
     except Exception as exc:
         log_diagnosis("_install_ui_signal_loggers", exc)
-
-    if getattr(main_window, "_builtin_log_tab", False):
-        # Huvudfönstret har en inbyggd loggflik (ui/log_view.py) som
-        # läser samma logs/app.log — lägg inte till en andra flik.
-        alog(
-            "LOGGER_VIEW",
-            "Inbyggd loggflik finns i huvudfönstret — pluginet "
-            "hoppar över sin egen LoggerView-flik",
-            logger="AdvancedLogger",
-        )
-        alog("PLUGIN", "AdvancedLogger UI registrerat (phase 2)",
-             logger="AdvancedLogger")
-        return
 
     try:
         view = LoggerView(

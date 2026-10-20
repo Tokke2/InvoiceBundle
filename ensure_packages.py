@@ -29,8 +29,6 @@ _IMPORT_NAME = {
     "PySide6": "PySide6",
     "reportlab": "reportlab",
     "pypdf": "pypdf",
-    "PyMuPDF": "pymupdf",
-    "Pillow": "PIL",
 }
 
 

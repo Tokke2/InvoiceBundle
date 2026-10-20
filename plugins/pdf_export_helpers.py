@@ -57,20 +57,20 @@ PDF_MARGIN_LEFT: int = 36
 PDF_MARGIN_RIGHT: int = 36
 PDF_MARGIN_TOP: int = 50
 PDF_MARGIN_BOTTOM: int = 45
-PDF_LINE_HEIGHT: int = 17
+PDF_LINE_HEIGHT: int = 16
 PDF_HEADER_HEIGHT: int = 20
 
 #: PDF-tabellkolumner: (etikett, datanyckel, kolumnbredd)
 #: Breddarna summerar till 523 pt = A4 (595) minus marginaler (2×36),
 #: så hela tabellen inklusive Status-kolumnen får plats på sidan.
-#: Kolumnerna är valda för BETALNING: leverantör, fakturanummer,
-#: OCR/referens (det man knappar in i banken), förfallodatum och belopp.
 PDF_COLUMNS: list[tuple[str, str, int]] = [
-    ("Fakturanr",     "invoice_number",  80),
-    ("Leverantor",    "supplier",       146),
-    ("OCR",           "ocr",            118),
-    ("Forfallodatum", "due_date",        80),
-    ("Belopp",        "total_amount",    99),
+    ("Fakturanr",     "invoice_number",  76),
+    ("Typ",           "invoice_type",    58),
+    ("Leverantor",    "supplier",       112),
+    ("Datum",         "date",            62),
+    ("Forfallodatum", "due_date",        72),
+    ("Belopp",        "total_amount",    80),
+    ("Status",        "status",          63),
 ]
 
 #: Leverantörsfält som visas i PDF:en
@@ -98,75 +98,26 @@ DARK_ROW_NORMAL   = "#171f2b"
 DARK_TEXT         = "#e2e8f0"
 DARK_SUPPLIER_BG  = "#1c2636"
 
-LIGHT_HEADER_BG   = "#12284b"
+LIGHT_HEADER_BG   = "#2b6cb0"
 LIGHT_HEADER_FG   = "#ffffff"
-LIGHT_ROW_ALT     = "#eef2f7"
+LIGHT_ROW_ALT     = "#ebf4ff"
 LIGHT_ROW_NORMAL  = "#ffffff"
 LIGHT_TEXT        = "#1a202c"
-LIGHT_SUPPLIER_BG = "#f2f6fb"
+LIGHT_SUPPLIER_BG = "#f0f7ff"
 
-_ACCENT            = "#12284b"
+_ACCENT            = "#3182ce"
 ACCENT_DARK        = "#63b3ed"
-FOOTER_GREY        = "#4a5568"
-CREDIT_COLOR       = "#b91c1c"
-INVOICE_COLOR      = "#166534"
-SUPPLIER_LABEL     = "#44546a"
+FOOTER_GREY        = "#718096"
+CREDIT_COLOR       = "#e53e3e"
+INVOICE_COLOR      = "#38a169"
+SUPPLIER_LABEL     = "#718096"
 DIVIDER_COLOR      = "#a0aec0"
 SUMMARY_BG_DARK    = "#1a365d"
-SUMMARY_BG_LIGHT   = "#f4f7fb"
+SUMMARY_BG_LIGHT   = "#ebf8ff"
 ATT_BETALA_BG_D    = "#2d3748"
-ATT_BETALA_BG_L    = "#ffffff"
+ATT_BETALA_BG_L    = "#bee3f8"
 DUE_DATE_BG_DARK   = "#1a3a2a"   # grön box – mörkt tema
 DUE_DATE_BG_LIGHT  = "#c6f6d5"   # grön box – ljust tema
-GOLD_BRAND         = "#d4a017"   # guldaccent (streck/detaljer)
-INK_PDF            = "#0d1522"   # nästan svart – nyckelsiffror
-
-#: PDF-etiketter per språk. Dokumentet följer appens språk
-#: (settings "language"); standard är svenska.
-PDF_LABELS: dict[str, dict[str, str]] = {
-    "sv": {
-        "col_invoice_number": "Fakturanr", "col_type": "Typ",
-        "col_supplier": "Leverantor", "col_ocr": "OCR / referens",
-        "col_date": "Datum",
-        "col_due_date": "Forfallodatum", "col_amount": "Belopp",
-        "col_status": "Status",
-        "invoices_plus": "Fakturor  (+):", "credits_minus": "Krediter  (-):",
-        "to_pay": "ATT BETALA:", "page": "Sida", "of": "av",
-        "subtotal": "Summa", "continued": "(fortsatt)",
-        "invoices": "FAKTUROR", "supplier_details": "LEVERANTORSUPPGIFTER",
-        "exported": "Exporterad", "payment_date": "BETALNINGSDATUM:",
-        "rounding": "avrundning",
-        "terms": "Betalvillkor", "contact": "Kontaktperson",
-        "attachment_divider": "Originalfaktura",
-        "email": "E-post", "phone": "Telefon", "address": "Adress",
-        "days": "dagar", "rows": "Rader", "suppliers": "Leverantorer",
-    },
-    "en": {
-        "col_invoice_number": "Invoice no.", "col_type": "Type",
-        "col_supplier": "Supplier", "col_ocr": "OCR / reference",
-        "col_date": "Date",
-        "col_due_date": "Due date", "col_amount": "Amount",
-        "col_status": "Status",
-        "invoices_plus": "Invoices  (+):", "credits_minus": "Credits  (-):",
-        "to_pay": "TO PAY:", "page": "Page", "of": "of",
-        "subtotal": "Subtotal", "continued": "(continued)",
-        "invoices": "INVOICES", "supplier_details": "SUPPLIER DETAILS",
-        "exported": "Exported", "payment_date": "PAYMENT DATE:",
-        "rounding": "rounding",
-        "terms": "Payment terms", "contact": "Contact person",
-        "attachment_divider": "Original invoice",
-        "email": "E-mail", "phone": "Phone", "address": "Address",
-        "days": "days", "rows": "Rows", "suppliers": "Suppliers",
-    },
-}
-
-_PDF_COL_KEYS: dict[str, str] = {
-    "invoice_number": "col_invoice_number", "invoice_type": "col_type",
-    "supplier": "col_supplier", "ocr": "col_ocr", "date": "col_date",
-    "due_date": "col_due_date", "total_amount": "col_amount",
-    "status": "col_status",
-}
-
 
 #: Giltiga avrundningslägen för ATT BETALA (samma som GUI).
 PDF_ROUNDING_MODES: tuple[str, ...] = ("exact", "hel", "50", "100")
@@ -276,31 +227,6 @@ def get_platform() -> str:
     return "windows" if p == "windows" else "linux"
 
 
-def _display_order(invoices: list[dict]) -> list[dict]:
-    """Visningsordning i betal-PDF:en: leverantör A–Ö, sedan
-    förfallodatum, sedan fakturanummer. Grupperingen gör listan
-    lätt att stämma av leverantör för leverantör mot banken."""
-    def key(inv: dict) -> tuple[str, str, str]:
-        return (
-            str(inv.get("supplier", "")).strip().casefold(),
-            str(inv.get("due_date") or "9999-99-99"),
-            str(inv.get("invoice_number", "")).strip().casefold(),
-        )
-    return sorted(invoices, key=key)
-
-
-def _payment_ref_date(payment_date: str) -> str:
-    """Referensdatum (ISO) för förfallo-markering: betalningsdatumet,
-    annars idag. Förfallodatum före referensen markeras röda."""
-    if payment_date:
-        try:
-            return datetime.date.fromisoformat(
-                str(payment_date)[:10]).isoformat()
-        except ValueError:
-            pass
-    return datetime.date.today().isoformat()
-
-
 def _to_float(value: Any, default: float = 0.0) -> float:
     """Säker float-konvertering – trasiga belopp kraschar aldrig."""
     try:
@@ -312,23 +238,21 @@ def _to_float(value: Any, default: float = 0.0) -> float:
 
 
 def to_ascii(text: str) -> str:
-    """Sanerar text för PDF-teckensnittet (Helvetica, WinAnsi).
-
-    ÅÄÖ och övriga latin-1-tecken behålls — de finns i WinAnsi och
-    skrivs ut korrekt; tidigare strippades de till a/a/o vilket gav
-    felstavade namn (t.ex. "Langkvist"). Tecken utanför latin-1
-    bryts ned via NFKD eller ersätts med "?".
-    """
+    """Konverterar svenska och specialtecken till ren ASCII för PDF."""
     replacements: dict[str, str] = {
+        "å": "a", "ä": "a", "ö": "o",
+        "Å": "A", "Ä": "A", "Ö": "O",
         "\u2009": " ", "\u2212": "-", "–": "-", "—": "-",
         "“": '"', "”": '"', "‘": "'", "’": "'",
         "…": "...",
+        "é": "e", "è": "e", "ê": "e",
+        "ü": "u", "Ü": "U",
     }
     result: list[str] = []
     for ch in text:
         if ch in replacements:
             result.append(replacements[ch])
-        elif ord(ch) < 256:
+        elif ord(ch) < 128:
             result.append(ch)
         else:
             decomposed = unicodedata.normalize("NFKD", ch)
@@ -410,41 +334,12 @@ def ask_export_payment_date(
         from PySide6.QtCore import Qt, QDate
         from PySide6.QtGui import QFont
 
-        # Bättre kalender-drop + språk (mjuka importer med fallback —
-        # pluginet ska fungera även helt fristående).
-        NiceDateEdit = QDateEdit  # type: ignore[assignment,misc]
-        quick_pick_row = None
-        date_preview_label = None
-        try:
-            from ui.date_picker import (
-                NiceDateEdit, date_preview_label, quick_pick_row,
-            )
-        except Exception:
-            try:
-                from date_picker import (  # type: ignore[no-redef]
-                    NiceDateEdit, date_preview_label, quick_pick_row,
-                )
-            except Exception:
-                pass
-        try:
-            from ui.i18n import tr
-        except Exception:
-            def tr(key: str, **_f: object) -> str:  # type: ignore[no-redef]
-                _sv = {
-                    "export.date_title": "📄  Ange betalningsdatum för export",
-                    "export.payment_date": "Betalningsdatum:",
-                    "export.export_with_date": "✔  Exportera med detta datum",
-                    "export.cancel_export": "✖  Avbryt export",
-                    "export.date_window_title": "Betalningsdatum för export",
-                }
-                return _sv.get(key, key)
-
         class _ExportDateDialog(QDialog):
             """Dialog för betalningsdatum per export-batch."""
 
             def __init__(self) -> None:
                 super().__init__(parent)
-                self.setWindowTitle(tr("export.date_window_title"))
+                self.setWindowTitle("Betalningsdatum för export")
                 self.setWindowFlags(
                     Qt.WindowType.Dialog
                     | Qt.WindowType.WindowStaysOnTopHint
@@ -459,7 +354,7 @@ def ask_export_payment_date(
                 root.setSpacing(12)
                 root.setContentsMargins(22, 18, 22, 18)
 
-                title = QLabel(tr("export.date_title"))
+                title = QLabel("📄  Ange betalningsdatum för export")
                 title_font = QFont()
                 title_font.setPointSize(12)
                 title_font.setBold(True)
@@ -474,17 +369,15 @@ def ask_export_payment_date(
 
                 # Export-sammanfattning
                 summary_parts: list[str] = [
-                    tr("export.date_count", n=invoice_count),
+                    f"Antal fakturor:  {invoice_count}",
                 ]
                 if supplier_names:
                     shown = supplier_names[:5]
                     rest = len(supplier_names) - 5
                     sup_str = ",  ".join(shown)
                     if rest > 0:
-                        sup_str += tr("export.date_and_more", n=rest)
-                    summary_parts.append(
-                        tr("export.date_suppliers", names=sup_str)
-                    )
+                        sup_str += f"  och {rest} till …"
+                    summary_parts.append(f"Leverantörer:     {sup_str}")
                 summary_parts.append(
                     f"ATT BETALA:      {fmt_amount(total_amount, currency)}"
                 )
@@ -500,7 +393,11 @@ def ask_export_payment_date(
                 sep2.setFrameShadow(QFrame.Shadow.Sunken)
                 root.addWidget(sep2)
 
-                info = QLabel(tr("export.date_info"))
+                info = QLabel(
+                    "Betalningsdatumet gäller ALLA fakturor i denna export.\n"
+                    "Det nollställs automatiskt efter exporten.\n"
+                    "Nästa export → du tillfrågas igen."
+                )
                 info.setFont(QFont("Segoe UI", 9))
                 info.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 info.setWordWrap(True)
@@ -510,13 +407,16 @@ def ask_export_payment_date(
                 # Datumrad
                 date_row = QHBoxLayout()
                 date_row.setSpacing(10)
-                lbl_d = QLabel(tr("export.payment_date"))
+                lbl_d = QLabel("Betalningsdatum:")
                 lbl_d.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
                 lbl_d.setStyleSheet("background:transparent;")
                 date_row.addWidget(lbl_d)
 
-                self._date_edit = NiceDateEdit()
-                self._date_edit.setMinimumWidth(170)
+                self._date_edit = QDateEdit()
+                self._date_edit.setCalendarPopup(True)
+                self._date_edit.setDisplayFormat("yyyy-MM-dd")
+                self._date_edit.setMinimumHeight(36)
+                self._date_edit.setMinimumWidth(150)
 
                 # Default: session_due_date → idag
                 default_date = datetime.date.today()
@@ -538,14 +438,6 @@ def ask_export_payment_date(
                 date_row.addStretch()
                 root.addLayout(date_row)
 
-                # Snabbval + läsbar förhandsvisning under datumraden
-                if quick_pick_row is not None:
-                    root.addWidget(quick_pick_row(self._date_edit, self))
-                if date_preview_label is not None:
-                    root.addWidget(
-                        date_preview_label(self._date_edit, self)
-                    )
-
                 sep3 = QFrame()
                 sep3.setFrameShape(QFrame.Shape.HLine)
                 sep3.setFrameShadow(QFrame.Shadow.Sunken)
@@ -555,13 +447,13 @@ def ask_export_payment_date(
                 btn_row = QHBoxLayout()
                 btn_row.setSpacing(10)
 
-                btn_ok = QPushButton(tr("export.export_with_date"))
+                btn_ok = QPushButton("✔  Exportera med detta datum")
                 btn_ok.setDefault(True)
                 btn_ok.setMinimumHeight(38)
                 btn_ok.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
                 btn_ok.clicked.connect(self._on_ok)
 
-                btn_cancel = QPushButton(tr("export.cancel_export"))
+                btn_cancel = QPushButton("✖  Avbryt export")
                 btn_cancel.setMinimumHeight(38)
                 btn_cancel.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
                 btn_cancel.clicked.connect(self.reject)
@@ -637,25 +529,14 @@ def build_supplier_map(
     return sup_map
 
 
-_DETAIL_LABEL_KEYS: dict[str, str] = {
-    "payment_terms": "terms", "contact_person": "contact",
-    "email": "email", "phone": "phone", "address": "address",
-}
-
-
-def supplier_detail_lines(
-    sup: dict, language: str = "sv"
-) -> list[tuple[str, str]]:
+def supplier_detail_lines(sup: dict) -> list[tuple[str, str]]:
     """Formaterade (etikett, värde)-rader för PDF:ens leverantörsblock."""
-    labels = PDF_LABELS["en" if str(language).startswith("en") else "sv"]
     lines: list[tuple[str, str]] = []
     for label, key in SUPPLIER_DETAIL_FIELDS:
         val = str(sup.get(key, "")).strip()
         if val and val != "0":
             if key == "payment_terms":
-                val = f"{val} {labels['days']}"
-            if key in _DETAIL_LABEL_KEYS:
-                label = labels[_DETAIL_LABEL_KEYS[key]]
+                val = f"{val} dagar"
             lines.append((label, val))
     return lines
 
@@ -804,124 +685,6 @@ class InvoiceNumberGuard:
 # ═════════════════════════════════════════════════════════════════════
 
 
-def _divider_page_bytes(
-    band: str, text: str, note: str = "",
-) -> bytes | None:
-    """
-    Avdelarsida före ett original — bytes, eller None utan reportlab.
-
-    Vit sida med marinblått band + guldlinje (utskriftsvänligt;
-    tidigare helnavy sida med en "📎"-emoji som blev "?" i PDF:en).
-    *band* = rubrik (t.ex. "Originalfaktura"), *text* = leverantör ·
-    fakturanr · filnamn, *note* = sidkontext (t.ex. "2 / 5").
-    """
-    try:
-        import io
-
-        from reportlab.lib.pagesizes import A4
-        from reportlab.pdfgen import canvas
-
-        buf = io.BytesIO()
-        c = canvas.Canvas(buf, pagesize=A4)
-        w, h = A4
-        c.setFillColorRGB(0.07, 0.16, 0.29)      # marinblått band
-        c.rect(0, h - 84, w, 84, fill=1, stroke=0)
-        c.setFillColorRGB(0.83, 0.63, 0.09)      # guldlinje
-        c.rect(0, h - 88, w, 4, fill=1, stroke=0)
-        c.setFillColorRGB(1, 1, 1)
-        c.setFont("Helvetica-Bold", 16)
-        c.drawString(48, h - 54, to_ascii(band))
-        body = text
-        prefix = f"{band}:"
-        if body.startswith(prefix):
-            body = body[len(prefix):].strip()
-        c.setFillColorRGB(0.07, 0.16, 0.29)
-        c.setFont("Helvetica-Bold", 12.5)
-        c.drawString(48, h - 140, to_ascii(truncate(body, 64)))
-        if note:
-            c.setFillColorRGB(0.29, 0.33, 0.41)
-            c.setFont("Helvetica-Bold", 11)
-            c.drawString(48, h - 166, to_ascii(note))
-        c.showPage()
-        c.save()
-        return buf.getvalue()
-    except Exception:
-        return None
-
-
-def merge_originals(
-    base_pdf: Path,
-    attachments: list,
-    divider_label: str = "Originalfaktura",
-) -> dict:
-    """
-    Lägger originalfakturorna EFTER huvud-PDF:en i samma fil:
-    avdelarsida + original (PDF-sidor direkt; bilder som helsidor).
-    Returnerar {"included": n, "missing": m, "pages_added": p}.
-    """
-    result = {"included": 0, "missing": 0, "pages_added": 0}
-    if not attachments:
-        return result
-    try:
-        from pypdf import PdfWriter
-    except Exception as exc:
-        log.warning("merge_originals: pypdf saknas: %s", exc)
-        return result
-
-    writer = PdfWriter()
-    try:
-        writer.append(str(base_pdf))
-    except Exception as exc:
-        log.warning("merge_originals: kan inte läsa bas-PDF: %s", exc)
-        return result
-
-    import io
-
-    total_att = len(attachments)
-    for att_idx, (label, raw_path) in enumerate(attachments):
-        path = Path(str(raw_path))
-        if not str(raw_path).strip() or not path.is_file():
-            result["missing"] += 1
-            continue
-        pages_before = len(writer.pages)
-        try:
-            divider = _divider_page_bytes(
-                divider_label, label, f"{att_idx + 1} / {total_att}")
-            if divider is not None:
-                writer.append(io.BytesIO(divider))
-            suffix = path.suffix.lower()
-            if suffix == ".pdf":
-                writer.append(str(path))
-            elif suffix in (".png", ".jpg", ".jpeg", ".tif", ".tiff",
-                            ".bmp"):
-                from PIL import Image
-
-                img = Image.open(path).convert("RGB")
-                buf = io.BytesIO()
-                img.save(buf, format="PDF")
-                buf.seek(0)
-                writer.append(buf)
-            else:
-                result["missing"] += 1
-                continue
-            result["included"] += 1
-            result["pages_added"] += len(writer.pages) - pages_before
-        except Exception as exc:
-            log.warning("merge_originals %s: %s", path, exc)
-            result["missing"] += 1
-
-    if result["included"]:
-        tmp = base_pdf.with_suffix(".merged.pdf")
-        try:
-            with open(tmp, "wb") as fh:
-                writer.write(fh)
-            tmp.replace(base_pdf)
-        except Exception as exc:
-            log.warning("merge_originals skriv: %s", exc)
-            result["included"] = 0
-    return result
-
-
 class PDFExporter:
     """
     Exporterar fakturalistor till stilren PDF.
@@ -954,10 +717,7 @@ class PDFExporter:
         theme: str = "dark",
         get_suppliers_fn: Callable[[], list[dict]] | None = None,
         rounding_mode: str = "exact",
-        language: str = "sv",
     ) -> None:
-        _lang_in = str(language).lower()
-        self._lang = "en" if _lang_in.startswith("en") else "sv"
         self._export_dir = confine_export_dir(Path(export_dir))
         self._data_dir = Path(data_dir)
         self._guard = InvoiceNumberGuard(self._data_dir)
@@ -975,33 +735,12 @@ class PDFExporter:
         ensure_dir(self._export_dir)
         ensure_dir(self._data_dir)
 
-        import importlib.util as _ilu
-
-        self._has_rl = _ilu.find_spec("reportlab") is not None
-        if self._has_rl:
+        try:
+            import reportlab  # noqa: F401
+            self._has_rl = True
             log.info("reportlab available – full PDF support")
-        else:
+        except ImportError:
             log.warning("reportlab not installed – text fallback active")
-
-    def _refresh_lang(self) -> None:
-        """Hämtar språket live om en språk-källa kopplats (språkbyte)."""
-        fn = getattr(self, "_language_fn", None)
-        if fn is not None:
-            try:
-                self._lang = "en" if str(fn()).lower().startswith("en") else "sv"
-            except Exception:
-                pass
-
-    def _t(self, key: str) -> str:
-        """PDF-etikett på dokumentets språk."""
-        return PDF_LABELS[self._lang].get(key, key)
-
-    def _columns(self):
-        """PDF_COLUMNS med rubriker på dokumentets språk."""
-        return [
-            (self._t(_PDF_COL_KEYS.get(k, "")), k, w)
-            for _lbl, k, w in PDF_COLUMNS
-        ]
 
     @property
     def guard(self) -> InvoiceNumberGuard:
@@ -1043,9 +782,8 @@ class PDFExporter:
         except Exception:
             return True
 
-    def _colours(self, dark: bool | None = None) -> dict[str, str]:
-        if dark is None:
-            dark = self._is_dark()
+    def _colours(self) -> dict[str, str]:
+        dark = self._is_dark()
         return {
             "header_bg":     DARK_HEADER_BG    if dark else LIGHT_HEADER_BG,
             "header_fg":     DARK_HEADER_FG    if dark else LIGHT_HEADER_FG,
@@ -1054,7 +792,6 @@ class PDFExporter:
             "text":          DARK_TEXT         if dark else LIGHT_TEXT,
             "footer":        FOOTER_GREY,
             "accent":        ACCENT_DARK       if dark else _ACCENT,
-            "gold":          GOLD_BRAND,
             "credit":        CREDIT_COLOR,
             "invoice":       INVOICE_COLOR,
             "supplier_bg":   DARK_SUPPLIER_BG  if dark else LIGHT_SUPPLIER_BG,
@@ -1144,9 +881,7 @@ class PDFExporter:
         session_due_date: str = "",
         ask_payment_date: bool = True,
         parent_widget: Any = None,
-        include_originals: bool = False,
     ) -> dict[str, Any]:
-        self._refresh_lang()
         """
         Exporterar fakturor till PDF.
 
@@ -1259,27 +994,26 @@ class PDFExporter:
         file_path = confine_export_file(file_path)
         ensure_dir(file_path.parent)
 
-        ordered = _display_order(invoices)
-        regular, credits = self._split_invoices(ordered)
+        regular, credits = self._split_invoices(invoices)
         sum_inv = self._sum_field(regular, "total_amount")
         sum_crd = self._sum_field(credits, "total_amount")
         net = round(sum_inv + sum_crd, 2)
         net_display = round_by_mode(net, self._rounding)
 
         sup_map = self._get_supplier_map(invoices, suppliers_list)
-        sup_list = self._unique_suppliers(ordered, sup_map)
+        sup_list = self._unique_suppliers(invoices, sup_map)
 
         # ── Bygg PDF ────────────────────────────────────────────────────
         try:
             if self._has_rl:
                 self._build_reportlab(
-                    file_path, ordered, regular, credits,
+                    file_path, invoices, regular, credits,
                     title, sum_inv, sum_crd, net, net_display,
                     sup_list, effective_payment_date,
                 )
             else:
                 self._build_text(
-                    file_path, ordered, regular, credits,
+                    file_path, invoices, regular, credits,
                     title, sum_inv, sum_crd, net, net_display,
                     sup_list, effective_payment_date,
                 )
@@ -1297,34 +1031,6 @@ class PDFExporter:
                 batch_id,
                 effective_payment_date,   # ← betalningsdatum lagras
             )
-
-        # ── Bifoga originalfakturor (om valt) ─────────────────────
-        if include_originals and self._has_rl:
-            attachments = []
-            for inv in invoices:
-                raw = str(inv.get("attachment", "") or "").strip()
-                if not raw:
-                    continue
-                candidate = Path(raw)
-                if not candidate.is_absolute():
-                    candidate = APP_ROOT / candidate
-                label = " · ".join(x for x in (
-                    str(inv.get("supplier", "")),
-                    str(inv.get("invoice_number", "")),
-                    candidate.name,
-                ) if x)
-                attachments.append((label, candidate))
-            merged = merge_originals(
-                file_path, attachments,
-                divider_label=self._t("attachment_divider"),
-            )
-            result["attachments_included"] = merged["included"]
-            result["attachments_missing"] = merged["missing"]
-            if merged["included"]:
-                log.info(
-                    "PDF: %d original bifogade (+%d sidor)",
-                    merged["included"], merged["pages_added"],
-                )
 
         result.update({
             "success":           True,
@@ -1380,10 +1086,7 @@ class PDFExporter:
         from reportlab.pdfgen import canvas as rl_canvas
 
         page_w, page_h = A4
-        # Betalningsunderlaget är ett pappersdokument: alltid ljus
-        # palett, även om appen körs i mörkt tema — annars blir
-        # utskriften mörk, bläcktörstig och svårläst.
-        col = self._colours(dark=False)
+        col = self._colours()
 
         def render(c, total_pages):
             self._draw_report(
@@ -1444,14 +1147,14 @@ class PDFExporter:
             c.drawString(
                 PDF_MARGIN_LEFT, PDF_MARGIN_BOTTOM - 16,
                 to_ascii(
-                    f"(c) {COPYRIGHT_YEAR} Rickard Längkvist"
+                    f"(c) {COPYRIGHT_YEAR} Rickard Langkvist"
                     f"  |  FakturaRäknaren"
                     f"  |  Exporterad {now_iso()}"
                 ),
             )
-            pages = f"{self._t('page')} {page_num[0]}"
+            pages = f"Sida {page_num[0]}"
             if total_pages:
-                pages += f" {self._t('of')} {total_pages}"
+                pages += f" av {total_pages}"
             c.drawRightString(
                 page_w - PDF_MARGIN_RIGHT, PDF_MARGIN_BOTTOM - 16, pages,
             )
@@ -1465,7 +1168,7 @@ class PDFExporter:
         def top_band() -> None:
             c.setFillColor(hc(col["header_bg"]))
             c.rect(0, page_h - 12, page_w, 12, fill=True, stroke=False)
-            c.setFillColor(hc(col["gold"]))
+            c.setFillColor(hc(col["accent"]))
             c.rect(0, page_h - 14.5, page_w, 2.5, fill=True, stroke=False)
 
         def new_page() -> float:
@@ -1482,7 +1185,7 @@ class PDFExporter:
             c.setFont("Helvetica", 8)
             c.setFillColor(hc(col["footer"]))
             c.drawRightString(
-                page_w - PDF_MARGIN_RIGHT, y, self._t("continued"),
+                page_w - PDF_MARGIN_RIGHT, y, "(fortsatt)",
             )
             y -= 10
             _line(y, 0.5)
@@ -1511,14 +1214,11 @@ class PDFExporter:
 
         def table_header(y):
             box(y + 8, PDF_HEADER_HEIGHT + 2, col["header_bg"], 4)
-            c.setFont("Helvetica-Bold", 9)
+            c.setFont("Helvetica-Bold", 8)
             c.setFillColor(hc(col["header_fg"]))
             x = PDF_MARGIN_LEFT
-            for label, _k, width in self._columns():
-                if _k == "total_amount":
-                    c.drawRightString(x + width - 3, y + 4, label)
-                else:
-                    c.drawString(x + 4, y + 4, label)
+            for label, _k, width in PDF_COLUMNS:
+                c.drawString(x + 4, y + 4, label)
                 x += width
             return y - PDF_HEADER_HEIGHT - 3
 
@@ -1547,34 +1247,32 @@ class PDFExporter:
             )
         y -= 30
 
-        c.setFont("Helvetica", 8.5)
+        c.setFont("Helvetica", 8)
         c.setFillColor(hc(col["footer"]))
         c.drawString(
             PDF_MARGIN_LEFT, y,
             to_ascii(
-                f"{self._t('exported')}: {now_iso()}   |   {self._t('rows')}: {len(invoices)}"
-                f"   |   {self._t('invoices')}: {len(regular)}"
-                f"   |   {self._t('credits_minus').split('(')[0].strip()}: {len(credits)}"
-                f"   |   {self._t('suppliers')}: {len(sup_list)}"
+                f"Exporterad: {now_iso()}   |   Rader: {len(invoices)}"
+                f"   |   Fakturor: {len(regular)}"
+                f"   |   Krediter: {len(credits)}"
+                f"   |   Leverantorer: {len(sup_list)}"
             ),
         )
         y -= 8
         _line(y, 1.0)
         y -= 20
 
-        # ── Betalningsdatum (marinblå box – syns direkt) ────────────
+        # ── Betalningsdatum (grön box med accentstripe) ───────────────
         if payment_date:
             y = check(y, 36)
-            box(y + 4, 28, col["header_bg"], 5)
-            stripe(y + 4, 28, col["gold"])
+            box(y + 4, 28, col["due_date_bg"], 5)
+            stripe(y + 4, 28, col["invoice"])
             c.setFont("Helvetica-Bold", 10)
-            c.setFillColor(hc("#ffffff"))
+            c.setFillColor(hc(col["invoice"]))
             c.drawString(
-                PDF_MARGIN_LEFT + 10, y - 4,
-                to_ascii(self._t("payment_date")),
+                PDF_MARGIN_LEFT + 10, y - 4, to_ascii("BETALNINGSDATUM:"),
             )
-            c.setFont("Helvetica-Bold", 14)
-            c.setFillColor(hc("#f5c542"))
+            c.setFont("Helvetica-Bold", 13)
             c.drawRightString(
                 page_w - PDF_MARGIN_RIGHT - 8, y - 4,
                 to_ascii(payment_date),
@@ -1585,49 +1283,42 @@ class PDFExporter:
         y = check(y, 84)
         box_h = 70
         box(y + 4, box_h, col["summary_bg"], 5)
-        c.setStrokeColor(hc(col["accent"]))
-        c.setLineWidth(1.2)
-        c.roundRect(
-            PDF_MARGIN_LEFT - 3, y + 4 - box_h + 8,
-            content_w + 6, box_h, 5, fill=False, stroke=True,
-        )
 
-        c.setFont("Helvetica", 10)
+        c.setFont("Helvetica", 9.5)
         c.setFillColor(hc(col["invoice"]))
-        c.drawString(PDF_MARGIN_LEFT + 8, y - 2, self._t("invoices_plus"))
-        c.setFont("Helvetica-Bold", 11)
+        c.drawString(PDF_MARGIN_LEFT + 8, y - 2, "Fakturor  (+):")
+        c.setFont("Helvetica-Bold", 10)
         c.drawRightString(
             page_w - PDF_MARGIN_RIGHT - 8, y - 2,
             fmt_amount(sum_inv, self._currency),
         )
         y -= 17
 
-        c.setFont("Helvetica", 10)
+        c.setFont("Helvetica", 9.5)
         c.setFillColor(hc(col["credit"]))
-        c.drawString(PDF_MARGIN_LEFT + 8, y - 2, self._t("credits_minus"))
-        c.setFont("Helvetica-Bold", 11)
+        c.drawString(PDF_MARGIN_LEFT + 8, y - 2, "Krediter  (-):")
+        c.setFont("Helvetica-Bold", 10)
         c.drawRightString(
             page_w - PDF_MARGIN_RIGHT - 8, y - 2,
             fmt_amount(abs(sum_crd), self._currency),
         )
         y -= 6
 
-        c.setStrokeColor(hc(col["gold"]))
-        c.setLineWidth(1.5)
+        c.setStrokeColor(hc(col["accent"]))
+        c.setLineWidth(1.2)
         c.line(
             PDF_MARGIN_LEFT + 6, y, page_w - PDF_MARGIN_RIGHT - 6, y,
         )
         y -= 17
 
         rounding_note = (
-            f"  ({self._t('rounding')}: {self._rounding})"
+            f"  (avrundning: {self._rounding})"
             if self._rounding != "exact" else ""
         )
-        c.setFont("Helvetica-Bold", 14)
+        c.setFont("Helvetica-Bold", 13)
         c.setFillColor(hc(col["accent"]))
-        c.drawString(PDF_MARGIN_LEFT + 8, y - 4, self._t("to_pay"))
-        c.setFont("Helvetica-Bold", 20)
-        c.setFillColor(hc(INK_PDF))
+        c.drawString(PDF_MARGIN_LEFT + 8, y - 4, "ATT BETALA:")
+        c.setFont("Helvetica-Bold", 15)
         c.drawRightString(
             page_w - PDF_MARGIN_RIGHT - 8, y - 5,
             fmt_amount(net_display, self._currency)
@@ -1640,42 +1331,38 @@ class PDFExporter:
             y = check(y, 40)
             c.setFont("Helvetica-Bold", 10)
             c.setFillColor(hc(col["accent"]))
-            c.drawString(
-                PDF_MARGIN_LEFT, y,
-                to_ascii(self._t("supplier_details").upper()),
-            )
+            c.drawString(PDF_MARGIN_LEFT, y, "LEVERANTORSUPPGIFTER")
             y -= 4
             _line(y, 0.5)
             y -= 12
 
             for sup in sup_list:
                 name = str(sup.get("name", "-")).strip()
-                details = supplier_detail_lines(sup, self._lang)
-                block_h = 16 + len(details) * 12 + 6
+                details = supplier_detail_lines(sup)
+                block_h = 16 + len(details) * 11 + 6
                 y = check(y, block_h)
 
                 box(y + 2, block_h, col["supplier_bg"], 3)
                 stripe(y + 2, block_h, col["accent"])
 
-                c.setFont("Helvetica-Bold", 10.5)
+                c.setFont("Helvetica-Bold", 9)
                 c.setFillColor(hc(col["accent"]))
                 c.drawString(
                     PDF_MARGIN_LEFT + 8, y - 2, to_ascii(name),
                 )
-                y -= 15
+                y -= 14
 
+                c.setFont("Helvetica", 7.5)
                 for label, value in details:
-                    c.setFont("Helvetica", 8)
                     c.setFillColor(hc(col["supplier_lbl"]))
                     c.drawString(
                         PDF_MARGIN_LEFT + 12, y, to_ascii(f"{label}:"),
                     )
-                    c.setFont("Helvetica-Bold", 8.5)
                     c.setFillColor(hc(col["text"]))
                     c.drawString(
                         PDF_MARGIN_LEFT + 92, y, to_ascii(value),
                     )
-                    y -= 12
+                    y -= 11
                 y -= 4
             y -= 6
 
@@ -1683,64 +1370,17 @@ class PDFExporter:
         y = check(y, 40)
         c.setFont("Helvetica-Bold", 10)
         c.setFillColor(hc(col["accent"]))
-        c.drawString(PDF_MARGIN_LEFT, y, self._t("invoices"))
+        c.drawString(PDF_MARGIN_LEFT, y, "FAKTUROR")
         y -= 4
         _line(y, 0.5)
         y -= 14
         y = table_header(y)
 
-        # Delsummor per leverantör (visas bara vid flera leverantörer)
-        # och förfallo-markering mot betalningsdatumet (annars idag).
-        ref_str = _payment_ref_date(payment_date)
-        group_sums: dict[str, float] = {}
-        for _inv in invoices:
-            _k = str(_inv.get("supplier", "")).strip().lower()
-            group_sums[_k] = (
-                group_sums.get(_k, 0.0)
-                + _to_float(_inv.get("total_amount"))
-            )
-        multi_group = len(group_sums) > 1
-        sup_names = {
-            str(s.get("name", "")).strip().lower():
-                str(s.get("name", "")).strip()
-            for s in sup_list
-        }
-
-        def subtotal_line(sup_key: str) -> None:
-            nonlocal y
-            c.setStrokeColor(hc(col["divider"]))
-            c.setLineWidth(0.75)
-            c.line(
-                PDF_MARGIN_LEFT, y + 12,
-                page_w - PDF_MARGIN_RIGHT, y + 12,
-            )
-            c.setFont("Helvetica-Bold", 9)
-            c.setFillColor(hc(col["accent"]))
-            c.drawRightString(
-                page_w - PDF_MARGIN_RIGHT - 3, y,
-                to_ascii(
-                    f"{self._t('subtotal')} "
-                    f"{sup_names.get(sup_key, sup_key)}: "
-                    f"{fmt_amount(group_sums[sup_key], '')}"
-                ),
-            )
-            y -= 18
-
         row_idx = 0
-        current_sup: str | None = None
         for inv in invoices:
             if y < PDF_MARGIN_BOTTOM + 30:
                 y = new_page()
                 y = table_header(y)
-
-            sup_key = str(inv.get("supplier", "")).strip().lower()
-            if (multi_group and current_sup is not None
-                    and sup_key != current_sup):
-                if y < PDF_MARGIN_BOTTOM + 46:
-                    y = new_page()
-                    y = table_header(y)
-                subtotal_line(current_sup)
-            current_sup = sup_key
 
             itype = str(inv.get("invoice_type", "Faktura")).strip()
             total = _to_float(inv.get("total_amount"))
@@ -1757,55 +1397,26 @@ class PDFExporter:
                 content_w + 6, PDF_LINE_HEIGHT, fill=True, stroke=False,
             )
 
+            c.setFont("Helvetica", 8)
             text_col = col["credit"] if is_cred else col["text"]
-            due_raw = str(inv.get("due_date") or "")
-            overdue = (
-                bool(due_raw) and due_raw < ref_str and not is_cred
-            )
-            if overdue:
-                c.setFillColor(hc(col["credit"]))
-                c.rect(
-                    PDF_MARGIN_LEFT - 3, y - 4, 3.5, PDF_LINE_HEIGHT,
-                    fill=True, stroke=False,
-                )
+            c.setFillColor(hc(text_col))
 
             x = PDF_MARGIN_LEFT
-            for _label, key, width in self._columns():
+            for _label, key, width in PDF_COLUMNS:
+                raw = inv.get(key, "")
                 if key == "total_amount":
-                    c.setFont("Helvetica-Bold", 9)
-                    c.setFillColor(hc(text_col))
-                    c.drawRightString(
-                        x + width - 3, y,
-                        fmt_amount(_to_float(inv.get(key)), ""),
-                    )
-                elif key == "due_date":
-                    c.setFont(
-                        "Helvetica-Bold" if overdue else "Helvetica", 9)
-                    c.setFillColor(
-                        hc(col["credit"] if overdue else text_col))
-                    c.drawString(x + 4, y, to_ascii(due_raw or "-"))
-                elif key == "ocr":
-                    ocr = str(inv.get("ocr") or inv.get("ref") or "")
-                    c.setFont("Helvetica", 9)
-                    c.setFillColor(hc(text_col))
-                    c.drawString(
-                        x + 4, y, to_ascii(truncate(ocr, 20)) or "-")
+                    cell = fmt_amount(_to_float(raw), "")
+                    c.drawRightString(x + width - 3, y, cell)
+                elif key == "invoice_type":
+                    cell = truncate(to_ascii(str(raw or "Faktura")), 13)
+                    c.drawString(x + 4, y, cell)
                 else:
-                    c.setFont("Helvetica", 9)
-                    c.setFillColor(hc(text_col))
-                    cell = truncate(
-                        to_ascii(str(inv.get(key) or "")), 30)
+                    cell = truncate(to_ascii(str(raw or "")), 26)
                     c.drawString(x + 4, y, cell)
                 x += width
 
             y -= PDF_LINE_HEIGHT
             row_idx += 1
-
-        if multi_group and current_sup is not None:
-            if y < PDF_MARGIN_BOTTOM + 46:
-                y = new_page()
-                y = table_header(y)
-            subtotal_line(current_sup)
 
         footer()
 
@@ -1841,7 +1452,7 @@ class PDFExporter:
                     if self._org_number else ""
                 )
             )
-        lines.append(f"  {self._t('exported')}: {now_iso()}")
+        lines.append(f"  Exporterad: {now_iso()}")
         lines.append(dbl)
         lines.append("")
 
@@ -1856,10 +1467,10 @@ class PDFExporter:
             if self._rounding != "exact" else ""
         )
         lines += [
-            f"  {self._t('invoices_plus')}  {fmt_amount(sum_inv, self._currency)}",
-            f"  {self._t('credits_minus')}  {fmt_amount(abs(sum_crd), self._currency)}",
+            f"  Fakturor  (+):  {fmt_amount(sum_inv, self._currency)}",
+            f"  Krediter  (-):  {fmt_amount(abs(sum_crd), self._currency)}",
             sep,
-            f"  {self._t('to_pay')}     "
+            f"  ATT BETALA:     "
             f"{fmt_amount(net_display, self._currency)}{rounding_note}",
             "",
             sep,
@@ -1868,12 +1479,12 @@ class PDFExporter:
 
         # Leverantörsuppgifter
         if sup_list:
-            lines.append(f"  {self._t('supplier_details')}")
+            lines.append("  LEVERANTORSUPPGIFTER")
             lines.append(sep)
             for sup in sup_list:
                 name = a(str(sup.get("name", "-")).strip())
                 lines.append(f"  {name}")
-                for label, value in supplier_detail_lines(sup, self._lang):
+                for label, value in supplier_detail_lines(sup):
                     lines.append(f"    {a(label):<16} {a(value)}")
                 lines.append("")
             lines.append(sep)
