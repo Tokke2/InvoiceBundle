@@ -1125,3 +1125,82 @@ def test_region_pdf_reads_values_end_to_end(tmp_path):
     }}}
     parsed2 = si.parse_invoice_file(pdf, "", [], templates=tom)
     assert not parsed2.get("template")
+
+
+def test_parked_dialog_offers_template_creation(tmp_path, monkeypatch):
+    """Okänt format → appen FRÅGAR om en mall ska skapas, öppnar
+    matchningsdialogen med den parkerade fakturans bild och
+    skannar om mappen när mallen är sparad — allt i appen."""
+    import fitz
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as siv
+
+    folder = tmp_path / "NordlysIn"
+    folder.mkdir()
+    pdf = folder / "faktura.pdf"
+    doc = fitz.open()
+    doc.new_page(width=595, height=842)
+    doc.save(pdf)
+    doc.close()
+    templates_file = tmp_path / "invoice_templates.json"
+
+    view = siv.ScanImportView(
+        app=_fake_core(), templates_path=templates_file
+    )
+    try:
+        entry = {"supplier": "Nordlys Energi AB", "path": str(folder)}
+        view._watch.set_folders([entry])
+
+        fragor: list[str] = []
+        monkeypatch.setattr(
+            siv.QMessageBox, "warning",
+            lambda *_a, **_k: None,
+        )
+
+        def _question(_parent, _title, text):
+            fragor.append(text)
+            return siv.QMessageBox.StandardButton.Yes
+
+        monkeypatch.setattr(siv.QMessageBox, "question", _question)
+
+        oppnad: dict = {}
+
+        class FakeTemplateDialog:
+            def __init__(self, parent, text, supplier="",
+                         existing=None, path=None):
+                oppnad["path"] = path
+                self.result_template = {
+                    "supplier": "Nordlys Energi AB",
+                    "fields": {
+                        "total_amount": {
+                            "region": [0.7, 0.8, 0.97, 0.85],
+                            "page": 0,
+                        },
+                    },
+                }
+
+            def exec(self):
+                return 1
+
+        monkeypatch.setattr(siv, "TemplateDialog", FakeTemplateDialog)
+        omskannad: list = []
+        monkeypatch.setattr(
+            view._watch, "scan_folder",
+            lambda e: omskannad.append(e),
+        )
+
+        view._parked_notify = [{
+            "file": "faktura.pdf", "path": str(pdf),
+            "reason": "no-template",
+        }]
+        view._show_parked_dialog()
+
+        assert len(fragor) == 1
+        assert "Nordlys Energi AB" in fragor[0]
+        assert Path(oppnad["path"]) == pdf
+        assert omskannad
+        assert "Nordlys Energi AB" in view._get_templates()
+    finally:
+        view.close()

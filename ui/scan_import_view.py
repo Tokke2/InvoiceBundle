@@ -1033,6 +1033,84 @@ class ScanImportView(QWidget):
                 n=len(infos), files="\n".join(lines),
             ),
         )
+        # Varje okänt format ska erbjudas en mall direkt i
+        # appen — användaren ska inte behöva leta fram rätt
+        # knapp själv. En fråga per leverantör och runda.
+        self._offer_create_templates_for_parked(infos)
+
+    def _offer_create_templates_for_parked(
+        self, infos: list[dict]
+    ) -> None:
+        """Frågar (en gång per leverantör) om en mall ska skapas
+        för parkerade filer vars format inte kändes igen.
+
+        Vid Ja öppnas matchningsdialogen med just den parkerade
+        fakturans bild; när mallen sparats skannas mappen om så
+        filerna prövas — och registreras — av sig själva.
+        """
+        try:
+            from ui.watch_folders import _norm_path_key
+        except Exception:
+            return
+        watch = getattr(self, "_watch", None)
+        if watch is None:
+            return
+        folders = [
+            f for f in (getattr(watch, "folders", []) or [])
+            if isinstance(f, dict)
+        ]
+        if not folders:
+            return
+        seen: set[str] = set()
+        for info in infos:
+            reason = str(info.get("reason", "") or "")
+            if not (
+                reason == "no-template"
+                or reason.startswith("missing")
+            ):
+                continue
+            file_path = str(info.get("path", "") or "")
+            if not file_path:
+                continue
+            fkey = _norm_path_key(file_path)
+            entry = None
+            for f in folders:
+                root = _norm_path_key(str(f.get("path", "")))
+                if root and (
+                    fkey == root or fkey.startswith(root + "/")
+                ):
+                    entry = f
+                    break
+            if entry is None:
+                continue
+            supplier = str(entry.get("supplier", "") or "").strip()
+            if not supplier:
+                parsed = info.get("parsed") or {}
+                supplier = str(
+                    parsed.get("supplier", "") or ""
+                ).strip()
+            dedupe = (supplier or file_path).lower()
+            if dedupe in seen:
+                continue
+            seen.add(dedupe)
+            name = info.get("file") or Path(file_path).name
+            answer = QMessageBox.question(
+                self,
+                tr("watch.learn_title"),
+                tr(
+                    "watch.parked_learn_offer",
+                    file=name,
+                    supplier=supplier or "okänd leverantör",
+                ),
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                continue
+            teach_entry = dict(entry)
+            if supplier:
+                teach_entry["supplier"] = supplier
+            self._teach_from_folder(
+                teach_entry, example=Path(file_path), force=True
+            )
 
     def _refresh_watch_ui(self) -> None:
         if not hasattr(self, "_lst_watch"):
@@ -1219,7 +1297,9 @@ class ScanImportView(QWidget):
         if answer == QMessageBox.StandardButton.Yes:
             self._teach_from_folder(entry)
 
-    def _teach_from_folder(self, entry: dict) -> None:
+    def _teach_from_folder(
+        self, entry: dict, example: Any = None, force: bool = False
+    ) -> bool:
         """Lär appen läsa mappens fakturor från en exempel-PDF.
 
         Appen skannar en av filerna i mappen; användaren matchar
@@ -1229,7 +1309,7 @@ class ScanImportView(QWidget):
         och används direkt av mappbevakningen.
         """
         supplier0 = str(entry.get("supplier", "") or "").strip()
-        if supplier0:
+        if supplier0 and not force:
             _si0 = _scan_module()
             if _si0.has_builtin_format(supplier0):
                 # Inbyggt verifierat format (matchat mot riktiga
@@ -1239,14 +1319,14 @@ class ScanImportView(QWidget):
                 self._lbl_status.setText(
                     tr("watch.learn_builtin", supplier=supplier0)
                 )
-                return
+                return False
         from ui.watch_folders import supported_invoice_files
         files = supported_invoice_files(entry.get("path", ""))
-        if not files:
+        if not files and not example:
             self._lbl_status.setText(tr("watch.learn_no_files"))
-            return
-        chosen = files[0]
-        if len(files) > 1:
+            return False
+        chosen = Path(example) if example else files[0]
+        if not example and len(files) > 1:
             names = [f.name for f in files]
             name, ok = QInputDialog.getItem(
                 self,
@@ -1255,14 +1335,14 @@ class ScanImportView(QWidget):
                 names, 0, False,
             )
             if not ok:
-                return
+                return False
             chosen = files[names.index(name)]
         si = _scan_module()
         if si.page_image_count(chosen) <= 0:
             self._lbl_status.setText(
                 tr("watch.learn_no_image", file=chosen.name)
             )
-            return
+            return False
         supplier = str(entry.get("supplier", "") or "")
         templates = self._get_templates()
         existing = (
@@ -1273,7 +1353,7 @@ class ScanImportView(QWidget):
             path=chosen,
         )
         if not dlg.exec() or not dlg.result_template:
-            return
+            return False
         name = dlg.result_template["supplier"]
         templates[name] = {"fields": dlg.result_template["fields"]}
         self._save_templates_file()
@@ -1288,6 +1368,7 @@ class ScanImportView(QWidget):
                 self._watch.scan_folder(entry)
             except Exception as exc:
                 log.warning("teach rescan: %s", exc)
+        return True
 
     def _apply_template_to_row(self, parsed: dict, text: str) -> dict:
         """Applicerar leverantörsmallen på en (parkerad) rad.
