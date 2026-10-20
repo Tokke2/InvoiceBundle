@@ -49,7 +49,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QScrollArea, QMenu, QFileDialog, QCheckBox,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QSize
-from PySide6.QtGui import QFont, QColor, QCursor, QBrush, QWheelEvent, QPixmap
+from PySide6.QtGui import QFont, QColor, QCursor, QBrush, QWheelEvent
 
 # Tangentbordsnavigation delas med invoices_helpers (en implementation)
 try:
@@ -59,11 +59,13 @@ try:
         attach_visible_rows,
         ensure_row_height,
         fg_on_row,
+        is_dark_theme,
         ROLE_ROW_BG,
         ROLE_ROW_FG,
         ROLE_STRIPE,
         ROLE_ROW_BG_ODD,
     )
+    from ui.i18n import tr, tr_list
 except ImportError:
     from invoices_helpers import (  # type: ignore[no-redef]
         install_keyboard_navigation,
@@ -71,17 +73,31 @@ except ImportError:
         attach_visible_rows,
         ensure_row_height,
         fg_on_row,
+        is_dark_theme,
         ROLE_ROW_BG,
         ROLE_ROW_FG,
         ROLE_STRIPE,
         ROLE_ROW_BG_ODD,
     )
+    from i18n import tr, tr_list  # type: ignore[no-redef]
 
 # ═════════════════════════════════════════════════════════════════════
 #  KONSTANTER
 # ═════════════════════════════════════════════════════════════════════
 
 COPYRIGHT_YEAR: int = datetime.date.today().year
+
+try:
+    from ui.design import ICON_HEADER_PX, app_icon_pixmap, header_font
+except Exception:  # pragma: no cover - fristående körning
+    try:
+        from design import ICON_HEADER_PX, app_icon_pixmap, header_font  # type: ignore[no-redef]
+    except Exception:
+        ICON_HEADER_PX = 28  # type: ignore[no-redef]
+
+        def app_icon_pixmap(size: int = 28):  # type: ignore[no-redef]
+            from PySide6.QtGui import QPixmap as _QP
+            return _QP()
 
 log = logging.getLogger("SuppliersView")
 
@@ -193,9 +209,7 @@ def _cell(
     """Skapar en icke-redigerbar, fet tabellcell med valfri textfärg."""
     item = _NumericCell(str(text)) if numeric else QTableWidgetItem(str(text))
     item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-    item.setTextAlignment(
-        int(align) | int(Qt.AlignmentFlag.AlignVCenter)
-    )
+    item.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
     item.setFont(_font(13, bold=bold))
     if fg:
         item.setForeground(QBrush(QColor(fg)))
@@ -275,10 +289,10 @@ class SupplierDialog(QDialog):
         self.f_iban = _le("SEXX XXXX …")
         self.f_bic = _le("XXXXSESS")
 
-        form.addRow("Bankgiro (BG):", self.f_bg)
-        form.addRow("Plusgiro (PG):", self.f_pg)
-        form.addRow("IBAN:", self.f_iban)
-        form.addRow("BIC / SWIFT:", self.f_bic)
+        form.addRow(tr("supplierdlg.bg"), self.f_bg)
+        form.addRow(tr("supplierdlg.pg"), self.f_pg)
+        form.addRow(tr("supplierdlg.iban"), self.f_iban)
+        form.addRow(tr("supplierdlg.bic"), self.f_bic)
         form.addRow(_h_line())
 
         # ── Betalvillkor ───────────────────────────────────────────────
@@ -288,7 +302,7 @@ class SupplierDialog(QDialog):
         self.f_terms.setValue(30)
         self.f_terms.setMinimumHeight(34)
         self.f_terms.setFont(_font(11))
-        form.addRow("Betalvillkor:", self.f_terms)
+        form.addRow(tr("supplierdlg.terms"), self.f_terms)
 
         # Snabbvalsknappar för betalvillkor — färre klick i vardagen
         terms_row = QHBoxLayout()
@@ -321,18 +335,18 @@ class SupplierDialog(QDialog):
         self.f_phone = _le("+46 70 XXX XX XX")
         self.f_address = _le("Gatuadress, postnr, ort")
 
-        form.addRow("Kontaktperson:", self.f_contact)
-        form.addRow("E-post:", self.f_email)
-        form.addRow("Telefon:", self.f_phone)
-        form.addRow("Adress:", self.f_address)
+        form.addRow(tr("supplierdlg.contact"), self.f_contact)
+        form.addRow(tr("supplierdlg.email"), self.f_email)
+        form.addRow(tr("supplierdlg.phone"), self.f_phone)
+        form.addRow(tr("supplierdlg.address"), self.f_address)
         form.addRow(_h_line())
 
         # ── Anteckning ─────────────────────────────────────────────────
         self.f_note = QTextEdit()
-        self.f_note.setPlaceholderText("Fritext anteckning …")
+        self.f_note.setPlaceholderText(tr("supplierdlg.note_ph"))
         self.f_note.setMaximumHeight(100)
         self.f_note.setFont(_font(11))
-        form.addRow("Anteckning:", self.f_note)
+        form.addRow(tr("supplierdlg.note"), self.f_note)
 
         scroll.setWidget(inner)
         root.addWidget(scroll)
@@ -347,7 +361,7 @@ class SupplierDialog(QDialog):
         save_btn.setMinimumHeight(40)
         save_btn.setFont(_font(12, bold=True))
         btn_box.button(QDialogButtonBox.StandardButton.Cancel).setText(
-            "✖  Avbryt"
+            f"✖  {tr('common.cancel')}"
         )
         btn_box.accepted.connect(self._validate_and_accept)
         btn_box.rejected.connect(self.reject)
@@ -406,7 +420,7 @@ class SupplierDialog(QDialog):
         """Validerar obligatoriska fält innan dialogen accepteras."""
         if not self.f_name.text().strip():
             QMessageBox.warning(
-                self, "Validering", "Namn är obligatoriskt."
+                self, tr("supplier.validation"), tr("supplier.name_required")
             )
             self.f_name.setFocus()
             return
@@ -479,29 +493,28 @@ class SuppliersView(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(8, 6, 8, 4)
-        root.setSpacing(6)
+        root.setContentsMargins(16, 14, 16, 10)
+        root.setSpacing(10)
         self.setMinimumWidth(0)
 
         # ── Header ─────────────────────────────────────────────────────
-        hdr = QLabel("🏢  Leverantörer")
-        hdr.setFont(_font(18, bold=True))
+        hdr = QLabel(tr("suppliers.title"))
+        self._hdr_label = hdr
+        hdr.setFont(header_font())
         head = QHBoxLayout()
         head.setSpacing(8)
-        _icon = Path(__file__).resolve().parent.parent / "app_icon.png"
-        if _icon.is_file():
+        _pix = app_icon_pixmap(ICON_HEADER_PX)
+        if not _pix.isNull():
             mark = QLabel()
-            mark.setPixmap(
-                QPixmap(str(_icon)).scaled(
-                    28, 28,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+            mark.setPixmap(_pix)
             mark.setStyleSheet("background:transparent;")
             head.addWidget(mark)
         head.addWidget(hdr)
         head.addStretch()
+        self._lbl_count = QLabel(tr("suppliers.count", n=0))
+        self._lbl_count.setObjectName("CountChip")
+        self._lbl_count.setFont(_font(11, bold=True))
+        head.addWidget(self._lbl_count)
         root.addLayout(head)
         root.addWidget(_h_line())
 
@@ -510,39 +523,35 @@ class SuppliersView(QWidget):
         row1.setSpacing(8)
 
         self._search = QLineEdit()
-        self._search.setPlaceholderText(
-            "🔍  Sök namn, org.nr, e-post, kontakt …"
-        )
+        self._search.setPlaceholderText(tr("suppliers.search_ph"))
         self._search.setMinimumHeight(36)
         self._search.setFont(_font(11))
         self._search.setClearButtonEnabled(True)
         self._search.textChanged.connect(self._on_search_changed)
 
         self._btn_add = _make_btn(
-            "➕  Ny leverantör", "Registrera ny leverantör", accent=True
+            tr("suppliers.new"), tr("suppliers.new"), accent=True
         )
         self._btn_add.clicked.connect(self._add_supplier)
 
-        self._btn_edit = _make_btn(
-            "✏️  Redigera", "Redigera vald leverantör"
-        )
+        self._btn_edit = _make_btn(tr("suppliers.edit"), tr("suppliers.edit"))
         self._btn_edit.clicked.connect(self._edit_supplier)
         self._btn_edit.setEnabled(False)
 
         self._btn_duplicate = _make_btn(
-            "📋  Duplicera", "Duplicera vald leverantör"
+            tr("suppliers.duplicate"), tr("suppliers.duplicate")
         )
         self._btn_duplicate.clicked.connect(self._duplicate_supplier)
         self._btn_duplicate.setEnabled(False)
 
         self._btn_delete = _make_btn(
-            "🗑  Ta bort", "Ta bort vald leverantör", danger=True
+            tr("suppliers.delete"), tr("suppliers.delete"), danger=True
         )
         self._btn_delete.clicked.connect(self._delete_supplier)
         self._btn_delete.setEnabled(False)
 
         self._btn_export = _make_btn(
-            "📄  Exportera",
+            tr("suppliers.export"),
             "Exportera leverantörslista till CSV / JSON",
             info=True,
         )
@@ -562,16 +571,13 @@ class SuppliersView(QWidget):
         row1.addWidget(self._btn_refresh)
         root.addLayout(row1)
 
-        # ── Räknare ────────────────────────────────────────────────────
-        self._lbl_count = QLabel("Leverantörer: 0")
-        self._lbl_count.setFont(_font(11, bold=True))
-        self._lbl_count.setStyleSheet("background:transparent;")
-        root.addWidget(self._lbl_count)
-
         # ── Tabell ─────────────────────────────────────────────────────
         self._table = QTableWidget()
         self._table.setColumnCount(len(COLUMNS))
-        self._table.setHorizontalHeaderLabels(COL_LABELS)
+        headers = tr_list("supplier.columns")
+        self._table.setHorizontalHeaderLabels(
+            headers if len(headers) == len(COLUMNS) else COL_LABELS
+        )
         self._table.setSortingEnabled(True)
         self._table.setAlternatingRowColors(True)
         self._table.setSelectionBehavior(
@@ -624,19 +630,16 @@ class SuppliersView(QWidget):
 
         root.addWidget(self._table, stretch=1)
 
-    def _fit_columns(self) -> None:
-        fit_table_columns(self._table, COL_WIDTHS)
-
-    def resizeEvent(self, event) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        self._fit_columns()
-
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
-        QTimer.singleShot(0, self._fit_columns)
-
-    def minimumSizeHint(self) -> QSize:  # noqa: N802
-        return QSize(0, 200)
+        # Tom-läge: vänlig förklaring i stället för en tom vit tabell
+        # (det var så här "fliken funkar inte" upplevdes).
+        self._empty_label = QLabel(self._table.viewport())
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setWordWrap(True)
+        self._empty_label.setFont(_font(13, bold=True))
+        self._empty_label.setStyleSheet(
+            "background:transparent; color:#8a9bb0; padding:24px;"
+        )
+        self._empty_label.hide()
 
         # ── Footer ─────────────────────────────────────────────────────
         root.addWidget(_h_line())
@@ -648,6 +651,21 @@ class SuppliersView(QWidget):
         footer.setFont(_font(9))
         footer.setStyleSheet("background:transparent; color:#718096;")
         root.addWidget(footer)
+
+    def _fit_columns(self) -> None:
+        fit_table_columns(self._table, COL_WIDTHS)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._fit_columns()
+        self._position_empty_label()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        QTimer.singleShot(0, self._fit_columns)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, 200)
 
     def _table_wheel(self, event: QWheelEvent) -> None:
         """Mushjul-scroll i tabellen."""
@@ -693,15 +711,13 @@ class SuppliersView(QWidget):
         n_total = len(self._all_data)
         n_shown = len(filtered)
         where = self._source_label()
-        if n_total == 0:
-            text = f"Leverantörer: 0  ·  {where}  — filen är tom"
+        if query and n_shown != n_total:
+            text = tr("suppliers.count_of", shown=n_shown, total=n_total)
         else:
-            text = (
-                f"Leverantörer: {n_shown}"
-                + (f" av {n_total}" if query and n_shown != n_total else "")
-                + f"  ·  {where}"
-            )
+            text = tr("suppliers.count", n=n_shown)
+        text += f"  ·  {where}"
         self._lbl_count.setText(text)
+        self._update_empty_state(n_total, n_shown, bool(query))
         self._lbl_count.setToolTip(
             "Appen läser bara data/suppliers.json i appmappen.\n"
             "Finns en kopia i ui/data slås den ihop hit när du trycker Uppdatera.\n"
@@ -826,8 +842,8 @@ class SuppliersView(QWidget):
         if existing:
             reply = QMessageBox.question(
                 self,
-                "Möjlig dublett",
-                f"'{data['name']}' finns redan.\nLägg till ändå?",
+                tr("supplier.duplicate_title"),
+                tr("supplier.duplicate_body", name=data["name"]),
                 QMessageBox.StandardButton.Yes
                 | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
@@ -844,7 +860,7 @@ class SuppliersView(QWidget):
             return
 
         self._do_refresh()
-        self._statusbar(f"✅  Leverantör '{data['name']}' sparad.")
+        self._statusbar(tr("supplier.saved", name=data["name"]))
 
     def _edit_supplier(self) -> None:
         supplier = self._selected_supplier()
@@ -872,8 +888,8 @@ class SuppliersView(QWidget):
             return
         reply = QMessageBox.question(
             self,
-            "Ta bort leverantör",
-            f"Ta bort '{supplier.get('name', '')}'?\nKan inte ångras.",
+            tr("supplier.delete_title"),
+            tr("supplier.delete_body", name=supplier.get("name", "")),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -923,16 +939,24 @@ class SuppliersView(QWidget):
         """Exporterar leverantörslistan till CSV eller JSON."""
         if not self._all_data:
             QMessageBox.information(
-                self, "Export", "Inga leverantörer att exportera."
+                self, "Export", tr("supplier.export_none")
             )
             return
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Alltid i appmappen. Ingen sökväg utanför.
+        # Förvald plats: appens exports-mapp. Användaren väljer format
+        # (CSV/JSON) och kan byta plats i dialogen.
         root = Path(__file__).resolve().parent.parent / "exports"
         day = root / datetime.date.today().isoformat()
         day.mkdir(parents=True, exist_ok=True)
-        path = str(day / f"leverantorer_{ts}.csv")
+        path, _filter = QFileDialog.getSaveFileName(
+            self,
+            tr("suppliers.export"),
+            str(day / f"leverantorer_{ts}.csv"),
+            "CSV (*.csv);;JSON (*.json)",
+        )
+        if not path:
+            return
 
         try:
             p = Path(path)
@@ -953,12 +977,12 @@ class SuppliersView(QWidget):
                 p.write_text("\n".join(lines), encoding="utf-8-sig")
 
             log.info("Leverantörer exporterade till %s", path)
-            self._statusbar(f"📄  Exporterade till {p.name}")
+            self._statusbar(f"📄  {p.name}")
             QMessageBox.information(
                 self,
                 "Export klar",
-                f"✅  {len(self._all_data)} leverantörer exporterade.\n\n"
-                f"{path}",
+                tr("supplier.export_done", n=len(self._all_data))
+                + f"\n\n{path}",
             )
         except Exception as exc:
             log.error("export_suppliers: %s", exc)
@@ -984,12 +1008,12 @@ class SuppliersView(QWidget):
             return
 
         menu = QMenu(self)
-        menu.addAction("✏️  Redigera", self._edit_supplier)
-        menu.addAction("📋  Duplicera", self._duplicate_supplier)
+        menu.addAction(tr("suppliers.edit"), self._edit_supplier)
+        menu.addAction(tr("suppliers.duplicate"), self._duplicate_supplier)
         menu.addSeparator()
-        menu.addAction("📄  Exportera", self._export_suppliers)
+        menu.addAction(tr("suppliers.export"), self._export_suppliers)
         menu.addSeparator()
-        menu.addAction("🗑  Ta bort", self._delete_supplier)
+        menu.addAction(tr("suppliers.delete"), self._delete_supplier)
         menu.exec(self._table.viewport().mapToGlobal(pos))
 
     # ══════════════════════════════════════════════════════════════════
@@ -1019,8 +1043,8 @@ class SuppliersView(QWidget):
         """
         reply = QMessageBox.question(
             self,
-            "Okänd leverantör",
-            f"Leverantören '{name}' finns inte.\nLägga till nu?",
+            tr("supplier.unknown_title"),
+            tr("supplier.unknown_body", name=name),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )
@@ -1049,10 +1073,44 @@ class SuppliersView(QWidget):
     # ══════════════════════════════════════════════════════════════════
 
     def _is_dark(self) -> bool:
-        """True om aktuellt tema är mörkt (baserat på bakgrundsfärg)."""
-        return self._current_theme.get("bg", "#0d1117") not in (
-            "#f5f7fa", "#ffffff", "#f8f9fa", "#f6f8fa",
-        )
+        """True om aktuellt tema är mörkt (temanamn → luminans)."""
+        return is_dark_theme(self._current_theme)
+
+    def _update_empty_state(self, total: int, shown: int, searching: bool) -> None:
+        """Visar förklarande text när tabellen är tom."""
+        if not hasattr(self, "_empty_label"):
+            return
+        if shown > 0:
+            self._empty_label.hide()
+            return
+        if searching:
+            self._empty_label.setText(tr("suppliers.empty_search"))
+        else:
+            self._empty_label.setText(
+                f"{tr('suppliers.empty_title')}\n\n{tr('suppliers.empty_body')}"
+            )
+        self._position_empty_label()
+        self._empty_label.show()
+        self._empty_label.raise_()
+
+    def _position_empty_label(self) -> None:
+        if hasattr(self, "_empty_label"):
+            vp = self._table.viewport()
+            self._empty_label.setGeometry(0, 40, vp.width(), vp.height() - 40)
+
+    def retranslate(self) -> None:
+        """Uppdaterar alla texter efter språkbyte (utan omstart)."""
+        self._hdr_label.setText(tr("suppliers.title"))
+        self._search.setPlaceholderText(tr("suppliers.search_ph"))
+        self._btn_add.setText(tr("suppliers.new"))
+        self._btn_edit.setText(tr("suppliers.edit"))
+        self._btn_duplicate.setText(tr("suppliers.duplicate"))
+        self._btn_delete.setText(tr("suppliers.delete"))
+        self._btn_export.setText(tr("suppliers.export"))
+        headers = tr_list("supplier.columns")
+        if len(headers) == len(COLUMNS):
+            self._table.setHorizontalHeaderLabels(headers)
+        self._do_refresh()
 
     def apply_theme(self, theme: dict) -> None:
         """
@@ -1176,7 +1234,9 @@ class SuppliersView(QWidget):
 
         # ── Labels ─────────────────────────────────────────────────────
         self._lbl_count.setStyleSheet(
-            f"color:{text_strong}; font-weight:700; background:transparent;"
+            f"color:#ffffff; font-weight:800; "
+            f"background:{t.get('tab_selected', accent)}; "
+            f"border-radius:11px; padding:3px 12px;"
         )
 
         self._do_refresh()

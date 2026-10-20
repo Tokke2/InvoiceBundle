@@ -72,7 +72,7 @@ for _dir in (str(BASE_DIR), str(UI_DIR)):
 
 APP_NAME: str = "Fakturabunten"
 APP_SHORT_NAME: str = "Fakturabunten"
-APP_VERSION: str = "1.4.10"
+APP_VERSION: str = "1.0.0"
 APP_ORGANIZATION: str = "Rickard Längkvist"
 
 COPYRIGHT_YEAR: int = datetime.date.today().year
@@ -715,6 +715,23 @@ def _verify_window_visible(window: Any) -> None:
                     x=geo.x(), y=geo.y(),
                 )
             if visible:
+                # Synligt enligt Qt — men det kan ändå ligga utanför
+                # alla anslutna skärmar (bortkopplad extern skärm).
+                # Skärmvakten i huvudfönstret flyttar i så fall
+                # tillbaka det och vi loggar vad som hände.
+                moved = False
+                try:
+                    from ui.main_window import ensure_window_on_screen
+                    moved = ensure_window_on_screen(window)
+                except Exception:
+                    moved = False
+                if moved and alog_fn is not None:
+                    alog_fn(
+                        "WINDOW_OFFSCREEN_GUARD",
+                        "Fönstret låg utanför alla skärmar → centrerat "
+                        "på primärskärmen",
+                        logger="FakturaMain",
+                    )
                 return
 
             log.warning(
@@ -1513,6 +1530,14 @@ def main() -> None:
     app_qt.setOrganizationName(APP_ORGANIZATION)
     app_qt.setStyle("Fusion")
     app_qt.setQuitOnLastWindowClosed(False)
+    # Läsbar grundtypografi i hela appen (temat förstärker rubriker,
+    # flikar och tabeller ytterligare via stilarket).
+    try:
+        from PySide6.QtGui import QFont as _QFont
+
+        app_qt.setFont(_QFont("Segoe UI", 11))
+    except Exception:
+        pass
     for _icon_name in ("app_icon.ico", "app_icon.png", "app_icon.svg"):
         _icon_path = BASE_DIR / _icon_name
         if _icon_path.exists():

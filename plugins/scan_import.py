@@ -172,10 +172,16 @@ def _norm_amount(raw: str) -> float:
     """'71 144,00' / '1 638.50' → float; 0.0 vid skräp."""
     t = re.sub(r"[ \u00a0\u2009]", "", raw or "")
     t = t.replace("kr", "").replace("SEK", "").strip()
-    if t.count(",") == 1 and "." not in t:
+    if "," in t and "." in t:
+        # Båda skiljetecknen finns: det SISTA är decimaltecknet.
+        # Svenskt 3.499,30 (punkt = tusental, t.ex. NSG/Pilkington)
+        # och US-format 1,234.56 (komma = tusental) blir båda rätt.
+        if t.rfind(",") > t.rfind("."):
+            t = t.replace(".", "").replace(",", ".")
+        else:
+            t = t.replace(",", "")
+    elif t.count(",") == 1:
         t = t.replace(",", ".")
-    elif "," in t and "." in t:
-        t = t.replace(",", "")          # 1,234.56-stil
     try:
         return abs(float(t))
     except ValueError:
@@ -186,11 +192,33 @@ def _norm_amount(raw: str) -> float:
 _TOTAL_PATTERNS: tuple[str, ...] = (
     r"ATT\s*BETALA[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
     r"TOTALT\s*ATT\s*BETALA[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
+    r"TILLGODO[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
     r"SUMMA[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
     r"TOTALT[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
 )
 
 _ALL_AMOUNTS = re.compile(r"\d{1,3}(?:[ .\u00a0]\d{3})+,\d{2}|\d+,\d{2}")
+
+
+def _amount_from_group(group: str) -> float:
+    """
+    Tolkar beloppsgruppen efter en total-etikett. Vissa layouter
+    (Saint-Gobain) skriver "Summa Glas 1 2.642,50" — ett ensamt
+    heltal (ANTAL) framför beloppet som annars klistras ihop
+    till 12.642,50. Står ett ensamt heltal före det sista
+    fullständiga beloppet är det sista beloppet det rätta.
+    """
+    g = (group or "").strip()
+    hits = list(_ALL_AMOUNTS.finditer(g))
+    if hits:
+        last = hits[-1]
+        if (
+            last.start() > 0
+            and last.end() == len(g)
+            and re.fullmatch(r"[\d\s]+", g[: last.start()])
+        ):
+            return _norm_amount(last.group(0))
+    return _norm_amount(g)
 
 
 def parse_total(text: str) -> float:
@@ -203,7 +231,7 @@ def parse_total(text: str) -> float:
     for pat in _TOTAL_PATTERNS:
         m = re.search(pat, upper)
         if m:
-            v = _norm_amount(m.group(1))
+            v = _amount_from_group(m.group(1))
             if v > 0:
                 return round(v, 2)
     amounts = [_norm_amount(a) for a in _ALL_AMOUNTS.findall(text)]
@@ -220,12 +248,23 @@ def _search(text: str, patterns: tuple[str, ...]) -> str:
 
 
 def parse_invoice_number(text: str) -> str:
-    return _search(text, (
-        r"Fakturanr\.?\s*[:#]?\s*([A-Za-z0-9\-/ .]{2,25})",
-        r"Fakturanummer\s*[:#]?\s*([A-Za-z0-9\-/ .]{2,25})",
-        r"Invoice\s*no\.?\s*[:#]?\s*([A-Za-z0-9\-/ .]{2,25})",
-        r"Vår\s*referens\s*[:#]?\s*([A-Za-z0-9\-/ .]{2,25})",
-    ))
+    for pat in (
+        r"Fakturanr\.?\s*[:#]?\s*(\S{2,25})",
+        r"Fakturanummer\s*[:#]?\s*(\S{2,25})",
+        r"Invoice\s*no\.?\s*[:#]?\s*(\S{2,25})",
+        r"Vår\s*referens\s*[:#]?\s*(\S{2,25})",
+    ):
+        for m in re.finditer(pat, text, re.IGNORECASE):
+            tok = _INVOICE_NR_RE.match(m.group(1))
+            cand = tok.group(0) if tok else ""
+            if len(cand) >= 2 and cand.upper() not in _INVOICE_NR_STOPWORDS:
+                return cand
+            # Siffrigt nummer separerat med streck ("NL-2026-0771"
+            # via etiketten "Vår referens") är också ett nummer.
+            num = re.match(r"\d[\d\-/]*\d|\d", m.group(1))
+            if num and len(num.group(0)) >= 4:
+                return num.group(0)
+    return ""
 
 
 def parse_ocr(text: str) -> str:
@@ -238,7 +277,7 @@ def parse_ocr(text: str) -> str:
 def _parse_date(raw: str) -> str:
     """Normaliserar svenska datumformat till YYYY-MM-DD ('' vid fel)."""
     raw = (raw or "").strip()
-    m = re.match(r"^(\d{4})-?(\d{2})-?(\d{2})$", raw)
+    m = re.match(r"^(\d{4})[-./]?(\d{2})[-./]?(\d{2})$", raw)
     if m:
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
     m = re.match(r"^(\d{1,2})[./\-](\d{1,2})[./\-](\d{2,4})$", raw)
@@ -248,6 +287,20 @@ def _parse_date(raw: str) -> str:
         return f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
     return ""
 
+
+#: Markörer för kreditdokument. Ordet "kreditfaktura/-nota" på
+#: dokumentet är den pålitliga signalen — nakna siffror säger
+#: inte om beloppet ska öka eller MINSKA att betala.
+_CREDIT_MARKERS = (
+    "kreditfaktura", "kreditnota",
+    "credit note", "credit memo", "credit invoice",
+)
+
+
+def is_credit_note(text: str) -> bool:
+    """True om dokumentet ser ut att vara en kreditfaktura/-nota."""
+    t = (text or "").lower()
+    return any(m in t for m in _CREDIT_MARKERS)
 
 def parse_dates(text: str) -> tuple[str, str]:
     """
@@ -304,22 +357,137 @@ def match_supplier(text: str, suppliers: list[dict]) -> str:
 
 
 def parse_invoice_text(
-    text: str, suppliers: list[dict] | None = None
+    text: str,
+    suppliers: list[dict] | None = None,
+    templates: dict | None = None,
+    region_texts: dict | None = None,
 ) -> dict[str, Any]:
     """
     Tolkar en fakturatext och returnerar kandidater:
 
         {"total_amount", "invoice_number", "ocr", "date", "due_date",
-         "supplier", "missing": [..]}
+         "supplier", "missing": [..]} (+ "template" vid mallträff)
 
     Inget gissas ohämmat: saknas ett fält blir det tomt och listas i
     "missing" så att användaren ser vad som ska kompletteras.
+
+    Finns en leverantörsmall (templates) för den igenkända
+    leverantören körs den FÖRST för sina fält — användarens egna
+    etiketter vinner alltid över den generiska heuristiken. Mallens
+    leverantörsnamn kan också kännas igen direkt i texten, även om
+    leverantören inte finns i registret än.
+
+    Saknas egen mall prövas de inbyggda, verifierade formaten
+    (BUILTIN_FORMATS): leverantörer vars layout matchats mot
+    riktiga exempelfakturor i förväg. De identifieras via
+    org.nr/bankgiro eller tryckt namn på själva fakturan och
+    kräver fakturanummer + belopp ur formatet för att räknas —
+    annars parkeras filen som vanligt.
     """
     total = parse_total(text or "")
     inv_nr = parse_invoice_number(text or "")
     ocr = parse_ocr(text or "")
     date, due = parse_dates(text or "")
     supplier = match_supplier(text or "", suppliers or [])
+    template_name = ""
+    template_fields: list[str] = []
+
+    if templates:
+        if not supplier:
+            supplier = match_supplier(
+                text or "", [{"name": n} for n in templates.keys()]
+            )
+        template = find_template(templates, supplier) if supplier else None
+        if template is None and region_texts:
+            # Regionsmall (användaren har pekat ut värdena på
+            # fakturabilden): mallens ruttexter gav träffar —
+            # mallen identifierar då leverantören själv, även
+            # när löptexten saknar igenkännbart namn/nummer.
+            for cand_name, cand in templates.items():
+                if not isinstance(cand, dict):
+                    continue
+                if template_values_from_regions(
+                    cand, region_texts
+                ):
+                    template = cand
+                    if not supplier:
+                        supplier = str(cand_name)
+                    break
+        if template:
+            found = apply_template(text or "", template)
+            if region_texts:
+                # Utpekade rutor på fakturabilden vinner över
+                # etikettläsningen — platsen är explicit angiven.
+                found.update(
+                    template_values_from_regions(
+                        template, region_texts
+                    )
+                )
+            for field, value in found.items():
+                if field == "total_amount":
+                    total = float(value)
+                elif field == "invoice_number":
+                    inv_nr = str(value)
+                elif field == "ocr":
+                    ocr = str(value)
+                elif field == "date":
+                    date = str(value)
+                elif field == "due_date":
+                    due = str(value)
+                template_fields.append(field)
+            if found:
+                template_name = supplier
+
+    if not template_name:
+        builtin = builtin_template_for(text or "")
+        if builtin:
+            bname, btmpl = builtin
+            found = apply_template(text or "", btmpl)
+            # Strikt krav: fakturanummer OCH att betala måste
+            # komma ur själva formatet (på kreditnotor ger
+            # Tillgodo-vägen beloppet i stället). Att betala
+            # måste dessutom stå på SAMMA RAD som sin etikett:
+            # i en radvis/kolumnbruten text (rubrikrad följd av
+            # värderad) är första beloppet efter etiketten en
+            # annan kolumn (netto/exkl. moms) och får aldrig
+            # bokföras. Sådan text parkeras som förut — gissade
+            # värden registreras aldrig automatiskt.
+            total_label = str(
+                btmpl.get("fields", {})
+                .get("total_amount", {}).get("label", "")
+            )
+            # Att betala verifieras mot sin rad: parvis layout
+            # lägger beloppet på etikettens egen rad, kolumn-
+            # layouten på värderaden under rubriken. Annat
+            # innehåll mellan etikett och belopp (fel kolumn)
+            # accepteras aldrig.
+            total_ok = (
+                "total_amount" in found
+                and (
+                    _label_same_line_amount(text or "", total_label)
+                    == found["total_amount"]
+                    or _label_below_amount(text or "", total_label)
+                    == found["total_amount"]
+                )
+            )
+            if "invoice_number" in found and (
+                total_ok or is_credit_note(text or "")
+            ):
+                for field, value in found.items():
+                    if field == "total_amount":
+                        total = float(value)
+                    elif field == "invoice_number":
+                        inv_nr = str(value)
+                    elif field == "ocr":
+                        ocr = str(value)
+                    elif field == "date":
+                        date = str(value)
+                    elif field == "due_date":
+                        due = str(value)
+                    template_fields.append(field)
+                if not supplier:
+                    supplier = bname
+                template_name = supplier
 
     missing = [
         label for ok, label in (
@@ -328,7 +496,12 @@ def parse_invoice_text(
             (bool(supplier), "leverantör"),
         ) if not ok
     ]
-    return {
+    # Kreditfaktura/-nota: beloppet ska MINSKA att betala,
+    # aldrig öka den. Missbedömningen sker lätt annars eftersom
+    # både heuristiken och mallarna bara ser nakna siffror.
+    if total > 0 and is_credit_note(text or ""):
+        total = -total
+    result: dict[str, Any] = {
         "total_amount": total,
         "invoice_number": inv_nr,
         "ocr": ocr,
@@ -337,6 +510,763 @@ def parse_invoice_text(
         "supplier": supplier,
         "missing": missing,
     }
+    if template_name:
+        result["template"] = template_name
+        result["template_fields"] = template_fields
+    return result
+
+
+def parse_invoice_file(
+    path: Any,
+    text: str,
+    suppliers: list[dict] | None = None,
+    templates: dict | None = None,
+) -> dict[str, Any]:
+    """Tolkning av en FIL: löptext + eventuella regionsmallar.
+
+    Mallar vars fält pekar ut rutor på fakturabilden (region)
+    läses ur själva filen (textlager i rutan, annars OCR) och
+    får avgöra fälten. Första mallen vars rutor ger ett
+    fakturanummer eller ett att betala-belopp används — resten
+    av tolkningen är exakt densamma som för ren text.
+    """
+    tpl = templates or {}
+    for _name, cand in tpl.items():
+        if not isinstance(cand, dict):
+            continue
+        fields = cand.get("fields", {}) or {}
+        if not any(
+            isinstance(spec, dict) and spec.get("region")
+            for spec in fields.values()
+        ):
+            continue
+        rtext = extract_region_texts(path, cand)
+        vals = template_values_from_regions(cand, rtext)
+        if vals.get("invoice_number") or vals.get("total_amount"):
+            return parse_invoice_text(
+                text, suppliers, tpl, region_texts=rtext
+            )
+    return parse_invoice_text(text, suppliers, tpl)
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  LEVERANTÖRSMALLAR (egen layout per leverantör)
+#
+#  Fakturor har olika layout per leverantör. En mall talar om för
+#  tolkaren VILKEN ETIKETT som står framför varje värde på just den
+#  leverantörens fakturor, t.ex. {"label": "Att betala", ...}.
+#  Användaren skapar mallen i Import-fliken genom att markera ett
+#  värde i fakturatexten — etiketten härleds automatiskt.
+#
+#  Format (data/invoice_templates.json):
+#    {"Elgiganten AB": {"fields": {
+#        "total_amount": {"label": "Att betala"},
+#        "invoice_number": {"label": "Fakturanr"},
+#        "due_date": {"label": "Förfallodatum"}}}}
+# ═════════════════════════════════════════════════════════════════════
+
+#: Fält som kan ingå i en mall → extraktor-typ.
+TEMPLATE_FIELD_KINDS: dict[str, str] = {
+    "invoice_number": "token",
+    "total_amount": "amount",
+    "date": "date",
+    "due_date": "date",
+    "ocr": "digits",
+}
+
+_AMOUNT_AFTER = re.compile(
+    r"\d{1,3}(?:[ .\u00a0]\d{3})+(?:[,.]\d{2})?|\d+[,.]\d{2}"
+)
+_DATE_AFTER = re.compile(r"\d{4}[-./]?\d{2}[-./]?\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}")
+_TOKEN_AFTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-/.]{1,29}")
+#: Ett fakturanummer är EN token (inga mellanslag) — annars följer
+#: resten av raden med, eller nästa kolumnrubrik vid radvis text.
+_INVOICE_NR_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-/.]*")
+#: Ord som aldrig är ett fakturanummer (kolumnrubriker vid radvis
+#: extraktion: "Fakturanr. Fakturadatum Kundnr." → nästa rubrik).
+_INVOICE_NR_STOPWORDS = frozenset({
+    "FAKTURADATUM", "FAKTURANR", "FAKTURANUMMER", "KUNDNR",
+    "KUNDNUMMER", "ORDERNR", "ORDERNUMMER", "DATUM", "SIDA",
+})
+_DIGITS_AFTER = re.compile(r"\d[\d \-]{4,28}\d")
+
+
+def extract_with_label(text: str, label: str, kind: str) -> str:
+    """
+    Hittar etiketten i texten (skiftlägesoberoende) och extraherar
+    första värdet av rätt typ EFTER etiketten — först på samma rad,
+    annars inom de närmaste 120 tecknen. Returnerar strängvärde
+    (belopp som float-sträng, datum som YYYY-MM-DD) eller "".
+    """
+    if not text or not label:
+        return ""
+    flat = re.sub(r"[ \t]+", " ", text)
+    lab = re.sub(r"\s+", " ", str(label)).strip().rstrip(":#").strip()
+    if not lab:
+        return ""
+    for m in re.finditer(re.escape(lab), flat, re.IGNORECASE):
+        window = flat[m.end(): m.end() + 160]
+        same_line = window.split("\n", 1)[0]
+        hit = _extract_kind(same_line, kind, m.group(0))
+        if hit:
+            return hit
+        if same_line.strip() and kind != "token":
+            # Text finns på etikettens rad men värdet saknas —
+            # troligen en kolumnrubrik i en rubrikrad ("Fakturanr.
+            # Fakturadatum Kundnr."): nästa förekomst. För token
+            # gäller rubrik-hoppet i stället (stopporden) — ett
+            # nummer kan aldrig stå på nästa rad i radvis text.
+            continue
+        if kind != "token":
+            hit = _extract_kind(window, kind, m.group(0))
+            if hit:
+                return hit
+    return ""
+
+
+def _extract_kind(chunk: str, kind: str, label: str = "") -> str:
+    if not chunk:
+        return ""
+    if kind == "token":
+        parts = chunk.strip().lstrip(":#").strip().split(None, 1)
+        line = parts[0] if parts else ""
+        if label and line.rstrip(":#").lower() == label.rstrip(":#").lower():
+            # Fönsterformen direkt efter etiketten ("Fakturanr:
+            # 906178"): första biten ÄR rubriken — nästa bit är
+            # värdet. Bara när chunk börjar med etiketten.
+            rest = chunk[len(line):]
+            if not rest or not (rest[0].isalnum()):
+                parts = rest.strip().split(None, 1)
+                line = parts[0] if parts else ""
+        tok = _INVOICE_NR_RE.match(line)
+        cand = tok.group(0) if tok else ""
+        if len(cand) >= 2 and cand.upper() not in _INVOICE_NR_STOPWORDS:
+            return cand
+        # Siffrigt nummer separerat med streck/snedstreck
+        # ("NL-2026-0771" via "Er ref hos oss"/"Vår referens").
+        num = re.match(r"\d[\d\-/]*\d|\d", line)
+        if num and len(num.group(0)) >= 4:
+            return num.group(0)
+        return ""
+    if kind == "amount":
+        m = _AMOUNT_AFTER.search(chunk)
+        if m:
+            v = _norm_amount(m.group(0))
+            if v > 0:
+                return f"{v:.2f}"
+        return ""
+    if kind == "date":
+        m = _DATE_AFTER.search(chunk)
+        return _parse_date(m.group(0)) if m else ""
+    if kind == "digits":
+        m = _DIGITS_AFTER.search(chunk)
+        return re.sub(r"\s", "", m.group(0)) if m else ""
+    m = _TOKEN_AFTER.search(chunk)
+    return m.group(0).strip(" .") if m else ""
+
+
+#: En datumtoken ("2024-05-08") får aldrig tas för ett
+#: fakturanummer i en värderad under kolumnrubriker.
+_DATE_TOKEN = re.compile(
+    r"\d{4}[-./]\d{2}[-./]\d{2}|\d{1,2}[-./]\d{1,2}[-./]\d{2,4}"
+)
+
+
+def _extract_below_line(line: str, kind: str) -> str:
+    """Värdet av given typ i en VÄRDERAD (raden under rubrikerna).
+
+    Rubrikerna styr vilken typ varje fält läser — aldrig "första
+    beloppet efter etiketten" (det är nästan alltid fel kolumn):
+    belopp = SISTA beloppet på raden (Att betala är sista
+    kolumnen i summablocket), datum = datumtoken, nummer =
+    första nummertoken som inte är ett datum.
+    """
+    line = (line or "").strip()
+    if not line:
+        return ""
+    if kind == "amount":
+        hits = _AMOUNT_AFTER.findall(line)
+        if hits:
+            v = _norm_amount(hits[-1])
+            if v > 0:
+                return f"{v:.2f}"
+        return ""
+    if kind == "date":
+        m = _DATE_AFTER.search(line)
+        return _parse_date(m.group(0)) if m else ""
+    if kind == "digits":
+        m = _DIGITS_AFTER.search(line)
+        return re.sub(r"\s", "", m.group(0)) if m else ""
+    if kind == "token":
+        for tok in line.split():
+            tok = tok.strip(" .,;:#")
+            if not tok or not any(c.isdigit() for c in tok):
+                continue
+            if _DATE_TOKEN.fullmatch(tok):
+                continue
+            if _INVOICE_NR_RE.fullmatch(tok) is None:
+                continue
+            if len(tok) >= 2 and tok.upper() not in _INVOICE_NR_STOPWORDS:
+                return tok
+        return ""
+    m = _TOKEN_AFTER.search(line)
+    return m.group(0).strip(" .") if m else ""
+
+
+def _extract_below_label(text: str, label: str, kind: str) -> str:
+    """Värdet på raden UNDER etikettens rubrikrad, eller "".
+
+    För layouten där etiketterna står som kolumnrubriker i en
+    rubrikrad ("Fakturanr. Fakturadatum Kundnr." / "… Summa
+    netto Moms Öresavrundning Att betala") och alla värden
+    samlade på raden under. Radvis/kolumnvis extraktion (PDF/
+    OCR) kan aldrig para etikett+värde på samma rad där.
+
+    Villkor (samma försiktighet som alltid): etikettens egen
+    rad får INTE innehålla ett värde av typen (då är det en
+    vanlig etikett+värde-rad, ingen rubrikrad) och värdet
+    måste stå i den omedelbart följande icke-tomma raden.
+    """
+    if not text or not label:
+        return ""
+    flat = re.sub(r"[ \t]+", " ", text)
+    lab = re.sub(r"\s+", " ", str(label)).strip().rstrip(":#").strip()
+    if not lab:
+        return ""
+    lines = flat.split("\n")
+    for m in re.finditer(re.escape(lab), flat, re.IGNORECASE):
+        rest_line = flat[m.end():].split("\n", 1)[0]
+        if _extract_kind(rest_line, kind, m.group(0)):
+            # Vanlig etikett+värde-rad — aldrig rubrikrad.
+            continue
+        lineno = flat.count("\n", 0, m.end())
+        for below in lines[lineno + 1:]:
+            if not below.strip():
+                continue
+            hit = _extract_below_line(below, kind)
+            if hit:
+                return hit
+            break
+    return ""
+
+
+def _label_below_amount(text: str, label: str) -> float | None:
+    """Beloppet i kolumnen under etiketten ("Att betala")."""
+    hit = _extract_below_label(text, label, "amount")
+    return float(hit) if hit else None
+
+
+def apply_template(text: str, template: dict) -> dict[str, Any]:
+    """Kör en leverantörsmall på texten → {fält: värde} för träffar."""
+    fields = (template or {}).get("fields", {})
+    found: dict[str, Any] = {}
+    for field, spec in fields.items():
+        kind = TEMPLATE_FIELD_KINDS.get(field)
+        if kind is None or not isinstance(spec, dict):
+            continue
+        label = str(spec.get("label", ""))
+        raw = extract_with_label(text or "", label, kind)
+        if spec.get("below"):
+            # Verifierad kolumnlayout (rubrikrad + värderad,
+            # t.ex. Martin G:s nyare fakturor): värdet på raden
+            # under rubriken VINNER över vanlig etikettläsning —
+            # annars norpar den första beloppet efter etiketten
+            # ur fel kolumn (t.ex. Total vikt i stället för Att
+            # betala). Saknas värderaden gäller vanlig läsning.
+            below_raw = _extract_below_label(text or "", label, kind)
+            if below_raw:
+                raw = below_raw
+        if raw == "":
+            continue
+        found[field] = float(raw) if field == "total_amount" else raw
+    return found
+
+
+# ── Regionsmallar: värden pekas ut på fakturabilden ──────────
+# En malls fält kan i stället för etikett bära en RUTA på sidan:
+#   {"region": [x0, y0, x1, y1], "page": 0}
+# Koordinaterna är andelar (0–1) av sidans bredd/höjd, så samma
+# mall fungerar oavsett filens upplösning. Läsningen sker i
+# första hand ur PDF:ens textlager inuti rutan (PyMuPDF, pypdf
+# som reserv), annars OCR av den utklippta rutan. Poängen är
+# inlärningsdialogens bildmarkering: användaren drar en ruta
+# runt värdet — appen behöver inte gissa etiketter alls.
+
+
+def _value_from_region(raw: str, kind: str) -> str:
+    """Tolkar värdet ur en markerad rutas råtext.
+
+    Rutan ska innehålla i huvudsak själva värdet, men lite
+    etikett-text tolereras: nummer = första nummertoken som
+    inte är ett datum/rubrikord, belopp = sista fullständiga
+    beloppet, datum = första datumtoken, OCR = sifferserien.
+    """
+    text = " ".join(str(raw or "").split())
+    if not text:
+        return ""
+    if kind == "amount":
+        hits = _AMOUNT_AFTER.findall(text)
+        if hits:
+            v = _norm_amount(hits[-1])
+            if v > 0:
+                return f"{v:.2f}"
+        return ""
+    if kind == "date":
+        m = _DATE_AFTER.search(text)
+        return _parse_date(m.group(0)) if m else ""
+    if kind == "digits":
+        m = _DIGITS_AFTER.search(text)
+        if m:
+            return re.sub(r"\s", "", m.group(0))
+        digits = re.sub(r"\D", "", text)
+        return digits if len(digits) >= 4 else ""
+    if kind == "token":
+        return _extract_below_line(text, "token")
+    parts = text.split()
+    return parts[0] if parts else ""
+
+
+def _region_specs(template: dict | None) -> dict[str, dict]:
+    """{fält: spec} för fält i mallen som har en giltig ruta."""
+    out: dict[str, dict] = {}
+    for field, spec in ((template or {}).get("fields", {}) or {}).items():
+        if field not in TEMPLATE_FIELD_KINDS:
+            continue
+        if not isinstance(spec, dict):
+            continue
+        region = spec.get("region")
+        if (
+            isinstance(region, (list, tuple))
+            and len(region) == 4
+            and all(
+                isinstance(v, (int, float)) and 0.0 <= float(v) <= 1.0
+                for v in region
+            )
+        ):
+            out[field] = spec
+    return out
+
+
+def template_values_from_regions(
+    template: dict | None, region_texts: dict | None
+) -> dict[str, Any]:
+    """{fält: tolkat värde} ur rutornas råtexter."""
+    found: dict[str, Any] = {}
+    texts = region_texts or {}
+    for field, spec in _region_specs(template).items():
+        raw = _value_from_region(
+            str(texts.get(field, "") or ""),
+            TEMPLATE_FIELD_KINDS[field],
+        )
+        if raw == "":
+            continue
+        found[field] = (
+            float(raw) if field == "total_amount" else raw
+        )
+    return found
+
+
+def template_values(
+    path: Any, text: str, template: dict | None
+) -> dict[str, Any]:
+    """Mallens fältvärden för en konkret fil: etikettläsning ur
+    texten + bildrutorna (rutorna vinner — de är utpekade)."""
+    found = apply_template(text or "", template or {})
+    if path:
+        found.update(
+            template_values_from_regions(
+                template, extract_region_texts(path, template or {})
+            )
+        )
+    return found
+
+
+def _clamp_rect(region: Any) -> tuple[float, float, float, float]:
+    vals = [min(1.0, max(0.0, float(v))) for v in region]
+    x0, y0, x1, y1 = vals
+    return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+
+
+def _words_in_region_fitz(
+    path: Path, page_index: int, rect: tuple
+) -> str:
+    x0, y0, x1, y1 = rect
+    try:
+        with fitz.open(str(path)) as doc:
+            if not len(doc):
+                return ""
+            page = doc[min(max(page_index, 0), len(doc) - 1)]
+            w_pt, h_pt = page.rect.width, page.rect.height
+            if not w_pt or not h_pt:
+                return ""
+            hits = []
+            for word in page.get_text("words"):
+                wx0, wy0, wx1, wy1, text = (
+                    word[0], word[1], word[2], word[3], word[4],
+                )
+                cx = (wx0 + wx1) / 2 / w_pt
+                cy = (wy0 + wy1) / 2 / h_pt
+                if (
+                    x0 - 0.004 <= cx <= x1 + 0.004
+                    and y0 - 0.004 <= cy <= y1 + 0.004
+                ):
+                    hits.append((wy0, wx0, text))
+            hits.sort(key=lambda h: (round(h[0] / 4.0), h[1]))
+            return " ".join(h[2] for h in hits).strip()
+    except Exception as exc:
+        log.warning("region-fitz %s: %s", path, exc)
+        return ""
+
+
+def _words_in_region_pypdf(
+    path: Path, page_index: int, rect: tuple
+) -> str:
+    x0, y0, x1, y1 = rect
+    try:
+        reader = PdfReader(str(path))
+        if not reader.pages:
+            return ""
+        page = reader.pages[
+            min(max(page_index, 0), len(reader.pages) - 1)
+        ]
+        w_pt = float(page.mediabox.width)
+        h_pt = float(page.mediabox.height)
+        if not w_pt or not h_pt:
+            return ""
+        hits: list[str] = []
+
+        def _visitor(text, cm, tm, _font, _size):
+            chunk = " ".join(str(text or "").split())
+            if not chunk:
+                return
+            ux = tm[4] * cm[0] + tm[5] * cm[2] + cm[4]
+            uy = tm[4] * cm[1] + tm[5] * cm[3] + cm[5]
+            fx, fy = ux / w_pt, 1.0 - uy / h_pt
+            if (
+                x0 - 0.006 <= fx <= x1 + 0.006
+                and y0 - 0.006 <= fy <= y1 + 0.006
+            ):
+                hits.append(chunk)
+
+        page.extract_text(visitor_text=_visitor)
+        return " ".join(hits).strip()
+    except Exception as exc:
+        log.warning("region-pypdf %s: %s", path, exc)
+        return ""
+
+
+def _ocr_crop_text(path: Path, page_index: int, rect: tuple) -> str:
+    """OCR av den utklippta rutan (bildfil eller skannad PDF)."""
+    if not HAS_TESS:
+        return ""
+    x0, y0, x1, y1 = rect
+    try:
+        import io
+
+        if path.suffix.lower() == ".pdf":
+            if not HAS_FITZ:
+                return ""
+            with fitz.open(str(path)) as doc:
+                if not len(doc):
+                    return ""
+                page = doc[min(max(page_index, 0), len(doc) - 1)]
+                clip = fitz.Rect(
+                    x0 * page.rect.width, y0 * page.rect.height,
+                    x1 * page.rect.width, y1 * page.rect.height,
+                )
+                pix = page.get_pixmap(dpi=300, clip=clip)
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
+        else:
+            img = Image.open(str(path))
+            img = img.crop((
+                int(x0 * img.width), int(y0 * img.height),
+                int(x1 * img.width), int(y1 * img.height),
+            ))
+        text = pytesseract.image_to_string(img, lang="swe+eng")
+        return (text or "").strip()
+    except Exception as exc:
+        log.warning("region-ocr %s: %s", path, exc)
+        return ""
+
+
+def extract_region_texts(
+    path: Any, template: dict | None
+) -> dict[str, str]:
+    """{fält: råtext i rutan} för mallens regionsfält.
+
+    Textlager i rutan först (PyMuPDF, därefter pypdf); saknas
+    träffar provas OCR av den utklippta rutan. Aldrig undantag
+    utåt — misslyckad läsning ger bara färre nycklar.
+    """
+    specs = _region_specs(template)
+    if not specs or not path:
+        return {}
+    p = Path(path)
+    if not p.exists():
+        return {}
+    out: dict[str, str] = {}
+    for field, spec in specs.items():
+        rect = _clamp_rect(spec.get("region"))
+        page_index = 0
+        try:
+            page_index = int(spec.get("page", 0) or 0)
+        except (TypeError, ValueError):
+            page_index = 0
+        raw = ""
+        if p.suffix.lower() == ".pdf":
+            if HAS_FITZ:
+                raw = _words_in_region_fitz(p, page_index, rect)
+            if not raw and HAS_PYPDF:
+                raw = _words_in_region_pypdf(p, page_index, rect)
+        if not raw:
+            raw = _ocr_crop_text(p, page_index, rect)
+        if raw:
+            out[field] = raw
+    return out
+
+
+def page_image_count(path: Any) -> int:
+    """Antal sidor som kan visas som bild (0 = kan inte visas)."""
+    p = Path(path or "")
+    if not p.exists():
+        return 0
+    if p.suffix.lower() == ".pdf":
+        try:
+            if HAS_FITZ:
+                with fitz.open(str(p)) as doc:
+                    return len(doc)
+            if HAS_PYPDF:
+                return len(PdfReader(str(p)).pages)
+        except Exception as exc:
+            log.warning("sidor %s: %s", p, exc)
+        return 0
+    return 1 if p.suffix.lower() in SCAN_EXTENSIONS else 0
+
+
+def render_page_image(
+    path: Any, page_index: int = 0, dpi: int = 150
+) -> bytes | None:
+    """Sidans bild som PNG-bytes (PDF via PyMuPDF; bildfilen
+    själv). None när sidan inte kan renderas."""
+    p = Path(path or "")
+    if not p.exists():
+        return None
+    if p.suffix.lower() == ".pdf":
+        if not HAS_FITZ:
+            return None
+        try:
+            with fitz.open(str(p)) as doc:
+                if not len(doc):
+                    return None
+                page = doc[min(max(page_index, 0), len(doc) - 1)]
+                return page.get_pixmap(dpi=dpi).tobytes("png")
+        except Exception as exc:
+            log.warning("rendera %s: %s", p, exc)
+            return None
+    if p.suffix.lower() in SCAN_EXTENSIONS:
+        try:
+            return p.read_bytes()
+        except Exception as exc:
+            log.warning("bild %s: %s", p, exc)
+    return None
+
+
+def find_template(templates: dict, supplier: str) -> dict | None:
+    """Mall för leverantörsnamn (exakt eller skiftlägesoberoende)."""
+    if not templates or not supplier:
+        return None
+    if supplier in templates:
+        return templates[supplier]
+    low = supplier.strip().lower()
+    for name, tmpl in templates.items():
+        if str(name).strip().lower() == low:
+            return tmpl
+    return None
+
+
+#: Inbyggda, verifierade leverantörsformat. Varje format har
+#: matchats manuellt mot riktiga exempelfakturor tillsammans
+#: med användaren INNAN det byggdes in — det är den manuella
+#: matchningen som annars sker i inlärningsdialogen. Därför
+#: får bevakningen registrera dem automatiskt utan att
+#: användaren lär appen samma leverantör en gång till.
+#: Identifiering sker via org.nr/bankgiro eller det tryckta
+#: namnet på fakturan (aldrig via registerpostens namn, som
+#: kan heta något annat — t.ex. Direktglas på Saint-Gobain-
+#: papper). Användarens egna mallar har alltid företräde.
+BUILTIN_FORMATS: list[dict] = [
+    {
+        "name": "Martin G Anderson",
+        "aliases": [
+            "Martin G Anderson", "AB Martin G Anderson", "Martin G",
+        ],
+        "org": "5568245806",
+        "bg": "7280811",
+        "printed": ["martin g anderson"],
+        "fields": {
+            # Nya layouten (2024−, verifierad mot faktura 916336
+            # i chatten): rubrikrad + värderad — "below". Äldre
+            # parvis layout träffas av vanlig etikettläsning.
+            "invoice_number": {"label": "Fakturanr.", "below": True},
+            "total_amount": {"label": "Att betala", "below": True},
+            "date": {"label": "Fakturadatum", "below": True},
+            "due_date": {"label": "Förfallodatum"},
+        },
+    },
+    {
+        "name": "Saint-Gobain Autover Sverige AB",
+        "aliases": [
+            "Direktglas", "Saint-Gobain",
+            "Saint-Gobain Autover Sverige AB",
+        ],
+        "org": "5562746114",
+        "bg": "9422817",
+        "printed": ["saint-gobain autover", "saint-gobain"],
+        "fields": {
+            "invoice_number": {"label": "Nummer"},
+            "total_amount": {"label": "Att Betala (SEK)"},
+            "date": {"label": "Datum"},
+            "due_date": {"label": "Förfallodatum"},
+        },
+    },
+    {
+        "name": "Pilkington",
+        "aliases": [
+            "Pilkington", "Pilkington Sverige AB",
+            "Pilkington Automotive Sweden AB", "Pilkington Glas AB",
+        ],
+        "org": "",
+        "bg": "5723457",
+        "printed": ["pilkington automotive", "pilkington nsg"],
+        "fields": {
+            "invoice_number": {"label": "Nummer"},
+            "total_amount": {"label": "TOTALT FAKTURABELOPP"},
+            "date": {"label": "Datum (tax point)"},
+            "due_date": {"label": "T.o.m."},
+        },
+    },
+    {
+        "name": "Swede Glass United",
+        "aliases": [
+            "Swede Glass United", "Swede Glass",
+        ],
+        "org": "5566371588",
+        "bg": "55921449",
+        "printed": ["swede glass united"],
+        "fields": {
+            "invoice_number": {"label": "Fakturanummer / Kundnummer"},
+            "total_amount": {"label": "ATT BETALA"},
+            "date": {"label": "Fakturadatum"},
+            "due_date": {"label": "Förfallodatum"},
+        },
+    },
+    {
+        "name": "AAG Automotive AB",
+        "aliases": [
+            "AAG Automotive AB", "AAG Automotive",
+        ],
+        "org": "5591400816",
+        "bg": "4030706",
+        "printed": ["aag automotive"],
+        "fields": {
+            "invoice_number": {"label": "Fakturanr"},
+            "total_amount": {"label": "ATT BETALA"},
+            "date": {"label": "Fakturadatum"},
+            "due_date": {"label": "Förfallodatum"},
+        },
+    },
+]
+
+
+def builtin_template_for(text: str) -> tuple[str, dict] | None:
+    """
+    Inbyggt verifierat format för texten → (namn, mall) eller
+    None. Träff kräver org.nr/bankgiro i texten eller det
+    tryckta leverantörsnamnet — registerpostens namn används
+    aldrig (det kan vara ett helt annat, t.ex. Direktglas).
+    """
+    if not text:
+        return None
+    digits = re.sub(r"\D", "", text)
+    flat = text.lower()
+    for fmt in BUILTIN_FORMATS:
+        if fmt["org"] and fmt["org"] in digits:
+            return fmt["name"], {"fields": dict(fmt["fields"])}
+        if fmt["bg"] and fmt["bg"] in digits:
+            return fmt["name"], {"fields": dict(fmt["fields"])}
+        if any(p in flat for p in fmt["printed"]):
+            return fmt["name"], {"fields": dict(fmt["fields"])}
+    return None
+
+
+def _label_same_line_amount(text: str, label: str) -> float | None:
+    """Beloppet på SAMMA RAD som etiketten, eller None.
+
+    Skiljer en äkta etikett+värde-rad ("ATT BETALA 706,00")
+    från en kolumnrubrikrad där värdena står på nästa rad i
+    kolumner — där är första beloppet efter etiketten nästan
+    alltid fel kolumn (netto i stället för att betala).
+    """
+    if not text or not label:
+        return None
+    flat = re.sub(r"[ \t]+", " ", text)
+    lab = re.sub(r"\s+", " ", str(label)).strip().rstrip(":#").strip()
+    if not lab:
+        return None
+    for m in re.finditer(re.escape(lab), flat, re.IGNORECASE):
+        same_line = flat[m.end():].split("\n", 1)[0]
+        hit = _extract_kind(same_line, "amount", m.group(0))
+        if hit:
+            return float(hit)
+    return None
+
+
+def has_builtin_format(supplier: str) -> bool:
+    """True om leverantörsnamnet har ett inbyggt verifierat
+    format (namnvarianter tillåts, t.ex. 'AB Martin G Anderson'
+    för registerposten och 'Martin G Anderson' i formatet)."""
+    s = " ".join(str(supplier or "").lower().split())
+    if len(s) < 4:
+        return False
+    for fmt in BUILTIN_FORMATS:
+        for alias in fmt["aliases"]:
+            a = alias.lower()
+            if s == a:
+                return True
+            shorter = s if len(s) < len(a) else a
+            if len(shorter) >= 5 and (s in a or a in s):
+                return True
+    return False
+
+
+def load_templates(path: Path) -> dict:
+    """Läser mall-JSON tolerant ({} vid saknad/trasig fil)."""
+    try:
+        import json as _json
+
+        data = _json.loads(Path(path).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_templates(path: Path, templates: dict) -> bool:
+    """Skriver mall-JSON (atomärt via tmp-fil)."""
+    try:
+        import json as _json
+
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(
+            _json.dumps(templates, ensure_ascii=False, indent=1),
+            encoding="utf-8",
+        )
+        tmp.replace(target)
+        return True
+    except Exception as exc:
+        log.warning("save_templates: %s", exc)
+        return False
 
 
 # ═════════════════════════════════════════════════════════════════════
