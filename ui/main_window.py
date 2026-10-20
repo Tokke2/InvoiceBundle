@@ -2584,6 +2584,17 @@ class MainWindow(QMainWindow):
                     )
         except Exception as exc:
             log.warning("_check_updates: %s", exc, exc_info=True)
+            # Aldrig tyst: saknas uppdateraren i den här kopian ska
+            # användaren se det — inte tro att hen har senaste
+            # versionen. (Release-paketet vaktas dessutom av
+            # build_release.py + test_release_integrity.py.)
+            try:
+                QMessageBox.warning(
+                    self, tr("update.title"),
+                    tr("update.failed", error=str(exc)),
+                )
+            except Exception:
+                pass
 
     def _toggle_include_originals(self, checked: bool) -> None:
         """Kryss i Inställningar-menyn: original i betal-PDF:en."""

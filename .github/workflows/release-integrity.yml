@@ -1,0 +1,32 @@
+name: Release integrity
+
+# Vaktar att autouppdateringen aldrig försvinner ur den publicerade
+# versionen igen: uppdaterarfiler, Hjälp-menyns "Sök ny version",
+# tray-valet, auto-kollen vid start och release-manifestet testas
+# vid varje push och tagg.
+
+on:
+  push:
+    branches:
+      - "arena/**"
+      - main
+    tags:
+      - "v*"
+  pull_request:
+
+jobs:
+  updater-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pytest
+        run: python -m pip install -q pytest
+      - name: Guard the auto-updater
+        run: >-
+          python -m pytest
+          tests/test_updater.py
+          tests/test_release_integrity.py
+          -q
