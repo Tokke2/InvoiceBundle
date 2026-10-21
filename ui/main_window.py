@@ -1383,6 +1383,14 @@ class MainWindow(QMainWindow):
         self._pending_update: dict | None = None
         self._update_worker = None
         QTimer.singleShot(5_000, self._maybe_auto_update_check)
+        # …och därefter var 6:e timme medan appen körs: versionen
+        # står kvar på v1.0.0, så ändrade filer i releasen (ny commit
+        # under samma tagg) måste upptäckas utan att appen startas om.
+        self._update_poll_timer = QTimer(self)
+        self._update_poll_timer.setInterval(6 * 3600 * 1000)
+        self._update_poll_timer.timeout.connect(
+            self._maybe_auto_update_check)
+        self._update_poll_timer.start()
 
         # ── Autoexport-triggers: vid start + när fakturor ändras ───
         self._auto_batch_worker = None
@@ -2484,9 +2492,13 @@ class MainWindow(QMainWindow):
             self.set_status("   ".join(messages), 12000)
 
     def _maybe_auto_update_check(self) -> None:
-        """Tyst bakgrundskoll (max 1 gång/dygn) — säger bara till
-        om en nyare build faktiskt finns, så ingen gammal kopia
-        blir liggande igång ovetande. Aldrig ett felmeddelande."""
+        """Tyst bakgrundskoll — vid varje start och var 6:e timme.
+
+        Versionen står kvar på v1.0.0 medan filerna i releasen byts
+        (ny commit under samma tagg), så kollen jämför alltid den
+        installerade buildens commit mot releasens aktuella commit
+        och säger till direkt när de skiljer sig — ingen dygnsspärr
+        får fördröja det. Aldrig ett felmeddelande vid tyst fel."""
         try:
             from ui.update_dialog import UpdateWorker
             sys.path.insert(0, str(PROJECT_DIR / "plugins"))
@@ -2494,9 +2506,9 @@ class MainWindow(QMainWindow):
 
             if not bool(self._settings.get("update_auto_check", True)):
                 return
-            last = str(self._settings.get("update_last_check", ""))
-            if not _updater.auto_check_due(last):
-                return
+            worker = getattr(self, "_update_worker", None)
+            if worker is not None and worker.isRunning():
+                return  # en koll pågår redan
             import datetime as _dt
             self._settings.set(
                 "update_last_check",

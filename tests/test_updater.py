@@ -310,3 +310,25 @@ def test_zip_build_sha_reads_built_zip(tmp_path):
     assert up.zip_build_sha(built) == "deadbeef"
     plain = _zip(tmp_path / "p.zip", {"app.py": "x"})
     assert up.zip_build_sha(plain) == ""   # taggarkiv: ingen build_info
+
+
+def test_same_version_new_files_are_an_update(tmp_path):
+    # Kravet: versionen står kvar på v1.0.0 — ändras filerna i
+    # releasen (ny commit under samma tagg) ska appen ändå uppdatera.
+    # Det är commit-shan som jämförs, aldrig versionsnumret.
+    (tmp_path / "build_info.json").write_text(
+        json.dumps({"version": "1.0.0", "sha": "forra", "files": []}),
+        encoding="utf-8",
+    )
+    result = up.check_for_update(
+        tmp_path, fetch=_fake_fetch(release_sha="nya-filer"))
+    assert result["release"]["tag"] == "v1.0.0"      # samma version …
+    assert result["status"] == "update"              # … men nya filer
+    (tmp_path / "build_info.json").write_text(
+        json.dumps({"version": "1.0.0", "sha": "nya-filer",
+                    "files": []}),
+        encoding="utf-8",
+    )
+    result = up.check_for_update(
+        tmp_path, fetch=_fake_fetch(release_sha="nya-filer"))
+    assert result["status"] == "current"
