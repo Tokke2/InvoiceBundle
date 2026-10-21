@@ -1415,3 +1415,72 @@ def test_teach_adjust_loop_recHECKS(tmp_path, monkeypatch):
         assert "minns den" in view._lbl_status.text()
     finally:
         view.close()
+
+
+def test_supplier_match_name_variants_and_bankgiro():
+    """Bättre matchning: bolagsform/punkt/ordning ska inte avgöra,
+    bankgiro-fältet i registret (inte bara "bg") ska identifiera,
+    och delad förstanamns-träff mellan två leverantörer ger ingen
+    gissning."""
+    sups = [
+        {"name": "Martin G Anderson AB", "bankgiro": "728-0811"},
+        {"name": "Direktglas", "bankgiro": "942-2817"},
+        {"name": "Pilkington Sverige AB"},
+        {"name": "Pilkington Glas AB"},
+    ]
+    assert si.match_supplier(
+        "AB Martin G. Anderson\nFakturanr 123", sups
+    ) == "Martin G Anderson AB"
+    # Tryckta namnet är Saint-Gobain — registerposten Direktglas
+    # identifieras via bankgirot, precis som i verkligheten.
+    assert si.match_supplier(
+        "Saint-Gobain Autover Sverige AB\nBankgiro: 942-2817", sups
+    ) == "Direktglas"
+    # Bara "Pilkington" passar båda Pilkington-posterna → ingen
+    # gissning (fakturan parkeras/man granskar i stället).
+    assert si.match_supplier("Pilkington", sups) == ""
+
+
+def test_template_lookup_name_variants_unambiguous():
+    """Malluppslag tål namnvariant men väljer aldrig vid tvetydighet."""
+    templates = {
+        "Nordlys Energi AB": {"fields": {"total_amount": {"label": "X"}}},
+        "Annan AB": {"fields": {"total_amount": {"label": "Y"}}},
+    }
+    assert si.find_template(templates, "AB Nordlys Energi") \
+        is templates["Nordlys Energi AB"]
+    assert si.find_template(templates, "Okänd AB") is None
+    amb = {"Martin G": {"fields": {}}, "Martin G Anderson": {"fields": {}}}
+    assert si.find_template(amb, "Martin G Anderson") is amb["Martin G Anderson"]
+    assert si.find_template(amb, "Martin") is None
+
+
+def test_number_and_total_label_variants():
+    """Fler entydiga etiketter: 'Faktura nr', 'Invoice number',
+    'Summa att betala' och 'Amount due'."""
+    assert si.parse_invoice_number("Faktura nr: 77881\nAtt betala 10,00") \
+        == "77881"
+    assert si.parse_invoice_number("Invoice number: INV-2026-9") \
+        == "INV-2026-9"
+    assert si.parse_total("Summa att betala 1 234,00 kr") == 1234.0
+    assert si.parse_total("Amount due: 99.50") == 99.5
+
+
+def test_template_applies_for_register_name_variant():
+    """Registernamnets variant ska ändå hitta leverantörens mall
+    och läsa värdena ur den — matchningen sitter i namnet, inte
+    i exakt stavning."""
+    templates = {
+        "Nordlys Energi AB": {"fields": {
+            "invoice_number": {"label": "Er ref hos oss"},
+            "total_amount": {"label": "SLUTSUMMA ATT BETALA"},
+        }},
+    }
+    suppliers = [{"name": "AB Nordlys Energi"}]
+    parsed = si.parse_invoice_text(
+        WEIRD_LAYOUT, suppliers=suppliers, templates=templates
+    )
+    assert parsed["supplier"] == "AB Nordlys Energi"
+    assert parsed["template"] == "AB Nordlys Energi"
+    assert parsed["invoice_number"] == "NL-2026-0771"
+    assert parsed["total_amount"] == 1125.0

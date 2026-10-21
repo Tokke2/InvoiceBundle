@@ -34,6 +34,7 @@ Copyright © dynamiskt år Rickard Längkvist
 import datetime
 import logging
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -191,7 +192,11 @@ def _norm_amount(raw: str) -> float:
 #: Etikettmönster för ATT BETALA-beloppet (prioriteras).
 _TOTAL_PATTERNS: tuple[str, ...] = (
     r"ATT\s*BETALA[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
+    r"SUMMA\s*ATT\s*BETALA[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
     r"TOTALT\s*ATT\s*BETALA[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
+    r"AMOUNT\s*DUE[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
+    r"TOTAL\s*AMOUNT\s*DUE[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
+    r"BALANCE\s*DUE[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
     r"TILLGODO[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
     r"SUMMA[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
     r"TOTALT[^0-9]{0,12}(\d[\d .,\u00a0]{2,20})",
@@ -250,8 +255,12 @@ def _search(text: str, patterns: tuple[str, ...]) -> str:
 def parse_invoice_number(text: str) -> str:
     for pat in (
         r"Fakturanr\.?\s*[:#]?\s*(\S{2,25})",
+        r"Faktura\s*nr\.?\s*[:#]?\s*(\S{2,25})",
+        r"Faktura\s*nummer\s*[:#]?\s*(\S{2,25})",
         r"Fakturanummer\s*[:#]?\s*(\S{2,25})",
-        r"Invoice\s*no\.?\s*[:#]?\s*(\S{2,25})",
+        r"Invoice\s*(?:no\.?|number|#)\s*[:#]?\s*(\S{2,25})",
+        r"Dokumentnummer\s*[:#]?\s*(\S{2,25})",
+        r"Document\s*(?:no\.?|number)\s*[:#]?\s*(\S{2,25})",
         r"Vår\s*referens\s*[:#]?\s*(\S{2,25})",
     ):
         for m in re.finditer(pat, text, re.IGNORECASE):
@@ -325,35 +334,118 @@ def parse_dates(text: str) -> tuple[str, str]:
     return inv, due
 
 
+#: Bolagsformer/konjunktioner som inte bär identitet i ett
+#: leverantörsnamn ("AB Martin G Anderson" = "Martin G Anderson").
+_NAME_DROP_TOKENS = frozenset({
+    "ab", "aktiebolag", "hb", "kb", "ek", "bolag",
+    "och", "and", "the",
+})
+
+
+def _fold_text(value: Any) -> str:
+    """Viker text för namnmatchning: gemener, accenter bort
+    (å/ä/ö → a/a/o), skiljetecken → mellanslag. "Saint-Gobain
+    Autover" och "saint gobain autover" blir samma nyckel —
+    OCR- och layoutvarianter ska inte avgöra matchningen."""
+    raw = unicodedata.normalize("NFKD", str(value or "").lower())
+    folded = "".join(
+        ch for ch in raw if not unicodedata.combining(ch)
+    )
+    folded = folded.replace("&", " och ")
+    folded = re.sub(r"[^a-z0-9]+", " ", folded)
+    return " ".join(folded.split())
+
+
+def _name_tokens(value: Any) -> list[str]:
+    return [
+        tok for tok in _fold_text(value).split()
+        if tok not in _NAME_DROP_TOKENS
+    ]
+
+
+def _names_match(left: Any, right: Any) -> bool:
+    """Samma leverantörsnamn trots variant? Sant vid vikt
+    likhet, samma betydelsebärande ordmängd, eller när den ena
+    sidans ord (minst två, eller ett långt särskiljande ord)
+    alla finns i den andra ("Martin G" i "Martin G Anderson",
+    "Nordlys Energi" i "Nordlys Energi AB")."""
+    lf, rf = _fold_text(left), _fold_text(right)
+    if not lf or not rf:
+        return False
+    if lf == rf:
+        return True
+    lt, rt = set(_name_tokens(left)), set(_name_tokens(right))
+    if not lt or not rt:
+        return False
+    if lt == rt:
+        return True
+    small, large = (lt, rt) if len(lt) <= len(rt) else (rt, lt)
+    if small <= large:
+        return len(small) >= 2 or (
+            len(small) == 1 and len(next(iter(small))) >= 5
+        )
+    return False
+
+
+#: Registerfält som kan identifiera en leverantör på fakturan.
+_SUPPLIER_ID_KEYS = (
+    "org_number", "orgnr", "org",
+    "bankgiro", "bg", "plusgiro", "pg",
+)
+
+
 def match_supplier(text: str, suppliers: list[dict]) -> str:
     """
-    Matchar texten mot kända leverantörer: namn (skiftlägesoberoende)
-    eller sifferföljder (org.nr / bankgiro / plusgiro) som förekommer
-    i texten. Returnerar leverantörsnamn eller "".
+    Matchar texten mot kända leverantörer och returnerar namnet
+    eller "" (inget gissas vid tvetydighet).
+
+    Starka träffar: org.nr/bankgiro/plusgiro i texten, eller
+    leverantörens namn — vikt så att "AB Martin G Anderson",
+    "Martin G. Anderson" och OCR-varianten utan prickar är samma
+    leverantör. Ordmängden räcker också (alla betydelsebärande
+    ord på fakturan), vilket klarar bolagsform före/efter namnet
+    och annan ordning. Delad förstanamns-träff ("Pilkington ...")
+    används bara om den är ensam om bästa poäng.
     """
-    digits = re.sub(r"\D", "", text)
-    flat = text.lower()
-    best, best_score = "", 0
+    digits = re.sub(r"\D", "", text or "")
+    folded = _fold_text(text)
+    folded_tokens = set(folded.split())
+    best: list[str] = []
+    best_score = 0
     for sup in suppliers or []:
         name = str(sup.get("name", "")).strip()
         if not name:
             continue
         score = 0
-        if name.lower() in flat:
+        name_fold = _fold_text(name)
+        tokens = _name_tokens(name)
+        token_set = set(tokens)
+        if name_fold and name_fold in folded:
+            score += 6
+        elif token_set and token_set <= folded_tokens and (
+            len(token_set) >= 2
+            or (tokens and len(tokens[0]) >= 4)
+        ):
             score += 5
-        else:
-            # första betydelsebärande ordet, t.ex. "Pilkington" i
-            # "Pilkington Sverige AB"
-            first = name.split()[0].lower() if name.split() else ""
-            if first and len(first) > 3 and first in flat:
-                score += 3
-        for key in ("org_number", "bg", "pg"):
+        elif tokens and len(tokens[0]) >= 5 \
+                and tokens[0] in folded_tokens:
+            # Ensamt särskiljande förstanamn ("Pilkington Sverige
+            # AB" på en faktura som bara trycker "Pilkington").
+            score += 3
+        for key in _SUPPLIER_ID_KEYS:
             num = re.sub(r"\D", "", str(sup.get(key, "") or ""))
             if len(num) >= 6 and num in digits:
-                score += 4
+                score += 5
+                break
         if score > best_score:
-            best, best_score = name, score
-    return best
+            best, best_score = [name], score
+        elif score == best_score and score > 0:
+            best.append(name)
+    if best_score >= 5 and len(best) == 1:
+        return best[0]
+    if best_score == 3 and len(best) == 1:
+        return best[0]
+    return ""
 
 
 def parse_invoice_text(
@@ -1072,16 +1164,26 @@ def render_page_image(
 
 
 def find_template(templates: dict, supplier: str) -> dict | None:
-    """Mall för leverantörsnamn (exakt eller skiftlägesoberoende)."""
+    """Mall för leverantörsnamn: exakt först, annars vikt
+    namnmatchning ("AB Nordlys Energi" hittar mallen för
+    "Nordlys Energi AB"). Tvetydighet ger None — fel leverantörs
+    mall får aldrig användas av misstag."""
     if not templates or not supplier:
         return None
     if supplier in templates:
         return templates[supplier]
-    low = supplier.strip().lower()
-    for name, tmpl in templates.items():
-        if str(name).strip().lower() == low:
-            return tmpl
-    return None
+    folded = _fold_text(supplier)
+    exact = [
+        tmpl for name, tmpl in templates.items()
+        if _fold_text(name) == folded
+    ]
+    if len(exact) == 1:
+        return exact[0]
+    hits = [
+        tmpl for name, tmpl in templates.items()
+        if _names_match(name, supplier)
+    ]
+    return hits[0] if len(hits) == 1 else None
 
 
 #: Inbyggda, verifierade leverantörsformat. Varje format har
@@ -1188,13 +1290,13 @@ def builtin_template_for(text: str) -> tuple[str, dict] | None:
     if not text:
         return None
     digits = re.sub(r"\D", "", text)
-    flat = text.lower()
+    flat = _fold_text(text)
     for fmt in BUILTIN_FORMATS:
         if fmt["org"] and fmt["org"] in digits:
             return fmt["name"], {"fields": dict(fmt["fields"])}
         if fmt["bg"] and fmt["bg"] in digits:
             return fmt["name"], {"fields": dict(fmt["fields"])}
-        if any(p in flat for p in fmt["printed"]):
+        if any(_fold_text(p) in flat for p in fmt["printed"]):
             return fmt["name"], {"fields": dict(fmt["fields"])}
     return None
 
@@ -1225,18 +1327,13 @@ def has_builtin_format(supplier: str) -> bool:
     """True om leverantörsnamnet har ett inbyggt verifierat
     format (namnvarianter tillåts, t.ex. 'AB Martin G Anderson'
     för registerposten och 'Martin G Anderson' i formatet)."""
-    s = " ".join(str(supplier or "").lower().split())
-    if len(s) < 4:
+    if len(_fold_text(supplier)) < 4:
         return False
-    for fmt in BUILTIN_FORMATS:
-        for alias in fmt["aliases"]:
-            a = alias.lower()
-            if s == a:
-                return True
-            shorter = s if len(s) < len(a) else a
-            if len(shorter) >= 5 and (s in a or a in s):
-                return True
-    return False
+    return any(
+        _names_match(supplier, alias)
+        for fmt in BUILTIN_FORMATS
+        for alias in fmt["aliases"]
+    )
 
 
 def load_templates(path: Path) -> dict:
