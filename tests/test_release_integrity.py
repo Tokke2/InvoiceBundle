@@ -94,3 +94,23 @@ def test_built_zip_contains_updater_and_build_info(tmp_path):
         or n in ("settings.json", "shortcuts.json")
         for n in names
     )
+
+
+def test_updater_downloads_from_release_never_main():
+    up_src = (PROJECT_DIR / "plugins" / "updater.py").read_text(
+        encoding="utf-8"
+    )
+    dlg_src = (PROJECT_DIR / "ui" / "update_dialog.py").read_text(
+        encoding="utf-8"
+    )
+    # Arkiv-URL:en byggs ur releasens tagg (refs/tags/), och nedladd-
+    # ningen går alltid via den verifierade release-vägen.
+    assert "zipball/refs/tags/" in up_src
+    assert "def download_release_zip" in up_src
+    assert "def is_release_bound_url" in up_src
+    assert "download_release_zip" in dlg_src
+    # Ingen kodväg får peka på main/default-branchen för nedladdning.
+    for src in (up_src, dlg_src):
+        assert "heads/main" not in src
+        assert "zipball/main" not in src
+        assert "archive/main" not in src

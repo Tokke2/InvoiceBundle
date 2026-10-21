@@ -89,13 +89,12 @@ class UpdateWorker(QThread):
                 self.check_done.emit(updater.check_for_update(self._root))
                 return
             release = self._release
-            asset = release.get("asset") or {}
-            url = asset.get("url") or release.get("zipball_url") or ""
-            if not url:
-                raise RuntimeError("Ingen nedladdningslänk i releasen.")
+            # Hämtar ALLTID från releasen: asset (sha-verifierad mot
+            # taggen) eller arkivet för exakt releasens tagg — aldrig
+            # från main/default-branchen.
             zip_path = Path(tempfile.gettempdir()) / "fakturabunten-update.zip"
-            updater.download_file(
-                url, zip_path,
+            updater.download_release_zip(
+                release, zip_path,
                 progress=lambda d, t: self.progress.emit(d, t),
             )
             report = updater.apply_update(

@@ -184,3 +184,129 @@ def test_apply_update_reports_file_progress(tmp_path):
                     progress=lambda d, t: calls.append((d, t)))
     assert calls == [(1, 3), (2, 3), (3, 3)]
     assert not (root / "data" / "invoices.json").exists()
+
+
+# ── Uppdatera från RELEASE, aldrig från main ─────────────────────────
+
+def test_latest_release_archive_url_built_from_tag():
+    # Även om GitHub-svaret skulle innehålla en branch-URL (main!)
+    # bygger uppdateraren alltid arkiv-URL:en ur releasens tagg.
+    def fetch(url):
+        if url.endswith("/releases/latest"):
+            return {
+                "tag_name": "v1.0.0", "name": "v1.0.0",
+                "published_at": "", "body": "",
+                "zipball_url":
+                    "https://api.github.com/repos/Tokke2/"
+                    "InvoiceBundle/zipball/main",
+                "assets": [],
+            }
+        assert "/git/ref/tags/" in url
+        return {"object": {"sha": "abc123", "type": "commit"}}
+    rel = up.get_latest_release(fetch)
+    assert rel["zipball_url"].endswith("/zipball/refs/tags/v1.0.0")
+    assert up.is_release_bound_url(rel["zipball_url"], "v1.0.0")
+    assert up.release_archive_url("") == ""
+
+
+def test_is_release_bound_url_rejects_branches():
+    tag = "v1.0.0"
+    assert up.is_release_bound_url(
+        "https://github.com/Tokke2/InvoiceBundle/releases/"
+        "download/v1.0.0/InvoiceBundle-v1.0.0.zip", tag)
+    assert up.is_release_bound_url(
+        "https://api.github.com/repos/Tokke2/InvoiceBundle/"
+        "zipball/refs/tags/v1.0.0", tag)
+    for bad in (
+        "https://api.github.com/repos/Tokke2/InvoiceBundle/zipball/main",
+        "https://api.github.com/repos/Tokke2/InvoiceBundle/zipball",
+        "https://github.com/Tokke2/InvoiceBundle/archive/refs/heads/main.zip",
+        "https://github.com/Tokke2/InvoiceBundle/releases/download/v9.9.9/x.zip",
+        "https://example.com/v1.0.0.zip",
+        "",
+    ):
+        assert not up.is_release_bound_url(bad, tag), bad
+    assert not up.is_release_bound_url(
+        "https://api.github.com/repos/Tokke2/InvoiceBundle/"
+        "zipball/refs/tags/v1.0.0", "")
+
+
+_ASSET_URL = ("https://github.com/Tokke2/InvoiceBundle/releases/"
+              "download/v1.0.0/InvoiceBundle-v1.0.0.zip")
+
+
+def _release(asset_url="", sha="abc123"):
+    return {
+        "tag": "v1.0.0", "sha": sha,
+        "asset": ({"name": "InvoiceBundle-v1.0.0.zip",
+                   "url": asset_url, "size": 1} if asset_url else None),
+        "zipball_url": up.release_archive_url("v1.0.0"),
+    }
+
+
+def test_download_release_zip_prefers_verified_asset(tmp_path):
+    asset_zip = _zip(tmp_path / "asset.zip", {
+        "build_info.json": json.dumps({"sha": "abc123"}),
+        "app.py": "NY KOD",
+    })
+
+    def fake_download(url, dest, progress=None):
+        Path(dest).write_bytes(asset_zip.read_bytes())
+        return Path(dest)
+
+    out = up.download_release_zip(
+        _release(_ASSET_URL), tmp_path / "dl.zip",
+        download=fake_download)
+    with zipfile.ZipFile(out) as zf:
+        assert zf.read("app.py").decode() == "NY KOD"
+
+
+def test_download_release_zip_stale_asset_falls_back_to_tag(tmp_path):
+    # Asset från en äldre taggflytt (build-sha stämmer inte) får
+    # aldrig installeras — taggens eget arkiv hämtas i stället.
+    stale = _zip(tmp_path / "stale.zip", {
+        "build_info.json": json.dumps({"sha": "gammalsha"}),
+        "app.py": "GAMMAL KOD",
+    })
+    tag_zip = _zip(tmp_path / "tag.zip", {"app.py": "TAGGENS KOD"})
+    calls = []
+
+    def fake_download(url, dest, progress=None):
+        calls.append(url)
+        src = stale if url == _ASSET_URL else tag_zip
+        Path(dest).write_bytes(src.read_bytes())
+        return Path(dest)
+
+    out = up.download_release_zip(
+        _release(_ASSET_URL), tmp_path / "dl.zip",
+        download=fake_download)
+    assert calls == [_ASSET_URL, up.release_archive_url("v1.0.0")]
+    with zipfile.ZipFile(out) as zf:
+        assert zf.read("app.py").decode() == "TAGGENS KOD"
+
+
+def test_download_release_zip_never_downloads_branch(tmp_path):
+    tag_zip = _zip(tmp_path / "tag.zip", {"app.py": "TAGGENS KOD"})
+    calls = []
+
+    def fake_download(url, dest, progress=None):
+        calls.append(url)
+        Path(dest).write_bytes(tag_zip.read_bytes())
+        return Path(dest)
+
+    rel = _release(
+        "https://api.github.com/repos/Tokke2/InvoiceBundle/zipball/main")
+    up.download_release_zip(rel, tmp_path / "dl.zip",
+                            download=fake_download)
+    assert calls == [up.release_archive_url("v1.0.0")]
+    assert all("main" not in u for u in calls)
+
+
+def test_zip_build_sha_reads_built_zip(tmp_path):
+    built = _zip(tmp_path / "b.zip", {
+        "build_info.json": json.dumps({"sha": "deadbeef"}),
+        "app.py": "x",
+    })
+    assert up.zip_build_sha(built) == "deadbeef"
+    plain = _zip(tmp_path / "p.zip", {"app.py": "x"})
+    assert up.zip_build_sha(plain) == ""   # taggarkiv: ingen build_info

@@ -5,7 +5,10 @@ updater.py — uppdatering i appen (Sök ny version).
 Flöde:
   1. check_for_update() frågar GitHub om senaste releasen och jämför
      dess commit (via taggen) med build_info.json i appmappen.
-  2. download_release() hämtar zip-asset (fallback: GitHubs zipball).
+  2. download_release_zip() hämtar release-zipen: asset först
+     (sha-verifierad mot taggen via build_info.json), annars arkivet
+     för EXAKT releasens tagg. Uppdateraren hämtar ALDRIG från main
+     eller någon annan branch — bara från releasen.
   3. apply_update() packar upp i en temporär mapp och byter
      programfilerna — men rör ALDRIG användardata.
 
@@ -101,6 +104,39 @@ def resolve_tag_sha(tag: str, fetch: Callable = _fetch_json) -> str:
     return sha
 
 
+def release_archive_url(tag: str) -> str:
+    """
+    Zip-arkiv för EXAKT releasens tagg — aldrig default-branchen.
+
+    Byggs alltid ur taggen i stället för att lita på svarsfält:
+    en URL utan ref (eller med en branch som main) skulle hämta
+    fel kodlinje än den releasen pekar på.
+    """
+    tag = str(tag or "").strip()
+    if not tag:
+        return ""
+    return f"{API_BASE}/zipball/refs/tags/{tag}"
+
+
+def is_release_bound_url(url: str, tag: str) -> bool:
+    """
+    True om URL:en garanterat hör till releasen: release-asset för
+    taggen eller arkiv för taggen. Branch-URL:er (t.ex. main) och
+    ref-lösa arkiv-URL:er är ALDRIG godkända.
+    """
+    u = str(url or "")
+    t = str(tag or "").strip()
+    if not u or not t:
+        return False
+    return (
+        f"/releases/download/{t}/" in u
+        or f"/zipball/refs/tags/{t}" in u
+        or f"/zipball/{t}" in u
+        or f"/tarball/refs/tags/{t}" in u
+        or f"/tarball/{t}" in u
+    )
+
+
 def get_latest_release(fetch: Callable = _fetch_json) -> dict:
     """Senaste releasen, normaliserad + taggens commit-sha."""
     release = fetch(f"{API_BASE}/releases/latest")
@@ -113,7 +149,9 @@ def get_latest_release(fetch: Callable = _fetch_json) -> dict:
         "body": str(release.get("body", "") or ""),
         "sha": sha,
         "asset": pick_zip_asset(release),
-        "zipball_url": str(release.get("zipball_url", "")),
+        # Arkiv-URL:en byggs ur taggen — svarsfältet används inte,
+        # så en branch-URL kan aldrig smyga sig in här.
+        "zipball_url": release_archive_url(tag),
     }
 
 
@@ -182,6 +220,71 @@ def download_file(url: str, dest: Path,
                 if progress:
                     progress(done, total)
     return dest
+
+
+def zip_build_sha(zip_path: Path) -> str:
+    """
+    build_info.json:s sha i en byggd release-zip ("" om den saknas).
+
+    GitHubs taggarkiv saknar build_info.json (den skrivs först vid
+    installationen) — då returneras "" och ingen sha-koll kan göras.
+    """
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            for name in zf.namelist():
+                if name == BUILD_INFO_NAME or \
+                        name.endswith("/" + BUILD_INFO_NAME):
+                    info = json.loads(zf.read(name).decode("utf-8"))
+                    return str(info.get("sha", "") or "")
+    except Exception:
+        return ""
+    return ""
+
+
+def download_release_zip(release: dict, dest: Path,
+                         progress: ProgressFn = None,
+                         download: Callable = download_file) -> Path:
+    """
+    Hämtar release-zipen till `dest` och returnerar sökvägen.
+
+    Ordning: (1) releasens zip-asset — men bara om zipens inbyggda
+    build_info-sha stämmer med taggens commit (ett asset som blivit
+    kvar från en äldre taggflytt sorteras annars bort); (2) arkivet
+    för exakt releasens tagg. En URL som inte är bunden till taggen
+    (t.ex. main eller default-branchen) används ALDRIG.
+    """
+    tag = str(release.get("tag", "") or "")
+    sha = str(release.get("sha", "") or "").strip().lower()
+    candidates: list[str] = []
+    asset = release.get("asset") or {}
+    if asset.get("url") and is_release_bound_url(asset["url"], tag):
+        candidates.append(str(asset["url"]))
+    archive = str(release.get("zipball_url", "") or "") \
+        or release_archive_url(tag)
+    if archive and is_release_bound_url(archive, tag) \
+            and archive not in candidates:
+        candidates.append(archive)
+    if not candidates:
+        raise RuntimeError(
+            "Ingen nedladdningslänk bunden till releasen hittades.")
+    last_exc: Exception | None = None
+    for url in candidates:
+        try:
+            path = download(url, Path(dest), progress=progress)
+        except Exception as exc:
+            last_exc = exc
+            continue
+        zsha = zip_build_sha(path).strip().lower()
+        if zsha and sha and zsha != sha:
+            log.warning(
+                "UPDATE zipens build-sha %s != releasens %s — "
+                "hämtar taggarkivet i stället", zsha, sha)
+            continue  # föråldrat asset → nästa kandidat (taggarkivet)
+        return Path(path)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(
+        "Ingen nedladdad zip matchade releasens commit.")
 
 
 # ── Applicering ────────────────────────────────────────────────────────
