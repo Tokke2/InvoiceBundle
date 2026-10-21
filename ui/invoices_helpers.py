@@ -355,6 +355,121 @@ def find_invoice_duplicate(
     return None
 
 
+def _invoice_number_key(value) -> str:
+    """Jämförelsenyckel för fakturanummer: gemener, inga
+    separatorer/mellanslag, OCR-lookalikes vikt (O→0, I/L→1,
+    S→5, B→8) när siffror förekommer. "2026-144", "2026144"
+    och "2026 144" är samma nyckel."""
+    raw = str(value or "").strip().casefold()
+    key = "".join(ch for ch in raw if ch.isalnum())
+    if any(ch.isdigit() for ch in key):
+        key = (key.replace("o", "0").replace("i", "1")
+               .replace("l", "1").replace("s", "5")
+               .replace("b", "8"))
+    return key
+
+
+def _levenshtein(a: str, b: str) -> int:
+    """Redigeringsavstånd (litet DP — numren är korta)."""
+    if a == b:
+        return 0
+    if not a or not b:
+        return max(len(a), len(b))
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        cur = [i]
+        for j, cb in enumerate(b, start=1):
+            cur.append(min(
+                prev[j] + 1, cur[j - 1] + 1,
+                prev[j - 1] + (0 if ca == cb else 1),
+            ))
+        prev = cur
+    return prev[-1]
+
+
+def invoice_numbers_similar(a, b) -> bool:
+    """Nästan samma fakturanummer? Samma nyckel, den ena en
+    del av den andra (borttappad siffra), eller redigerings-
+    avstånd ≤1 (≤2 för långa nummer). Minst 4 tecken krävs —
+    korta nummer liknar allt."""
+    ka, kb = _invoice_number_key(a), _invoice_number_key(b)
+    if not ka or not kb or min(len(ka), len(kb)) < 4:
+        return False
+    if ka == kb:
+        return True
+    if ka in kb or kb in ka:
+        return abs(len(ka) - len(kb)) <= 2
+    limit = 2 if max(len(ka), len(kb)) >= 8 else 1
+    return _levenshtein(ka, kb) <= limit
+
+
+def _supplier_key(value) -> str:
+    raw = str(value or "").strip().casefold()
+    return "".join(ch for ch in raw if ch.isalnum())
+
+
+def find_possible_duplicate(
+    invoices: list[dict],
+    candidate: dict,
+    exclude_id: str = "",
+) -> dict | None:
+    """
+    Möjlig dubblett av candidate i invoices → {invoice, kind,
+    reason} eller None. Två styrkor:
+
+    • "exact-number": samma leverantör + samma fakturanummer
+      efter normalisering (separatorer/skiftläge/OCR-lookalikes
+      får inte dölja en dubblett).
+    • "similar-number": samma leverantör + samma belopp +
+      samma faktura- eller förfallodatum + nästan samma nummer
+      (t.ex. en OCR-siffra fel vid inskanning igen).
+
+    Bara samma belopp/datum utan likt nummer flaggas ALDRIG —
+    månadsfakturor med samma belopp är inte dubbletter. Inget
+    tas bort och inget registreras av den här kontrollen; den
+    bara varnar så användaren får avgöra.
+    """
+    sup = _supplier_key(candidate.get("supplier", ""))
+    nr = str(candidate.get("invoice_number", "") or "")
+    if not sup or not _invoice_number_key(nr):
+        return None
+    amount = _to_float(candidate.get("total_amount"))
+    cand_dates = {
+        str(candidate.get("date", "") or "")[:10],
+        str(candidate.get("due_date", "") or "")[:10],
+    } - {""}
+    similar_hit: dict | None = None
+    for inv in invoices or []:
+        if exclude_id and str(inv.get("id", "")) == str(exclude_id):
+            continue
+        if _supplier_key(inv.get("supplier", "")) != sup:
+            continue
+        inv_nr = str(inv.get("invoice_number", "") or "")
+        if _invoice_number_key(inv_nr) == _invoice_number_key(nr):
+            return {
+                "invoice": inv, "kind": "exact-number",
+                "reason": "samma fakturanummer",
+            }
+        if similar_hit is None and amount > 0:
+            inv_dates = {
+                str(inv.get("date", "") or "")[:10],
+                str(inv.get("due_date", "") or "")[:10],
+            } - {""}
+            if (
+                abs(_to_float(inv.get("total_amount")) - amount) <= 0.01
+                and cand_dates & inv_dates
+                and invoice_numbers_similar(inv_nr, nr)
+            ):
+                similar_hit = {
+                    "invoice": inv, "kind": "similar-number",
+                    "reason": (
+                        "nästan samma fakturanummer, samma belopp "
+                        "och datum"
+                    ),
+                }
+    return similar_hit
+
+
 def payment_info_text(invoice: dict, supplier: dict | None) -> str:
     """
     Betalinfo för en faktura som färdig text till urklipp —

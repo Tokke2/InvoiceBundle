@@ -1484,3 +1484,62 @@ def test_template_applies_for_register_name_variant():
     assert parsed["template"] == "AB Nordlys Energi"
     assert parsed["invoice_number"] == "NL-2026-0771"
     assert parsed["total_amount"] == 1125.0
+
+
+def test_manual_create_warns_and_skips_possible_duplicate(
+        tmp_path, monkeypatch):
+    """Manuell registrering: möjlig dubblett ger en fråga FÖRE
+    registrering; Nej lämnar raden kvar orörd och inget skapas."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as siv
+    from ui.scan_import_view import ScanImportView
+
+    created = []
+
+    class FakeCore:
+        def get_suppliers(self):
+            return [{"name": "Test AB"}]
+
+        def get_setting(self, key, default=None):
+            return default
+
+        def get_invoices(self):
+            return [{
+                "supplier": "Test AB", "invoice_number": "9911",
+                "total_amount": 1250.0, "date": "2026-09-01",
+                "status": "Obetald",
+            }]
+
+        def add_invoice(self, data):
+            created.append(data)
+            return {"id": "x", **data}
+
+    view = ScanImportView(
+        app=FakeCore(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        view._rows = [{
+            "file": "igen.pdf", "supplier": "Test AB",
+            "invoice_number": "9912", "total_amount": 1250.0,
+            "date": "2026-09-01", "due_date": "", "ocr": "",
+            "method": "test", "_path": "", "missing": [],
+            "status": "redo",
+        }]
+        view._refresh_table()
+        view._tbl.selectRow(0)
+        asked = []
+        monkeypatch.setattr(
+            siv.QMessageBox, "question",
+            lambda *a, **k: (
+                asked.append(a),
+                siv.QMessageBox.StandardButton.No,
+            )[1],
+        )
+        view._create_invoices()
+        assert asked and created == []
+        assert len(view._rows) == 1  # raden kvar, inget borttaget
+    finally:
+        view.close()

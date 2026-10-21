@@ -417,6 +417,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "scan.sum": {"sv": "{n} rad(er)  ·  summa {amount} kr", "en": "{n} row(s)  ·  total {amount} SEK"},
     "scan.ready": {"sv": "redo", "en": "ready"},
     "scan.missing": {"sv": "saknas: {fields}", "en": "missing: {fields}"},
+    "scan.possible_dup_title": {"sv": "Möjliga dubbletter", "en": "Possible duplicates"},
+    "scan.possible_dup_body": {"sv": "Dessa rader liknar fakturor som redan finns:\n\n{lines}\n\nRegistrera dem ändå? Inget tas bort automatiskt — väljer du Nej lämnas raderna kvar i tabellen orörda.", "en": "These rows look like invoices that already exist:\n\n{lines}\n\nRegister them anyway? Nothing is removed automatically — if you choose No, the rows stay untouched in the table."},
+    "scan.possible_dup_line": {"sv": "{file}: faktura {nr} liknar {supplier} faktura {existing} ({reason})", "en": "{file}: invoice {nr} looks like {supplier} invoice {existing} ({reason})"},
+    "scan.possible_dup_skipped": {"sv": "{n} möjlig(a) dubblett(er) hoppades över — raderna ligger kvar i tabellen.", "en": "{n} possible duplicate(s) skipped — the rows remain in the table."},
 
     "scan.no_text": {"sv": "ingen text hittad", "en": "no text found"},
 

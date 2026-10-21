@@ -184,6 +184,12 @@ def _park_reason_sv(reason: str) -> str:
     reason = str(reason or "").strip()
     if reason.startswith("missing:"):
         return "saknar uppgifter: " + reason.split(":", 1)[1].strip()
+    if reason.startswith("possible-duplicate:"):
+        return (
+            "möjlig dubblett av redan registrerad faktura — "
+            + reason.split(":", 1)[1].strip()
+            + ". Registreras inte automatiskt; granska och avgör."
+        )
     return _PARK_REASON_SV.get(reason, reason or "okänd orsak")
 
 
@@ -981,13 +987,46 @@ class WatchManager(QObject):
             )
             return
 
+        # Möjlig dubblett (nästan samma nummer + samma belopp/
+        # datum, eller numret i annan separatorform) registreras
+        # ALDRIG automatiskt — filen parkeras och användaren får
+        # varningen + avgörandet. Exakt dubblett är redan stoppad
+        # ovan; det här fångar inskanning-igen med OCR-avvikelse.
+        possible_dup = None
+        if not parsed.get("missing"):
+            try:
+                try:
+                    from ui.invoices_helpers import (
+                        find_possible_duplicate,
+                    )
+                except Exception:
+                    from invoices_helpers import (  # type: ignore
+                        find_possible_duplicate,
+                    )
+                possible_dup = find_possible_duplicate(
+                    self._invoices(), parsed
+                )
+            except Exception as exc:
+                log.debug("possible-duplicate check: %s", exc)
+                possible_dup = None
+
         # Auto-registrering kräver en inlärd leverantörsmall
         # som faktiskt träffar på filen (se punkt 5 ovan).
         untaught = not parsed.get("template")
-        if parsed.get("missing") or not self.auto_create or untaught:
+        if (
+            parsed.get("missing") or possible_dup
+            or not self.auto_create or untaught
+        ):
             if parsed.get("missing"):
                 reason = "missing: " + ", ".join(
                     parsed.get("missing", [])
+                )
+            elif possible_dup:
+                inv = possible_dup.get("invoice", {}) or {}
+                reason = (
+                    "possible-duplicate: "
+                    f"faktura {inv.get('invoice_number', '')} "
+                    f"({possible_dup.get('reason', '')})"
                 )
             elif not self.auto_create:
                 reason = "review"

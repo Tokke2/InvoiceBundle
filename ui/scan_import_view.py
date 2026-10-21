@@ -2055,6 +2055,52 @@ class ScanImportView(QWidget):
     #  SKAPA FAKTUROR
     # ══════════════════════════════════════════════════════════════════
 
+    def _registry_invoices(self) -> list[dict]:
+        """Hela registret (även arkiverade/betalda) för
+        dubblettkollen — en exporterad faktura är fortfarande
+        en dubblett. Tyst [] om kärnan inte kan svara."""
+        app = self._app
+        if app is None:
+            return []
+        try:
+            if hasattr(app, "get_invoices"):
+                return list(app.get_invoices() or [])
+            invoices = getattr(app, "invoices", None)
+            if invoices is not None and hasattr(invoices, "all"):
+                return list(invoices.all() or [])
+        except Exception as exc:
+            log.debug("registry invoices for dup check: %s", exc)
+        return []
+
+    def _possible_duplicates_for_rows(
+        self, idxs: list[int]
+    ) -> list[tuple[int, dict]]:
+        """[(radindex, träff)] för möjliga dubbletter bland de
+        valda raderna — mot registret OCH mot varandra (samma
+        faktura två gånger i samma inläsning). Bara varning:
+        här registreras eller tas ingenting bort."""
+        try:
+            try:
+                from ui.invoices_helpers import find_possible_duplicate
+            except Exception:
+                from invoices_helpers import (  # type: ignore
+                    find_possible_duplicate,
+                )
+        except Exception:
+            return []
+        registry = self._registry_invoices()
+        hits: list[tuple[int, dict]] = []
+        earlier: list[dict] = []
+        for i in idxs:
+            row = self._rows[i]
+            hit = find_possible_duplicate(registry, row)
+            if hit is None:
+                hit = find_possible_duplicate(earlier, row)
+            if hit is not None:
+                hits.append((i, hit))
+            earlier.append(row)
+        return hits
+
     def _create_invoices(self) -> None:
         """Registrerar markerade rader som fakturor (belopp → summan)."""
         idxs = self._selected_rows()
@@ -2079,8 +2125,37 @@ class ScanImportView(QWidget):
         if not ready:
             return
 
+        # Möjliga dubbletter: varna FÖRE registrering och låt
+        # användaren avgöra. Nej = raderna lämnas kvar orörda;
+        # inget tas någonsin bort automatiskt.
+        skip_idxs: set[int] = set()
+        dup_hits = self._possible_duplicates_for_rows(ready)
+        if dup_hits:
+            lines = []
+            for i, hit in dup_hits:
+                inv = hit.get("invoice", {}) or {}
+                lines.append(tr(
+                    "scan.possible_dup_line",
+                    file=self._rows[i].get("file", ""),
+                    nr=self._rows[i].get("invoice_number", "") or "—",
+                    supplier=inv.get("supplier", "") or "—",
+                    existing=inv.get("invoice_number", "") or "—",
+                    reason=hit.get("reason", ""),
+                ))
+            answer = QMessageBox.question(
+                self, tr("scan.possible_dup_title"),
+                tr("scan.possible_dup_body", lines="\n".join(lines)),
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                skip_idxs = {i for i, _hit in dup_hits}
+                self._lbl_status.setText(tr(
+                    "scan.possible_dup_skipped", n=len(skip_idxs)
+                ))
+
         created = 0
         for i in sorted(ready, reverse=True):
+            if i in skip_idxs:
+                continue
             row = self._rows[i]
             if not self._supplier_exists(row.get("supplier", "")):
                 QMessageBox.warning(
