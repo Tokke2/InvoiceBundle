@@ -160,6 +160,7 @@ class _RegionImageView(QWidget):
     """
 
     region_drawn = Signal(str, int, tuple)
+    zoom_changed = Signal(float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -170,11 +171,20 @@ class _RegionImageView(QWidget):
         self._active = ""
         self._drag_a: tuple[float, float] | None = None
         self._drag_b: tuple[float, float] | None = None
+        # Zoom: 1.0 = hela sidan anpassad; _focus = bildandelen
+        # i vycentret. Panorera med höger musknapp.
+        self._zoom = 1.0
+        self._focus: tuple[float, float] = (0.5, 0.5)
+        self._pan_last = None
 
     def set_page(self, pixmap: QPixmap | None, page: int) -> None:
         self._pixmap = pixmap
         self._page = page
         self._drag_a = self._drag_b = None
+        self._pan_last = None
+        self._zoom = 1.0
+        self._focus = (0.5, 0.5)
+        self.zoom_changed.emit(self._zoom)
         self.update()
 
     def set_regions(self, regions: dict) -> None:
@@ -193,11 +203,54 @@ class _RegionImageView(QWidget):
         size = self._pixmap.size().scaled(
             area.size().toSize(), Qt.AspectRatioMode.KeepAspectRatio
         )
-        return QRectF(
-            area.center().x() - size.width() / 2,
-            area.center().y() - size.height() / 2,
-            float(size.width()), float(size.height()),
-        )
+        w = float(size.width()) * self._zoom
+        h = float(size.height()) * self._zoom
+        center = area.center()
+        if w <= area.width():
+            left = center.x() - w / 2
+        else:
+            left = min(
+                max(center.x() - self._focus[0] * w,
+                    area.right() - w),
+                area.left(),
+            )
+        if h <= area.height():
+            top = center.y() - h / 2
+        else:
+            top = min(
+                max(center.y() - self._focus[1] * h,
+                    area.bottom() - h),
+                area.top(),
+            )
+        return QRectF(left, top, w, h)
+
+    # ── Zoom / panorering ────────────────────────────────────
+    def set_zoom(self, zoom: float) -> None:
+        self._zoom = min(max(float(zoom), 1.0), 8.0)
+        self.zoom_changed.emit(self._zoom)
+        self.update()
+
+    def zoom_in(self) -> None:
+        self.set_zoom(self._zoom * 1.3)
+
+    def zoom_out(self) -> None:
+        self.set_zoom(self._zoom / 1.3)
+
+    def zoom_fit(self) -> None:
+        self._focus = (0.5, 0.5)
+        self.set_zoom(1.0)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 (Qt-namn)
+        if self._pixmap is None or self._pixmap.isNull():
+            return
+        delta = event.angleDelta().y()
+        if not delta:
+            return
+        frac = self._fraction(event.position())
+        if frac is not None:
+            self._focus = frac  # zooma mot pekaren
+        self.set_zoom(self._zoom * (1.25 if delta > 0 else 1 / 1.25))
+        event.accept()
 
     def _fraction(self, pos) -> tuple[float, float] | None:
         rect = self._img_rect()
@@ -280,6 +333,10 @@ class _RegionImageView(QWidget):
 
     # ── Mus ───────────────────────────────────────────────────
     def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.RightButton:
+            self._pan_last = event.position()
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+            return
         if not self._active:
             return
         if event.button() != Qt.MouseButton.LeftButton:
@@ -290,6 +347,21 @@ class _RegionImageView(QWidget):
             self.update()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._pan_last is not None:
+            pos = event.position()
+            rect = self._img_rect()
+            if rect is not None:
+                dx = (pos.x() - self._pan_last.x()) / max(
+                    rect.width(), 1.0)
+                dy = (pos.y() - self._pan_last.y()) / max(
+                    rect.height(), 1.0)
+                self._focus = (
+                    min(max(self._focus[0] - dx, 0.0), 1.0),
+                    min(max(self._focus[1] - dy, 0.0), 1.0),
+                )
+            self._pan_last = pos
+            self.update()
+            return
         if self._drag_a is None:
             return
         frac = self._fraction(event.position())
@@ -298,6 +370,13 @@ class _RegionImageView(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if (
+            event.button() == Qt.MouseButton.RightButton
+            and self._pan_last is not None
+        ):
+            self._pan_last = None
+            self.unsetCursor()
+            return
         if self._drag_a is None or self._drag_b is None:
             return
         rect = self._norm(self._drag_a, self._drag_b)
@@ -399,10 +478,32 @@ class TemplateDialog(QDialog):
             lambda: self._goto_page(self._page + 1)
         )
         nav.addWidget(self._btn_next)
+        nav.addSpacing(12)
+        self._btn_zoom_out = QPushButton("−")
+        self._btn_zoom_out.setToolTip(tr("tmpl.zoom_out"))
+        self._btn_zoom_out.setMaximumWidth(34)
+        nav.addWidget(self._btn_zoom_out)
+        self._lbl_zoom = QLabel("100 %")
+        self._lbl_zoom.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_zoom.setMinimumWidth(46)
+        nav.addWidget(self._lbl_zoom)
+        self._btn_zoom_in = QPushButton("+")
+        self._btn_zoom_in.setToolTip(tr("tmpl.zoom_in"))
+        self._btn_zoom_in.setMaximumWidth(34)
+        nav.addWidget(self._btn_zoom_in)
+        self._btn_zoom_fit = QPushButton(tr("tmpl.zoom_fit"))
+        nav.addWidget(self._btn_zoom_fit)
         left.addLayout(nav)
         self._view = _RegionImageView()
         self._view.region_drawn.connect(self._on_region_drawn)
+        self._btn_zoom_out.clicked.connect(self._view.zoom_out)
+        self._btn_zoom_in.clicked.connect(self._view.zoom_in)
+        self._btn_zoom_fit.clicked.connect(self._view.zoom_fit)
+        self._view.zoom_changed.connect(self._on_zoom_changed)
         left.addWidget(self._view, stretch=1)
+        lbl_zoom_hint = QLabel(tr("tmpl.zoom_hint"))
+        lbl_zoom_hint.setWordWrap(True)
+        left.addWidget(lbl_zoom_hint)
         middle.addLayout(left, stretch=3)
 
         right = QVBoxLayout()
@@ -471,6 +572,9 @@ class TemplateDialog(QDialog):
         self._test_all()
 
     # ── Sidor ─────────────────────────────────────────────────
+    def _on_zoom_changed(self, zoom: float) -> None:
+        self._lbl_zoom.setText(f"{int(round(zoom * 100))} %")
+
     def _goto_page(self, page: int) -> None:
         self._page = min(max(page, 0), max(self._page_count - 1, 0))
         self._reload_page()
@@ -479,7 +583,9 @@ class TemplateDialog(QDialog):
         pixmap = self._pixmaps.get(self._page)
         if pixmap is None and self._path is not None:
             si = _scan_module()
-            data = si.render_page_image(self._path, self._page)
+            data = si.render_page_image(
+                self._path, self._page, dpi=200
+            )
             pixmap = QPixmap()
             if data:
                 pixmap.loadFromData(data)
@@ -1482,10 +1588,13 @@ class ScanImportView(QWidget):
         # används av både bevakning och manuell import på alla
         # kommande fakturor — det sägs rakt ut i statusraden.
         self._lbl_status.setText(tr("tmpl.remembered", supplier=name))
-        # Använd mallen direkt på nytt som ligger i mappen
+        # Den nya mallen prövas direkt på mappens parkerade
+        # fakturor: de läses om NU ifall de kan använda samma
+        # mall. (Vanliga skanningar läser aldrig om parkerade
+        # tolkningsfiler — de ligger still tills en mall sparas.)
         if self._watch is not None:
             try:
-                self._watch.scan_folder(entry)
+                self._watch.reprocess_parked(entry)
             except Exception as exc:
                 log.warning("teach rescan: %s", exc)
         return True
@@ -1722,6 +1831,65 @@ class ScanImportView(QWidget):
             status = "ingen text hittad"
         return status
 
+    def _reread_rows_with_template(
+        self, supplier: str, template: dict, exclude: Any = None
+    ) -> int:
+        """Läser om de ANDRA tolkade raderna med en nyss sparad mall.
+
+        Efter att användaren granskat EN faktura och sparat mallen
+        prövas den direkt på resten av listan: rader som mallen
+        faktiskt läser (fakturanummer eller belopp hittas) får
+        mallens värden + status omräknad. Rader mallen inte läser
+        rörs inte. Returnerar antalet omlästa rader.
+        """
+        si = _scan_module()
+        count = 0
+        for other in self._rows:
+            if exclude is not None and other is exclude:
+                continue
+            text = str(other.get("_text", "") or "")
+            path = str(other.get("_path", "") or "")
+            if not text and not path:
+                continue
+            try:
+                found = si.template_values(
+                    path or None, text, template
+                )
+            except Exception as exc:
+                log.warning("reread row: %s", exc)
+                continue
+            if not found:
+                continue
+            if not found.get("invoice_number") \
+                    and not found.get("total_amount"):
+                continue  # mallen gör inte anspråk på dokumentet
+            for field, value in found.items():
+                other[field] = value
+            other["supplier"] = supplier
+            other["template"] = supplier
+            miss: list[str] = []
+            try:
+                amount_ok = float(other.get("total_amount") or 0) > 0
+            except (TypeError, ValueError):
+                amount_ok = False
+            if not amount_ok:
+                miss.append("belopp")
+            if not other.get("invoice_number"):
+                miss.append("fakturanummer")
+            other["missing"] = miss
+            other["status"] = (
+                "redo" if not miss
+                else "saknas: " + ", ".join(miss)
+            )
+            count += 1
+        if count:
+            self._refresh_table()
+            log.info(
+                "SCAN_TEMPLATE: %d andra rader lästes om med "
+                "mallen för %s", count, supplier,
+            )
+        return count
+
     def _open_template_dialog(self) -> None:
         """Skapa/redigera mall för markerad rad + tolka om raden."""
         idxs = self._selected_rows()
@@ -1780,10 +1948,16 @@ class ScanImportView(QWidget):
                 row[key] = reparsed.get(key, row.get(key))
             row["template"] = reparsed.get("template", "")
             row["status"] = self._compute_status(reparsed, bool(text))
-        self._refresh_table()
-        self._lbl_status.setText(
-            tr("tmpl.saved", supplier=supplier)
+        # De andra tolkade raderna läses om med samma mall —
+        # kan de använda den fylls deras fält i direkt.
+        n_others = self._reread_rows_with_template(
+            supplier, templates[supplier], exclude=row
         )
+        self._refresh_table()
+        status = tr("tmpl.saved", supplier=supplier)
+        if n_others:
+            status += " " + tr("tmpl.reread_others", n=n_others)
+        self._lbl_status.setText(status)
         log.info(
             "SCAN_TEMPLATE: mall sparad för %s, fält=%s",
             supplier, list(dlg.result_template["fields"]),

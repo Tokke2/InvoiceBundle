@@ -287,11 +287,19 @@ def test_watch_untaught_supplier_parked_until_taught(tmp_path):
     assert parked[0]["reason"] == "no-template"
     assert parked[0]["parsed"]["invoice_number"] == "9911"
 
-    # Användaren lär appen (mall sparas) → den PARKERADE filen
-    # prövas på nytt vid nästa skanning och registreras, och
-    # nya filer går direkt
+    # Vanliga skanningar läser ALDRIG om parkerade tolkningsfiler
+    # — inte ens när en mall dykt upp. Filen är redan importerad
+    # för tolkning och ska ligga still tills användaren agerar.
     holder["templates"] = TEMPLATES
     mgr.scan_all()
+    assert not ready
+    assert len(mgr.parked) == 1
+
+    # Först när parkerade läses om uttryckligen (det mall-
+    # sparandet gör, krav 3) prövas filen mot nya mallen och
+    # registreras; nya filer går direkt
+    entry = {"supplier": "Pilkington", "path": str(folder)}
+    assert mgr.reprocess_parked(entry) == 1
     assert len(ready) == 1
     assert ready[0]["template"] == "Pilkington"
     assert not mgr.parked
@@ -868,3 +876,44 @@ def test_watch_possible_duplicate_parked_not_registered(tmp_path):
     assert len(parked) == 1
     assert parked[0]["reason"].startswith("possible-duplicate:")
     assert "möjlig dubblett" in _park_reason_sv(parked[0]["reason"])
+
+
+def test_watch_parked_interpretation_files_never_rescanned(tmp_path):
+    """Krav: parkerade tolkningsfiler (mall saknas) tolkas EN gång.
+
+    Hur många skanningar som än körs ska filen ligga still i
+    parkeringen — ingen ny tolkning och ingen ny parkerings-
+    händelse (dialog) för samma fil.
+    """
+    _qapp()
+    from ui.watch_folders import WatchManager
+
+    calls = {"n": 0}
+
+    def extract(path):
+        calls["n"] += 1
+        return TEXT, "test"
+
+    folder = tmp_path / "PilkingtonIn"
+    folder.mkdir(parents=True, exist_ok=True)
+    mgr = WatchManager(
+        tmp_path / "watch_folders.json",
+        app=FakeApp(),
+        extract_fn=extract,
+        templates_provider=lambda: {},   # ingen mall → no-template
+    )
+    mgr.set_folders([{"supplier": "Pilkington", "path": str(folder)}])
+    parked_events = []
+    mgr.file_parked.connect(lambda info: parked_events.append(info))
+    (folder / "f1.pdf").write_bytes(b"%PDF-fake-1")
+
+    mgr.scan_all()
+    assert len(mgr.parked) == 1
+    assert mgr.parked[0]["reason"] == "no-template"
+    assert calls["n"] == 1 and len(parked_events) == 1
+
+    mgr.scan_all()
+    mgr.scan_all()
+    assert calls["n"] == 1            # aldrig tolkad igen
+    assert len(parked_events) == 1    # ingen ny varning för samma fil
+    assert len(mgr.parked) == 1

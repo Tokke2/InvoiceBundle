@@ -1543,3 +1543,93 @@ def test_manual_create_warns_and_skips_possible_duplicate(
         assert len(view._rows) == 1  # raden kvar, inget borttaget
     finally:
         view.close()
+
+
+def test_saved_template_rereads_other_interpreted_rows(tmp_path):
+    """Krav: när en mall sparats efter granskning av EN faktura
+    läses de andra tolkade raderna om ifall de kan använda samma
+    mall — deras fält fylls i utan att de öppnas en och en."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import ScanImportView
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    view._refresh_table = lambda: None  # isolera hjälparens logik
+    template = {"fields": {
+        "invoice_number": {"label": "Fakturanr"},
+        "total_amount": {"label": "SUMMA"},
+    }}
+
+    def _row(name, text, supplier=""):
+        return {
+            "file": name, "supplier": supplier,
+            "invoice_number": "", "total_amount": 0,
+            "date": "", "due_date": "", "ocr": "",
+            "missing": ["belopp", "fakturanummer"],
+            "template": "", "method": "test",
+            "status": "saknas: belopp, fakturanummer",
+            "_text": text, "_path": "",
+        }
+
+    taught = _row("a.pdf", "Fakturanr: 9911\nSUMMA: 1 250,00\n",
+                  supplier="Pilkington")
+    same = _row("b.pdf", "PILKINGTON GLAS AB\n"
+                         "Fakturanr: 9912\nSUMMA: 2 500,00\n")
+    other = _row("c.pdf", "HELT ANNAN LEVERANTÖR\nBelopp saknas här")
+    view._rows = [taught, same, other]
+
+    n = view._reread_rows_with_template(
+        "Pilkington", template, exclude=taught)
+    assert n == 1
+    assert same["invoice_number"] == "9912"
+    assert same["total_amount"] == 2500.0
+    assert same["supplier"] == "Pilkington"
+    assert same["template"] == "Pilkington"
+    assert same["status"] == "redo"
+    # Mallen gör inte anspråk på det andra dokumentet → orört
+    assert other["invoice_number"] == "" and other["supplier"] == ""
+    # Den granskade raden själv rörs inte av hjälparen
+    assert taught["invoice_number"] == ""
+
+
+def test_region_image_view_zoom(tmp_path):
+    """Krav: vid mallgranskning ska man kunna zooma in på
+    fakturan för att se raderna — bildrektangeln (och därmed
+    rutkoordinaterna) skalar med zoomen och Anpassa återställer."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QPixmap
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import _RegionImageView
+
+    view = _RegionImageView()
+    view.resize(700, 520)
+    view.set_page(QPixmap(1000, 700), 0)
+    fit = view._img_rect()
+    assert fit is not None and view._zoom == 1.0
+
+    view.set_zoom(2.0)
+    zoomed = view._img_rect()
+    assert abs(zoomed.width() - 2 * fit.width()) < 1.5
+    # Vycentret svarar mot fokuspunkten i bilden
+    frac = view._fraction(zoomed.center())
+    assert abs(frac[0] - 0.5) < 0.01 and abs(frac[1] - 0.5) < 0.01
+    # Rutornas pixelrektangel följer samma skalning
+    rp = view._rect_px((0.1, 0.1, 0.3, 0.25))
+    assert abs(rp.width() - 0.2 * zoomed.width()) < 1.5
+
+    view.zoom_fit()
+    assert view._zoom == 1.0
+    assert abs(view._img_rect().width() - fit.width()) < 1.5
+    # Zoomen kläms till rimliga gränser
+    view.set_zoom(100.0)
+    assert view._zoom == 8.0
+    view.set_zoom(0.1)
+    assert view._zoom == 1.0
+    view.set_page(QPixmap(1000, 700), 0)   # ny sida → 100 %
+    assert view._zoom == 1.0

@@ -381,7 +381,6 @@ class WatchManager(QObject):
         self._extract_fn = extract_fn
         self._config: dict[str, Any] = self._load()
         self._warned_missing: set[str] = set()
-        self._parked_retry_marks: dict[str, str] = {}
         self._scan_stats: dict[str, int] = {
             "imported": 0, "duplicate": 0, "parked": 0, "already": 0,
             "waiting": 0,
@@ -757,45 +756,65 @@ class WatchManager(QObject):
         except Exception as exc:
             log.warning("SCAN_WATCH självläkning: %s", exc)
 
-    def _templates_fingerprint(self) -> str:
-        """Fingeravtryck av mall-läget (egna mallar; inbyggda
-        format ändras bara vid appuppdatering = ny process)."""
-        try:
-            if self._templates_provider is not None:
-                return repr(sorted(
-                    (self._templates_provider() or {}).items()
-                ))
-        except Exception:
-            pass
-        return ""
-
     def _should_retry_parked(self, parked_entry: dict,
                              digest: str) -> bool:
-        """Parkerade filer prövas EN gång till när mall-läget
-        ändrats (appen har lärt sig leverantören, eller ett
-        inbyggt format har tillkommit via uppdatering).
+        """Ska en parkerad fil prövas igen av en VANLIG skanning?
 
-        En parkering får inte bli en återvändsgränd: filen
-        parkerades för att appen inte kunde formatet DÅ.
-        Skäl som beror på filens innehåll (dubblett m.m.)
-        prövas inte om.
+        Filer som importerats för tolkning (mall saknas eller
+        uppgifter saknas) skannas ALDRIG om automatiskt — de är
+        redan inlästa för granskning och ska ligga still tills
+        användaren sparar en mall; DÅ läses de om explicit via
+        reprocess_parked(). Enda undantaget: filer som parkerades
+        enbart för att auto-registreringen var avstängd ("review")
+        prövas igen så fort den slås på — det är ett medvetet
+        användarval, inte en omskanning.
         """
         reason = str(parked_entry.get("reason", ""))
         if reason == "review":
-            # Parkerades bara för att auto-registreringen var
-            # avstängd då. Så fort den är på prövas filen igen —
-            # annars blir parkeringen en återvändsgränd där en
-            # fullt läsbar faktura aldrig läses in.
             return self.auto_create
-        if not (
-            reason == "no-template" or reason.startswith("missing")
-        ):
-            return False
-        fp = self._templates_fingerprint()
-        if self._parked_retry_marks.get(digest) == fp:
-            return False
-        self._parked_retry_marks[digest] = fp
-        return True
+        return False
+
+    def reprocess_parked(self, entry: dict | None = None) -> int:
+        """Läser OM parkerade tolkningsfiler med dagens mallar.
+
+        Det här är tillfället då filer som parkerats för tolkning
+        (orsak "no-template" eller "missing: …") tolkas på nytt —
+        anropas när användaren sparat en mall, så leverantörens
+        övriga väntande fakturor prövas mot den direkt. Med
+        `entry` bara den mappens filer, annars alla bevakade
+        mappar. Returnerar antalet filer som lästes om.
+        """
+        folder_key = ""
+        if entry is not None:
+            folder_key = _norm_path_key(str(entry.get("path", "")))
+        targets: list[dict] = []
+        for parked in list(self._config.get("parked", [])):
+            reason = str(parked.get("reason", "") or "")
+            if not (
+                reason == "no-template"
+                or reason.startswith("missing")
+            ):
+                continue
+            if folder_key:
+                pkey = _norm_path_key(str(parked.get("path", "")))
+                if pkey != folder_key and not pkey.startswith(
+                    folder_key + "/"
+                ):
+                    continue
+            targets.append(parked)
+        for parked in targets:
+            self._config["parked"].remove(parked)
+        if targets:
+            self._save()
+            log.info(
+                "SCAN_WATCH: läser om %d parkerade filer med "
+                "dagens mallar", len(targets),
+            )
+        if entry is not None:
+            self.scan_folder(entry)
+        else:
+            self.scan_all()
+        return len(targets)
 
     def scan_folder(self, entry: dict) -> None:
         folder = Path(str(entry.get("path", "")))
