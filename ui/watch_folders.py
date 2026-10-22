@@ -193,8 +193,114 @@ def _park_reason_sv(reason: str) -> str:
     return _PARK_REASON_SV.get(reason, reason or "okänd orsak")
 
 
+#: Fältnamn i malldiagnosen (som användaren ser dem).
+_DIAG_FIELD_SV = {
+    "invoice_number": "fakturanr",
+    "total_amount": "att betala",
+    "date": "fakturadatum",
+    "due_date": "förfallodatum",
+    "ocr": "OCR",
+}
+
+#: Högsta antal djupdiagnoser per felsökningspaket — paketet
+#: ska gå att klistra in någonstans, inte vara en roman.
+_DIAG_MAX_FILES = 10
+
+
+def _template_diag_lines(
+    path: str,
+    suppliers: list[dict] | None,
+    templates: dict | None,
+) -> list[str]:
+    """Malldiagnos för EN parkerad fil: per textuttag vilket
+    format som var kandidat, vilka fält som hittades och exakt
+    vilket krav som brast. Rent läsande (scan_import sköter
+    analysen); fel här får aldrig kasta paketet."""
+    import scan_import as si
+
+    lines = ["      malldiagnos (varför ingen mall tog filen):"]
+    try:
+        diags = si.diagnose_invoice_file(
+            path, suppliers or [], templates or {}
+        )
+    except Exception as exc:
+        return [f"      malldiagnos: kunde inte köras ({exc})"]
+    for d in diags:
+        head = (
+            f"        · uttag {d.get('method', '—')} "
+            f"({int(d.get('chars', 0) or 0)} tecken)"
+        )
+        if d.get("claimed"):
+            lines.append(
+                head
+                + " — mallen ”{}” TAR texten (fakturanr={}, "
+                "att betala={})".format(
+                    d.get("template") or d.get("candidate") or "?",
+                    d.get("invoice_number") or "—",
+                    d.get("total_amount") or "—",
+                )
+            )
+        elif d.get("candidate"):
+            bits = []
+            for field, value in (d.get("fields") or {}).items():
+                bits.append(
+                    "{}={}".format(
+                        _DIAG_FIELD_SV.get(field, field),
+                        value if value not in (None, "") else "—",
+                    )
+                )
+            failed = list(d.get("failed") or [])
+            tail = ""
+            if d.get("total_verified") is False:
+                failed = [
+                    f for f in failed if f != "total_amount"
+                ]
+                tail = (
+                    " — brister: att betala (värdet {} stämmer "
+                    "inte mot etikettens rad/värderad)".format(
+                        (d.get("fields") or {}).get("total_amount")
+                    )
+                )
+            if failed:
+                names = ", ".join(
+                    _DIAG_FIELD_SV.get(f, f) for f in failed
+                )
+                tail += (
+                    (" — brister: " if not tail else ", ")
+                    + names
+                )
+            lines.append(
+                head
+                + " — {} ”{}”: ".format(
+                    d.get("candidate_kind") or "mall",
+                    d.get("candidate"),
+                )
+                + (", ".join(bits) or "(inga fält)")
+                + (
+                    tail
+                    or " — alla fält funna men anspråket "
+                    "nekades ändå"
+                )
+            )
+        else:
+            lines.append(
+                head + " — "
+                + (
+                    d.get("note")
+                    or "ingen mall var kandidat för texten"
+                )
+            )
+        preview = " ".join((d.get("preview") or "").split())
+        if preview:
+            lines.append(f"          textstart: {preview[:200]}")
+    return lines
+
+
 def watch_diagnostic_lines(
-    config: dict | None, stats: dict | None = None
+    config: dict | None,
+    stats: dict | None = None,
+    suppliers: list[dict] | None = None,
+    templates: dict | None = None,
 ) -> list[str]:
     """Diagnosrader om bevakningen för felsökningspaketet.
 
@@ -247,6 +353,7 @@ def watch_diagnostic_lines(
                 return root
         return ""
 
+    diag_used = 0
     for entry in folders:
         folder = Path(str(entry.get("path", "")))
         supplier = str(entry.get("supplier") or "?")
@@ -316,6 +423,25 @@ def watch_diagnostic_lines(
                         n=len(p.get("text", "") or ""),
                     )
                 )
+            _reason = str(p.get("reason", "") or "")
+            if diag_used < _DIAG_MAX_FILES and (
+                _reason == "no-template"
+                or _reason.startswith("missing:")
+                or (_parsed and not _parsed.get("template"))
+            ):
+                diag_used += 1
+                _ppath = str(p.get("path", "") or "")
+                if _ppath and Path(_ppath).is_file():
+                    lines.extend(
+                        _template_diag_lines(
+                            _ppath, suppliers, templates
+                        )
+                    )
+                else:
+                    lines.append(
+                        "      malldiagnos: filen finns inte "
+                        "kvar på sökvägen"
+                    )
         if len(mine) > 15:
             lines.append(
                 f"    … och {len(mine) - 15} parkerade till "
@@ -604,7 +730,18 @@ class WatchManager(QObject):
     def status_lines(self) -> list[str]:
         """Diagnosrader till felsökningspaketet (Logg-fliken):
         varför filer i bevakade mappar inte lästs in."""
-        return watch_diagnostic_lines(self._config, self.last_scan_stats)
+        templates: dict = {}
+        if self._templates_provider is not None:
+            try:
+                templates = self._templates_provider() or {}
+            except Exception:
+                templates = {}
+        return watch_diagnostic_lines(
+            self._config,
+            self.last_scan_stats,
+            suppliers=self._suppliers(),
+            templates=templates,
+        )
 
     @property
     def last_scan_stats(self) -> dict[str, int]:

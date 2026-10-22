@@ -696,6 +696,165 @@ def _parse_with_reader_fallback(
     return result
 
 
+def _diag_preview(text: str, limit: int = 320) -> str:
+    """Första biten av en text för felsökningspaketet."""
+    t = (text or "").strip()
+    if len(t) <= limit:
+        return t
+    return t[:limit].rstrip() + " …"
+
+
+def _diag_fill_fields(
+    diag: dict[str, Any], fields_spec: Any, found: dict
+) -> None:
+    """Fyll diag["fields"]/["failed"] ur en malls träffar."""
+    fields: dict[str, Any] = {}
+    failed: list[str] = []
+    for field in (fields_spec or {}):
+        if field not in TEMPLATE_FIELD_KINDS:
+            continue
+        value = found.get(field)
+        fields[field] = value
+        if value in (None, ""):
+            failed.append(field)
+    diag["fields"] = fields
+    diag["failed"] = failed
+
+
+def diagnose_invoice_file(
+    path: Any,
+    suppliers: list[dict] | None = None,
+    templates: dict | None = None,
+) -> list[dict[str, Any]]:
+    """Malldiagnos per textuttag, för felsökningspaketet.
+
+    Varje uttag gås igenom för sig (varje PDF-läsare för sig,
+    annars filens enda textkälla): vilken mall var kandidat
+    (egen mall eller inbyggt verifierat format), vilka av dess
+    fält som hittades, och vilket krav som brast — inklusive
+    om det lästa att betala-beloppet stämmer mot etikettens
+    egen rad/värderaden. Diagnosen är rent läsande: den
+    tolkar ingenting vidare och gissar ingenting. Returnerar
+    en post per uttag; nycklarna "fields" (fält → värde/None),
+    "failed" (fält som saknas), "total_verified" och
+    "claimed" bär facit, "preview" första textbiten.
+    """
+    tpl = templates or {}
+    try:
+        p = Path(path) if path else None
+    except Exception:
+        p = None
+    texts: list[tuple[str, str]] = []
+    if p is not None and p.suffix.lower() == ".pdf":
+        texts = extract_pdf_texts(p)
+    if not texts:
+        if p is not None:
+            texts = [extract_text(p)]
+        else:
+            texts = [("", "—")]
+    out: list[dict[str, Any]] = []
+    region_cache: dict[int, dict] = {}
+    for text, method in texts:
+        text = text or ""
+        parsed = parse_invoice_text(text, suppliers, tpl)
+        diag: dict[str, Any] = {
+            "method": method,
+            "chars": len(text),
+            "preview": _diag_preview(text),
+            "invoice_number": parsed.get("invoice_number", ""),
+            "total_amount": parsed.get("total_amount", 0),
+            "date": parsed.get("date", ""),
+            "due_date": parsed.get("due_date", ""),
+            "missing": list(parsed.get("missing", []) or []),
+            "template": parsed.get("template", ""),
+            "candidate": "",
+            "candidate_kind": "",
+            "fields": {},
+            "failed": [],
+            "total_verified": None,
+            "claimed": bool(parsed.get("template")),
+            "note": "",
+        }
+        # Kandidat 1: egen mall (samma matchning som tolkningen).
+        cand_name, cand_tpl = "", None
+        if tpl:
+            sup = match_supplier(text, suppliers or [])
+            if not sup:
+                sup = match_supplier(
+                    text, [{"name": n} for n in tpl.keys()]
+                )
+            if sup:
+                for key, val in tpl.items():
+                    if not isinstance(val, dict):
+                        continue
+                    try:
+                        if find_template({key: val}, sup) is val:
+                            cand_name, cand_tpl = str(key), val
+                            break
+                    except Exception:
+                        continue
+        if cand_tpl is not None:
+            diag["candidate"] = cand_name
+            diag["candidate_kind"] = "egen mall"
+            found = apply_template(text, cand_tpl)
+            spec = cand_tpl.get("fields", {}) or {}
+            if p is not None and any(
+                isinstance(s, dict) and s.get("region")
+                for s in spec.values()
+            ):
+                # Regionsmall: värdena ligger i utpekade bild-
+                # rutor, inte i löptexten — läs dem ur filen.
+                cache_key = id(cand_tpl)
+                if cache_key not in region_cache:
+                    region_cache[cache_key] = (
+                        template_values_from_regions(
+                            cand_tpl, extract_region_texts(p, cand_tpl)
+                        )
+                    )
+                found.update(region_cache[cache_key])
+            _diag_fill_fields(diag, spec, found)
+            if found.get("invoice_number") or found.get(
+                "total_amount"
+            ):
+                diag["claimed"] = True
+        else:
+            # Kandidat 2: inbyggt verifierat format.
+            builtin = builtin_template_for(text)
+            if builtin:
+                bname, btmpl = builtin
+                diag["candidate"] = bname
+                diag["candidate_kind"] = "inbyggt format"
+                found = apply_template(text, btmpl)
+                if "total_amount" in found:
+                    label = str(
+                        btmpl.get("fields", {})
+                        .get("total_amount", {})
+                        .get("label", "")
+                    )
+                    tot = found["total_amount"]
+                    diag["total_verified"] = bool(
+                        _label_same_line_amount(text, label) == tot
+                        or _label_below_amount(text, label) == tot
+                        or is_credit_note(text)
+                    )
+                _diag_fill_fields(
+                    diag, btmpl.get("fields", {}), found
+                )
+                if (
+                    diag["total_verified"] is False
+                    and "total_amount" in found
+                    and "total_amount" not in diag["failed"]
+                ):
+                    diag["failed"].append("total_amount")
+            else:
+                diag["note"] = (
+                    "inget format kände igen leverantören "
+                    "(org.nr/bankgiro/tryckt namn saknas i texten)"
+                )
+        out.append(diag)
+    return out
+
+
 # ═════════════════════════════════════════════════════════════════════
 #  LEVERANTÖRSMALLAR (egen layout per leverantör)
 #

@@ -943,6 +943,67 @@ def test_extract_pdf_texts_offers_both_readers(tmp_path):
     assert si.extract_pdf_text(pdf) == texts[0]
 
 
+def test_diagnose_invoice_file_explains_each_reader(
+    tmp_path, monkeypatch
+):
+    # Felsökningspaketets malldiagnos: staplad text får sin
+    # brist namngiven, radtextens fullträff syns som sådan.
+    monkeypatch.setattr(
+        si, "extract_pdf_texts",
+        lambda _p: [
+            (MARTIN_G_STACKED, "textlager-pypdf"),
+            (MARTIN_G_2024, "textlager-pymupdf"),
+        ],
+    )
+    diags = si.diagnose_invoice_file(
+        tmp_path / "x.pdf", MARTIN_G_REGISTER
+    )
+    assert [d["method"] for d in diags] == [
+        "textlager-pypdf", "textlager-pymupdf",
+    ]
+    stacked, rowed = diags
+    assert stacked["candidate"] == "Martin G Anderson"
+    assert stacked["candidate_kind"] == "inbyggt format"
+    assert not stacked["claimed"]
+    assert "invoice_number" in stacked["failed"]
+    assert stacked["fields"]["total_amount"] == 478.00
+    assert rowed["claimed"]
+    assert rowed["invoice_number"] == "916336"
+    assert rowed["failed"] == []
+
+
+def test_diagnose_invoice_file_flags_unverified_total(
+    tmp_path, monkeypatch
+):
+    # Beloppet läses i fönstret efter etiketten men står
+    # varken på etikettens rad eller värderaden under den —
+    # diagnosen ska säga att just att betala brast, inte
+    # bara att mallen "inte tog" filen.
+    text = (
+        "MARTIN G ANDERSON\n"
+        "Fakturanr. Fakturadatum Kundnr.\n"
+        "916336 2024-05-08 103\n"
+        "Att betala\n"
+        "Betalningsvillkor: 30 dagar netto\n"
+        "Prislista: 500,00\n"
+        "Org nr 556824-5806\n"
+    )
+    assert not si.parse_invoice_text(
+        text, MARTIN_G_REGISTER
+    ).get("template")
+    monkeypatch.setattr(
+        si, "extract_pdf_texts",
+        lambda _p: [(text, "textlager-pypdf")],
+    )
+    (diag,) = si.diagnose_invoice_file(
+        tmp_path / "x.pdf", MARTIN_G_REGISTER
+    )
+    assert not diag["claimed"]
+    assert diag["total_verified"] is False
+    assert "total_amount" in diag["failed"]
+    assert diag["fields"]["invoice_number"] == "916336"
+
+
 def test_builtin_martin_g_below_needs_value_row():
     # Rubrikraden finns men värderaden under Att betala är en
     # textrad utan belopp (t.ex. avklippt OCR) → ingen träff,

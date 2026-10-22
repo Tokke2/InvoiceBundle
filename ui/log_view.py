@@ -719,7 +719,25 @@ class LogView(QWidget):
                 if isinstance(loaded, dict):
                     wcfg = loaded
             meta["watch_folders"] = len(wcfg.get("folders", []) or [])
-            meta["watch_lines"] = watch_diagnostic_lines(wcfg)
+            # Malldiagnosen per parkerad fil behöver registret
+            # och mallarna (samma underlag som tolkningen).
+            _suppliers: list = []
+            try:
+                _suppliers = list(app.get_suppliers() or [])
+            except Exception:
+                pass
+            _templates: dict = {}
+            try:
+                import scan_import as _si
+
+                _templates = _si.load_templates(
+                    _data_dir / "invoice_templates.json"
+                )
+            except Exception:
+                pass
+            meta["watch_lines"] = watch_diagnostic_lines(
+                wcfg, suppliers=_suppliers, templates=_templates
+            )
         except Exception:
             pass
         meta["log_file"] = str(self._log_file)

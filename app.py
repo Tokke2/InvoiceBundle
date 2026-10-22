@@ -3562,7 +3562,25 @@ def collect_diagnostics(app_core: Any) -> str:
             loaded = _load_json(wcfg_path)
             if isinstance(loaded, dict):
                 wcfg = loaded
-        for wline in watch_diagnostic_lines(wcfg):
+        # Malldiagnosen per parkerad fil behöver registret och
+        # mallarna (samma underlag som tolkningen).
+        _suppliers: list = []
+        try:
+            _suppliers = list(app_core.get_suppliers() or [])
+        except Exception:
+            pass
+        _templates: dict = {}
+        try:
+            import scan_import as _si
+
+            _templates = _si.load_templates(
+                DATA_DIR / "invoice_templates.json"
+            )
+        except Exception:
+            pass
+        for wline in watch_diagnostic_lines(
+            wcfg, suppliers=_suppliers, templates=_templates
+        ):
             add(wline)
     except Exception as exc:
         add(f"Bevakningsdiagnos: fel — {exc}")
