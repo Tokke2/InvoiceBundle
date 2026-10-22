@@ -463,6 +463,142 @@ def match_supplier(text: str, suppliers: list[dict]) -> str:
     return ""
 
 
+def _math_line_amount(text: str, label: str) -> float | None:
+    """Beloppet på etikettens EGEN rad, försiktigt valt.
+
+    Rader där etiketten bara nämns i förbifarten ("Pris exkl
+    moms: …") hoppas över, och en etikett som inleder sin rad
+    vinner över en som står mitt i en summarrad. Bara belopp på
+    samma rad accepteras — i kolumnlayouter (rubrikrad +
+    värderad) blir svaret None i stället för fel kolumn.
+    """
+    flat = re.sub(r"[ \t]+", " ", text or "")
+    lab = re.sub(r"\s+", " ", str(label)).strip().rstrip(":#").strip()
+    if not lab:
+        return None
+    best: float | None = None
+    for m in re.finditer(re.escape(lab), flat, re.IGNORECASE):
+        line_start = flat.rfind("\n", 0, m.start()) + 1
+        prefix = flat[line_start:m.start()].strip().lower()
+        if "exkl" in prefix or "pris" in prefix:
+            continue  # omnämnande, inte summarraden
+        rest = flat[m.end():].split("\n", 1)[0]
+        hit = _extract_kind(rest, "amount", m.group(0))
+        if not hit:
+            continue
+        try:
+            value = float(hit)
+        except (TypeError, ValueError):
+            continue
+        if not prefix:
+            return value  # etiketten inleder raden — starkast
+        if best is None:
+            best = value
+    return best
+
+
+#: Etiketter för räknekontrollen (netto/moms/öresavrundning).
+#: Samma försiktighet som överallt: bara värden på etikettens
+#: egen rad används, annars "okänt" — aldrig fel kolumn.
+_MATH_NET_LABELS = (
+    "Summa netto", "Netto exkl. moms", "Summa exkl. moms",
+    "Exkl. moms", "Netto",
+)
+_MATH_VAT_LABELS = (
+    "Moms 25 %", "Moms 25%", "Mervärdesskatt", "Moms", "VAT",
+)
+_MATH_ROUND_LABELS = ("Öresavrundning", "Oresavrundning", "Avrundning")
+
+
+def invoice_math_check(text: str, total: float) -> dict[str, Any]:
+    """Räknekontroll: stämmer netto + moms (+ öresavrundning)
+    mot att betala?
+
+    Returnerar {"status": "ok"/"mismatch"/"unknown", "net",
+    "vat", "rounding", "expected", "diff"}. Både netto och
+    moms måste stå på sina etiketters egna rader för att
+    kontrollen alls ska uttala sig — annars "unknown", så
+    kolumnlayouter och enkla fakturor aldrig falsklarmar.
+    """
+    try:
+        tot = abs(float(total or 0))
+    except (TypeError, ValueError):
+        tot = 0.0
+    net = vat = rounding = None
+    for lab in _MATH_NET_LABELS:
+        net = _math_line_amount(text or "", lab)
+        if net is not None:
+            break
+    for lab in _MATH_VAT_LABELS:
+        vat = _math_line_amount(text or "", lab)
+        if vat is not None:
+            break
+    for lab in _MATH_ROUND_LABELS:
+        rounding = _math_line_amount(text or "", lab)
+        if rounding is not None:
+            break
+    out: dict[str, Any] = {
+        "status": "unknown",
+        "net": net,
+        "vat": vat,
+        "rounding": rounding,
+        "expected": None,
+        "diff": None,
+    }
+    if tot <= 0 or net is None or vat is None:
+        return out
+    expected = round(net + vat + (rounding or 0.0), 2)
+    diff = round(tot - expected, 2)
+    out["expected"] = expected
+    out["diff"] = diff
+    out["status"] = (
+        "ok"
+        if abs(diff) <= max(1.0, tot * 0.005)
+        else "mismatch"
+    )
+    return out
+
+
+def _iso_date_or_none(value: Any) -> Any:
+    try:
+        return datetime.date.fromisoformat(str(value or "")[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def invoice_date_check(date: str, due: str) -> dict[str, Any]:
+    """Datumlogik: förfaller fakturan EFTER fakturadatumet och
+    med en rimlig betalfrist?
+
+    Returnerar {"status": "ok"/"warning"/"unknown",
+    "problems": [...], "term_days": n}. Problemen är koder:
+    "due_before_date" (förfallodatum före fakturadatum —
+    troligt avläsningsfel), "term_long" (frist över 120
+    dagar) och "date_future" (fakturadatum mer än 30 dagar
+    framåt). Saknas datum blir svaret "unknown".
+    """
+    d = _iso_date_or_none(date)
+    u = _iso_date_or_none(due)
+    problems: list[str] = []
+    term = None
+    if d is not None and u is not None:
+        term = (u - d).days
+        if term < 0:
+            problems.append("due_before_date")
+        elif term > 120:
+            problems.append("term_long")
+    if d is not None and d > (
+        datetime.date.today() + datetime.timedelta(days=30)
+    ):
+        problems.append("date_future")
+    status = (
+        "warning"
+        if problems
+        else ("ok" if (d is not None and u is not None) else "unknown")
+    )
+    return {"status": status, "problems": problems, "term_days": term}
+
+
 def parse_invoice_text(
     text: str,
     suppliers: list[dict] | None = None,
@@ -620,6 +756,10 @@ def parse_invoice_text(
     if template_name:
         result["template"] = template_name
         result["template_fields"] = template_fields
+    # Kontrollerna är rådgivande: de ändrar aldrig värdena,
+    # men flaggar räkne-/datumfel för granskning och logg.
+    result["math_check"] = invoice_math_check(text or "", total)
+    result["date_check"] = invoice_date_check(date, due)
     return result
 
 
@@ -853,6 +993,82 @@ def diagnose_invoice_file(
                 )
         out.append(diag)
     return out
+
+
+#: Etikettkandidater för mallreparation, per fält: vanliga
+#: formuleringar som prövas i ordning mot fakturans egen text.
+_REPAIR_LABELS: dict[str, tuple[str, ...]] = {
+    "invoice_number": (
+        "Fakturanr.", "Fakturanr", "Faktura nr", "Fakturanummer",
+        "Faktura-nr", "Nummer", "Dokumentnummer", "Invoice number",
+    ),
+    "total_amount": (
+        "Att betala", "Summa att betala", "Totalt att betala",
+        "Att Betala (SEK)", "ATT BETALA", "Att betala SEK",
+        "Totalt", "Slutsumma", "Amount due",
+    ),
+    "date": (
+        "Fakturadatum", "Faktura datum", "Utfärdandedatum",
+        "Utfärdad", "Datum (tax point)", "Datum", "Invoice date",
+    ),
+    "due_date": (
+        "Förfallodatum", "Förfaller", "Betalas senast",
+        "Förfallodag", "Due date",
+    ),
+    "ocr": ("OCR-nummer", "OCR nummer", "OCR", "Referens"),
+}
+
+
+def suggest_template_repairs(
+    text: str, template: dict
+) -> list[dict[str, Any]]:
+    """Föreslå ny etikett för mallfält som slutat träffa.
+
+    Malldriftsassistenten: leverantören har bytt formulering
+    på fakturan, så mallens etikett hittar inget längre. För
+    varje sådant fält prövas vanliga alternativa etiketter mot
+    fakturans egen text; första kandidaten som faktiskt läser
+    ett värde av rätt typ föreslås, med värdet som bevis.
+    Fält mallen fortfarande läser rörs aldrig, och rutfält
+    (regioner på bilden) föreslås inga etiketter för — dem
+    pekar användaren ut själv. Returnerar en lista med
+    {field, old_label, new_label, value}; appen frågar alltid
+    innan något sparas.
+    """
+    fields = (template or {}).get("fields", {}) or {}
+    if not text or not fields:
+        return []
+    found = apply_template(text, template)
+    suggestions: list[dict[str, Any]] = []
+    for field, spec in fields.items():
+        kind = TEMPLATE_FIELD_KINDS.get(field)
+        if kind is None or not isinstance(spec, dict):
+            continue
+        if spec.get("region"):
+            continue
+        if field in found:
+            continue
+        old_label = str(spec.get("label", "") or "")
+        for cand in _REPAIR_LABELS.get(field, ()):
+            if cand.lower() == old_label.strip().lower():
+                continue
+            raw = extract_with_label(text, cand, kind)
+            below = False
+            if not raw:
+                raw = _extract_below_label(text, cand, kind)
+                below = bool(raw)
+            if not raw:
+                continue
+            value: Any = float(raw) if field == "total_amount" else raw
+            suggestions.append({
+                "field": field,
+                "old_label": old_label,
+                "new_label": cand,
+                "value": value,
+                "below": below,
+            })
+            break
+    return suggestions
 
 
 # ═════════════════════════════════════════════════════════════════════

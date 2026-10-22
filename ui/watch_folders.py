@@ -1120,6 +1120,28 @@ class WatchManager(QObject):
         ):
             parsed["missing"].append("leverantör")
 
+        # Räkne-/datumkontrollerna är rådgivande: värdena
+        # registreras som tolkade, men avvikelser loggas så de
+        # syns i felsökningspaketet och kan granskas i Import.
+        _mc = parsed.get("math_check") or {}
+        if isinstance(_mc, dict) and _mc.get("status") == "mismatch":
+            log.warning(
+                "SCAN_WATCH: %s — räknekontrollen avviker: netto "
+                "%s + moms %s = %s, men att betala är %s "
+                "(diff %s kr)",
+                path.name, _mc.get("net"), _mc.get("vat"),
+                _mc.get("expected"), parsed.get("total_amount"),
+                _mc.get("diff"),
+            )
+        _dc = parsed.get("date_check") or {}
+        if isinstance(_dc, dict) and _dc.get("problems"):
+            log.warning(
+                "SCAN_WATCH: %s — datumkontrollen varnar: %s "
+                "(fakturadatum %s, förfallodatum %s)",
+                path.name, ", ".join(_dc["problems"]),
+                parsed.get("date", ""), parsed.get("due_date", ""),
+            )
+
         now = datetime.now().isoformat(timespec="seconds")
         base_info = {
             "hash": digest, "path": str(path), "file": path.name,

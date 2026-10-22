@@ -1702,6 +1702,7 @@ class ScanImportView(QWidget):
         """
         if not self._watch:
             return
+        start = len(self._rows)
         for parked in list(self._watch.parked):
             parsed = dict(parked.get("parsed", {}))
             parsed["file"] = parked.get("file", "")
@@ -1711,12 +1712,204 @@ class ScanImportView(QWidget):
             parsed = self._apply_template_to_row(
                 parsed, str(parked.get("text", "") or "")
             )
+            # Äldre parkeringar saknar räkne-/datumkontrollerna
+            # (de kom i en senare version) — räkna fram dem nu
+            # så även de får sina kontrollflaggor i listan.
+            try:
+                si = _scan_module()
+                if "math_check" not in parsed:
+                    parsed["math_check"] = si.invoice_math_check(
+                        str(parked.get("text", "") or ""),
+                        float(parsed.get("total_amount") or 0),
+                    )
+                if "date_check" not in parsed:
+                    parsed["date_check"] = si.invoice_date_check(
+                        parsed.get("date", ""),
+                        parsed.get("due_date", ""),
+                    )
+            except Exception:
+                pass
             parsed["status"] = self._compute_status(
                 parsed, bool(parked.get("text"))
             )
             self._rows.append(parsed)
             self._watch.remove_parked(parked.get("hash", ""))
         self._refresh_table()
+        self._offer_template_repairs(self._rows[start:])
+
+    def _offer_template_repairs(self, rows: list[dict]) -> None:
+        """Malldriftsassistenten för nyligen granskade parkeringar.
+
+        Har leverantören bytt formulering på sina fakturor läser
+        den sparade mallen inte längre alla fält. Då föreslår
+        appen — utifrån fakturornas egen text — nya etiketter.
+        Användaren bekräftar alltid; först därefter uppdateras
+        mallen, sparas och prövas på raderna igen.
+        """
+        if not rows:
+            return
+        try:
+            si = _scan_module()
+            templates = self._get_templates()
+        except Exception as exc:
+            log.warning("malldrift: %s", exc)
+            return
+        if not templates:
+            return
+
+        import copy
+
+        field_names = {
+            "invoice_number": "Fakturanr",
+            "total_amount": "Att betala",
+            "date": "Fakturadatum",
+            "due_date": "Förfallodatum",
+            "ocr": "OCR",
+        }
+        by_supplier: dict[str, list[dict]] = {}
+        for row in rows:
+            supplier = str(row.get("supplier", "") or "").strip()
+            if supplier:
+                by_supplier.setdefault(supplier, []).append(row)
+
+        for supplier, supplier_rows in by_supplier.items():
+            try:
+                template = si.find_template(templates, supplier)
+                if not template:
+                    continue
+                template_name = supplier
+                if template_name not in templates:
+                    template_name = next(
+                        (
+                            name
+                            for name, tmpl in templates.items()
+                            if tmpl is template
+                        ),
+                        supplier,
+                    )
+
+                # Samla förslag per fält; vid flera parkerade
+                # fakturor vinner den vanligaste nya etiketten.
+                candidates: dict[str, dict[str, dict[str, Any]]] = {}
+                for row in supplier_rows:
+                    text = str(row.get("_text", "") or "")
+                    if not text:
+                        continue
+                    for suggestion in si.suggest_template_repairs(
+                        text, template
+                    ):
+                        field = str(suggestion.get("field", "") or "")
+                        label = str(suggestion.get("new_label", "") or "")
+                        if not field or not label:
+                            continue
+                        per_label = candidates.setdefault(field, {})
+                        record = per_label.get(label)
+                        if record is None:
+                            per_label[label] = {
+                                "suggestion": suggestion,
+                                "count": 1,
+                            }
+                        else:
+                            record["count"] += 1
+                if not candidates:
+                    continue
+
+                chosen: list[dict[str, Any]] = []
+                ordered_fields = [
+                    field for field in _TEMPLATE_FIELDS
+                    if field in candidates
+                ] + [
+                    field for field in candidates
+                    if field not in _TEMPLATE_FIELDS
+                ]
+                for field in ordered_fields:
+                    record = max(
+                        candidates[field].values(),
+                        key=lambda item: item["count"],
+                    )
+                    chosen.append(dict(record["suggestion"]))
+                if not chosen:
+                    continue
+
+                lines: list[str] = []
+                for suggestion in chosen:
+                    value = suggestion.get("value", "")
+                    if suggestion.get("field") == "total_amount":
+                        value_text = _fmt_amount(value) or str(value)
+                    else:
+                        value_text = str(value)
+                    evidence = f"= {value_text}"
+                    if suggestion.get("below"):
+                        evidence += ", på raden under rubriken"
+                    lines.append(
+                        "• {}: {} → {} ({})".format(
+                            field_names.get(
+                                suggestion["field"],
+                                suggestion["field"],
+                            ),
+                            suggestion.get("old_label") or "—",
+                            suggestion["new_label"],
+                            evidence,
+                        )
+                    )
+                answer = QMessageBox.question(
+                    self,
+                    tr("tmpl.repair_title"),
+                    tr(
+                        "tmpl.repair_body",
+                        supplier=template_name,
+                        changes="\n".join(lines),
+                    ),
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    continue
+
+                new_template = copy.deepcopy(template)
+                fields = new_template.setdefault("fields", {})
+                if not isinstance(fields, dict):
+                    fields = {}
+                    new_template["fields"] = fields
+                for suggestion in chosen:
+                    spec = fields.get(suggestion["field"])
+                    if not isinstance(spec, dict):
+                        spec = {}
+                        fields[suggestion["field"]] = spec
+                    if spec.get("region"):
+                        continue
+                    spec["label"] = suggestion["new_label"]
+                    if suggestion.get("below"):
+                        spec["below"] = True
+                    else:
+                        spec.pop("below", None)
+                templates[template_name] = new_template
+                self._save_templates_file()
+                count = self._reread_rows_with_template(
+                    template_name, new_template
+                )
+                self._lbl_status.setText(
+                    tr(
+                        "tmpl.repaired",
+                        supplier=template_name,
+                        n=count,
+                    )
+                )
+                if not count:
+                    self._refresh_table()
+                log.info(
+                    "SCAN_TEMPLATE: malldrift reparerad för %s: %s",
+                    template_name,
+                    ", ".join(
+                        "{}→{}".format(
+                            suggestion["field"],
+                            suggestion["new_label"],
+                        )
+                        for suggestion in chosen
+                    ),
+                )
+            except Exception as exc:
+                log.warning(
+                    "malldrift för %s: %s", supplier, exc
+                )
 
     def _log_status(self) -> None:
         """Visar vilka textkällor som är tillgängliga på maskinen."""
@@ -2094,7 +2287,8 @@ class ScanImportView(QWidget):
                     align | Qt.AlignmentFlag.AlignVCenter
                 )
                 if key == "status":
-                    if self._ocr_check_bad(row):
+                    if self._ocr_check_bad(row) \
+                            or self._check_warnings(row):
                         item.setForeground(QColor("#ef6c00"))
                     elif row.get("missing") or text == tr("scan.no_text"):
                         item.setForeground(
@@ -2125,6 +2319,30 @@ class ScanImportView(QWidget):
             return False
 
     @staticmethod
+    def _check_warnings(row: dict) -> list[str]:
+        """Kontrollvarningar (räkning/datum) för statuscellen.
+
+        Tolkningen bifogar math_check/date_check på varje rad;
+        avvikelserna visas — värdena ändras aldrig av dem.
+        """
+        warns: list[str] = []
+        mc = row.get("math_check") or {}
+        if isinstance(mc, dict) and mc.get("status") == "mismatch":
+            warns.append(tr("scan.math_warn"))
+        dc = row.get("date_check") or {}
+        keys = {
+            "due_before_date": "scan.date_due_before",
+            "term_long": "scan.date_term_long",
+            "date_future": "scan.date_future",
+        }
+        if isinstance(dc, dict):
+            for prob in dc.get("problems") or []:
+                key = keys.get(str(prob))
+                if key:
+                    warns.append(tr(key))
+        return warns
+
+    @staticmethod
     def _display_status(row: dict) -> str:
         """Statuscell på aktuellt språk (internt värde är svenska)."""
         raw = str(row.get("status", "") or "")
@@ -2145,6 +2363,11 @@ class ScanImportView(QWidget):
         # i stället för först vid betalning hos banken.
         if ScanImportView._ocr_check_bad(row):
             text += "  ·  " + tr("scan.ocr_warn")
+        # Räkne-/datumavvikelser likaså: hellre en flagga i
+        # listan än ett felbelopp i summan.
+        warns = ScanImportView._check_warnings(row)
+        if warns:
+            text += "  ·  " + " · ".join(warns)
         return text
 
     def _update_sum(self) -> None:

@@ -1004,6 +1004,203 @@ def test_diagnose_invoice_file_flags_unverified_total(
     assert diag["fields"]["invoice_number"] == "916336"
 
 
+# ── Räknekontroll + datumlogik ───────────────────────────────────
+# Kontrollerna är rådgivande: de ändrar aldrig värden, men
+# flaggar räkne- och datumfel innan beloppet hamnar i summan.
+
+def test_invoice_math_check_ok_mismatch_unknown():
+    ok_text = "Summa netto 1 000,00\nMoms 250,00\nAtt betala 1 250,00"
+    ok = si.invoice_math_check(ok_text, 1250.00)
+    assert ok["status"] == "ok"
+    assert ok["net"] == 1000.00
+    assert ok["vat"] == 250.00
+    assert ok["expected"] == 1250.00
+    assert ok["diff"] == 0.00
+
+    bad = si.invoice_math_check(ok_text, 1300.00)
+    assert bad["status"] == "mismatch"
+    assert bad["expected"] == 1250.00
+    assert bad["diff"] == 50.00
+
+    # Varken netto eller moms på egna rader → kontrollen uttalar
+    # sig inte alls (hellre "unknown" än en falsk varning).
+    assert si.invoice_math_check(
+        "Att betala 1 250,00", 1250.00
+    )["status"] == "unknown"
+    # Kolumnlayout (rubrikrad + värderad): ingen gissning ur
+    # fel kolumn — Martin G 2024 förblir "unknown".
+    assert si.invoice_math_check(
+        MARTIN_G_2024, 478.00
+    )["status"] == "unknown"
+
+
+def test_invoice_math_check_paired_layout_with_rounding():
+    # Martin G:s parvisa layout: netto + moms + öresavrundning
+    # på summarraden; avrundningsdifferensen ryms i toleransen.
+    chk = si.invoice_math_check(MARTIN_G_PAIRED, 3491.00)
+    assert chk["status"] == "ok"
+    assert chk["net"] == 2793.03
+    assert chk["vat"] == 698.26
+    assert chk["rounding"] == 0.29
+    assert chk["expected"] == 3491.58
+
+
+def test_invoice_date_check_flags_problems():
+    ok = si.invoice_date_check("2024-05-08", "2024-06-07")
+    assert ok["status"] == "ok"
+    assert ok["term_days"] == 30
+    assert ok["problems"] == []
+
+    before = si.invoice_date_check("2024-06-07", "2024-05-08")
+    assert before["status"] == "warning"
+    assert before["problems"] == ["due_before_date"]
+    assert before["term_days"] == -30
+
+    long = si.invoice_date_check("2024-01-01", "2024-07-01")
+    assert long["problems"] == ["term_long"]
+    assert long["term_days"] > 120
+
+    assert si.invoice_date_check("", "2024-06-07")["status"] \
+        == "unknown"
+
+    from datetime import date, timedelta
+
+    future = date.today() + timedelta(days=60)
+    future_check = si.invoice_date_check(
+        future.isoformat(),
+        (future + timedelta(days=30)).isoformat(),
+    )
+    assert future_check["problems"] == ["date_future"]
+
+
+def test_parse_attaches_math_and_date_checks():
+    parsed = si.parse_invoice_text(MARTIN_G_PAIRED, MARTIN_G_SUPPLIER)
+    assert parsed["total_amount"] == 3491.00
+    assert parsed["math_check"]["status"] == "ok"
+    assert parsed["date_check"]["status"] == "ok"
+    assert parsed["date_check"]["term_days"] == 30
+
+    due_first = si.parse_invoice_text(
+        "ACME AB\n"
+        "Fakturadatum: 2026-09-10\n"
+        "Förfallodatum: 2026-09-01\n"
+        "Att betala: 100,00\n",
+        [],
+    )
+    assert due_first["date_check"]["problems"] == [
+        "due_before_date"
+    ]
+
+
+# ── Malldriftsassistenten ────────────────────────────────────────
+# Leverantören byter formulering: mallen slutar träffa, men
+# appen föreslår den nya etiketten ur fakturans egen text.
+
+DRIFT_TEXT = """\
+NORDLYS ENERGI AB
+Faktura nr: NL-2026-0771
+Utfärdad: 2026-09-01
+Betalas senast: 2026-10-01
+Pris exkl moms: 900,00
+Moms: 225,00
+Summa att betala: 1 125,00 SEK
+"""
+
+DRIFT_TEMPLATE = {"fields": {
+    "invoice_number": {"label": "Er ref hos oss"},
+    "total_amount": {"label": "SLUTSUMMA ATT BETALA"},
+    "date": {"label": "Fakturadatum"},
+    "due_date": {"label": "Betalas senast"},
+}}
+
+
+def test_suggest_template_repairs_from_invoice_text():
+    suggestions = si.suggest_template_repairs(
+        DRIFT_TEXT, DRIFT_TEMPLATE
+    )
+    by_field = {s["field"]: s for s in suggestions}
+    # Fältet som fortfarande läses (förfallodatum) föreslås inte.
+    assert set(by_field) == {"invoice_number", "total_amount", "date"}
+    assert by_field["invoice_number"]["new_label"] == "Faktura nr"
+    assert by_field["invoice_number"]["value"] == "NL-2026-0771"
+    assert by_field["invoice_number"]["below"] is False
+    assert by_field["total_amount"]["value"] == 1125.00
+    assert by_field["date"]["new_label"] == "Utfärdad"
+    assert by_field["date"]["value"] == "2026-09-01"
+
+    working = {"fields": {
+        "invoice_number": {"label": "Fakturanr."},
+        "total_amount": {"label": "Att betala"},
+        "date": {"label": "Fakturadatum"},
+        "due_date": {"label": "Förfallodatum"},
+    }}
+    assert si.suggest_template_repairs(MARTIN_G_PAIRED, working) == []
+
+    # Rutfält pekas ut av användaren — inga etikettförslag.
+    region_only = {"fields": {
+        "total_amount": {"region": [0.0, 0.0, 0.1, 0.1]},
+    }}
+    assert si.suggest_template_repairs(
+        MARTIN_G_PAIRED, region_only
+    ) == []
+
+
+def test_drift_offer_repairs_template_and_rereads_rows(
+    tmp_path, monkeypatch
+):
+    """Accepterat reparationsförslag: mallen uppdateras på
+    disk och raden läses om med de nya etiketterna."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as siv
+    from ui.scan_import_view import ScanImportView
+
+    templates_file = tmp_path / "invoice_templates.json"
+    si.save_templates(templates_file, {
+        "Nordlys Energi AB": DRIFT_TEMPLATE,
+    })
+    view = ScanImportView(
+        app=_fake_core(), templates_path=templates_file
+    )
+    try:
+        row = {
+            "supplier": "Nordlys Energi AB",
+            "file": "nordlys.pdf", "_path": "", "_text": DRIFT_TEXT,
+            "invoice_number": "", "ocr": "", "date": "",
+            "due_date": "2026-10-01", "total_amount": 0.0,
+            "method": "test",
+            "missing": ["belopp", "fakturanummer"],
+            "status": "saknas: belopp, fakturanummer",
+        }
+        view._rows = [row]
+
+        asked = []
+
+        def _question(_parent, title, body):
+            asked.append((title, body))
+            return siv.QMessageBox.StandardButton.Yes
+
+        monkeypatch.setattr(
+            siv.QMessageBox, "question", _question
+        )
+        view._offer_template_repairs([row])
+
+        assert asked and "Nordlys Energi AB" in asked[0][1]
+        saved = si.load_templates(templates_file)
+        fields = saved["Nordlys Energi AB"]["fields"]
+        assert fields["invoice_number"]["label"] == "Faktura nr"
+        assert fields["total_amount"]["label"] == "Att betala"
+        assert fields["date"]["label"] == "Utfärdad"
+        assert fields["due_date"]["label"] == "Betalas senast"
+        assert row["invoice_number"] == "NL-2026-0771"
+        assert row["total_amount"] == 1125.0
+        assert row["date"] == "2026-09-01"
+        assert "uppdaterad" in view._lbl_status.text()
+    finally:
+        view.close()
+
+
 def test_builtin_martin_g_below_needs_value_row():
     # Rubrikraden finns men värderaden under Att betala är en
     # textrad utan belopp (t.ex. avklippt OCR) → ingen träff,
