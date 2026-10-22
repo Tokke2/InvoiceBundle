@@ -79,20 +79,24 @@ SCAN_EXTENSIONS: tuple[str, ...] = (
 # ═════════════════════════════════════════════════════════════════════
 
 
-def extract_pdf_text(path: Path) -> tuple[str, str]:
+def extract_pdf_texts(path: Path) -> list[tuple[str, str]]:
     """
-    Extraherar text ur en PDF.
+    Alla tillgängliga PDF-textuttag, i prioritetsordning.
 
-    Returnerar (text, metod) där metod är "textlager-pypdf",
-    "textlager-pymupdf" eller ("", "saknas-stöd") vid fel.
+    Olika läsare lägger ut samma sidas text i olika ordning
+    (innehållsström kontra sidposition). En kolumnlayout
+    (rubrikrad + värderad) kan därför vara läsbar för den ena
+    läsaren men staplad för den andra — tolkningen prövar
+    alternativen innan en fil parkeras (se parse_invoice_file).
     """
+    out: list[tuple[str, str]] = []
     if HAS_PYPDF:
         try:
             reader = PdfReader(str(path))
             parts = [p.extract_text() or "" for p in reader.pages]
             text = "\n".join(parts).strip()
             if text:
-                return text, "textlager-pypdf"
+                out.append((text, "textlager-pypdf"))
         except Exception as exc:
             log.warning("pypdf: %s", exc)
     if HAS_FITZ:
@@ -102,10 +106,21 @@ def extract_pdf_text(path: Path) -> tuple[str, str]:
                     p.get_text() for p in doc  # type: ignore
                 ).strip()
             if text:
-                return text, "textlager-pymupdf"
+                out.append((text, "textlager-pymupdf"))
         except Exception as exc:
             log.warning("pymupdf: %s", exc)
-    return "", "ingen-pdf-läsare"
+    return out
+
+
+def extract_pdf_text(path: Path) -> tuple[str, str]:
+    """
+    Extraherar text ur en PDF.
+
+    Returnerar (text, metod) där metod är "textlager-pypdf",
+    "textlager-pymupdf" eller ("", "saknas-stöd") vid fel.
+    """
+    texts = extract_pdf_texts(path)
+    return texts[0] if texts else ("", "ingen-pdf-läsare")
 
 
 def extract_image_text(path: Path) -> tuple[str, str]:
@@ -638,7 +653,47 @@ def parse_invoice_file(
             return parse_invoice_text(
                 text, suppliers, tpl, region_texts=rtext
             )
-    return parse_invoice_text(text, suppliers, tpl)
+    return _parse_with_reader_fallback(path, text, suppliers, tpl)
+
+
+def _parse_with_reader_fallback(
+    path: Any,
+    text: str,
+    suppliers: list[dict] | None,
+    templates: dict,
+) -> dict[str, Any]:
+    """Tolka texten; utan mallträff prövas övriga PDF-läsares text.
+
+    En leverantörsmall (egen eller inbyggd verifierad) som känner
+    igen fakturan på ett alternativt textuttag vinner ALLTID över
+    en mallös tolkning — aldrig tvärtom, och de strikta
+    anspråksreglerna gäller oförändrade för varje uttag. Säger
+    ingen läsares text något om formatet gäller den första
+    tolkningen orörd (filen parkeras som förut).
+    """
+    result = parse_invoice_text(text, suppliers, templates)
+    if result.get("template"):
+        return result
+    try:
+        p = Path(path) if path else None
+    except Exception:
+        p = None
+    if p is None or p.suffix.lower() != ".pdf":
+        return result
+    seen = re.sub(r"\s+", " ", text or "").strip()
+    for alt_text, method in extract_pdf_texts(p):
+        if re.sub(r"\s+", " ", alt_text).strip() == seen:
+            continue
+        alt = parse_invoice_text(alt_text, suppliers, templates)
+        if alt.get("template"):
+            log.info(
+                "SCAN_IMPORT: mallen kände igen fakturan via "
+                "alternativt textuttag (%s): %s",
+                method,
+                alt.get("template"),
+            )
+            return alt
+    return result
 
 
 # ═════════════════════════════════════════════════════════════════════

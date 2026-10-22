@@ -833,6 +833,116 @@ def test_builtin_martin_g_2024_single_page_layout():
     assert parsed["template"]
 
 
+# ── Alternativ PDF-läsare när första uttaget saknar mallträff ────
+# Den ena läsaren kan stapla texten (alla rubriker för sig, alla
+# värden för sig) så att ingen mall gör anspråk, medan den andra
+# läsaren ger rubrikrad + värderad. Filtolkningen prövar då det
+# andra uttaget innan filen parkeras — och bara vid mallträff.
+
+MARTIN_G_STACKED = """\
+MARTIN G ANDERSON
+FAKTURA
+Fakturanr.
+Fakturadatum
+Kundnr.
+916336
+2024-05-08
+103
+Förfallodatum: 2024-06-07
+Att betala
+478,00
+AB Martin G Anderson
+Box 1736
+701 17 ÖREBRO
+Org nr 556824-5806
+Bankgiro: 728-0811
+"""
+
+
+def _martin_g_2024_pdf(tmp_path):
+    """Riktig PDF med 916336-layouten (rubrikrad + värderad)."""
+    import fitz
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    y = 60
+    page.insert_text((40, y), "MARTIN G ANDERSON", fontsize=13)
+    y += 30
+    for x, s in ((40, "Fakturanr."), (150, "Fakturadatum"),
+                 (280, "Kundnr.")):
+        page.insert_text((x, y), s, fontsize=10)
+    y += 14
+    for x, s in ((40, "916336"), (150, "2024-05-08"), (280, "103")):
+        page.insert_text((x, y), s, fontsize=10)
+    y += 30
+    page.insert_text((40, y), "001 Isolerglas Dubbel 382,50",
+                     fontsize=9)
+    y += 26
+    for x, s in ((40, "Summa netto"), (150, "Moms"),
+                 (240, "Öresavrundning"), (360, "Att betala")):
+        page.insert_text((x, y), s, fontsize=10)
+    y += 14
+    for x, s in ((40, "382,50"), (150, "95,63"), (240, "0,13"),
+                 (360, "SEK 478,00")):
+        page.insert_text((x, y), s, fontsize=10)
+    y += 30
+    page.insert_text((40, y), "Förfallodatum: 2024-06-07", fontsize=10)
+    y += 20
+    page.insert_text((40, y), "Org nr 556824-5806  Bankgiro: 728-0811",
+                     fontsize=9)
+    pdf = tmp_path / "martin_g_916336.pdf"
+    doc.save(pdf)
+    doc.close()
+    return pdf
+
+
+def test_parse_file_retries_other_reader_when_stacked(tmp_path):
+    # Den staplade texten gör inget mallanspråk (förutsättning).
+    primary = si.parse_invoice_text(MARTIN_G_STACKED, MARTIN_G_REGISTER)
+    assert not primary.get("template")
+    pdf = _martin_g_2024_pdf(tmp_path)
+    parsed = si.parse_invoice_file(pdf, MARTIN_G_STACKED,
+                                   MARTIN_G_REGISTER)
+    assert parsed["template"]
+    assert parsed["supplier"] == "AB Martin G Anderson"
+    assert parsed["invoice_number"] == "916336"
+    assert parsed["total_amount"] == 478.00
+    assert parsed["date"] == "2024-05-08"
+    assert parsed["due_date"] == "2024-06-07"
+
+
+def test_parse_file_keeps_first_parse_without_any_claim(tmp_path):
+    # Okänt format i båda uttagen → första tolkningen gäller
+    # orörd; alternativet får aldrig skriva över gissningar.
+    import fitz
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((40, 60), "ACME BOLAG AB", fontsize=12)
+    page.insert_text((40, 90), "Fakturanr: 777", fontsize=10)
+    page.insert_text((40, 110), "Att betala: 200,00", fontsize=10)
+    pdf = tmp_path / "acme.pdf"
+    doc.save(pdf)
+    doc.close()
+    parsed = si.parse_invoice_file(
+        pdf, "ACME BOLAG AB\nFakturanr: 555\nAtt betala: 100,00",
+        MARTIN_G_REGISTER,
+    )
+    assert not parsed.get("template")
+    assert parsed["invoice_number"] == "555"
+    assert parsed["total_amount"] == 100.00
+
+
+def test_extract_pdf_texts_offers_both_readers(tmp_path):
+    if not (si.HAS_PYPDF and si.HAS_FITZ):
+        return
+    pdf = _martin_g_2024_pdf(tmp_path)
+    texts = si.extract_pdf_texts(pdf)
+    methods = [m for _t, m in texts]
+    assert methods[0] == "textlager-pypdf"
+    assert "textlager-pymupdf" in methods
+    # Primäruttaget är oförändrat det första alternativet.
+    assert si.extract_pdf_text(pdf) == texts[0]
+
+
 def test_builtin_martin_g_below_needs_value_row():
     # Rubrikraden finns men värderaden under Att betala är en
     # textrad utan belopp (t.ex. avklippt OCR) → ingen träff,
