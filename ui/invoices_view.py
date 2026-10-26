@@ -286,6 +286,12 @@ class InvoicesView(QWidget):
         super().__init__(parent)
         self._app = app
         self._all_data: list[dict] = []
+        # Exportmarkering per faktura-id: radmarkeringen i tabellen
+        # ÄR exportvalet, men mängden bor här så markeringen
+        # överlever filterbyte och refresh (återappliceras per id).
+        self._marked_export_ids: set[str] = set()
+        self._displayed_ids: list[str] = []
+        self._populating_table = False
         self._undo_stack: list[list[tuple[str, str, str]]] = []
         self._chip_mode: str = ""  # snabbfilter: "" / overdue / today / week
         self._current_theme: dict = {}
@@ -402,7 +408,12 @@ class InvoicesView(QWidget):
         supplier_layout.addStretch()
         root.addWidget(supplier_frame)
 
-        # ── Sök + filter ───────────────────────────────────────────────
+        # ── Sök + filter (egen panel: FilterBar) ───────────────────────
+        filter_frame = QFrame()
+        filter_frame.setObjectName("FilterBar")
+        filter_layout = QVBoxLayout(filter_frame)
+        filter_layout.setContentsMargins(10, 6, 10, 6)
+        filter_layout.setSpacing(6)
         row_search = QHBoxLayout()
         row_search.setSpacing(8)
 
@@ -451,7 +462,7 @@ class InvoicesView(QWidget):
         row_search.addWidget(self._filter_type)
         row_search.addWidget(self._filter_status)
         row_search.addWidget(self._filter_supplier)
-        root.addLayout(row_search)
+        filter_layout.addLayout(row_search)
 
         # ── Snabbfilter-chips: förfallofönster ──────────────────────
         row_chips = QHBoxLayout()
@@ -470,10 +481,14 @@ class InvoicesView(QWidget):
             self._chip_btns[mode] = chip
             row_chips.addWidget(chip)
         row_chips.addStretch()
-        root.addLayout(row_chips)
+        filter_layout.addLayout(row_chips)
+        root.addWidget(filter_frame)
 
-        # ── CRUD-knappar ───────────────────────────────────────────────
-        row_actions = QHBoxLayout()
+        # ── CRUD-knappar (egen panel: ActionsBar) ──────────────────────
+        actions_frame = QFrame()
+        actions_frame.setObjectName("ActionsBar")
+        row_actions = QHBoxLayout(actions_frame)
+        row_actions.setContentsMargins(10, 6, 10, 6)
         row_actions.setSpacing(8)
 
         self._btn_add = make_btn(
@@ -542,11 +557,30 @@ class InvoicesView(QWidget):
         )
         self._btn_undo.clicked.connect(self._undo_last_status)
         row_actions.addWidget(self._btn_undo)
-        root.addLayout(row_actions)
+        root.addWidget(actions_frame)
 
-        # ── Export-rad ─────────────────────────────────────────────────
+        # ── Export (egen panel: ExportBar) ─────────────────────────────
+        export_frame = QFrame()
+        export_frame.setObjectName("ExportBar")
+        export_layout = QVBoxLayout(export_frame)
+        export_layout.setContentsMargins(10, 6, 10, 6)
+        export_layout.setSpacing(6)
         row_export = QHBoxLayout()
         row_export.setSpacing(10)
+
+        self._btn_export_selected = make_btn(
+            tr("invoices.export_selected"),
+            "Exportera bara de markerade fakturorna till PDF.\n"
+            "Samma regler som alltid: varje faktura egen rad, max "
+            "10 per fil, original bifogas (standard PÅ) och "
+            "betald-markerade ingår aldrig. Efter lyckad export "
+            "markeras fakturorna Betald och flyttas till Historik.",
+            success=True,
+        )
+        self._btn_export_selected.clicked.connect(
+            self._export_selected_pdf
+        )
+        self._btn_export_selected.setEnabled(False)
 
         self._btn_export_all = make_btn(
             tr("invoices.export_all"),
@@ -576,12 +610,45 @@ class InvoicesView(QWidget):
             "color:#888;background:transparent;"
         )
 
+        row_export.addWidget(self._btn_export_selected)
         row_export.addWidget(self._btn_export_all)
         row_export.addWidget(self._btn_history)
         row_export.addWidget(self._btn_open_export)
         row_export.addWidget(self._lbl_history_count)
         row_export.addStretch()
-        root.addLayout(row_export)
+        export_layout.addLayout(row_export)
+
+        # Markerbar: radmarkeringen ÄR exportvalet. Markeringen
+        # bor per faktura-id och överlever filterbyte/refresh;
+        # här syns alltid hur många som är valda och nettot.
+        row_select = QHBoxLayout()
+        row_select.setSpacing(8)
+        self._lbl_export_selection = QLabel(
+            tr("invoices.export_sel_none")
+        )
+        self._lbl_export_selection.setFont(make_font(11, True))
+        self._lbl_export_selection.setStyleSheet(
+            "background:transparent;"
+        )
+        self._btn_mark_shown = make_btn(
+            tr("invoices.mark_shown"),
+            "Markera alla rader som visas just nu för export",
+        )
+        self._btn_mark_shown.clicked.connect(self._mark_all_shown)
+        self._btn_clear_marked = make_btn(
+            tr("invoices.clear_marked"),
+            "Rensa exportmarkeringen helt",
+        )
+        self._btn_clear_marked.clicked.connect(
+            self._clear_export_selection
+        )
+        self._btn_clear_marked.setEnabled(False)
+        row_select.addWidget(self._lbl_export_selection)
+        row_select.addStretch()
+        row_select.addWidget(self._btn_mark_shown)
+        row_select.addWidget(self._btn_clear_marked)
+        export_layout.addLayout(row_select)
+        root.addWidget(export_frame)
 
         # ── Summering: tre beloppskort ─────────────────────────────────
         summary_frame = QFrame()
@@ -752,6 +819,11 @@ class InvoicesView(QWidget):
             log.error("refresh error: %s", exc)
             self._all_data = []
 
+        # Exportmarkeringen lever bara så länge posten finns kvar
+        # i huvudregistret (exporterade/borttagna id:n städas bort).
+        _valid = {str(r.get("id", "")) for r in self._all_data}
+        self._marked_export_ids &= _valid
+
         self._refresh_supplier_selector()
         self._update_filter_supplier_combo()
 
@@ -760,24 +832,38 @@ class InvoicesView(QWidget):
         self._update_summary(filtered)
         self._update_export_buttons()
 
-    def _archive_exported(self, chunk: list[dict]) -> int:
-        """Flyttar exporterade fakturor till leverantörsarkivet
-        (motorn flyttar posten till data/betalda/<leverantör>.json
-        när status sätts till Arkiverad). Faller tillbaka på
-        motor-metoden om den finns. Aldrig ett exportfel."""
+    def _archive_exported(
+        self, chunk: list[dict], payment_date: str = ""
+    ) -> int:
+        """Efter en LYCKAD delfil: posterna markeras Betald med
+        exportens betalningsdatum och flyttas till leverantörens
+        fil i data/betalda/ (Historik) — därifrån ser importens
+        dubblettskydd dem, så de aldrig registreras igen.
+        Faller tillbaka på app-fasaden om motormetoden saknas.
+        Aldrig ett exportfel."""
         ids = [str(i.get("id", "")) for i in chunk if i.get("id")]
         if not ids:
             return 0
         engine = getattr(self._app, "invoices", None)
-        if engine is not None and hasattr(engine, "mark_archived"):
+        if engine is not None and hasattr(
+            engine, "mark_exported_paid"
+        ):
             try:
-                return int(engine.mark_archived(ids))
+                return int(
+                    engine.mark_exported_paid(ids, payment_date)
+                )
             except Exception as exc:
-                log.warning("ARKIV mark_archived: %s", exc)
+                log.warning("EXPORT mark_exported_paid: %s", exc)
         count = 0
         for rid in ids:
             try:
-                self._app.update_invoice(rid, {"status": "Arkiverad"})
+                self._app.update_invoice(
+                    rid,
+                    {
+                        "status": "Betald",
+                        "payment_date": payment_date,
+                    },
+                )
                 count += 1
             except Exception:
                 pass
@@ -798,6 +884,56 @@ class InvoicesView(QWidget):
             if r.get("status") not in NON_UNPAID_STATUSES
         ]
 
+    def _get_selected_exportable(self) -> list[dict]:
+        """Markerade för export: exportmarkeringen (per id, även
+        rader som ett filter just nu döljer) ∩ exporterbara.
+        Betald/Arkiverad/Makulerad ingår alltså aldrig, precis
+        som i "Exportera alla"."""
+        return [
+            r
+            for r in self._get_exportable()
+            if str(r.get("id", "")) in self._marked_export_ids
+        ]
+
+    def _apply_table_selection(self) -> None:
+        """Ritar exportmarkeringen som radmarkering i tabellen
+        (per UserRole-id, efter sortering). Signaler stängs av
+        under tiden så mängden per id inte skrivs över."""
+        model = self._table.selectionModel()
+        if model is None:
+            return
+        self._populating_table = True
+        try:
+            model.clearSelection()
+            flags = (
+                QItemSelectionModel.SelectionFlag.Select
+                | QItemSelectionModel.SelectionFlag.Rows
+            )
+            for row in range(self._table.rowCount()):
+                item = self._table.item(row, 0)
+                if item is not None and str(
+                    item.data(Qt.ItemDataRole.UserRole) or ""
+                ) in self._marked_export_ids:
+                    model.select(
+                        self._table.model().index(row, 0), flags
+                    )
+        finally:
+            self._populating_table = False
+        self._update_export_buttons()
+        self._update_buttons()
+
+    def _mark_all_shown(self) -> None:
+        """Markerar alla rader som visas just nu för export."""
+        self._marked_export_ids |= {
+            i for i in self._displayed_ids if i
+        }
+        self._apply_table_selection()
+
+    def _clear_export_selection(self) -> None:
+        """Rensar exportmarkeringen helt."""
+        self._marked_export_ids = set()
+        self._apply_table_selection()
+
     def _include_originals(self) -> bool:
         """Inställningen export_include_originals (standard: PÅ —
         originalen ska följa med i betal-PDF:en)."""
@@ -817,7 +953,8 @@ class InvoicesView(QWidget):
             return False
 
     def _update_export_buttons(self) -> None:
-        """Uppdaterar exportknapp + historikräknare."""
+        """Uppdaterar exportknappar (alla/markerade), markerings-
+        raden och historikräknaren."""
         exportable = self._get_exportable()
         n = len(exportable)
         self._btn_export_all.setEnabled(n > 0)
@@ -826,6 +963,53 @@ class InvoicesView(QWidget):
             if n > 0
             else tr("invoices.export_none")
         )
+        selected = self._get_selected_exportable()
+        if hasattr(self, "_btn_export_selected"):
+            m = len(selected)
+            self._btn_export_selected.setEnabled(m > 0)
+            if m > 0:
+                net = round(
+                    sum(
+                        _to_float(r.get("total_amount"))
+                        for r in selected
+                    ),
+                    2,
+                )
+                self._btn_export_selected.setText(
+                    tr(
+                        "invoices.export_selected_n",
+                        n=m,
+                        amount=fmt_amount(net),
+                    )
+                )
+            else:
+                self._btn_export_selected.setText(
+                    tr("invoices.export_selected")
+                )
+        if hasattr(self, "_lbl_export_selection"):
+            if selected:
+                net = round(
+                    sum(
+                        _to_float(r.get("total_amount"))
+                        for r in selected
+                    ),
+                    2,
+                )
+                self._lbl_export_selection.setText(
+                    tr(
+                        "invoices.export_sel_info",
+                        n=len(selected),
+                        amount=fmt_amount(net),
+                    )
+                )
+            else:
+                self._lbl_export_selection.setText(
+                    tr("invoices.export_sel_none")
+                )
+        if hasattr(self, "_btn_clear_marked"):
+            self._btn_clear_marked.setEnabled(
+                bool(self._marked_export_ids)
+            )
         hist_count = self._export_history.count()
         self._lbl_history_count.setText(
             tr("invoices.history_count", n=hist_count)
@@ -1029,6 +1213,10 @@ class InvoicesView(QWidget):
 
     def _populate_table(self, data: list[dict]) -> None:
         """Ritar tabellen med statusfärger och kredit-markering."""
+        self._populating_table = True
+        self._displayed_ids = [
+            str(r.get("id", "")) for r in data if r.get("id")
+        ]
         self._table.setSortingEnabled(False)
         self._table.setRowCount(len(data))
         dark = self._is_dark()
@@ -1081,7 +1269,10 @@ class InvoicesView(QWidget):
         self._table.setSortingEnabled(True)
         self._table.resizeRowsToContents()
         self._fit_columns()
-        self._update_buttons()
+        # Exportmarkeringen återappliceras per id efter
+        # sorteringen — den överlever filterbyte och refresh.
+        self._populating_table = False
+        self._apply_table_selection()
 
     def _fit_columns(self) -> None:
         fit_table_columns(self._table, COL_WIDTHS)
@@ -1155,6 +1346,16 @@ class InvoicesView(QWidget):
     # ══════════════════════════════════════════════════════════════════
 
     def _on_selection_changed(self) -> None:
+        if not getattr(self, "_populating_table", False):
+            # Radmarkeringen ÄR exportvalet. Markerade id:n
+            # utanför det som visas just nu (annat filter) behålls
+            # — bara de synliga radernas val skrivs om.
+            visible = set(getattr(self, "_displayed_ids", []))
+            self._marked_export_ids = (
+                (self._marked_export_ids - visible)
+                | set(self._selected_ids())
+            )
+        self._update_export_buttons()
         self._update_buttons()
         inv = self._selected_invoice()
         if inv:
@@ -1275,6 +1476,16 @@ class InvoicesView(QWidget):
             _btn.setToolTip(tr(f"invoices.chip_{_mode}"))
         self._btn_combine.setText(tr("combine.button"))
         self._btn_combine.setToolTip(tr("combine.tip"))
+        if hasattr(self, "_btn_export_selected"):
+            self._btn_export_selected.setText(
+                tr("invoices.export_selected")
+            )
+        if hasattr(self, "_btn_mark_shown"):
+            self._btn_mark_shown.setText(tr("invoices.mark_shown"))
+        if hasattr(self, "_btn_clear_marked"):
+            self._btn_clear_marked.setText(
+                tr("invoices.clear_marked")
+            )
         self._btn_export_all.setText(tr("invoices.export_all"))
         self._btn_history.setText(tr("invoices.history"))
         self._btn_open_export.setText(tr("invoices.open_export_folder"))
@@ -2288,6 +2499,20 @@ class InvoicesView(QWidget):
         """
         self._export_invoices(self._get_exportable())
 
+    def _export_selected_pdf(self) -> None:
+        """Exporterar BARA de markerade fakturorna till PDF.
+
+        Samma flöde och regler som "Exportera alla": bekräftelse,
+        betalningsdatum, max 10 fakturor per fil (-delXavN),
+        original som standard, krediter nettas — och efter lyckad
+        export markeras posterna Betald i Historik/data/betalda.
+        Inget markerat (eller bara betalda markerade) → ingen
+        export och inget ändras."""
+        self._export_invoices(
+            self._get_selected_exportable(),
+            confirm_title=tr("invoices.export_selected_title"),
+        )
+
     def _export_invoices(
         self,
         exportable: list[dict],
@@ -2337,7 +2562,8 @@ class InvoicesView(QWidget):
             f"  ATT BETALA:       {fmt_amount(att_betala)}\n\n"
             f"Leverantörer: {', '.join(suppliers)}\n\n"
             f"Du tillfrågas om betalningsdatum i nästa steg.\n"
-            f"Fakturorna arkiveras efter export.",
+            f"Fakturorna markeras som Betald efter export och "
+            f"flyttas till Historik.",
             QMessageBox.StandardButton.Yes
             | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
@@ -2482,7 +2708,7 @@ class InvoicesView(QWidget):
 
             # Arkivera just den här filens fakturor → de flyttas
             # till leverantörens fil i data/betalda/ (Historik)
-            archived += self._archive_exported(chunk)
+            archived += self._archive_exported(chunk, export_pd)
 
         if not made_files:
             if aborted:
@@ -2515,7 +2741,8 @@ class InvoicesView(QWidget):
             if len(made_files) > 1 else ""
         )
         self._status(
-            f"📄  {archived} poster exporterade{files_note}"
+            f"📄  {archived} poster exporterade och markerade "
+            f"Betald{files_note}"
             f" → {fmt_amount(att_betala)}"
             + (f"  (betaldatum: {export_pd})" if export_pd else "")
             + attach_note
@@ -2540,7 +2767,8 @@ class InvoicesView(QWidget):
         )
         partial_line = (
             f"\n\n⚠  Exporten avbröts ({failed_note}) — "
-            "övriga poster är INTE exporterade eller arkiverade."
+            "övriga poster är INTE exporterade eller "
+            "betald-markerade."
             if failed_note else ""
         )
         box = QMessageBox(self)
@@ -2551,7 +2779,8 @@ class InvoicesView(QWidget):
             else QMessageBox.Icon.Information
         )
         box.setText(
-            f"✅  {archived} poster exporterade och arkiverade.\n\n"
+            f"✅  {archived} poster exporterade och markerade "
+            f"som Betald.\n\n"
             f"  Fakturor  (+)    {fmt_amount(total_invoices)}\n"
             f"  Krediter  (−)    {fmt_amount(total_credits)}\n"
             f"  {'─' * 38}\n"
@@ -2579,8 +2808,8 @@ class InvoicesView(QWidget):
         # Betalningsdatum nollställs implicit — variabeln payment_date
         # existerar bara i denna funktion. Nästa export frågar igen.
         log.info(
-            "Export klar: %d fakturor arkiverade i %d fil(er), "
-            "betalningsdatum '%s' nollställt",
+            "Export klar: %d fakturor markerade Betald i %d "
+            "fil(er), betalningsdatum '%s' nollställt",
             archived,
             len(made_files),
             export_pd,
@@ -2663,6 +2892,9 @@ class InvoicesView(QWidget):
             tr("invoices.mark_paid"), self._mark_selected_paid
         )
         menu.addAction(
+            tr("invoices.export_selected"), self._export_selected_pdf
+        )
+        menu.addAction(
             tr("invoices.ctx_undo_status"), self._undo_last_status
         )
         menu.addSeparator()
@@ -2719,6 +2951,17 @@ class InvoicesView(QWidget):
             strip.setStyleSheet(
                 "QFrame#SummaryStrip{background:transparent;border:none;}"
             )
+        # Grupperingspanelerna (filter / åtgärder / export) —
+        # exportpanelen får guldkant så den aldrig missas.
+        for _name in ("FilterBar", "ActionsBar", "ExportBar"):
+            _frame = self.findChild(QFrame, _name)
+            if _frame:
+                _edge = gold if _name == "ExportBar" else border_c
+                _frame.setStyleSheet(
+                    f"QFrame#{_name}{{background-color:{card};"
+                    f"border-radius:10px;"
+                    f"border:1.5px solid {_edge};}}"
+                )
         for obj_name, bg in (
             ("MoneyCard", card),
             ("MoneyCardCredit", card),

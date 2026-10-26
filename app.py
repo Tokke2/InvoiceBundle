@@ -2527,7 +2527,14 @@ class InvoiceEngine:
             self._sync_type(data)
         if self._store.get(record_id) is not None:
             if data.get("status") == "Arkiverad":
-                # Exporterad → flytta till leverantörsfilen
+                # Exporterad → flytta till leverantörsfilen.
+                # Övriga fält i samma anrop (t.ex. payment_date)
+                # appliceras FÖRST — annars tappades de i flytten.
+                rest = {
+                    k: v for k, v in data.items() if k != "status"
+                }
+                if rest:
+                    self._store.update(record_id, rest)
                 self.mark_archived([record_id])
                 return self._archive.get(record_id)
             return self._store.update(record_id, data)
@@ -2843,8 +2850,9 @@ class InvoiceEngine:
         """Markerar betalda + sätter betalningsdatum. Posten
         STANNAR i huvudfilen tills den exporteras — flytten till
         leverantörsfilen (data/betalda/) sker först vid export
-        (status Arkiverad). Markera betald ensam flyttar alltså
-        aldrig posten ur huvudregistret."""
+        (då med status Betald via mark_exported_paid). Markera
+        betald ensam flyttar alltså aldrig posten ur
+        huvudregistret."""
         date = payment_date or datetime.date.today().isoformat()
         count = 0
         for rid in ids:
@@ -2853,8 +2861,8 @@ class InvoiceEngine:
         return count
 
     def mark_archived(self, ids: list[str]) -> int:
-        """Arkiverar fakturor (sätts automatiskt efter PDF-export):
-        posten FLYTTAS till leverantörens fil i data/betalda/."""
+        """Arkiverar fakturor: posten FLYTTAS till leverantörens
+        fil i data/betalda/ med status Arkiverad."""
         count = 0
         for rid in ids:
             rec = self._store.get(rid)
@@ -2862,6 +2870,36 @@ class InvoiceEngine:
                 continue
             moved = dict(rec)
             moved["status"] = "Arkiverad"
+            self._archive.move_in(moved)
+            self._store.delete(rid)
+            count += 1
+        return count
+
+    def mark_exported_paid(
+        self, ids: list[str], payment_date: str = ""
+    ) -> int:
+        """Efter LYCKAD export: posten markeras Betald med
+        exportens betalningsdatum och FLYTTAS i samma steg till
+        leverantörens fil i data/betalda/ (Historik). Därifrån
+        ser importens dubblettskydd den — en exporterad faktura
+        kan aldrig registreras igen. Poster som redan bor i
+        arkivet uppdateras på plats till Betald."""
+        date = payment_date or datetime.date.today().isoformat()
+        count = 0
+        for rid in ids:
+            rec = self._store.get(rid)
+            if rec is None:
+                if self._archive.get(rid) is not None:
+                    self._archive.update(
+                        rid,
+                        {"status": "Betald", "payment_date": date},
+                    )
+                    count += 1
+                continue
+            moved = dict(rec)
+            moved["status"] = "Betald"
+            moved["payment_date"] = date
+            moved["updated_at"] = _now_iso()
             self._archive.move_in(moved)
             self._store.delete(rid)
             count += 1

@@ -2451,23 +2451,41 @@ class MainWindow(QMainWindow):
                     12000,
                 )
                 continue
+            # Exporterade = Betald + flytt till leverantörens fil
+            # i data/betalda/ (Historik, dubblettskydd vid import).
+            # Originalet rörs inte vid export — det har redan sin
+            # plats i årsmappen (<år>/); betalda spåras i JSON.
             paid = 0
-            for inv in batch["invoices"]:
+            _engine = getattr(self._app, "invoices", None)
+            _ids = [
+                str(inv.get("id"))
+                for inv in batch["invoices"] if inv.get("id")
+            ]
+            if _engine is not None and hasattr(
+                _engine, "mark_exported_paid"
+            ):
                 try:
-                    self._app.update_invoice(
-                        inv["id"],
-                        {
-                            "status": "Arkiverad",
-                            "payment_date": batch["payment_date"],
-                        },
+                    paid = int(
+                        _engine.mark_exported_paid(
+                            _ids, batch["payment_date"]
+                        )
                     )
-                    paid += 1
-                    # Originalet rörs inte vid export — det har
-                    # redan sin plats i årsmappen (<år>/); betalda
-                    # spåras i registret (JSON).
                 except Exception as exc:
-                    log.warning("AUTOBATCH betald %s: %s",
-                                inv.get("id"), exc)
+                    log.warning("AUTOBATCH betald: %s", exc)
+            else:
+                for inv in batch["invoices"]:
+                    try:
+                        self._app.update_invoice(
+                            inv["id"],
+                            {
+                                "status": "Betald",
+                                "payment_date": batch["payment_date"],
+                            },
+                        )
+                        paid += 1
+                    except Exception as exc:
+                        log.warning("AUTOBATCH betald %s: %s",
+                                    inv.get("id"), exc)
             try:
                 summary = combine_invoices(batch["invoices"])
                 ExportHistoryManager(
