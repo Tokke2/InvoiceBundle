@@ -220,6 +220,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     "invoices.export_all": {"sv": "📄  Exportera ALLA till PDF", "en": "📄  Export ALL to PDF"},
     "invoices.export_selected": {"sv": "📄  Exportera markerade till PDF", "en": "📄  Export selected to PDF"},
     "invoices.export_selected_n": {"sv": "📄  Exportera markerade till PDF  ({n}) · {amount}", "en": "📄  Export selected to PDF  ({n}) · {amount}"},
+    "invoices.marked_label": {"sv": "Markerade:", "en": "Selected:"},
+    "invoices.export_check_tip": {"sv": "Kryssa i för att ta med fakturan i exporten", "en": "Tick to include this invoice in the export"},
     "invoices.export_selected_title": {"sv": "Exportera markerade fakturor", "en": "Export selected invoices"},
     "invoices.export_sel_none": {"sv": "Markera rader i tabellen (Ctrl/Shift-klick) för att välja vilka som exporteras — eller exportera alla.", "en": "Select rows in the table (Ctrl/Shift-click) to choose what gets exported — or export all."},
     "invoices.export_sel_info": {"sv": "Valda för export: {n} st · netto {amount} · max 10 per fil", "en": "Chosen for export: {n} · net {amount} · max 10 per file"},

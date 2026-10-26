@@ -186,7 +186,7 @@ def test_export_selected_only_exports_marked_rows(
     """Markerade rader exporteras — resten lämnas orörda."""
     _qapp()
     import ui.invoices_view as iv
-    from PySide6.QtCore import QItemSelectionModel
+    from PySide6.QtCore import Qt
     from ui.invoices_view import InvoicesView
 
     rows = [_row(i) for i in range(1, 6)]
@@ -209,15 +209,10 @@ def test_export_selected_only_exports_marked_rows(
             iv, "build_export_path",
             lambda suppliers: (tmp_path, "fakturalista_120000.pdf"),
         )
-        # Markera två rader (radmarkeringen ÄR exportvalet)
-        view._table.selectRow(1)
-        model = view._table.selectionModel()
-        flags = (
-            QItemSelectionModel.SelectionFlag.Select
-            | QItemSelectionModel.SelectionFlag.Rows
-        )
-        model.select(view._table.model().index(3, 0), flags)
-        marked = set(view._selected_ids())
+        # Kryssa i två rader (kryssrutan ÄR exportvalet)
+        view._table.item(1, 0).setCheckState(Qt.CheckState.Checked)
+        view._table.item(3, 0).setCheckState(Qt.CheckState.Checked)
+        marked = set(view._marked_export_ids)
         assert len(marked) == 2
         assert view._btn_export_selected.isEnabled()
         assert {
@@ -240,37 +235,69 @@ def test_export_selected_only_exports_marked_rows(
 
 
 def test_marked_selection_survives_filter_and_refresh(tmp_path):
-    """Exportmarkeringen bor per id: filterbyte/refresh tappar
-    den inte, och valda rader förblir valda när de syns igen."""
+    """Exportvalet bor i kryssrutorna per id: filterbyte/refresh
+    tappar det inte, och valda rader är ikryssade igen när de
+    syns igen. Radmarkering (radklick) rörs inte av kryssrutorna."""
     _qapp()
-    from PySide6.QtCore import QItemSelectionModel
+    from PySide6.QtCore import Qt
     from ui.invoices_view import InvoicesView
 
     rows = [_row(i) for i in range(1, 6)]
     app = _selected_app(tmp_path, rows)
     view = InvoicesView(app)
     try:
-        view._table.selectRow(0)
-        model = view._table.selectionModel()
-        flags = (
-            QItemSelectionModel.SelectionFlag.Select
-            | QItemSelectionModel.SelectionFlag.Rows
-        )
-        model.select(view._table.model().index(2, 0), flags)
-        marked = set(view._selected_ids())
+        view._table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+        view._table.item(2, 0).setCheckState(Qt.CheckState.Checked)
+        marked = set(view._marked_export_ids)
         assert len(marked) == 2
 
-        # Filtrera bort allt utom en rad — markeringen behålls
+        # Filtrera bort allt utom en rad — valet behålls
         view._search.setText("F-003")
         view._do_refresh()
         assert marked <= view._marked_export_ids
 
-        # Tillbaka till ofiltrerat: samma rader markerade igen
+        # Tillbaka till ofiltrerat: samma rader ikryssade igen
         view._search.setText("")
         view._do_refresh()
-        assert set(view._selected_ids()) == marked
+
+        def _checked():
+            return {
+                str(view._table.item(r, 0).data(
+                    Qt.ItemDataRole.UserRole))
+                for r in range(view._table.rowCount())
+                if view._table.item(r, 0).checkState()
+                == Qt.CheckState.Checked
+            }
+
+        assert _checked() == marked
         assert {
             r["id"] for r in view._get_selected_exportable()
         } == marked
+    finally:
+        view.close()
+
+
+def test_row_selection_does_not_change_export_choice(tmp_path):
+    """Radklick (Redigera/Ta bort-spåret) får INTE ändra
+    exportvalet i kryssrutorna."""
+    _qapp()
+    from PySide6.QtCore import Qt
+    from ui.invoices_view import InvoicesView
+
+    rows = [_row(i) for i in range(1, 5)]
+    app = _selected_app(tmp_path, rows)
+    view = InvoicesView(app)
+    try:
+        view._table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+        before = set(view._marked_export_ids)
+        view._table.selectRow(2)
+        assert set(view._marked_export_ids) == before
+        assert view._btn_export_selected.isEnabled()  # 1 kryssad
+        assert view._btn_export_selected_sticky.isEnabled()
+        assert (view._btn_export_selected_sticky.text()
+                == view._btn_export_selected.text())
+        assert ("1 st" in view._lbl_export_selection.text())
+        # Markeringssummering: bara den ikryssade (100,00)
+        assert "100" in view._lbl_marked_net.text()
     finally:
         view.close()

@@ -67,6 +67,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QComboBox,
     QTableWidget,
+    QTableWidgetItem,
     QHeaderView,
     QAbstractItemView,
     QAbstractScrollArea,
@@ -648,6 +649,30 @@ class InvoicesView(QWidget):
         row_select.addWidget(self._btn_mark_shown)
         row_select.addWidget(self._btn_clear_marked)
         export_layout.addLayout(row_select)
+
+        # Summering för BARA de markerade — samma tre tal som
+        # beloppskorten nedan, fast för exportvalet (kryssrutorna).
+        row_marked = QHBoxLayout()
+        row_marked.setSpacing(8)
+        self._lbl_marked_cap = QLabel(tr("invoices.marked_label"))
+        self._lbl_marked_cap.setFont(make_font(11, True))
+        self._lbl_marked_cap.setStyleSheet("background:transparent;")
+        self._lbl_marked_inv = QLabel("")
+        self._lbl_marked_cred = QLabel("")
+        self._lbl_marked_net = QLabel("")
+        for _lbl in (
+            self._lbl_marked_inv,
+            self._lbl_marked_cred,
+            self._lbl_marked_net,
+        ):
+            _lbl.setFont(make_font(11, True))
+            _lbl.setStyleSheet("background:transparent;")
+        row_marked.addWidget(self._lbl_marked_cap)
+        row_marked.addWidget(self._lbl_marked_inv)
+        row_marked.addWidget(self._lbl_marked_cred)
+        row_marked.addWidget(self._lbl_marked_net)
+        row_marked.addStretch()
+        export_layout.addLayout(row_marked)
         root.addWidget(export_frame)
 
         # ── Summering: tre beloppskort ─────────────────────────────────
@@ -713,10 +738,16 @@ class InvoicesView(QWidget):
 
         # ── Tabell ─────────────────────────────────────────────────────
         self._table = QTableWidget()
-        self._table.setColumnCount(len(COLUMNS))
+        # Kolumn 0 = kryssruta för exportvalet (egen kolumn,
+        # separat från radmarkeringen); datakolumnerna följer
+        # COLUMNS som förut. Historik-tabellen rörs inte.
+        self._table.setColumnCount(len(COLUMNS) + 1)
         _headers = tr_list("invoices.columns")
-        self._table.setHorizontalHeaderLabels(
+        _data_headers = (
             _headers if len(_headers) == len(COLUMNS) else COL_LABELS
+        )
+        self._table.setHorizontalHeaderLabels(
+            ["☑"] + list(_data_headers)
         )
         self._table.setSortingEnabled(True)
         self._table.setAlternatingRowColors(True)
@@ -747,6 +778,7 @@ class InvoicesView(QWidget):
         self._table.itemSelectionChanged.connect(
             self._on_selection_changed
         )
+        self._table.itemChanged.connect(self._on_table_item_changed)
         self._table.doubleClicked.connect(self._edit_invoice)
         self._table.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -763,7 +795,10 @@ class InvoicesView(QWidget):
             "Betaldatum": "Betalningsdatum",
             "Notering": "Anteckning",
         }
-        for i, label in enumerate(COL_LABELS):
+        _check_head = self._table.horizontalHeaderItem(0)
+        if _check_head is not None:
+            _check_head.setToolTip(tr("invoices.export_check_tip"))
+        for i, label in enumerate(COL_LABELS, start=1):
             item = self._table.horizontalHeaderItem(i)
             if item is not None:
                 item.setToolTip(full.get(label, label))
@@ -776,6 +811,37 @@ class InvoicesView(QWidget):
         self._table.wheelEvent = self._table_wheel  # type: ignore
 
         root.addWidget(self._table, stretch=1)
+
+        # ── Fast exportrad längst ner (alltid synlig) ──────────────────
+        # Spegel av exportpanelen: valt antal + netto + knappen, så
+        # man aldrig behöver skrolla upp i en lång lista för att se
+        # vad som kommer att exporteras.
+        sticky_frame = QFrame()
+        sticky_frame.setObjectName("ExportStickyBar")
+        sticky_layout = QHBoxLayout(sticky_frame)
+        sticky_layout.setContentsMargins(10, 6, 10, 6)
+        sticky_layout.setSpacing(10)
+        self._lbl_sticky_selection = QLabel(
+            tr("invoices.export_sel_none")
+        )
+        self._lbl_sticky_selection.setFont(make_font(12, True))
+        self._lbl_sticky_selection.setStyleSheet(
+            "background:transparent;"
+        )
+        self._btn_export_selected_sticky = make_btn(
+            tr("invoices.export_selected"),
+            "Exportera bara de ikryssade fakturorna till PDF — "
+            "samma knapp som i exportpanelen ovan.",
+            success=True,
+        )
+        self._btn_export_selected_sticky.clicked.connect(
+            self._export_selected_pdf
+        )
+        self._btn_export_selected_sticky.setEnabled(False)
+        sticky_layout.addWidget(self._lbl_sticky_selection)
+        sticky_layout.addStretch()
+        sticky_layout.addWidget(self._btn_export_selected_sticky)
+        root.addWidget(sticky_frame)
 
         # ── Footer ─────────────────────────────────────────────────────
         root.addWidget(h_line())
@@ -896,31 +962,44 @@ class InvoicesView(QWidget):
         ]
 
     def _apply_table_selection(self) -> None:
-        """Ritar exportmarkeringen som radmarkering i tabellen
-        (per UserRole-id, efter sortering). Signaler stängs av
-        under tiden så mängden per id inte skrivs över."""
-        model = self._table.selectionModel()
-        if model is None:
-            return
+        """Sätter kryssrutorna för exportvalet per faktura-id
+        (kolumn 0). Signaler stängs av under tiden så mängden
+        per id inte skrivs över av programmatiska ändringar."""
         self._populating_table = True
         try:
-            model.clearSelection()
-            flags = (
-                QItemSelectionModel.SelectionFlag.Select
-                | QItemSelectionModel.SelectionFlag.Rows
-            )
             for row in range(self._table.rowCount()):
                 item = self._table.item(row, 0)
-                if item is not None and str(
+                if item is None:
+                    continue
+                rid = str(
                     item.data(Qt.ItemDataRole.UserRole) or ""
-                ) in self._marked_export_ids:
-                    model.select(
-                        self._table.model().index(row, 0), flags
-                    )
+                )
+                item.setCheckState(
+                    Qt.CheckState.Checked
+                    if rid in self._marked_export_ids
+                    else Qt.CheckState.Unchecked
+                )
         finally:
             self._populating_table = False
         self._update_export_buttons()
         self._update_buttons()
+
+    def _on_table_item_changed(self, item) -> None:
+        """Kryssrutan i kolumn 0 ÄR exportvalet: i → fakturan
+        ingår i 'Exportera markerade', ur → den ingår inte.
+        Radmarkeringen (Redigera/Ta bort/Slå ihop) rörs inte."""
+        if item is None or item.column() != 0:
+            return
+        if getattr(self, "_populating_table", False):
+            return
+        rid = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        if not rid:
+            return
+        if item.checkState() == Qt.CheckState.Checked:
+            self._marked_export_ids.add(rid)
+        else:
+            self._marked_export_ids.discard(rid)
+        self._update_export_buttons()
 
     def _mark_all_shown(self) -> None:
         """Markerar alla rader som visas just nu för export."""
@@ -1009,6 +1088,42 @@ class InvoicesView(QWidget):
         if hasattr(self, "_btn_clear_marked"):
             self._btn_clear_marked.setEnabled(
                 bool(self._marked_export_ids)
+            )
+        # Summering för bara de markerade (exportpanelen) +
+        # spegling till fasta exportraden längst ner.
+        if hasattr(self, "_lbl_marked_inv"):
+            _amounts = [
+                _to_float(r.get("total_amount")) for r in selected
+            ]
+            _inv_sum = round(
+                sum(v for v in _amounts if v > 0), 2
+            )
+            _cred_sum = round(
+                sum(v for v in _amounts if v < 0), 2
+            )
+            self._lbl_marked_inv.setText(
+                f"{tr('invoices.card_invoices')}  "
+                f"{fmt_amount(_inv_sum)}"
+            )
+            self._lbl_marked_cred.setText(
+                f"{tr('invoices.card_credits')}  "
+                f"{fmt_amount(_cred_sum)}"
+            )
+            self._lbl_marked_net.setText(
+                f"{tr('invoices.card_total')}  "
+                f"{fmt_amount(round(_inv_sum + _cred_sum, 2))}"
+            )
+        if hasattr(self, "_lbl_sticky_selection"):
+            self._lbl_sticky_selection.setText(
+                self._lbl_export_selection.text()
+                if hasattr(self, "_lbl_export_selection") else ""
+            )
+        if hasattr(self, "_btn_export_selected_sticky"):
+            self._btn_export_selected_sticky.setEnabled(
+                self._btn_export_selected.isEnabled()
+            )
+            self._btn_export_selected_sticky.setText(
+                self._btn_export_selected.text()
             )
         hist_count = self._export_history.count()
         self._lbl_history_count.setText(
@@ -1222,6 +1337,23 @@ class InvoicesView(QWidget):
         dark = self._is_dark()
 
         for row, inv in enumerate(data):
+            # Kryssruta för exportvalet (kolumn 0) — separat från
+            # radmarkeringen, styrs av _marked_export_ids per id.
+            check = QTableWidgetItem()
+            check.setData(Qt.ItemDataRole.UserRole, inv.get("id", ""))
+            check.setFlags(
+                Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsSelectable
+            )
+            check.setCheckState(
+                Qt.CheckState.Checked
+                if str(inv.get("id", "")) in self._marked_export_ids
+                else Qt.CheckState.Unchecked
+            )
+            check.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._table.setItem(row, 0, check)
+
             for col, key in enumerate(COL_KEYS):
                 raw = inv.get(key, "")
                 align = COL_ALIGN[col]
@@ -1255,13 +1387,13 @@ class InvoicesView(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, inv.get("id", ""))
                 if text:
                     item.setToolTip(text)
-                self._table.setItem(row, col, item)
+                self._table.setItem(row, col + 1, item)
 
             # Radfärgkodning på HELA raden enligt status
             pair = STATUS_ROW_BG.get(str(inv.get("status", "")))
             if pair:
                 row_bg = QColor(pair[0] if dark else pair[1])
-                for col in range(len(COL_KEYS)):
+                for col in range(self._table.columnCount()):
                     cell = self._table.item(row, col)
                     if cell is not None:
                         cell.setBackground(row_bg)
@@ -1275,7 +1407,19 @@ class InvoicesView(QWidget):
         self._apply_table_selection()
 
     def _fit_columns(self) -> None:
-        fit_table_columns(self._table, COL_WIDTHS)
+        if self._table.columnCount() == len(COL_WIDTHS) + 1:
+            fit_table_columns(self._table, [44] + COL_WIDTHS)
+            # fit_table_columns lägger eventuell överskottsbredd
+            # på första kolumnen — kryssrutan ska stanna på 44 px,
+            # så överskottet flyttas till Leverantör (kolumn 2).
+            check_w = self._table.columnWidth(0)
+            if check_w > 44:
+                self._table.setColumnWidth(
+                    2, self._table.columnWidth(2) + (check_w - 44)
+                )
+            self._table.setColumnWidth(0, 44)
+        else:
+            fit_table_columns(self._table, COL_WIDTHS)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -1346,15 +1490,10 @@ class InvoicesView(QWidget):
     # ══════════════════════════════════════════════════════════════════
 
     def _on_selection_changed(self) -> None:
-        if not getattr(self, "_populating_table", False):
-            # Radmarkeringen ÄR exportvalet. Markerade id:n
-            # utanför det som visas just nu (annat filter) behålls
-            # — bara de synliga radernas val skrivs om.
-            visible = set(getattr(self, "_displayed_ids", []))
-            self._marked_export_ids = (
-                (self._marked_export_ids - visible)
-                | set(self._selected_ids())
-            )
+        # Radmarkeringen styr Redigera/Ta bort/Slå ihop/Markera
+        # betald — exportvalet bor i kryssrutorna (kolumn 0) och
+        # rörs INTE av radklick, så man kan titta på en enskild
+        # faktura utan att tappa det man kryssat för export.
         self._update_export_buttons()
         self._update_buttons()
         inv = self._selected_invoice()
@@ -1518,9 +1657,21 @@ class InvoicesView(QWidget):
             )
         self._update_summary(self._apply_filters())
         self._update_export_buttons()
+        if hasattr(self, "_lbl_marked_cap"):
+            self._lbl_marked_cap.setText(tr("invoices.marked_label"))
+        if hasattr(self, "_btn_export_selected_sticky"):
+            self._btn_export_selected_sticky.setText(
+                tr("invoices.export_selected")
+            )
         headers = tr_list("invoices.columns")
         if len(headers) == len(COLUMNS):
-            self._table.setHorizontalHeaderLabels(headers)
+            self._table.setHorizontalHeaderLabels(["☑"] + headers)
+            try:
+                _chk = self._table.horizontalHeaderItem(0)
+                if _chk is not None:
+                    _chk.setToolTip(tr("invoices.export_check_tip"))
+            except Exception:
+                pass
 
     def _status(self, msg: str, timeout: int = 5000) -> None:
         """Visar ett meddelande i huvudfönstrets statusrad."""
@@ -2193,6 +2344,11 @@ class InvoicesView(QWidget):
         except Exception as exc:
             log.debug("_pay_today filterreset: %s", exc)
         self._do_refresh()
+
+        # Sedan kryssas träffarna in i exportvalet (förslag 2);
+        # radmarkeringen nedan bara visar vilka det rör sig om.
+        self._marked_export_ids |= ids
+        self._apply_table_selection()
 
         model = self._table.selectionModel()
         flags = (
@@ -2892,7 +3048,8 @@ class InvoicesView(QWidget):
             tr("invoices.mark_paid"), self._mark_selected_paid
         )
         menu.addAction(
-            tr("invoices.export_selected"), self._export_selected_pdf
+            tr("invoices.export_selected"),
+            lambda checked=False, r=rid: self._export_with_row(r),
         )
         menu.addAction(
             tr("invoices.ctx_undo_status"), self._undo_last_status
@@ -2900,6 +3057,15 @@ class InvoicesView(QWidget):
         menu.addSeparator()
         menu.addAction(tr("invoices.delete"), self._delete_invoice)
         menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    def _export_with_row(self, rid: str) -> None:
+        """Högerklicksexport: kryssa i raden under musen, lägg
+        sedan allt ikryssat i exporten (som knappen)."""
+        rid = str(rid or "")
+        if rid:
+            self._marked_export_ids.add(rid)
+            self._apply_table_selection()
+        self._export_selected_pdf()
 
     # ══════════════════════════════════════════════════════════════════
     #  TEMA
@@ -2953,10 +3119,13 @@ class InvoicesView(QWidget):
             )
         # Grupperingspanelerna (filter / åtgärder / export) —
         # exportpanelen får guldkant så den aldrig missas.
-        for _name in ("FilterBar", "ActionsBar", "ExportBar"):
+        for _name in ("FilterBar", "ActionsBar", "ExportBar",
+                      "ExportStickyBar"):
             _frame = self.findChild(QFrame, _name)
             if _frame:
-                _edge = gold if _name == "ExportBar" else border_c
+                _edge = gold if _name in (
+                    "ExportBar", "ExportStickyBar"
+                ) else border_c
                 _frame.setStyleSheet(
                     f"QFrame#{_name}{{background-color:{card};"
                     f"border-radius:10px;"
