@@ -38,9 +38,9 @@ from PySide6.QtWidgets import (
     QLineEdit, QCheckBox, QApplication, QInputDialog,
     QDialog, QListWidget, QPlainTextEdit,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QRectF
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal, QRectF
 from PySide6.QtGui import (
-    QColor, QFont, QImage, QPixmap, QPainter, QPen,
+    QColor, QDesktopServices, QFont, QImage, QPixmap, QPainter, QPen,
 )
 
 try:
@@ -1043,6 +1043,9 @@ class ScanImportView(QWidget):
         btn_print = QPushButton(tr("scan.print"))
         self._btn_print = btn_print
         btn_print.clicked.connect(self._print_row)
+        btn_open_orig = QPushButton(tr("scan.open_original"))
+        self._btn_open_orig = btn_open_orig
+        btn_open_orig.clicked.connect(self._open_original_row)
         btn_del = QPushButton(tr("scan.remove_row"))
         self._btn_del = btn_del
         btn_del.clicked.connect(self._remove_row)
@@ -1057,6 +1060,7 @@ class ScanImportView(QWidget):
         row3.addWidget(btn_create)
         row3.addWidget(btn_open_dlg)
         row3.addWidget(btn_print)
+        row3.addWidget(btn_open_orig)
         row3.addWidget(btn_del)
         row3.addWidget(self._btn_template)
         row3.addWidget(self._btn_templates)
@@ -1098,6 +1102,7 @@ class ScanImportView(QWidget):
         self._btn_create.setText(tr("scan.create"))
         self._btn_open_dlg.setText(tr("scan.open_dialog"))
         self._btn_print.setText(tr("scan.print"))
+        self._btn_open_orig.setText(tr("scan.open_original"))
         self._btn_del.setText(tr("scan.remove_row"))
         self._btn_template.setText(tr("scan.template_btn"))
         self._refresh_templates_btn()
@@ -2436,6 +2441,39 @@ class ScanImportView(QWidget):
         if not idxs and self._tbl.currentRow() >= 0:
             idxs = [self._tbl.currentRow()]
         return [i for i in idxs if 0 <= i < len(self._rows)]
+
+    def _open_original_row(self) -> None:
+        """Öppnar markerad rads originalfaktura i systemets visare.
+
+        Samma original som Skriv ut använder — för parkerade
+        filer är det filen i den bevakade mappen, orörd. Finns
+        filen inte kvar (eller ingen visare svarar) sägs det i
+        statusraden i stället för att något gissas fram.
+        """
+        idxs = self._selected_rows()
+        if not idxs:
+            self._lbl_status.setText(tr("scan.select_row"))
+            return
+        row = self._rows[idxs[0]]
+        path = str(row.get("_path", "") or "")
+        name = str(row.get("file", "") or "") or Path(path).name
+        if not path or not Path(path).exists():
+            self._lbl_status.setText(
+                tr("scan.open_missing", file=name)
+            )
+            return
+        try:
+            ok = QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        except Exception as exc:
+            log.warning("open original: %s", exc)
+            ok = False
+        if ok:
+            self._lbl_status.setText(tr("scan.opened", file=name))
+            log.info("SCAN_OPEN: %s öppnad i systemets visare", name)
+        else:
+            self._lbl_status.setText(
+                tr("scan.open_failed", file=name)
+            )
 
     def _print_row(self) -> None:
         """Skriver ut markerad rads originalfaktura.

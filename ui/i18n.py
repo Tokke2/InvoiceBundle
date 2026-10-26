@@ -549,6 +549,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "scan.print_missing": {"sv": "Kan inte skriva ut — originalfilen saknas ({file})", "en": "Cannot print — the original file is missing ({file})"},
     "scan.printed": {"sv": "🖨 {file} skickad till skrivaren ({n} sida/sidor)", "en": "🖨 {file} sent to the printer ({n} page(s))"},
     "scan.print_failed": {"sv": "Utskriften misslyckades: {error}", "en": "Printing failed: {error}"},
+    "scan.open_original": {"sv": "📂 Öppna original", "en": "📂 Open original"},
+    "scan.open_missing": {"sv": "Kan inte öppna — originalfilen saknas ({file})", "en": "Cannot open — the original file is missing ({file})"},
+    "scan.opened": {"sv": "📂 Öppnade {file} i systemets visare", "en": "📂 Opened {file} in the system viewer"},
+    "scan.open_failed": {"sv": "Kunde inte öppna {file} — ingen visare svarade", "en": "Could not open {file} — no viewer responded"},
     "dashboard.credits_stale": {"sv": "⚠️  {n} kreditfaktura(or) på {amount} har legat okvittade i över 30 dagar – kontrollera så ATT BETALA stämmer.", "en": "⚠️  {n} credit invoice(s) totalling {amount} have been unnetted for over 30 days – check that TO PAY adds up."},
     "dashboard.all_clear": {"sv": "🎉  Inget förfaller den närmaste veckan — allt är under kontroll.", "en": "🎉  Nothing due in the next week — everything is under control."},
 

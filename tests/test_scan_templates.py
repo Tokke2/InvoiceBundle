@@ -1248,6 +1248,63 @@ def test_print_row_missing_file_sets_status(tmp_path):
         view.close()
 
 
+def test_open_original_opens_existing_file(tmp_path, monkeypatch):
+    """Öppna original: radens fil lämnas till systemets visare
+    och statusraden bekräftar med filnamnet."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as siv
+    from ui.scan_import_view import ScanImportView
+
+    original = tmp_path / "faktura.pdf"
+    original.write_bytes(b"%PDF-1.4 test")
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        view._rows = [{
+            "file": "faktura.pdf", "_path": str(original),
+        }]
+        view._selected_rows = lambda: [0]
+        opened = []
+        monkeypatch.setattr(
+            siv.QDesktopServices, "openUrl",
+            lambda url: opened.append(url) or True,
+        )
+        view._open_original_row()
+        assert len(opened) == 1
+        assert opened[0].toLocalFile() == str(original)
+        assert "faktura.pdf" in view._lbl_status.text()
+    finally:
+        view.close()
+
+
+def test_open_original_missing_file_sets_status(tmp_path):
+    """Saknas originalfilen sägs det i statusraden — ingen
+    dialog, ingen gissning, ingen krasch."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import ScanImportView
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        view._rows = [{
+            "file": "borta.pdf",
+            "_path": str(tmp_path / "borta.pdf"),
+        }]
+        view._selected_rows = lambda: [0]
+        view._open_original_row()
+        assert "saknas" in view._lbl_status.text()
+    finally:
+        view.close()
+
+
 def test_builtin_martin_g_below_needs_value_row():
     # Rubrikraden finns men värderaden under Att betala är en
     # textrad utan belopp (t.ex. avklippt OCR) → ingen träff,
