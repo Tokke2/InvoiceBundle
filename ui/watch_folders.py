@@ -135,6 +135,42 @@ def invoice_exists(
     return False
 
 
+def invoice_control_changes(inv: dict, parsed: dict) -> dict:
+    """Jämför en nytolkning av originalet mot den registrerade
+    fakturan: {fält: (registrerat, nytolkat)} för avvikelserna.
+
+    Bara värden tolkningen läst med säkerhet räknas — det krävs
+    att en mall gjort strikt anspråk på läsningen (mall satt,
+    inget saknas), annars är originalet troligen en annan eller
+    oläsbar faktura och jämförelsen påstår ingenting.
+    Registrerade data ändras ALDRIG härifrån; jämförelsen
+    rapporterar bara — rättningen gör användaren per faktura
+    (Fakturor → högerklick → Skanna om faktura)."""
+    changes: dict[str, tuple] = {}
+    if not parsed.get("template") or parsed.get("missing"):
+        return changes
+    new_nr = str(parsed.get("invoice_number", "") or "").strip()
+    old_nr = str(inv.get("invoice_number", "") or "").strip()
+    if new_nr and new_nr.lower() != old_nr.lower():
+        changes["invoice_number"] = (old_nr, new_nr)
+    for field in ("date", "due_date"):
+        new = str(parsed.get(field, "") or "").strip()
+        old = str(inv.get(field, "") or "").strip()
+        if new and new != old:
+            changes[field] = (old, new)
+    try:
+        new_total = float(parsed.get("total_amount") or 0)
+    except (TypeError, ValueError):
+        new_total = 0.0
+    try:
+        old_total = float(inv.get("total_amount") or 0)
+    except (TypeError, ValueError):
+        old_total = 0.0
+    if new_total and abs(new_total - old_total) > 0.005:
+        changes["total_amount"] = (old_total, new_total)
+    return changes
+
+
 def _norm_path_key(path: str) -> str:
     """Sökväg som jämförelsenyckel: "D:/gewgg/f.pdf" och
     "D:\\gewgg\\f.pdf" är samma fil. Registrets sökvägar kan
@@ -509,8 +545,9 @@ class WatchManager(QObject):
         self._warned_missing: set[str] = set()
         self._scan_stats: dict[str, int] = {
             "imported": 0, "duplicate": 0, "parked": 0, "already": 0,
-            "waiting": 0,
+            "waiting": 0, "changed": 0,
         }
+        self._control_diffs: list[dict] = []
         self._waiting_reasons: dict[str, int] = {}
         self._last_logged_waiting: int = -1
         log.info(
@@ -751,16 +788,25 @@ class WatchManager(QObject):
         ingenting: en dubblett skapar ingen ny faktura."""
         return dict(self._scan_stats)
 
-    def scan_all(self) -> None:
+    @property
+    def last_control_diffs(self) -> list[dict]:
+        """Avvikelser från senaste kontrollskanningen: en post per
+        redan inläst faktura vars original tolkningen nu läser
+        annorlunda ({file, invoice_id, invoice_number, changes}).
+        Registrerade data ändrades inte — bara rapporten."""
+        return [dict(d) for d in self._control_diffs]
+
+    def scan_all(self, force: bool = False) -> None:
         self._scan_stats = {
             "imported": 0, "duplicate": 0, "parked": 0, "already": 0,
-            "waiting": 0,
+            "waiting": 0, "changed": 0,
         }
         self._waiting_reasons = {}
+        self._control_diffs = []
         self._heal_missing_imports()
         for entry in self.folders:
             try:
-                self.scan_folder(entry)
+                self.scan_folder(entry, force=force)
             except Exception as exc:
                 log.warning("SCAN_WATCH scan %s: %s", entry, exc)
         # Sammanfattningen loggas när något hände — eller när
@@ -801,6 +847,16 @@ class WatchManager(QObject):
                     "på i Import-fliken (Bevakade mappar)",
                     self._waiting_reasons["review"],
                 )
+        changed = self._scan_stats.get("changed", 0)
+        if changed:
+            log.warning(
+                "SCAN_WATCH kontroll: %d redan inläst(a) faktura/"
+                "fakturor avviker mot nytolkningen av "
+                "originalen — inget ändrades automatiskt; "
+                "rätta per faktura i Fakturor-fliken "
+                "(högerklicka → Skanna om faktura)",
+                changed,
+            )
 
     def _heal_missing_imports(self) -> None:
         """Självläkning: filer som står som importerade i
@@ -953,7 +1009,7 @@ class WatchManager(QObject):
             self.scan_all()
         return len(targets)
 
-    def scan_folder(self, entry: dict) -> None:
+    def scan_folder(self, entry: dict, force: bool = False) -> None:
         folder = Path(str(entry.get("path", "")))
         if not folder.is_dir():
             key = str(folder)
@@ -975,8 +1031,17 @@ class WatchManager(QObject):
             except Exception:
                 continue
             if digest in self._config["processed"]:
-                self._scan_stats["already"] += 1
-                continue
+                if force:
+                    if si is None:
+                        si = self._scan_module()
+                    if self._control_check_file(si, entry, path, digest):
+                        continue
+                    # Ingen faktura i registret hör till filen
+                    # längre — kontrollen tog bort markeringen,
+                    # så filen läses in som ny nedan.
+                else:
+                    self._scan_stats["already"] += 1
+                    continue
             parked_entry = next(
                 (
                     p for p in self._config.get("parked", [])
@@ -1069,8 +1134,13 @@ class WatchManager(QObject):
         except Exception as exc:
             log.warning("SCAN_WATCH årssortering: %s", exc)
 
-    def _process_file(self, si: Any, entry: dict, path: Path,
-                      digest: str) -> None:
+    def _parse_file(
+        self, si: Any, entry: dict, path: Path
+    ) -> tuple[str, str, dict]:
+        """Textuttag + tolkning av en fil, med mappens leverantör
+        påtvingad. Returnerar (text, metod, tolkning) — samma
+        väg som registreringen använder, så en kontrolläsning
+        bedöms exakt som den ursprungliga inläsningen."""
         if self._extract_fn is not None:
             text, method = self._extract_fn(path)
         else:
@@ -1106,6 +1176,112 @@ class WatchManager(QObject):
                 m for m in parsed.get("missing", [])
                 if m != "leverantör"
             ]
+        return text, method, parsed
+
+    def _find_invoice_for_file(
+        self, entry: dict, path: Path, digest: str, info: dict
+    ) -> dict | None:
+        """Registerfakturan som hör till en redan bearbetad fil:
+        originalsökvägen pekar på den, samma filinnehåll under
+        den, eller mappens leverantör + fakturanumret som
+        bearbetningsregistret sparade."""
+        invoices = self._invoices()
+        target = _norm_path_key(str(path))
+        for inv in invoices:
+            att = str(inv.get("attachment", "") or "")
+            if att and _norm_path_key(att) == target:
+                return inv
+        for inv in invoices:
+            att = str(inv.get("attachment", "") or "")
+            if att and Path(att).is_file():
+                try:
+                    if file_hash(Path(att)) == digest:
+                        return inv
+                except Exception:
+                    continue
+        supplier = self._resolve_register_supplier(
+            str(entry.get("supplier", "") or "")
+        ).strip().lower()
+        nr = str(info.get("invoice_number", "") or "").strip().lower()
+        if supplier and nr:
+            for inv in invoices:
+                if (
+                    str(inv.get("supplier", "") or "").strip().lower()
+                    == supplier
+                    and str(
+                        inv.get("invoice_number", "") or ""
+                    ).strip().lower() == nr
+                ):
+                    return inv
+        return None
+
+    def _control_check_file(
+        self, si: Any, entry: dict, path: Path, digest: str
+    ) -> bool:
+        """Kontrolläs en REDAN bearbetad fil mot registret.
+
+        Fakturans original tolkas på nytt med dagens mallar och
+        jämförs med det registrerade — avvikelser räknas och
+        loggas (last_control_diffs), men registrerade data
+        ändras ALDRIG av kontrollen; rättning sker per faktura
+        via Fakturor-flikens omskanning. Returnerar True när
+        filen är färdigkontrollerad; False när ingen faktura
+        hör till filen längre (bearbetningsmarkeringen tas
+        då bort och anroparen läser in filen som ny)."""
+        info = self._config.get("processed", {}).get(digest, {}) or {}
+        inv = self._find_invoice_for_file(entry, path, digest, info)
+        if inv is None:
+            log.info(
+                "SCAN_WATCH kontroll: %s är bearbetad men "
+                "fakturan saknas i registret — läses in på nytt",
+                path.name,
+            )
+            self.unprocess(digest)
+            return False
+        try:
+            _text, _method, parsed = self._parse_file(si, entry, path)
+        except Exception as exc:
+            log.warning(
+                "SCAN_WATCH kontroll %s: %s", path.name, exc
+            )
+            self._scan_stats["already"] = (
+                self._scan_stats.get("already", 0) + 1
+            )
+            return True
+        changes = invoice_control_changes(inv, parsed)
+        if not changes:
+            self._scan_stats["already"] = (
+                self._scan_stats.get("already", 0) + 1
+            )
+            return True
+        self._scan_stats["changed"] = (
+            self._scan_stats.get("changed", 0) + 1
+        )
+        self._control_diffs.append({
+            "file": path.name,
+            "invoice_id": str(inv.get("id", "") or ""),
+            "invoice_number": str(inv.get("invoice_number", "") or ""),
+            "changes": {
+                field: [old, new]
+                for field, (old, new) in changes.items()
+            },
+        })
+        detail = ", ".join(
+            f"{field}: {old} → {new}"
+            for field, (old, new) in changes.items()
+        )
+        log.warning(
+            "SCAN_WATCH kontroll: %s (faktura %s) avviker mot "
+            "registret — %s. Inget ändrat; rätta via Fakturor "
+            "→ högerklicka → Skanna om faktura.",
+            path.name,
+            inv.get("invoice_number", "?"), detail,
+        )
+        return True
+
+    def _process_file(self, si: Any, entry: dict, path: Path,
+                      digest: str) -> None:
+        text, method, parsed = self._parse_file(si, entry, path)
         # Leverantören måste finnas i registret för auto-registrering,
         # annars parkeras filen för granskning i stället.
         known = {

@@ -917,3 +917,54 @@ def test_watch_parked_interpretation_files_never_rescanned(tmp_path):
     assert calls["n"] == 1            # aldrig tolkad igen
     assert len(parked_events) == 1    # ingen ny varning för samma fil
     assert len(mgr.parked) == 1
+
+
+def test_watch_control_scan_flags_diff_without_touching(tmp_path):
+    """Kontrollskanning (force) läser om redan bearbetade filer:
+    en faktura vars registrerade belopp avviker från originalet
+    flaggas som avvikelse — men registret ändras ALDRIG av
+    kontrollen, och en vanlig skanning ser den som bearbetad."""
+    _qapp()
+    mgr, folder = _manager(tmp_path)
+    _persist_emitted(mgr)
+    (folder / "f1.pdf").write_bytes(b"%PDF-fake-1")
+    mgr.scan_all()
+    inv = mgr._app._invoices[0]
+    inv.update({
+        "total_amount": 70117.0,           # felregistrerat belopp
+        "date": "2026-09-01", "due_date": "2026-10-01",
+    })
+    # Vanlig skanning: filen är bearbetad och hoppas över
+    mgr.scan_all()
+    assert mgr.last_scan_stats["changed"] == 0
+    assert mgr.last_scan_stats["already"] == 1
+    # Kontrollskanning: tolkar om och flaggar avvikelsen
+    mgr.scan_all(force=True)
+    assert mgr.last_scan_stats["changed"] == 1
+    diffs = mgr.last_control_diffs
+    assert len(diffs) == 1
+    assert diffs[0]["invoice_number"] == "9911"
+    assert diffs[0]["changes"]["total_amount"] == [70117.0, 1250.0]
+    # Registret orört — rättning är användarens beslut
+    assert mgr._app._invoices[0]["total_amount"] == 70117.0
+
+
+def test_watch_control_check_missing_invoice_unprocesses(tmp_path):
+    """Kontroll av en bearbetad fil vars faktura försvunnit ur
+    registret: markeringen tas bort (handled=False) så filen
+    kan läsas in på nytt i stället för att vara borta för
+    alltid."""
+    _qapp()
+    mgr, folder = _manager(tmp_path)
+    _persist_emitted(mgr)
+    f = folder / "f1.pdf"
+    f.write_bytes(b"%PDF-fake-1")
+    mgr.scan_all()
+    assert len(mgr._app._invoices) == 1
+    mgr._app._invoices.clear()
+    digest = next(iter(mgr._config["processed"]))
+    handled = mgr._control_check_file(
+        mgr._scan_module(), mgr.folders[0], f, digest
+    )
+    assert handled is False
+    assert digest not in mgr._config["processed"]

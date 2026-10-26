@@ -962,6 +962,9 @@ class ScanImportView(QWidget):
         self._btn_scan_watch = QPushButton(tr("watch.scan_now"))
         self._btn_scan_watch.clicked.connect(self._scan_watch_now)
         wr2.addWidget(self._btn_scan_watch)
+        self._btn_control_scan = QPushButton(tr("watch.control_scan"))
+        self._btn_control_scan.clicked.connect(self._control_scan_now)
+        wr2.addWidget(self._btn_control_scan)
         wr2.addStretch(1)
         bw.addLayout(wr2)
         box_watch.setLayout(bw)
@@ -1126,6 +1129,7 @@ class ScanImportView(QWidget):
             self._chk_auto_watch.setText(tr("watch.auto_create"))
             self._btn_review_parked.setText(tr("watch.review"))
             self._btn_teach_folder.setText(tr("watch.learn"))
+            self._btn_control_scan.setText(tr("watch.control_scan"))
             self._refresh_watch_ui()
         self._refresh_table()
 
@@ -1358,6 +1362,39 @@ class ScanImportView(QWidget):
         log.info(
             "SCAN_WATCH: manuell skanning klar — %s",
             stats,
+        )
+
+    def _control_scan_now(self) -> None:
+        """Kontrollskanning (knapp): läs om ÄVEN redan inlästa
+        fakturor och jämför mot registret.
+
+        Vanlig skanning hoppar över bearbetade filer; kontrollen
+        tolkar dem på nytt med dagens mallar och rapporterar
+        avvikelser (statusraden + loggen), utan att ändra
+        något registrerat — rättning sker per faktura i
+        Fakturor-fliken via högerklick → Skanna om faktura."""
+        if not self._watch:
+            return
+        if not self._watch.folders:
+            self._lbl_status.setText(tr("watch.scan_none"))
+            return
+        self._watch.scan_all(force=True)
+        self._refresh_watch_ui()
+        stats = self._watch.last_scan_stats
+        self._lbl_status.setText(
+            tr(
+                "watch.control_done",
+                imported=stats.get("imported", 0),
+                duplicate=stats.get("duplicate", 0),
+                parked=stats.get("parked", 0),
+                already=stats.get("already", 0),
+                changed=stats.get("changed", 0),
+            )
+        )
+        log.info(
+            "SCAN_WATCH: manuell kontrollskanning klar — %s, "
+            "avvikelser=%s",
+            stats, self._watch.last_control_diffs,
         )
 
     def _toggle_watch_auto(self, state) -> None:

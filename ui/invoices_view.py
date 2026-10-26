@@ -2062,6 +2062,149 @@ class InvoicesView(QWidget):
             log.warning("print invoice: %s", exc)
             self._status(tr("scan.print_failed", error=str(exc)))
 
+    def _load_scan_templates(self, si: Any) -> dict:
+        """Användarens inlärda mallar (samma fil som Import-fliken
+        använder) — så omskanningen tolkar med dagens mallar."""
+        try:
+            raw = ""
+            try:
+                raw = str(self._app.settings.get("db_path", "data"))
+            except Exception:
+                raw = str(self._app.get_setting("db_path", "data"))
+            data_dir = Path(raw or "data")
+            if not data_dir.is_absolute():
+                data_dir = (
+                    Path(__file__).resolve().parent.parent / data_dir
+                )
+            return si.load_templates(data_dir / "invoice_templates.json")
+        except Exception as exc:
+            log.debug("rescan templates: %s", exc)
+            return {}
+
+    def _rescan_invoice(self) -> None:
+        """Skannar om markerad fakturas original med dagens
+        tolkning och erbjuder att rätta fakturan.
+
+        Originalet tolkas på nytt (mallar + säkerhetsregler
+        precis som vid inläsning). Avviker nytolkningen från
+        det registrerade visas gammalt → nytt per fält och
+        fakturan uppdateras först när användaren bekräftar;
+        stämmer allt — eller tolkningen är osäker — ändras
+        ingenting."""
+        inv = self._selected_invoice()
+        if not inv:
+            return
+        path = str(inv.get("attachment", "") or "")
+        nr = str(inv.get("invoice_number", "") or "")
+        if not path or not Path(path).exists():
+            self._status(tr("invoices.rescan_no_original", nr=nr))
+            return
+        try:
+            try:
+                from ui.scan_import_view import _scan_module
+            except ImportError:
+                from scan_import_view import _scan_module  # type: ignore[no-redef]
+            si = _scan_module()
+            text, _method = si.extract_text(Path(path))
+            try:
+                suppliers = list(self._app.get_suppliers() or [])
+            except Exception:
+                suppliers = []
+            parsed = si.parse_invoice_file(
+                path, text or "", suppliers,
+                templates=self._load_scan_templates(si),
+            )
+        except Exception as exc:
+            log.warning("rescan invoice %s: %s", nr, exc)
+            self._status(tr("invoices.rescan_failed", nr=nr))
+            return
+        if not parsed.get("template") or parsed.get("missing"):
+            missing = ", ".join(parsed.get("missing") or []) or "—"
+            log.info(
+                "SCAN_RESCAN: faktura %s kunde inte tolkas säkert "
+                "(mall=%s, saknar=%s) — inget ändrat",
+                nr, parsed.get("template") or "—", missing,
+            )
+            self._status(
+                tr("invoices.rescan_uncertain", nr=nr, missing=missing)
+            )
+            return
+        try:
+            from ui.watch_folders import invoice_control_changes
+        except ImportError:
+            from watch_folders import invoice_control_changes  # type: ignore[no-redef]
+        changes = invoice_control_changes(inv, parsed)
+        if not changes:
+            log.info(
+                "SCAN_RESCAN: faktura %s stämmer med originalet "
+                "— inget ändrat", nr,
+            )
+            self._status(tr("invoices.rescan_unchanged", nr=nr))
+            return
+        new_nr = changes.get("invoice_number", (None, None))[1]
+        if new_nr:
+            others = [
+                r for r in self._all_data
+                if r.get("id") != inv.get("id")
+                and str(r.get("supplier", "")).strip().lower()
+                == str(inv.get("supplier", "")).strip().lower()
+                and str(r.get("invoice_number", "")).strip().lower()
+                == str(new_nr).strip().lower()
+            ]
+            if others:
+                self._status(
+                    tr("invoices.rescan_number_taken", nr=nr, new=new_nr)
+                )
+                return
+        labels = {
+            "invoice_number": tr("invoices.rescan_field_number"),
+            "date": tr("invoices.rescan_field_date"),
+            "due_date": tr("invoices.rescan_field_due"),
+            "total_amount": tr("invoices.rescan_field_total"),
+        }
+
+        def _fmt(field: str, value: Any) -> str:
+            if field == "total_amount":
+                try:
+                    return fmt_amount(float(value))
+                except (TypeError, ValueError):
+                    return str(value)
+            return str(value or "—")
+
+        lines = "\n".join(
+            f"• {labels.get(field, field)}: "
+            f"{_fmt(field, old)} → {_fmt(field, new)}"
+            for field, (old, new) in changes.items()
+        )
+        reply = QMessageBox.question(
+            self,
+            tr("invoices.rescan_title"),
+            tr("invoices.rescan_confirm", nr=nr, lines=lines),
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self._status(tr("invoices.rescan_cancelled", nr=nr))
+            return
+        updates = {field: new for field, (_old, new) in changes.items()}
+        try:
+            self._app.update_invoice(inv["id"], updates)
+        except Exception as exc:
+            log.warning("rescan update %s: %s", nr, exc)
+            self._status(tr("invoices.rescan_failed", nr=nr))
+            return
+        log.info(
+            "SCAN_RESCAN: faktura %s uppdaterad efter omskanning "
+            "av %s: %s",
+            nr, Path(path).name,
+            ", ".join(
+                f"{f}: {o} → {n}" for f, (o, n) in changes.items()
+            ),
+        )
+        self._do_refresh()
+        self._status(tr("invoices.rescan_updated", nr=nr), timeout=8000)
+
     def _copy_payment_info(self) -> None:
         """Kopierar BG/PG/IBAN + OCR + belopp för markerad faktura."""
         inv = self._selected_invoice()
@@ -2505,6 +2648,7 @@ class InvoicesView(QWidget):
             tr("invoices.copy_payinfo"), self._copy_payment_info
         )
         menu.addAction(tr("invoices.ctx_print"), self._print_invoice)
+        menu.addAction(tr("invoices.ctx_rescan"), self._rescan_invoice)
         menu.addSeparator()
 
         status_menu = menu.addMenu(tr("invoices.ctx_status"))

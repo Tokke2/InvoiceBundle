@@ -407,3 +407,124 @@ def test_invoice_print_prints_original(tmp_path, monkeypatch):
         assert out.exists() and out.stat().st_size > 1000
     finally:
         view.close()
+
+
+# ── Skanna om faktura (högerklicksmenyn) ─────────────────────────────
+
+def _stub_scan_module(monkeypatch, parsed):
+    import ui.scan_import_view as siv
+
+    class _SI:
+        @staticmethod
+        def extract_text(path):
+            return ("stubtext", "test")
+
+        @staticmethod
+        def parse_invoice_file(path, text, suppliers, templates=None):
+            return dict(parsed)
+
+        @staticmethod
+        def load_templates(path):
+            return {}
+
+    monkeypatch.setattr(siv, "_scan_module", lambda: _SI())
+
+
+def _rescan_setup(tmp_path, monkeypatch, *, amount, answer):
+    _qapp()
+    import ui.invoices_view as iv
+
+    from ui.invoices_view import InvoicesView
+
+    original = tmp_path / "original.pdf"
+    original.write_bytes(b"%PDF-fake")
+    inv = _mk_invoice("1", "2026-10-01", amount=amount)
+    inv["attachment"] = str(original)
+    app = _fake_app(tmp_path, [inv])
+    view = InvoicesView(app)
+    captured: list[str] = []
+    monkeypatch.setattr(
+        view, "_status",
+        lambda msg, timeout=5000: captured.append(msg),
+    )
+    monkeypatch.setattr(view, "_selected_invoice", lambda: inv)
+    monkeypatch.setattr(view, "_do_refresh", lambda: None)
+    asked: list[bool] = []
+
+    class _Msg:
+        StandardButton = iv.QMessageBox.StandardButton
+
+        @staticmethod
+        def question(*_args, **_kwargs):
+            asked.append(True)
+            return answer
+
+    monkeypatch.setattr(iv, "QMessageBox", _Msg)
+    return view, app, inv, captured, asked
+
+
+def _rescan_parsed(inv, total=10378.0):
+    return {
+        "supplier": "Pilkington",
+        "invoice_number": inv["invoice_number"],
+        "date": "2026-09-01", "due_date": "2026-10-01",
+        "total_amount": total, "template": "Pilkington", "missing": [],
+    }
+
+
+def test_invoice_rescan_applies_confirmed_changes(tmp_path, monkeypatch):
+    """Omskanning som läser ett nytt belopp: användaren ser
+    gammalt → nytt och fakturan uppdateras först vid Ja."""
+    from PySide6.QtWidgets import QMessageBox
+
+    view, app, inv, captured, asked = _rescan_setup(
+        tmp_path, monkeypatch, amount=70117.0,
+        answer=QMessageBox.StandardButton.Yes,
+    )
+    _stub_scan_module(monkeypatch, _rescan_parsed(inv))
+    try:
+        view._rescan_invoice()
+        assert asked
+        assert inv["total_amount"] == 10378.0
+        assert any(
+            "uppdaterad efter omskanning" in m for m in captured
+        ), captured
+    finally:
+        view.close()
+
+
+def test_invoice_rescan_declined_keeps_values(tmp_path, monkeypatch):
+    """Svarar användaren Nej på avvikelsen ändras ingenting."""
+    from PySide6.QtWidgets import QMessageBox
+
+    view, app, inv, captured, asked = _rescan_setup(
+        tmp_path, monkeypatch, amount=70117.0,
+        answer=QMessageBox.StandardButton.No,
+    )
+    _stub_scan_module(monkeypatch, _rescan_parsed(inv))
+    try:
+        view._rescan_invoice()
+        assert asked
+        assert inv["total_amount"] == 70117.0
+        assert any("avbruten" in m for m in captured), captured
+    finally:
+        view.close()
+
+
+def test_invoice_rescan_unchanged_asks_nothing(tmp_path, monkeypatch):
+    """Stämmer omskanningen med registret visas ingen fråga —
+    bara en bekräftelse i statusraden."""
+    from PySide6.QtWidgets import QMessageBox
+
+    view, app, inv, captured, asked = _rescan_setup(
+        tmp_path, monkeypatch, amount=10378.0,
+        answer=QMessageBox.StandardButton.Yes,
+    )
+    _stub_scan_module(monkeypatch, _rescan_parsed(inv))
+    try:
+        view._rescan_invoice()
+        assert not asked
+        assert inv["total_amount"] == 10378.0
+        assert any("samma värden" in m for m in captured), captured
+    finally:
+        view.close()
