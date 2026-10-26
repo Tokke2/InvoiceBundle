@@ -136,8 +136,16 @@ def export_batches(
     Exporterar varje batch till betal-PDF med original bifogade.
     Rör INTE statusar — det gör anroparen efter lyckad export.
 
-    Returnerar en lista med {batch, success, file_path, error}.
+    Exporttaket (högst 10 fakturor per exportfil) gäller även
+    här, vid sista steget: en batch med fler än 10 fakturor
+    delas alltid i delfiler (…-del1avN.pdf, …) innan något
+    skrivs, oavsett hur batchen byggdes.
+
+    Returnerar en lista med {batch, success, file_path, error}
+    — en post per batch; file_path pekar på första delfilen.
     """
+    from ui.invoices_helpers import chunk_export_rows
+
     results: list[dict] = []
     exporter = getattr(app, "pdf_exporter", None)
     if exporter is None:
@@ -150,39 +158,63 @@ def export_batches(
 
     for batch in batches:
         try:
+            chunks = chunk_export_rows(list(batch["invoices"]))
             target_dir, filename = path_builder([batch["supplier"]])
-            full_path = Path(target_dir) / filename
-            result = exporter.export_invoice_list(
-                batch["invoices"],
-                filename=str(full_path),
-                title=tr("auto_batch.pdf_title",
-                         supplier=batch["supplier"]),
-                check_duplicates=False,
-                mark_exported=True,
-                force_export=True,
-                payment_date=batch["payment_date"],
-                ask_payment_date=False,
-                include_originals=True,
-            )
-            ok = bool(result.get("success"))
-            if result.get("attachments_missing"):
-                log.warning(
-                    "AUTOBATCH %s: %s originalfiler saknas på disk "
-                    "— kunde inte bifogas i PDF:en",
-                    batch["supplier"], result["attachments_missing"],
+            files: list[str] = []
+            errors: list[str] = []
+            ok = True
+            for idx, chunk in enumerate(chunks):
+                chunk_name = filename
+                if len(chunks) > 1:
+                    chunk_name = (
+                        f"{Path(filename).stem}"
+                        f"-del{idx + 1}av{len(chunks)}.pdf"
+                    )
+                full_path = Path(target_dir) / chunk_name
+                result = exporter.export_invoice_list(
+                    chunk,
+                    filename=str(full_path),
+                    title=tr("auto_batch.pdf_title",
+                             supplier=batch["supplier"]),
+                    check_duplicates=False,
+                    mark_exported=True,
+                    force_export=True,
+                    payment_date=batch["payment_date"],
+                    ask_payment_date=False,
+                    include_originals=True,
                 )
+                if result.get("attachments_missing"):
+                    log.warning(
+                        "AUTOBATCH %s: %s originalfiler saknas på "
+                        "disk — kunde inte bifogas i PDF:en",
+                        batch["supplier"],
+                        result["attachments_missing"],
+                    )
+                files.append(
+                    result.get("file_path", str(full_path))
+                )
+                if not result.get("success"):
+                    ok = False
+                    errors.extend(
+                        str(e) for e in
+                        (result.get("errors") or ["okänt fel"])
+                    )
+                    break
             results.append({
                 "batch": batch,
                 "success": ok,
-                "file_path": result.get("file_path", str(full_path)),
-                "error": "" if ok else str(
-                    result.get("errors", ["okänt fel"])
+                "file_path": (
+                    files[0] if files
+                    else str(Path(target_dir) / filename)
                 ),
+                "error": "" if ok else "; ".join(errors),
             })
             log.info(
-                "AUTOBATCH %s: %d fakturor, %s (betal datum %s) → %s",
+                "AUTOBATCH %s: %d fakturor i %d fil(er), %s "
+                "(betal datum %s) → %s",
                 batch["supplier"], len(batch["invoices"]),
-                batch["reason"], batch["payment_date"],
+                max(len(files), 0), batch["reason"],
+                batch["payment_date"],
                 "OK" if ok else "MISSLYCKADES",
             )
         except Exception as exc:
