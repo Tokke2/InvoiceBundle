@@ -138,14 +138,16 @@ def test_apply_update_strips_zipball_root(tmp_path):
     assert not (root / "data" / "x.json").exists()   # data rörs inte
 
 
-def test_auto_check_due_daily_gate():
+def test_auto_check_due_twice_daily_gate():
     import datetime as dt
     now = dt.datetime(2026, 10, 14, 12, 0, 0)
     assert up.auto_check_due("", now)                        # aldrig kollat
     assert up.auto_check_due("skräp", now)                   # korrupt värde
     assert up.auto_check_due("2026-10-13T11:59:59", now)     # > 24 h sedan
+    assert up.auto_check_due("2026-10-14T00:00:00", now)     # exakt 12 h
+    assert up.auto_check_due("2026-10-13T13:00:00", now)     # 23 h sedan
     assert not up.auto_check_due("2026-10-14T11:00:00", now)  # 1 h sedan
-    assert not up.auto_check_due("2026-10-13T13:00:00", now)  # 23 h sedan
+    assert not up.auto_check_due("2026-10-14T01:00:00", now)  # 11 h sedan
 
 
 def test_restore_backup_roundtrip(tmp_path):

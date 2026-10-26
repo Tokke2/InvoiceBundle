@@ -5,7 +5,8 @@ update_dialog.py — dialogen för "Sök ny version".
 Kollar GitHubs senaste release (plugins/updater.py), visar
 versionsnoteringar och — om användaren vill — hämtar och installerar
 uppdateringen. Användardata (data/, settings.json, loggar …) rörs
-aldrig; efteråt erbjuds omstart av appen.
+aldrig; efter lyckad installation startar appen om tyst
+av sig själv (ingen extra fråga eller klick).
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QVBoxLayout,
@@ -297,7 +298,7 @@ class UpdateDialog(QDialog):
         )
         self._lbl_status.setText(tr("update.done", n=n))
         self._show_local_build()
-        self._btn_restart.show()
+        self._schedule_silent_restart()
 
     def _on_failed(self, error: str) -> None:
         self._progress.setFormat("")
@@ -327,12 +328,20 @@ class UpdateDialog(QDialog):
                 tr("update.restored", n=report.get("restored", 0))
             )
             self._btn_install.hide()
-            self._btn_restart.show()
+            self._schedule_silent_restart()
             self._show_local_build()
         except Exception as exc:
             self._lbl_status.setText(tr("update.failed", error=str(exc)))
 
     # ── Omstart ──────────────────────────────────────────────────────
+    def _schedule_silent_restart(self) -> None:
+        """Tyst omstart: efter lyckad installation/återställning
+        startar appen om av sig själv — inget extra klick.
+        Klartexten ("Uppdateringen är klar …") hinner synas en
+        kort stund innan dialogen stängs och huvudfönstret
+        startar den nya instansen."""
+        QTimer.singleShot(1500, self._restart)
+
     def _restart(self) -> None:
         self.restart_requested = True
         self.accept()

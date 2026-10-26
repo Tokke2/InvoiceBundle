@@ -1383,11 +1383,13 @@ class MainWindow(QMainWindow):
         self._pending_update: dict | None = None
         self._update_worker = None
         QTimer.singleShot(5_000, self._maybe_auto_update_check)
-        # …och därefter var 6:e timme medan appen körs: versionen
-        # står kvar på v1.0.0, så ändrade filer i releasen (ny commit
-        # under samma tagg) måste upptäckas utan att appen startas om.
+        # …och därefter en gång i timmen medan appen körs — men
+        # själva kollen körs högst två gånger per dygn (minst
+        # 12 h mellan genomförda kollar, se _maybe_auto_update_check).
+        # Versionen står kvar på v1.0.0, så ändrade filer i releasen
+        # (ny commit under samma tagg) upptäcks ändå utan omstart.
         self._update_poll_timer = QTimer(self)
-        self._update_poll_timer.setInterval(6 * 3600 * 1000)
+        self._update_poll_timer.setInterval(3600 * 1000)
         self._update_poll_timer.timeout.connect(
             self._maybe_auto_update_check)
         self._update_poll_timer.start()
@@ -2492,13 +2494,17 @@ class MainWindow(QMainWindow):
             self.set_status("   ".join(messages), 12000)
 
     def _maybe_auto_update_check(self) -> None:
-        """Tyst bakgrundskoll — vid varje start och var 6:e timme.
+        """Tyst bakgrundskoll — högst två gånger per dygn.
 
         Versionen står kvar på v1.0.0 medan filerna i releasen byts
         (ny commit under samma tagg), så kollen jämför alltid den
-        installerade buildens commit mot releasens aktuella commit
-        och säger till direkt när de skiljer sig — ingen dygnsspärr
-        får fördröja det. Aldrig ett felmeddelande vid tyst fel."""
+        installerade buildens commit mot releasens aktuella commit.
+        Den körs vid start (om mogen) och vid timerns tick varje
+        timme, men bara när minst 12 timmar gått sedan senaste
+        GENOMFÖRDA koll — stämpeln sätts först när nätet svarat
+        (se _on_auto_update_result), så en offline-start förbrukar
+        ingen av de två gångerna. Aldrig ett felmeddelande vid
+        tyst fel; hittas en ny version erbjuds den som förut."""
         try:
             from ui.update_dialog import UpdateWorker
             sys.path.insert(0, str(PROJECT_DIR / "plugins"))
@@ -2509,11 +2515,10 @@ class MainWindow(QMainWindow):
             worker = getattr(self, "_update_worker", None)
             if worker is not None and worker.isRunning():
                 return  # en koll pågår redan
-            import datetime as _dt
-            self._settings.set(
-                "update_last_check",
-                _dt.datetime.now().isoformat(timespec="seconds"),
-            )
+            if not _updater.auto_check_due(
+                str(self._settings.get("update_last_check", "") or "")
+            ):
+                return  # kollat nyligen — två gånger per dygn räcker
             self._update_worker = UpdateWorker(
                 "check", PROJECT_DIR, parent=self
             )
@@ -2528,6 +2533,19 @@ class MainWindow(QMainWindow):
             log.debug("_maybe_auto_update_check: %s", exc)
 
     def _on_auto_update_result(self, result: dict) -> None:
+        # Kollen är GENOMFÖRD (nätet svarade) — först nu räknas
+        # den mot två gånger per dygn. En misslyckad koll
+        # (offline) når aldrig hit, sätter ingen stämpel och
+        # prövas igen vid nästa timtick.
+        try:
+            import datetime as _dt
+
+            self._settings.set(
+                "update_last_check",
+                _dt.datetime.now().isoformat(timespec="seconds"),
+            )
+        except Exception:
+            pass
         if result.get("status") != "update":
             return
         if self.isVisible():

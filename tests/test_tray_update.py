@@ -91,3 +91,30 @@ def test_tray_update_brings_window_front_then_opens_dialog():
     # Fönstret fram FÖRST (dialogen behöver synlig förälder),
     # sedan samma uppdateringsflöde som Hjälp-menyn.
     assert called == ["front", "check"]
+
+
+def test_applied_update_schedules_silent_restart(tmp_path, monkeypatch):
+    """Efter lyckad installation startar appen om TYST: en
+    fördröjd omstart schemaläggs — ingen Omstart-knapp visas
+    och användaren behöver inte klicka någonting."""
+    import ui.update_dialog as upd
+
+    _qapp()
+    fired: list = []
+
+    class _FakeTimer:
+        @staticmethod
+        def singleShot(msec, fn):
+            fired.append((msec, fn))
+
+    monkeypatch.setattr(upd, "QTimer", _FakeTimer)
+    dlg = upd.UpdateDialog(
+        None, tmp_path, "1.0.0",
+        initial_result={"status": "current"},
+    )
+    dlg._on_applied({"replaced": 2, "added": 1, "removed": 0})
+    assert dlg._btn_restart.isHidden()       # knappen visas aldrig
+    assert fired and fired[0][0] == 1500     # …i stället: tyst omstart
+    fired[0][1]()                            # timern löper ut
+    assert dlg.restart_requested is True
+    dlg.close()

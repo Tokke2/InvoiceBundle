@@ -50,13 +50,20 @@ def test_main_window_wires_update_everywhere():
     assert 'a_update = QAction(tr("menu.update"), self)' in s
     assert "m_help.addAction(a_update)" in s
     assert "a_update.triggered.connect(self._check_updates)" in s
-    # Auto-koll vid varje start + periodiskt medan appen körs, så
-    # ändrade filer i v1.0.0-releasen alltid upptäcks (sha-jämförelse,
-    # samma version). Ingen dygnsspärr får fördröja kollen.
+    # Tyst auto-koll högst två gånger per dygn: vid start (om mogen)
+    # + timtick medan appen körs; spärren (minst 12 h mellan
+    # GENOMFÖRDA kollar) bor i updater.auto_check_due och stämpeln
+    # sätts först när nätet svarat — offline förbrukar ingen gång.
     assert "QTimer.singleShot(5_000, self._maybe_auto_update_check)" in s
     assert "_update_poll_timer" in s
-    assert "6 * 3600 * 1000" in s
-    assert "auto_check_due(last)" not in s
+    assert "setInterval(3600 * 1000)" in s
+    assert "auto_check_due" in s
+    # Efter lyckad installation: tyst omstart — ingen knapp att klicka.
+    d = (PROJECT_DIR / "ui" / "update_dialog.py").read_text(
+        encoding="utf-8"
+    )
+    assert "QTimer.singleShot(1500, self._restart)" in d
+    assert "_btn_restart.show()" not in d
     assert 'self._settings.get("update_auto_check", True)' in s
     assert "_act_update_auto" in s
     # Även systembrickan har samma val.

@@ -170,13 +170,19 @@ def read_local_build(root: Path) -> dict:
 
 def auto_check_due(last_check: str,
                    now: datetime.datetime | None = None) -> bool:
-    """True om bakgrundskollen får köras (minst 24 h sedan sist)."""
+    """True om bakgrundskollen får köras (minst 12 h sedan sist).
+
+    Tolv timmar = två tysta kollar per dygn. Stämpeln sätts
+    först när en koll faktiskt genomförts (nätet svarade) —
+    en misslyckad koll offline förbrukar ingen av gångerna
+    och prövas igen vid nästa tillfälle.
+    """
     now = now or datetime.datetime.now()
     try:
         last = datetime.datetime.fromisoformat(str(last_check))
     except Exception:
         return True
-    return (now - last) >= datetime.timedelta(hours=24)
+    return (now - last) >= datetime.timedelta(hours=12)
 
 
 def should_update(local_sha: str, remote_sha: str) -> bool:
