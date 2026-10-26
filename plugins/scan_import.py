@@ -241,17 +241,34 @@ def _amount_from_group(group: str) -> float:
     return _norm_amount(g)
 
 
+def _is_postal_code_group(group: str) -> bool:
+    """True om beloppsgruppen i själva verket är ett svenskt
+    postnummer ("701 17"/"70117" utan decimaler). Ett sådant
+    får aldrig normaliseras till 70 117 kr — det är exakt så
+    leverantörens postadress tidigare kunde bli fakturans
+    att betala när etikett och värde hamnade på olika rader."""
+    g = (group or "").strip()
+    if "," in g or "." in g:
+        return False
+    digits = re.sub(r"[\s\u00a0]", "", g)
+    return bool(re.fullmatch(r"\d{5}", digits))
+
+
 def parse_total(text: str) -> float:
     """
     Hittar ATT BETALA-beloppet: etikettmönster först, annars största
     beloppet i dokumentet (på svenska fakturor är totalen nästan
-    alltid störst).
+    alltid störst). Postnummer-formade träffar efter en etikett
+    hoppas över — sökningen fortsätter till nästa förekomst i
+    stället för att postadressen blir belopp.
     """
     upper = text.upper()
     for pat in _TOTAL_PATTERNS:
-        m = re.search(pat, upper)
-        if m:
-            v = _amount_from_group(m.group(1))
+        for m in re.finditer(pat, upper):
+            group = m.group(1)
+            if _is_postal_code_group(group):
+                continue
+            v = _amount_from_group(group)
             if v > 0:
                 return round(v, 2)
     amounts = [_norm_amount(a) for a in _ALL_AMOUNTS.findall(text)]
@@ -678,7 +695,16 @@ def parse_invoice_text(
                 elif field == "due_date":
                     due = str(value)
                 template_fields.append(field)
-            if found:
+            if found.get("invoice_number") and (
+                found.get("total_amount") or is_credit_note(text or "")
+            ):
+                # Mallanspråk kräver att mallen SJÄLV läser
+                # fakturanummer + att betala (kreditnotor:
+                # Tillgodo-vägen i stället). En mall som bara
+                # fyller enstaka fält får aldrig låta en generisk
+                # beloppsgissning registreras automatiskt —
+                # delträffarna visas för granskning, men filen
+                # parkeras som mallös tills mallen verkligen tar den.
                 template_name = supplier
 
     if not template_name:
@@ -953,9 +979,11 @@ def diagnose_invoice_file(
                     )
                 found.update(region_cache[cache_key])
             _diag_fill_fields(diag, spec, found)
-            if found.get("invoice_number") or found.get(
-                "total_amount"
+            if found.get("invoice_number") and (
+                found.get("total_amount") or is_credit_note(text)
             ):
+                # Samma anspråksregel som tolkningen: mallen
+                # måste själv läsa fakturanummer + att betala.
                 diag["claimed"] = True
         else:
             # Kandidat 2: inbyggt verifierat format.
@@ -1278,6 +1306,101 @@ def _label_below_amount(text: str, label: str) -> float | None:
     return float(hit) if hit else None
 
 
+def _label_key(label: Any) -> str:
+    """Normaliserad etikettnyckel för radjämförelser."""
+    lab = re.sub(r"\s+", " ", str(label or "")).strip()
+    return lab.rstrip(":#.").strip().lower()
+
+
+def _stacked_template_values(
+    text: str, fields: dict
+) -> dict[str, Any]:
+    """Värden när textuttaget STAPLAR etiketterna och värdena.
+
+    Vissa PDF-läsare/OCR-motorer lägger först alla rubriker på
+    varsin rad och därefter alla värden på varsin rad:
+
+        Fakturanr.
+        Fakturadatum
+        Kundnr.
+        916336
+        2024-05-08
+        103
+
+    Varken etikett+värde på samma rad eller rubrikrad/värderad
+    träffar då. Här paras i stället den ihopliggande etikett-
+    sekvensen med värdesekvensen direkt efter — i samma
+    ordning, fält för fält, och varje värde måste vara av rätt
+    typ (nummer/datum/belopp). Minst två etiketter i följd och
+    ett läst fakturanummer krävs; annars gissas ingenting.
+    Icke-mallrubriker i sekvensen (t.ex. Kundnr.) förbrukar sitt
+    värde så kolumnerna inte förskjuts.
+    """
+    if not text or not fields:
+        return {}
+    specs: dict[str, tuple[str, str]] = {}
+    for field, spec in fields.items():
+        kind = TEMPLATE_FIELD_KINDS.get(field)
+        if kind is None or not isinstance(spec, dict):
+            continue
+        if spec.get("region"):
+            continue  # rutfält pekas ut på bilden, aldrig i text
+        label = _label_key(spec.get("label", ""))
+        if label:
+            specs[field] = (label, kind)
+    if len(specs) < 2:
+        return {}
+    label_to_field: dict[str, str] = {}
+    for field, (label, _kind) in specs.items():
+        label_to_field.setdefault(label, field)
+    known_labels = set(label_to_field)
+    for labels in _REPAIR_LABELS.values():
+        known_labels.update(_label_key(lab) for lab in labels)
+    known_labels.update({
+        "kundnr", "kundnummer", "ordernr", "ordernummer",
+        "antal", "styckpris", "summa", "vår referens", "er referens",
+    })
+
+    lines = [
+        re.sub(r"[ \t]+", " ", line).strip()
+        for line in str(text).splitlines()
+    ]
+    found: dict[str, Any] = {}
+    for start in range(len(lines)):
+        seq: list[str | None] = []
+        i = start
+        while i < len(lines):
+            key = _label_key(lines[i])
+            if not key or key not in known_labels:
+                break
+            seq.append(label_to_field.get(key))
+            i += 1
+        if len(seq) < 2 or not any(seq):
+            continue
+        values: list[str] = []
+        j = i
+        while j < len(lines) and len(values) < len(seq):
+            if lines[j]:
+                values.append(lines[j])
+            j += 1
+        if len(values) < len(seq):
+            continue
+        cand: dict[str, Any] = {}
+        for field, line in zip(seq, values):
+            if field is None or field in cand:
+                continue
+            kind = specs[field][1]
+            raw = _extract_below_line(line, kind)
+            if raw:
+                cand[field] = (
+                    float(raw) if field == "total_amount" else raw
+                )
+        if "invoice_number" in cand and len(cand) >= 2:
+            for field, value in cand.items():
+                found.setdefault(field, value)
+    return found
+
+
 def apply_template(text: str, template: dict) -> dict[str, Any]:
     """Kör en leverantörsmall på texten → {fält: värde} för träffar."""
     fields = (template or {}).get("fields", {})
@@ -1301,6 +1424,15 @@ def apply_template(text: str, template: dict) -> dict[str, Any]:
         if raw == "":
             continue
         found[field] = float(raw) if field == "total_amount" else raw
+    if len(found) < len(fields):
+        # Staplat textuttag (rubrikerna för sig, värdena för
+        # sig) träffas varken av etikettläsningen eller av
+        # rubrikrad/värderad — para sekvenserna i stället.
+        # Staplingen fyller bara fält som annars saknas.
+        for field, value in _stacked_template_values(
+            text or "", fields
+        ).items():
+            found.setdefault(field, value)
     return found
 
 

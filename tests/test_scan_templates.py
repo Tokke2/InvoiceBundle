@@ -732,16 +732,18 @@ def test_martin_g_paired_layout_generic_and_template():
 
 
 def test_martin_g_row_layout_no_column_guessing():
-    # Radvis text: fakturanumret hittas (sida-2-rubriken
-    # "Fakturanr: 906178" går före), men total och fakturadatum
-    # ur fel kolumn hittas INTE på — de lämnas tomma i stället
-    # för att t.ex. total vikt (89,99) eller kundnr (103)
-    # bokförs. Användarens markering i dialogen styr.
+    # Radvis text: den egna mallen läser bara numret ur
+    # sida-2-rubriken ("Fakturanr: 906178") och gör därför
+    # inget anspråk — då får det inbyggda verifierade formatet
+    # ta fakturan i stället och läsa totalen ur värderaden.
+    # Total ur fel kolumn (total vikt 89,99) eller kundnr (103)
+    # bokförs aldrig.
     templated = si.parse_invoice_text(
         MARTIN_G_ROW, MARTIN_G_SUPPLIER, templates=MARTIN_G_TEMPLATES,
     )
     assert templated["invoice_number"] == "906178"
-    assert templated["total_amount"] == 89.99  # dagens generiska gissning, ersätts av markering
+    assert templated["total_amount"] == 3491.00
+    assert templated["template"]
     generic = si.parse_invoice_text(MARTIN_G_ROW, MARTIN_G_SUPPLIER)
     assert generic["invoice_number"] == "906178"
     # Nästa kolumnrubrik är aldrig ett fakturanummer.
@@ -833,6 +835,62 @@ def test_builtin_martin_g_2024_single_page_layout():
     assert parsed["template"]
 
 
+def test_parse_total_never_reads_postal_code():
+    # Postnumret i leverantörens adress ("701 17 ÖREBRO") får
+    # aldrig bli att betala — det var exakt så faktura 914377
+    # (10 378,00) felaktigt bokfördes som 70 117,00 när
+    # etikett och värde hamnade på skilda rader i uttaget.
+    assert si.parse_total(
+        "Att betala\n701 17 ÖREBRO\n10 378,00") == 10378.0
+    assert si.parse_total(
+        "Att betala\n70117 ÖREBRO\n10 378,00") == 10378.0
+    # En äkta total på 70 117,00 (med decimaler) läses som förut.
+    assert si.parse_total("Att betala 70 117,00") == 70117.0
+
+
+def test_builtin_martin_g_stacked_text_claims():
+    # Staplat uttag (alla rubriker först, alla värden efteråt)
+    # paras sekvensvis av det inbyggda formatet: fakturanummer,
+    # datum och att betala läses ur sina positioner — inget
+    # värde gissas ur adressen eller ur fel kolumn.
+    parsed = si.parse_invoice_text(MARTIN_G_STACKED, MARTIN_G_REGISTER)
+    assert parsed["template"]
+    assert parsed["invoice_number"] == "916336"
+    assert parsed["total_amount"] == 478.00
+    assert parsed["date"] == "2024-05-08"
+    assert parsed["due_date"] == "2024-06-07"
+    assert parsed["missing"] == []
+
+
+def test_partial_template_never_claims_a_generic_amount():
+    # En egen mall som bara läser fakturanumret gör INTE
+    # anspråk på fakturan: den generiska beloppsläsningen
+    # (här 10 378,00 efter postnumret i adressen) visas för
+    # granskning, men registreras aldrig automatiskt som
+    # om mallen hade tagit fakturan.
+    text = (
+        "MARTIN G ANDERSON\n"
+        "Fakturanr. Fakturadatum Kundnr.\n"
+        "914377 2024-03-08 103\n"
+        "Fakturanr: 914377\n"
+        "Förfallodatum: 2024-04-07\n"
+        "Att betala\n"
+        "701 17 ÖREBRO\n"
+        "SEK 10 378,00\n"
+        "Org nr 556824-5806\n"
+        "Bankgiro: 728-0811\n"
+    )
+    templates = {"Martin G Anderson": {"fields": {
+        "invoice_number": {"label": "Fakturanr."},
+        "total_amount": {"label": "Finns ingen sådan etikett"},
+    }}}
+    parsed = si.parse_invoice_text(
+        text, MARTIN_G_SUPPLIER, templates=templates)
+    assert not parsed.get("template")
+    assert parsed["invoice_number"] == "914377"
+    assert parsed["total_amount"] == 10378.0
+
+
 # ── Alternativ PDF-läsare när första uttaget saknar mallträff ────
 # Den ena läsaren kan stapla texten (alla rubriker för sig, alla
 # värden för sig) så att ingen mall gör anspråk, medan den andra
@@ -895,10 +953,14 @@ def _martin_g_2024_pdf(tmp_path):
     return pdf
 
 
-def test_parse_file_retries_other_reader_when_stacked(tmp_path):
-    # Den staplade texten gör inget mallanspråk (förutsättning).
+def test_parse_file_stacked_text_claims_directly(tmp_path):
+    # Det staplade uttaget gör numera anspråk direkt via
+    # stapelparningen (rubriksekvensen paras med värdesekvensen)
+    # — inget annat läsarförsök behövs för att mallen ska ta den.
     primary = si.parse_invoice_text(MARTIN_G_STACKED, MARTIN_G_REGISTER)
-    assert not primary.get("template")
+    assert primary["template"]
+    assert primary["invoice_number"] == "916336"
+    assert primary["total_amount"] == 478.00
     pdf = _martin_g_2024_pdf(tmp_path)
     parsed = si.parse_invoice_file(pdf, MARTIN_G_STACKED,
                                    MARTIN_G_REGISTER)
@@ -946,8 +1008,9 @@ def test_extract_pdf_texts_offers_both_readers(tmp_path):
 def test_diagnose_invoice_file_explains_each_reader(
     tmp_path, monkeypatch
 ):
-    # Felsökningspaketets malldiagnos: staplad text får sin
-    # brist namngiven, radtextens fullträff syns som sådan.
+    # Felsökningspaketets malldiagnos: det staplade uttaget
+    # gör numera anspråk via stapelparningen och radtexten
+    # som förut — båda syns som fullträffar med sina fält.
     monkeypatch.setattr(
         si, "extract_pdf_texts",
         lambda _p: [
@@ -964,9 +1027,10 @@ def test_diagnose_invoice_file_explains_each_reader(
     stacked, rowed = diags
     assert stacked["candidate"] == "Martin G Anderson"
     assert stacked["candidate_kind"] == "inbyggt format"
-    assert not stacked["claimed"]
-    assert "invoice_number" in stacked["failed"]
+    assert stacked["claimed"]
+    assert stacked["fields"]["invoice_number"] == "916336"
     assert stacked["fields"]["total_amount"] == 478.00
+    assert stacked["failed"] == []
     assert rowed["claimed"]
     assert rowed["invoice_number"] == "916336"
     assert rowed["failed"] == []
