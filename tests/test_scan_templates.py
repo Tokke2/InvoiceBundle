@@ -1201,6 +1201,53 @@ def test_drift_offer_repairs_template_and_rereads_rows(
         view.close()
 
 
+def test_print_invoice_document_writes_pdf(tmp_path):
+    """Utskriftsvägen: fakturans sidor renderas till skrivaren
+    (här en PDF-skrivare) — en sida in, en sida ut."""
+    printsupport = pytest.importorskip("PySide6.QtPrintSupport")
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as siv
+
+    pdf = _martin_g_2024_pdf(tmp_path)
+    out = tmp_path / "utskrift.pdf"
+    printer = printsupport.QPrinter(
+        printsupport.QPrinter.PrinterMode.HighResolution
+    )
+    printer.setOutputFormat(
+        printsupport.QPrinter.OutputFormat.PdfFormat
+    )
+    printer.setOutputFileName(str(out))
+    pages = siv.print_invoice_document(pdf, printer)
+    assert pages == 1
+    assert out.exists() and out.stat().st_size > 1000
+
+
+def test_print_row_missing_file_sets_status(tmp_path):
+    """Saknas originalfilen sägs det i statusraden — ingen
+    dialog, ingen gissning, ingen krasch."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import ScanImportView
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        view._rows = [{
+            "file": "borta.pdf",
+            "_path": str(tmp_path / "borta.pdf"),
+        }]
+        view._selected_rows = lambda: [0]
+        view._print_row()
+        assert "saknas" in view._lbl_status.text()
+    finally:
+        view.close()
+
+
 def test_builtin_martin_g_below_needs_value_row():
     # Rubrikraden finns men värderaden under Att betala är en
     # textrad utan belopp (t.ex. avklippt OCR) → ingen träff,

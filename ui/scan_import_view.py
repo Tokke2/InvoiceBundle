@@ -39,7 +39,14 @@ from PySide6.QtWidgets import (
     QDialog, QListWidget, QPlainTextEdit,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QRectF
-from PySide6.QtGui import QColor, QFont, QPixmap, QPainter, QPen
+from PySide6.QtGui import (
+    QColor, QFont, QImage, QPixmap, QPainter, QPen,
+)
+
+try:
+    from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+except Exception:  # pragma: no cover - skrivarstöd saknas
+    QPrintDialog = QPrinter = None  # type: ignore[assignment]
 
 try:
     from ui.design import ICON_HEADER_PX, app_icon_pixmap
@@ -119,6 +126,49 @@ def _scan_module():
     import scan_import as si
 
     return si
+
+
+def print_invoice_document(path: Any, printer: Any) -> int:
+    """Skriver ut en fakturafils alla sidor på vald skrivare.
+
+    Sidorna renderas som bilder (samma rendering som
+    malldialogen använder), skalas till sidans utskriftsyta
+    med bibehållna proportioner och centreras. Returnerar
+    antalet utskrivna sidor — 0 om filen inte kan visas.
+    """
+    if printer is None:
+        return 0
+    si = _scan_module()
+    pages = si.page_image_count(path)
+    if pages <= 0:
+        return 0
+    painter = QPainter(printer)
+    printed = 0
+    try:
+        rect = printer.pageLayout().paintRectPixels(
+            printer.resolution()
+        )
+        for idx in range(pages):
+            data = si.render_page_image(path, idx, dpi=200)
+            if not data:
+                continue
+            img = QImage.fromData(data)
+            if img.isNull():
+                continue
+            if printed:
+                printer.newPage()
+            scaled = img.scaled(
+                rect.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            x = rect.x() + (rect.width() - scaled.width()) // 2
+            y = rect.y() + (rect.height() - scaled.height()) // 2
+            painter.drawImage(x, y, scaled)
+            printed += 1
+    finally:
+        painter.end()
+    return printed
 
 
 #: Fält i malldialogen (ordning = visning).
@@ -990,6 +1040,9 @@ class ScanImportView(QWidget):
         btn_open_dlg = QPushButton(tr("scan.open_dialog"))
         self._btn_open_dlg = btn_open_dlg
         btn_open_dlg.clicked.connect(self._open_row_dialog)
+        btn_print = QPushButton(tr("scan.print"))
+        self._btn_print = btn_print
+        btn_print.clicked.connect(self._print_row)
         btn_del = QPushButton(tr("scan.remove_row"))
         self._btn_del = btn_del
         btn_del.clicked.connect(self._remove_row)
@@ -1003,6 +1056,7 @@ class ScanImportView(QWidget):
         )
         row3.addWidget(btn_create)
         row3.addWidget(btn_open_dlg)
+        row3.addWidget(btn_print)
         row3.addWidget(btn_del)
         row3.addWidget(self._btn_template)
         row3.addWidget(self._btn_templates)
@@ -1043,6 +1097,7 @@ class ScanImportView(QWidget):
         self._chk_auto.setText(tr("scan.auto_open"))
         self._btn_create.setText(tr("scan.create"))
         self._btn_open_dlg.setText(tr("scan.open_dialog"))
+        self._btn_print.setText(tr("scan.print"))
         self._btn_del.setText(tr("scan.remove_row"))
         self._btn_template.setText(tr("scan.template_btn"))
         self._refresh_templates_btn()
@@ -2381,6 +2436,62 @@ class ScanImportView(QWidget):
         if not idxs and self._tbl.currentRow() >= 0:
             idxs = [self._tbl.currentRow()]
         return [i for i in idxs if 0 <= i < len(self._rows)]
+
+    def _print_row(self) -> None:
+        """Skriver ut markerad rads originalfaktura.
+
+        Raderna i granskningen bär originalets sökväg — för
+        parkerade filer ur bevakade mappar är det filen i den
+        bevakade mappen, orörd. Alla sidor skrivs ut via
+        systemets skrivardialog; finns filen inte kvar sägs
+        det i statusraden i stället för att gissa.
+        """
+        idxs = self._selected_rows()
+        if not idxs:
+            self._lbl_status.setText(tr("scan.select_row"))
+            return
+        row = self._rows[idxs[0]]
+        path = str(row.get("_path", "") or "")
+        name = str(row.get("file", "") or "") or Path(path).name
+        if not path or not Path(path).exists():
+            self._lbl_status.setText(
+                tr("scan.print_missing", file=name)
+            )
+            return
+        if QPrinter is None or QPrintDialog is None:
+            self._lbl_status.setText(
+                tr(
+                    "scan.print_failed",
+                    error="skrivarstödet (QtPrintSupport) saknas",
+                )
+            )
+            return
+        try:
+            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+            dlg = QPrintDialog(printer, self)
+            if not dlg.exec():
+                return
+            n = print_invoice_document(path, printer)
+            if n:
+                self._lbl_status.setText(
+                    tr("scan.printed", file=name, n=n)
+                )
+                log.info(
+                    "SCAN_PRINT: %s utskriven (%d sida/sidor)",
+                    name, n,
+                )
+            else:
+                self._lbl_status.setText(
+                    tr(
+                        "scan.print_failed",
+                        error="inga sidor kunde renderas",
+                    )
+                )
+        except Exception as exc:
+            log.warning("print row: %s", exc)
+            self._lbl_status.setText(
+                tr("scan.print_failed", error=str(exc))
+            )
 
     def _remove_row(self) -> None:
         for i in reversed(self._selected_rows()):

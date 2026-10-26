@@ -545,6 +545,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "scan.date_due_before": {"sv": "⚠ förfaller före fakturadatum", "en": "⚠ due before invoice date"},
     "scan.date_term_long": {"sv": "⚠ ovanligt lång betalfrist", "en": "⚠ unusually long payment term"},
     "scan.date_future": {"sv": "⚠ fakturadatum långt framåt", "en": "⚠ invoice date far in the future"},
+    "scan.print": {"sv": "🖨 Skriv ut", "en": "🖨 Print"},
+    "scan.print_missing": {"sv": "Kan inte skriva ut — originalfilen saknas ({file})", "en": "Cannot print — the original file is missing ({file})"},
+    "scan.printed": {"sv": "🖨 {file} skickad till skrivaren ({n} sida/sidor)", "en": "🖨 {file} sent to the printer ({n} page(s))"},
+    "scan.print_failed": {"sv": "Utskriften misslyckades: {error}", "en": "Printing failed: {error}"},
     "dashboard.credits_stale": {"sv": "⚠️  {n} kreditfaktura(or) på {amount} har legat okvittade i över 30 dagar – kontrollera så ATT BETALA stämmer.", "en": "⚠️  {n} credit invoice(s) totalling {amount} have been unnetted for over 30 days – check that TO PAY adds up."},
     "dashboard.all_clear": {"sv": "🎉  Inget förfaller den närmaste veckan — allt är under kontroll.", "en": "🎉  Nothing due in the next week — everything is under control."},
 
