@@ -74,6 +74,30 @@ def test_main_window_wires_update_everywhere():
     assert 'tr("update.failed"' in s
 
 
+def test_invoices_context_menu_is_translated():
+    s = (PROJECT_DIR / "ui" / "invoices_view.py").read_text(
+        encoding="utf-8"
+    )
+    start = s.index("def _context_menu")
+    end = s.index("def apply_theme", start)
+    body = s[start:end]
+    # Hela högerklicksmenyn går via i18n — inklusive Skriv ut.
+    assert 'tr("invoices.ctx_print")' in body
+    assert 'tr("invoices.ctx_status")' in body
+    assert 'tr("invoices.ctx_undo_status")' in body
+    assert "tr_status(s)" in body
+    # Inga hårdkodade svenska menytexter kvar i menyn.
+    for hard in (
+        '"✏️  Redigera"',
+        '"📋  Duplicera"',
+        '"✅  Markera betald"',
+        '"🗑  Ta bort"',
+        '"📊  Ändra status"',
+        '"↩  Ångra statusändring"',
+    ):
+        assert hard not in body
+
+
 def test_i18n_update_keys_exist():
     s = (PROJECT_DIR / "ui" / "i18n.py").read_text(encoding="utf-8")
     for key in ("menu.update", "update.title", "update.auto_menu",

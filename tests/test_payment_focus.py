@@ -348,3 +348,62 @@ def test_possible_duplicate_never_flags_recurring_or_others():
         "supplier": "Direktglas", "invoice_number": "9912",
         "total_amount": 1250.0, "date": "2026-09-01",
     }) is None
+
+
+def test_invoice_print_prints_original(tmp_path, monkeypatch):
+    """Fakturor-vyns Skriv ut (högerklicksmenyn): markerad
+    fakturas original (attachment-fältet) skrivs ut via
+    skrivardialogen och bekräftas i statusraden (skrivaren
+    är en PDF-fil här; dialogen är fejkad så inget fönster
+    öppnas)."""
+    _qapp()
+    import fitz
+    import PySide6.QtPrintSupport as printsupport
+
+    from ui.invoices_view import InvoicesView
+
+    pdf = tmp_path / "original.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 72), "Faktura F-1")
+    doc.save(pdf)
+    doc.close()
+
+    inv = _mk_invoice("1", "2026-09-11")
+    inv["attachment"] = str(pdf)
+    view = InvoicesView(_fake_app(tmp_path, [inv]))
+    captured: list[str] = []
+    monkeypatch.setattr(
+        view, "_status",
+        lambda msg, timeout=5000: captured.append(msg),
+    )
+    monkeypatch.setattr(view, "_selected_invoice", lambda: inv)
+
+    out = tmp_path / "utskrift.pdf"
+    real_printer = printsupport.QPrinter
+
+    def _pdf_printer(*_args, **_kwargs):
+        printer = real_printer(real_printer.PrinterMode.HighResolution)
+        printer.setOutputFormat(real_printer.OutputFormat.PdfFormat)
+        printer.setOutputFileName(str(out))
+        return printer
+
+    _pdf_printer.PrinterMode = real_printer.PrinterMode
+
+    class _Dlg:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def exec(self):
+            return 1
+
+    monkeypatch.setattr(printsupport, "QPrinter", _pdf_printer)
+    monkeypatch.setattr(printsupport, "QPrintDialog", _Dlg)
+    try:
+        view._print_invoice()
+        assert any(
+            "skickad till skrivaren" in m for m in captured
+        ), captured
+        assert out.exists() and out.stat().st_size > 1000
+    finally:
+        view.close()

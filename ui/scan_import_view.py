@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QCheckBox, QApplication, QInputDialog,
     QDialog, QListWidget, QPlainTextEdit,
 )
-from PySide6.QtCore import Qt, QTimer, QUrl, Signal, QRectF
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal, QRectF, QSizeF
 from PySide6.QtGui import (
     QColor, QDesktopServices, QFont, QImage, QPixmap, QPainter, QPen,
 )
@@ -132,8 +132,11 @@ def print_invoice_document(path: Any, printer: Any) -> int:
     """Skriver ut en fakturafils alla sidor på vald skrivare.
 
     Sidorna renderas som bilder (samma rendering som
-    malldialogen använder), skalas till sidans utskriftsyta
-    med bibehållna proportioner och centreras. Returnerar
+    malldialogen använder) och RITAS mot sidans utskriftsyta
+    med bibehållna proportioner, centrerat — bilden skalas
+    aldrig upp till skrivarens fulla enhetsupplösning (en
+    1200-dpi-skrivare skulle annars få en gigantisk bild och
+    utskriften kan hänga sig eller komma ut tom). Returnerar
     antalet utskrivna sidor — 0 om filen inte kan visas.
     """
     if printer is None:
@@ -145,8 +148,13 @@ def print_invoice_document(path: Any, printer: Any) -> int:
     painter = QPainter(printer)
     printed = 0
     try:
-        rect = printer.pageLayout().paintRectPixels(
-            printer.resolution()
+        if not painter.isActive():
+            return 0
+        painter.setRenderHint(
+            QPainter.RenderHint.SmoothPixmapTransform, True
+        )
+        rect = QRectF(
+            printer.pageLayout().paintRectPixels(printer.resolution())
         )
         for idx in range(pages):
             data = si.render_page_image(path, idx, dpi=200)
@@ -155,16 +163,17 @@ def print_invoice_document(path: Any, printer: Any) -> int:
             img = QImage.fromData(data)
             if img.isNull():
                 continue
-            if printed:
-                printer.newPage()
-            scaled = img.scaled(
-                rect.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
+            if printed and not printer.newPage():
+                break
+            size = QSizeF(img.size()).scaled(
+                rect.size(), Qt.AspectRatioMode.KeepAspectRatio
             )
-            x = rect.x() + (rect.width() - scaled.width()) // 2
-            y = rect.y() + (rect.height() - scaled.height()) // 2
-            painter.drawImage(x, y, scaled)
+            target = QRectF(
+                rect.x() + (rect.width() - size.width()) / 2,
+                rect.y() + (rect.height() - size.height()) / 2,
+                size.width(), size.height(),
+            )
+            painter.drawImage(target, img)
             printed += 1
     finally:
         painter.end()

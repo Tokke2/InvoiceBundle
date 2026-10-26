@@ -1222,6 +1222,11 @@ def test_print_invoice_document_writes_pdf(tmp_path):
     pages = siv.print_invoice_document(pdf, printer)
     assert pages == 1
     assert out.exists() and out.stat().st_size > 1000
+    import fitz
+
+    with fitz.open(out) as doc:
+        assert len(doc) == 1
+        assert doc[0].get_images(), "utskriven sida saknar fakturabilden"
 
 
 def test_print_row_missing_file_sets_status(tmp_path):
@@ -1244,6 +1249,56 @@ def test_print_row_missing_file_sets_status(tmp_path):
         view._selected_rows = lambda: [0]
         view._print_row()
         assert "saknas" in view._lbl_status.text()
+    finally:
+        view.close()
+
+
+def test_print_row_accepted_dialog_prints(tmp_path, monkeypatch):
+    """Hela vägen: markerad rad + accepterad skrivardialog ger
+    utskriften och bekräftelsen i statusraden (skrivaren är en
+    PDF-fil här; dialogen är fejkad så inget fönster öppnas)."""
+    printsupport = pytest.importorskip("PySide6.QtPrintSupport")
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as siv
+    from ui.scan_import_view import ScanImportView
+
+    pdf = _martin_g_2024_pdf(tmp_path)
+    out = tmp_path / "utskrift.pdf"
+    real_printer = printsupport.QPrinter
+
+    def _pdf_printer(*_args, **_kwargs):
+        printer = real_printer(
+            real_printer.PrinterMode.HighResolution
+        )
+        printer.setOutputFormat(
+            real_printer.OutputFormat.PdfFormat
+        )
+        printer.setOutputFileName(str(out))
+        return printer
+
+    _pdf_printer.PrinterMode = real_printer.PrinterMode
+
+    class _Dlg:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def exec(self):
+            return 1
+
+    monkeypatch.setattr(siv, "QPrinter", _pdf_printer)
+    monkeypatch.setattr(siv, "QPrintDialog", _Dlg)
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        view._rows = [{"file": pdf.name, "_path": str(pdf)}]
+        view._selected_rows = lambda: [0]
+        view._print_row()
+        assert "skickad till skrivaren" in view._lbl_status.text()
+        assert out.exists() and out.stat().st_size > 1000
     finally:
         view.close()
 

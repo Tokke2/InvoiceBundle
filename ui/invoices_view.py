@@ -2009,6 +2009,59 @@ class InvoicesView(QWidget):
         if len(picked) >= 2:
             self._show_combine_dialog()
 
+    def _print_invoice(self) -> None:
+        """Skriver ut markerad fakturas original (alla sidor).
+
+        Originalets sökväg ligger i fakturans attachment-fält
+        (samma fil som exporten bifogar) och skrivs ut orörd
+        via systemets skrivardialog — samma utskriftsväg som
+        Import-granskningens Skriv ut. Saknas originalet sägs
+        det i statusraden i stället för att något gissas fram.
+        """
+        inv = self._selected_invoice()
+        if not inv:
+            return
+        path = str(inv.get("attachment", "") or "")
+        nr = str(inv.get("invoice_number", "") or "")
+        name = Path(path).name if path else nr
+        if not path or not Path(path).exists():
+            self._status(tr("invoices.print_missing", nr=nr))
+            return
+        try:
+            from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+
+            try:
+                from ui.scan_import_view import print_invoice_document
+            except ImportError:
+                from scan_import_view import (  # type: ignore[no-redef]
+                    print_invoice_document,
+                )
+        except Exception as exc:
+            self._status(tr("scan.print_failed", error=str(exc)))
+            return
+        try:
+            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+            dlg = QPrintDialog(printer, self)
+            if not dlg.exec():
+                return
+            n = print_invoice_document(path, printer)
+            if n:
+                self._status(tr("scan.printed", file=name, n=n))
+                log.info(
+                    "INVOICE_PRINT: %s utskriven (%d sida/sidor)",
+                    name, n,
+                )
+            else:
+                self._status(
+                    tr(
+                        "scan.print_failed",
+                        error="inga sidor kunde renderas",
+                    )
+                )
+        except Exception as exc:
+            log.warning("print invoice: %s", exc)
+            self._status(tr("scan.print_failed", error=str(exc)))
+
     def _copy_payment_info(self) -> None:
         """Kopierar BG/PG/IBAN + OCR + belopp för markerad faktura."""
         inv = self._selected_invoice()
@@ -2446,27 +2499,30 @@ class InvoicesView(QWidget):
             self._table.selectRow(item.row())
 
         menu = QMenu(self)
-        menu.addAction("✏️  Redigera", self._edit_invoice)
-        menu.addAction("📋  Duplicera", self._duplicate_invoice)
+        menu.addAction(tr("invoices.edit"), self._edit_invoice)
+        menu.addAction(tr("invoices.duplicate"), self._duplicate_invoice)
         menu.addAction(
             tr("invoices.copy_payinfo"), self._copy_payment_info
         )
+        menu.addAction(tr("invoices.ctx_print"), self._print_invoice)
         menu.addSeparator()
 
-        status_menu = menu.addMenu("📊  Ändra status")
+        status_menu = menu.addMenu(tr("invoices.ctx_status"))
         for s in INVOICE_STATUSES:
-            act = status_menu.addAction(s)
+            act = status_menu.addAction(tr_status(s))
             act.triggered.connect(
                 lambda checked=False, st=s: self._set_status_selected(st)
             )
         menu.addSeparator()
 
         menu.addAction(
-            "✅  Markera betald", self._mark_selected_paid
+            tr("invoices.mark_paid"), self._mark_selected_paid
         )
-        menu.addAction("↩  Ångra statusändring", self._undo_last_status)
+        menu.addAction(
+            tr("invoices.ctx_undo_status"), self._undo_last_status
+        )
         menu.addSeparator()
-        menu.addAction("🗑  Ta bort", self._delete_invoice)
+        menu.addAction(tr("invoices.delete"), self._delete_invoice)
         menu.exec(self._table.viewport().mapToGlobal(pos))
 
     # ══════════════════════════════════════════════════════════════════
