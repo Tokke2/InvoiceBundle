@@ -42,23 +42,37 @@ def schedule_restart(root: Path, delay_seconds: float = 2.5) -> bool:
     släppas). Returnerar True om hjälparen startades.
     """
     root = Path(root)
-    entry = root / "main.py"
+    # Fönsterlös start först: main.pyw (aldrig main.py) så inget
+    # konsolfönster dyker upp efter en uppdatering.
+    entry = root / "main.pyw"
     if not entry.exists():
-        entry = root / "main.pyw"
+        entry = root / "main.py"
     if not entry.exists() or not sys.executable:
         return False
+    # pythonw.exe i stället för python.exe på Windows — konsol-
+    # tolken skulle annars öppna ett konsolfönster vid omstarten.
+    exe = Path(sys.executable)
+    if sys.platform.startswith("win") and exe.name.lower() == "python.exe":
+        _pyw = exe.with_name("pythonw.exe")
+        if _pyw.is_file():
+            exe = _pyw
+    no_window = (
+        getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if sys.platform.startswith("win") else 0
+    )
     helper = (
         "import subprocess, sys, time;"
         f"time.sleep({float(delay_seconds)});"
         f"subprocess.Popen([sys.executable, {str(entry)!r}], "
-        f"cwd={str(root)!r})"
+        f"cwd={str(root)!r}, creationflags={int(no_window)})"
     )
     try:
         subprocess.Popen(
-            [sys.executable, "-c", helper],
+            [str(exe), "-c", helper],
             cwd=str(root),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            creationflags=no_window,
         )
         return True
     except Exception as exc:

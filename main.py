@@ -41,6 +41,7 @@ import json
 import logging
 import os
 import platform
+import subprocess
 import sys
 import time
 import traceback
@@ -306,6 +307,71 @@ def _write_startup_crash(exc: BaseException) -> None:
 # ═════════════════════════════════════════════════════════════════════
 
 
+#: Sätts i miljön för den fönsterlösa omstarten så den aldrig loopar.
+_WINDOWLESS_GUARD = "FAKTURABUNTEN_WINDOWLESS_RELAUNCH"
+
+
+def _windowless_python(executable: str | None = None) -> Path | None:
+    """Motsvarande pythonw.exe för en Windows-Python, om den finns.
+
+    python.exe ger alltid ett konsolfönster; pythonw.exe ger
+    aldrig något. Returnerar None för andra plattformar/tolkar.
+    """
+    if CURRENT_PLATFORM != "windows":
+        return None
+    exe = Path(executable or sys.executable)
+    if exe.name.lower() == "pythonw.exe":
+        return exe
+    if exe.name.lower() != "python.exe":
+        return None
+    candidate = exe.with_name("pythonw.exe")
+    return candidate if candidate.is_file() else None
+
+
+def _relaunch_windowless() -> bool:
+    """Startar om appen fönsterlöst om den råkade startas med python.exe.
+
+    Körs allra först i main(): startades appen med konsoltolken
+    (t.ex. dubbelklick på main.py, en gammal genväg eller ett
+    .bat-skript) startas en ny instans med pythonw.exe + main.pyw
+    och den gamla processen avslutar direkt — inget konsolfönster
+    blir kvar på skärmen. --debug och --selftest rörs aldrig
+    (där VILL man se konsolen). Returnerar True när omstart skett.
+    """
+    if CURRENT_PLATFORM != "windows" or DEBUG_MODE or SELFTEST:
+        return False
+    if os.environ.get(_WINDOWLESS_GUARD) == "1":
+        return False
+    pythonw = _windowless_python()
+    if pythonw is None:
+        return False
+    script = BASE_DIR / "main.pyw"
+    if not script.is_file():
+        script = BASE_DIR / "main.py"
+    if not script.is_file():
+        return False
+    env = dict(os.environ)
+    env[_WINDOWLESS_GUARD] = "1"
+    try:
+        subprocess.Popen(
+            [str(pythonw), str(script), *sys.argv[1:]],
+            cwd=str(BASE_DIR),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        log.info(
+            "FONSTERLOS_OMSTART: python.exe -> %s %s",
+            pythonw, script,
+        )
+        return True
+    except Exception as exc:
+        log.warning("FONSTERLOS_OMSTART misslyckades: %s", exc)
+        return False
+
+
 def _hide_console() -> None:
     """Döljer konsolfönstret på Windows i produktionsläge."""
     if CURRENT_PLATFORM != "windows" or DEBUG_MODE:
@@ -360,6 +426,9 @@ def _windows_shortcut() -> None:
             check=False,
             timeout=20,
             capture_output=True,
+            # PowerShell är ett konsolprogram — utan flaggan blinkar
+            # ett konsolfönster till vid varje appstart.
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         log.info("IKON_GENVAG: %s", lnk)
     except Exception as exc:
@@ -1463,6 +1532,12 @@ def main() -> None:
     # Qt-runtime-miljö före QApplication (DPI-scalning, Qt6-hantering)
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
+
+    # Startades vi med konsoltolken (python.exe) startar vi om
+    # fönsterlöst med pythonw.exe och avslutar direkt — annars
+    # blir ett konsolfönster kvar bredvid appen.
+    if _relaunch_windowless():
+        return
 
     _hide_console()
     _set_windows_app_id()
