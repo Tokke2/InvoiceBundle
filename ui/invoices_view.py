@@ -62,6 +62,8 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
+    QScrollArea,
     QLabel,
     QFrame,
     QLineEdit,
@@ -409,14 +411,57 @@ class InvoicesView(QWidget):
         supplier_layout.addStretch()
         root.addWidget(supplier_frame)
 
+        # ── Huvudindelning: knappar/kontroller till VÄNSTER och
+        # fakturatabellen tydlig till HÖGER. Sidokolumnen har fast
+        # bredd och egen rullning, så inget täcks eller kläms ihop
+        # när fönstret är smalt — tabellen får all återstående
+        # bredd och anpassar sig efter fönstret.
+        body = QHBoxLayout()
+        body.setSpacing(8)
+        root.addLayout(body, stretch=1)
+
+        side_wrap = QWidget()
+        side_wrap.setObjectName("SideControls")
+        # Innehållet i rullområdet måste hålla sig inom spaltens
+        # bredd — annars växer panelerna förbi spalten och knappar
+        # hamnar under tabellen.
+        side_wrap.setMinimumWidth(276)
+        side_wrap.setMaximumWidth(364)
+        side = QVBoxLayout(side_wrap)
+        side.setContentsMargins(0, 0, 0, 0)
+        side.setSpacing(6)
+        side_scroll = QScrollArea()
+        side_scroll.setObjectName("SideScroll")
+        side_scroll.setWidgetResizable(True)
+        side_scroll.setWidget(side_wrap)
+        side_scroll.setMinimumWidth(284)
+        side_scroll.setMaximumWidth(372)
+        side_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        side_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._side_scroll = side_scroll
+        self._side_layout = side
+        body.addWidget(side_scroll)
+
+        right_wrap = QWidget()
+        right_layout = QVBoxLayout(right_wrap)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
+        self._right_pane = right_wrap
+        self._right_layout = right_layout
+        body.addWidget(right_wrap, stretch=1)
+
         # ── Sök + filter (egen panel: FilterBar) ───────────────────────
         filter_frame = QFrame()
         filter_frame.setObjectName("FilterBar")
         filter_layout = QVBoxLayout(filter_frame)
         filter_layout.setContentsMargins(10, 6, 10, 6)
         filter_layout.setSpacing(6)
-        row_search = QHBoxLayout()
-        row_search.setSpacing(8)
+        # Sidokolumn: sök och filter staplas vertikalt i full
+        # bredd — i en smal spalt kläms de annars ihop på en rad.
+        row_search = QVBoxLayout()
+        row_search.setSpacing(6)
 
         self._search = QLineEdit()
         self._search.setPlaceholderText(tr("invoices.search_ph"))
@@ -466,8 +511,8 @@ class InvoicesView(QWidget):
         filter_layout.addLayout(row_search)
 
         # ── Snabbfilter-chips: förfallofönster ──────────────────────
-        row_chips = QHBoxLayout()
-        row_chips.setSpacing(8)
+        row_chips = QVBoxLayout()
+        row_chips.setSpacing(6)
         self._chip_btns: dict[str, Any] = {}
         for mode, key in (
             ("overdue", "invoices.chip_overdue"),
@@ -483,14 +528,18 @@ class InvoicesView(QWidget):
             row_chips.addWidget(chip)
         row_chips.addStretch()
         filter_layout.addLayout(row_chips)
-        root.addWidget(filter_frame)
+        side.addWidget(filter_frame)
 
         # ── CRUD-knappar (egen panel: ActionsBar) ──────────────────────
         actions_frame = QFrame()
         actions_frame.setObjectName("ActionsBar")
-        row_actions = QHBoxLayout(actions_frame)
+        # Knapprutnät 2 × N i sidokolumnen: varje knapp får plats
+        # i full bredd i stället för att klämmas på en lång rad.
+        row_actions = QGridLayout(actions_frame)
         row_actions.setContentsMargins(10, 6, 10, 6)
-        row_actions.setSpacing(8)
+        row_actions.setSpacing(6)
+        row_actions.setColumnStretch(0, 1)
+        row_actions.setColumnStretch(1, 1)
 
         self._btn_add = make_btn(
             tr("invoices.add"),
@@ -533,12 +582,12 @@ class InvoicesView(QWidget):
         self._btn_combine.clicked.connect(self._show_combine_dialog)
         self._btn_combine.setEnabled(False)
 
-        row_actions.addWidget(self._btn_add)
-        row_actions.addWidget(self._btn_edit)
-        row_actions.addWidget(self._btn_delete)
-        row_actions.addWidget(self._btn_duplicate)
-        row_actions.addWidget(self._btn_mark_paid)
-        row_actions.addWidget(self._btn_combine)
+        row_actions.addWidget(self._btn_add, 0, 0)
+        row_actions.addWidget(self._btn_edit, 0, 1)
+        row_actions.addWidget(self._btn_delete, 1, 0)
+        row_actions.addWidget(self._btn_duplicate, 1, 1)
+        row_actions.addWidget(self._btn_mark_paid, 2, 0)
+        row_actions.addWidget(self._btn_combine, 2, 1)
 
         self._btn_pay_today = make_btn(
             tr("invoices.pay_today"),
@@ -546,19 +595,18 @@ class InvoicesView(QWidget):
             success=True,
         )
         self._btn_pay_today.clicked.connect(self._pay_today)
-        row_actions.addWidget(self._btn_pay_today)
-        row_actions.addStretch()
+        row_actions.addWidget(self._btn_pay_today, 3, 0, 1, 2)
 
         self._btn_refresh = make_btn("🔄", "Uppdatera vyn", width=50)
         self._btn_refresh.clicked.connect(self._do_refresh)
-        row_actions.addWidget(self._btn_refresh)
+        row_actions.addWidget(self._btn_refresh, 4, 0)
 
         self._btn_undo = make_btn(
             "↩", tr("invoices.undo_tip"), width=50
         )
         self._btn_undo.clicked.connect(self._undo_last_status)
-        row_actions.addWidget(self._btn_undo)
-        root.addWidget(actions_frame)
+        row_actions.addWidget(self._btn_undo, 4, 1)
+        side.addWidget(actions_frame)
 
         # ── Export (egen panel: ExportBar) ─────────────────────────────
         export_frame = QFrame()
@@ -566,8 +614,8 @@ class InvoicesView(QWidget):
         export_layout = QVBoxLayout(export_frame)
         export_layout.setContentsMargins(10, 6, 10, 6)
         export_layout.setSpacing(6)
-        row_export = QHBoxLayout()
-        row_export.setSpacing(10)
+        row_export = QVBoxLayout()
+        row_export.setSpacing(6)
 
         self._btn_export_selected = make_btn(
             tr("invoices.export_selected"),
@@ -622,8 +670,8 @@ class InvoicesView(QWidget):
         # Markerbar: radmarkeringen ÄR exportvalet. Markeringen
         # bor per faktura-id och överlever filterbyte/refresh;
         # här syns alltid hur många som är valda och nettot.
-        row_select = QHBoxLayout()
-        row_select.setSpacing(8)
+        row_select = QVBoxLayout()
+        row_select.setSpacing(6)
         self._lbl_export_selection = QLabel(
             tr("invoices.export_sel_none")
         )
@@ -652,8 +700,8 @@ class InvoicesView(QWidget):
 
         # Summering för BARA de markerade — samma tre tal som
         # beloppskorten nedan, fast för exportvalet (kryssrutorna).
-        row_marked = QHBoxLayout()
-        row_marked.setSpacing(8)
+        row_marked = QVBoxLayout()
+        row_marked.setSpacing(2)
         self._lbl_marked_cap = QLabel(tr("invoices.marked_label"))
         self._lbl_marked_cap.setFont(make_font(11, True))
         self._lbl_marked_cap.setStyleSheet("background:transparent;")
@@ -673,14 +721,18 @@ class InvoicesView(QWidget):
         row_marked.addWidget(self._lbl_marked_net)
         row_marked.addStretch()
         export_layout.addLayout(row_marked)
-        root.addWidget(export_frame)
+        side.addWidget(export_frame)
+        side.addStretch()
 
-        # ── Summering: tre beloppskort ─────────────────────────────────
+        # ── Summering: tre beloppskort (ovanför tabellen, höger) ───────
         summary_frame = QFrame()
         summary_frame.setObjectName("SummaryStrip")
-        summary_layout = QHBoxLayout(summary_frame)
+        summary_layout = QVBoxLayout(summary_frame)
         summary_layout.setContentsMargins(0, 2, 0, 2)
-        summary_layout.setSpacing(10)
+        summary_layout.setSpacing(4)
+        cards_row = QHBoxLayout()
+        cards_row.setSpacing(10)
+        summary_layout.addLayout(cards_row)
 
         def _money_card(name: str, caption: str, value: QLabel) -> QFrame:
             card = QFrame()
@@ -702,21 +754,21 @@ class InvoicesView(QWidget):
         self._lbl_invoices = QLabel("0,00 SEK")
         self._lbl_credits = QLabel("0,00 SEK")
         self._lbl_att_betala = QLabel("0,00 SEK")
-        summary_layout.addWidget(
+        cards_row.addWidget(
             _money_card("MoneyCard", tr("invoices.card_invoices"), self._lbl_invoices), 1
         )
-        summary_layout.addWidget(
+        cards_row.addWidget(
             _money_card("MoneyCardCredit", tr("invoices.card_credits"), self._lbl_credits), 1
         )
-        summary_layout.addWidget(
+        cards_row.addWidget(
             _money_card("MoneyCardTotal", tr("invoices.card_total"), self._lbl_att_betala), 1
         )
         self._cap_invoices = self._money_caps.get("MoneyCard")
         self._cap_credits = self._money_caps.get("MoneyCardCredit")
         self._cap_total = self._money_caps.get("MoneyCardTotal")
 
-        meta = QVBoxLayout()
-        meta.setSpacing(2)
+        meta = QHBoxLayout()
+        meta.setSpacing(14)
         self._lbl_count = QLabel("Poster: 0")
         self._lbl_unpaid = QLabel("Obetalt: 0,00 SEK")
         self._lbl_overdue = QLabel("Förfallet: 0,00 SEK")
@@ -726,7 +778,7 @@ class InvoicesView(QWidget):
             meta.addWidget(lbl)
         meta.addStretch()
         summary_layout.addLayout(meta)
-        root.addWidget(summary_frame)
+        self._right_layout.addWidget(summary_frame)
 
         # Beständig rad: markeringens summa (eller totalen att betala).
         # Ersätter den kortlivade statusradstexten så summan av det
@@ -734,7 +786,7 @@ class InvoicesView(QWidget):
         self._lbl_selection = QLabel("")
         self._lbl_selection.setFont(make_font(12, True))
         self._lbl_selection.setStyleSheet("background:transparent;")
-        root.addWidget(self._lbl_selection)
+        self._right_layout.addWidget(self._lbl_selection)
 
         # ── Tabell ─────────────────────────────────────────────────────
         self._table = QTableWidget()
@@ -765,7 +817,7 @@ class InvoicesView(QWidget):
         self._table.setTextElideMode(Qt.TextElideMode.ElideRight)
         self._table.setMinimumWidth(0)
         self._table.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
         self._table.setSizeAdjustPolicy(
             QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
@@ -810,7 +862,7 @@ class InvoicesView(QWidget):
         # Mushjul-scroll direkt på tabellen
         self._table.wheelEvent = self._table_wheel  # type: ignore
 
-        root.addWidget(self._table, stretch=1)
+        self._right_layout.addWidget(self._table, stretch=1)
 
         # ── Fast exportrad längst ner (alltid synlig) ──────────────────
         # Spegel av exportpanelen: valt antal + netto + knappen, så
@@ -1408,16 +1460,29 @@ class InvoicesView(QWidget):
 
     def _fit_columns(self) -> None:
         if self._table.columnCount() == len(COL_WIDTHS) + 1:
-            fit_table_columns(self._table, [44] + COL_WIDTHS)
-            # fit_table_columns lägger eventuell överskottsbredd
-            # på första kolumnen — kryssrutan ska stanna på 44 px,
-            # så överskottet flyttas till Leverantör (kolumn 2).
-            check_w = self._table.columnWidth(0)
-            if check_w > 44:
-                self._table.setColumnWidth(
-                    2, self._table.columnWidth(2) + (check_w - 44)
-                )
-            self._table.setColumnWidth(0, 44)
+            preferred = [44] + COL_WIDTHS
+            vp = max(
+                self._table.viewport().width(), self._table.width()
+            )
+            if vp >= sum(preferred):
+                fit_table_columns(self._table, preferred)
+                # fit_table_columns lägger eventuell överskottsbredd
+                # på första kolumnen — kryssrutan ska stanna på
+                # 44 px, så överskottet flyttas till Leverantör
+                # (kolumn 2).
+                check_w = self._table.columnWidth(0)
+                if check_w > 44:
+                    self._table.setColumnWidth(
+                        2,
+                        self._table.columnWidth(2) + (check_w - 44),
+                    )
+                self._table.setColumnWidth(0, 44)
+            else:
+                # Smal viewport: BEHÅLL läsbara föredragna bredder
+                # och låt horisontella rullisten ta resten — då
+                # kläms/kapar tabellen aldrig kolumnerna oläsliga.
+                for i, w in enumerate(preferred):
+                    self._table.setColumnWidth(i, w)
         else:
             fit_table_columns(self._table, COL_WIDTHS)
 
