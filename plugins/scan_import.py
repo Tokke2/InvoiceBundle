@@ -1514,9 +1514,15 @@ _DIGITS_AFTER = re.compile(r"\d[\d \-]{4,28}\d")
 def extract_with_label(text: str, label: str, kind: str) -> str:
     """
     Hittar etiketten i texten (skiftlägesoberoende) och extraherar
-    första värdet av rätt typ EFTER etiketten — först på samma rad,
-    annars inom de närmaste 120 tecknen. Returnerar strängvärde
-    (belopp som float-sträng, datum som YYYY-MM-DD) eller "".
+    värdet av rätt typ EFTER etiketten — först på samma rad, annars
+    inom de närmaste 160 tecknen. Returnerar strängvärde (belopp
+    som float-sträng, datum som YYYY-MM-DD) eller "".
+
+    För BELOPP vinner den SISTA förekomsten i dokumentet: i en
+    flersidig faktura kan delsummor stå under samma etikett på
+    tidigare sidor, medan dokumentets slutsumma alltid står sist.
+    Övriga typer (nummer/datum/OCR) behåller första träffen —
+    sidhuvuden upprepar dem oförändrade sida för sida.
     """
     if not text or not label:
         return ""
@@ -1524,24 +1530,21 @@ def extract_with_label(text: str, label: str, kind: str) -> str:
     lab = re.sub(r"\s+", " ", str(label)).strip().rstrip(":#").strip()
     if not lab:
         return ""
+    last_hit = ""
     for m in re.finditer(re.escape(lab), flat, re.IGNORECASE):
         window = flat[m.end(): m.end() + 160]
         same_line = window.split("\n", 1)[0]
         hit = _extract_kind(same_line, kind, m.group(0))
-        if hit:
-            return hit
-        if same_line.strip() and kind != "token":
-            # Text finns på etikettens rad men värdet saknas —
-            # troligen en kolumnrubrik i en rubrikrad ("Fakturanr.
-            # Fakturadatum Kundnr."): nästa förekomst. För token
-            # gäller rubrik-hoppet i stället (stopporden) — ett
-            # nummer kan aldrig stå på nästa rad i radvis text.
-            continue
-        if kind != "token":
+        if not hit and not (same_line.strip() and kind != "token") \
+                and kind != "token":
             hit = _extract_kind(window, kind, m.group(0))
-            if hit:
+        if hit:
+            if kind != "amount":
                 return hit
-    return ""
+            # Belopp: kom ihåg träffen men fortsätt — en senare
+            # förekomst i dokumentet är slutsumman (se docstring).
+            last_hit = hit
+    return last_hit
 
 
 def _extract_kind(chunk: str, kind: str, label: str = "") -> str:
@@ -1657,8 +1660,20 @@ def _extract_below_label(text: str, label: str, kind: str) -> str:
     amount_hits: list[float] = []
     for m in re.finditer(re.escape(lab), flat, re.IGNORECASE):
         rest_line = flat[m.end():].split("\n", 1)[0]
-        if _extract_kind(rest_line, kind, m.group(0)):
-            # Vanlig etikett+värde-rad — aldrig rubrikrad.
+        same_hit = _extract_kind(rest_line, kind, m.group(0))
+        if same_hit:
+            if kind != "amount":
+                # Vanlig etikett+värde-rad — aldrig rubrikrad.
+                continue
+            # Flersidig faktura: etiketten kan stå parvis på en
+            # sida ("Att betala 2 686,45") och som kolumnrubrik
+            # på en annan. Båda formerna är kandidater för
+            # beloppet — dokumentets SISTA kandidat är
+            # slutsumman, tidigare är delsummor.
+            try:
+                amount_hits.append(float(same_hit))
+            except (TypeError, ValueError):
+                pass
             continue
         lineno = flat.count("\n", 0, m.end())
         for below in lines[lineno + 1:]:
@@ -1668,24 +1683,23 @@ def _extract_below_label(text: str, label: str, kind: str) -> str:
             if hit:
                 if kind != "amount":
                     return hit
-                # Flersidig faktura: rubrikraden upprepas per
-                # sida och raden under på sida 1 är en artikelrad
-                # — dess sista belopp är BARA en delsumma. Det
-                # riktiga totalblocket står på sista sidan, så
-                # för belopp samlas alla träffar och den största
-                # (slutsumman) vinner i stället för första sidan.
                 try:
                     amount_hits.append(float(hit))
                 except (TypeError, ValueError):
                     pass
             break
     if amount_hits:
-        return f"{max(amount_hits):.2f}"
+        # Sista kandidaten i dokumentordning vinner — INTE den
+        # största: en artikelrad kan undantagsvis överstiga totalen,
+        # men slutsumman står alltid efter delsummorna.
+        return f"{amount_hits[-1]:.2f}"
     return ""
 
 
 def _label_below_amount(text: str, label: str) -> float | None:
-    """Beloppet i kolumnen under etiketten ("Att betala")."""
+    """Etikettens dokument-sista belopp ("Att betala"): värdet i
+    kolumnen under rubriken eller parvis på etikettens rad —
+    vid flera förekomster är den sista slutsumman."""
     hit = _extract_below_label(text, label, "amount")
     return float(hit) if hit else None
 
@@ -2288,12 +2302,17 @@ def _label_same_line_amount(text: str, label: str) -> float | None:
     lab = re.sub(r"\s+", " ", str(label)).strip().rstrip(":#").strip()
     if not lab:
         return None
+    last: float | None = None
     for m in re.finditer(re.escape(lab), flat, re.IGNORECASE):
         same_line = flat[m.end():].split("\n", 1)[0]
         hit = _extract_kind(same_line, "amount", m.group(0))
         if hit:
-            return float(hit)
-    return None
+            # SISTA förekomsten: i flersidiga fakturor kan en
+            # delsumma stå under samma etikett på en tidigare
+            # sida — verifieringen ska spegla slutsumman, annars
+            # "bekräftar" den första sidans felaktiga belopp.
+            last = float(hit)
+    return last
 
 
 def has_builtin_format(supplier: str) -> bool:

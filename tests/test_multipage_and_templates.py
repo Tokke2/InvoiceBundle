@@ -80,6 +80,62 @@ def test_below_label_other_fields_keep_first():
     ) == "111"
 
 
+_MARTIN_HEAD = (
+    "Martin G Anderson\nOrg.nr 556824-5806 Bankgiro 728-0811\n"
+)
+
+
+def test_builtin_martin_multipage_paired_last_total():
+    """923682 på riktigt: Martin Gs inbyggda format får INTE stanna
+    på första sidans delbelopp bara för att det står parvis under
+    samma etikett — slutsumman 6 176 sist i dokumentet vinner."""
+    text = (
+        _MARTIN_HEAD
+        + "Fakturanr. 923682\nFakturadatum 2024-12-05\n"
+        + "Att betala 2 686,45\n"
+        + "Specifikation fortsätter på nästa sida\n"
+        + "Att betala 6 176,00\n"
+    )
+    r = si.parse_invoice_text(
+        text, [{"name": "Martin G Anderson"}], {}
+    )
+    assert r["total_amount"] == 6176.0
+    assert r.get("template") == "Martin G Anderson"
+    assert r["invoice_number"] == "923682"
+
+
+def test_builtin_martin_multipage_mixed_layout():
+    """Rubrikrad+värderad med delbelopp på sida 1 men parvis
+    slutsumma på sista sidan — blandade layouter i samma dokument
+    ska ändå ge slutsumman."""
+    text = (
+        _MARTIN_HEAD
+        + "Fakturanr. Fakturadatum Att betala\n"
+        + "923682 2024-12-05 2 686,45\n"
+        + "Specifikation fortsätter på nästa sida\n"
+        + "Att betala 6 176,00\n"
+    )
+    r = si.parse_invoice_text(
+        text, [{"name": "Martin G Anderson"}], {}
+    )
+    assert r["total_amount"] == 6176.0
+    assert r.get("template") == "Martin G Anderson"
+
+
+def test_extract_amount_last_occurrence_dates_keep_first():
+    """Belopp = sista förekomsten (slutsumman), datum/nummer =
+    första (sidhuvuden upprepar dem oförändrade)."""
+    text = (
+        "Att betala 100,00\nAtt betala 250,00\n"
+        "Datum 2024-01-01\nDatum 2024-02-02\n"
+    )
+    assert si.extract_with_label(text, "Att betala", "amount") \
+        == "250.00"
+    assert si.extract_with_label(text, "Datum", "date") \
+        == "2024-01-01"
+    assert si._label_same_line_amount(text, "Att betala") == 250.0
+
+
 # ── Sidantal ────────────────────────────────────────────────────────
 
 def test_attachment_page_count(tmp_path):
