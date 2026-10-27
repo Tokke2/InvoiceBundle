@@ -1847,6 +1847,32 @@ class MainWindow(QMainWindow):
         self._act_clean_cache.triggered.connect(self._toggle_clean_cache)
         m_set.addAction(self._act_clean_cache)
 
+        # Manuell rensning med smartfilter: två lägen.
+        self._act_clean_cache_old = QAction(
+            tr("menu.clean_cache_old"), self
+        )
+        self._act_clean_cache_old.setToolTip(
+            "Smartfilter: rensar bara cachefiler som är ÄLDRE än\n"
+            "1 dygn. Färska filer från idag rörs aldrig. Samma\n"
+            "rensning körs dessutom automatiskt 1 gång per dygn."
+        )
+        self._act_clean_cache_old.triggered.connect(
+            lambda: self._clean_cache_now("old")
+        )
+        m_set.addAction(self._act_clean_cache_old)
+
+        self._act_clean_cache_all = QAction(
+            tr("menu.clean_cache_all"), self
+        )
+        self._act_clean_cache_all.setToolTip(
+            "Rensar ALL cache nu (__pycache__, *.pyc, *.tmp).\n"
+            "Data, inställningar, loggar och backuper röras aldrig."
+        )
+        self._act_clean_cache_all.triggered.connect(
+            lambda: self._clean_cache_now("all")
+        )
+        m_set.addAction(self._act_clean_cache_all)
+
         # ── Hjälp ─────────────────────────────────────────────────────
         m_help = bar.addMenu(tr("menu.help"))
         a_about = QAction(tr("menu.about"), self)
@@ -2684,6 +2710,32 @@ class MainWindow(QMainWindow):
             f"🧹  Töm cache vid avslut: {'PÅ' if checked else 'AV'}", 4000
         )
         log.info("clean_cache_on_exit → %s", checked)
+
+    def _clean_cache_now(self, mode: str) -> None:
+        """Manuell cache-rensning med smartfilter (old/all)."""
+        stats: dict = {}
+        try:
+            if self._app is not None and hasattr(
+                self._app, "clean_caches_now"
+            ):
+                stats = self._app.clean_caches_now(mode) or {}
+        except Exception as exc:
+            log.warning("_clean_cache_now(%s): %s", mode, exc)
+        n = (
+            int(stats.get("pycache_mappar", 0))
+            + int(stats.get("pyc_filer", 0))
+            + int(stats.get("tmp_filer", 0))
+        )
+        kb = float(stats.get("frigjorda_bytes", 0)) / 1024.0
+        if mode == "old":
+            msg = (
+                f"🧹  Smartfilter: rensade {n} gamla cachefiler "
+                f"(äldre än 1 dygn, {kb:.1f} KB) — färska rördes inte"
+            )
+        else:
+            msg = f"🧹  Cache rensad: {n} filer ({kb:.1f} KB)"
+        self.set_status(msg, 6000)
+        log.info("CACHE_CLEAN_MANUAL mode=%s n=%d", mode, n)
 
     def set_autostart(self, enable: bool) -> None:
         """Programmatisk autostart-sättning (synkar även kryssrutan)."""

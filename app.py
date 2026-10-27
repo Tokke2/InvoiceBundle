@@ -193,6 +193,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # *.tmp-lämmar) automatiskt när programmet avslutas.
     # Data, settings, loggar och backuper röras ALDRIG.
     "clean_cache_on_exit": True,
+    # SMARTFILTER-rensning: automatiskt EN gång per dygn (första
+    # starten på dagen) rensas cachefiler ÄLDRE än 1 dygn — färska
+    # filer (dagens, ev. låsta i körande processer) rörs aldrig.
+    # Stämpel för senaste genomförda dygnsrensningen (ISO-tid).
+    "cache_last_daily_clean": "",
     # Plugin-hälsa: antal raka krascher per plugin (3-strikes-regeln).
     "plugin_strikes": {},
     # Plugins som avaktiverats efter 3 krascher (återställs via
@@ -541,6 +546,96 @@ def cleanup_pycache(root: Path | None = None, days: int = 3) -> int:
     if removed:
         log.info("Städade bort %d gamla __pycache__/pyc", removed)
     return removed
+
+
+def clean_caches_smart(
+    root: Path | None = None, days: float = 1
+) -> dict[str, Any]:
+    """
+    SMARTFILTER-rensning: tar bara cachefiler ÄLDRE än *days* dygn.
+
+    Samma aldrig-rör-regler som clean_caches (bara __pycache__,
+    *.pyc/*.pyo och *.tmp-lämmar under appmappen), men filerna
+    måste vara äldre än gränsen — färska cachefiler från idag
+    (som kan vara låsta i körande processer) rörs aldrig.
+
+    Returnerar samma statistik-dict som clean_caches.
+    Fail-safe: kastar aldrig, hoppar över låsta filer.
+    """
+    root = root or BASE_DIR
+    stats = {
+        "pycache_mappar": 0,
+        "pyc_filer": 0,
+        "tmp_filer": 0,
+        "frigjorda_bytes": 0,
+    }
+    cutoff = datetime.datetime.now().timestamp() - float(days) * 86400
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            for d in list(dirnames):
+                if d != "__pycache__":
+                    continue
+                dirnames.remove(d)   # traversera inte ner i den
+                p = Path(dirpath) / d
+                try:
+                    if p.stat().st_mtime >= cutoff:
+                        continue      # färsk cache (idag) — rör ej
+                except OSError:
+                    continue
+                try:
+                    size = sum(
+                        f.stat().st_size for f in p.rglob("*")
+                        if f.is_file()
+                    )
+                except OSError:
+                    size = 0
+                shutil.rmtree(p, ignore_errors=True)
+                if not p.exists():
+                    stats["pycache_mappar"] += 1
+                    stats["frigjorda_bytes"] += size
+
+            for f in filenames:
+                lower = f.lower()
+                p = Path(dirpath) / f
+                is_pyc = lower.endswith((".pyc", ".pyo"))
+                is_tmp = lower.endswith(".tmp") or ".tmp." in lower
+                if not (is_pyc or is_tmp):
+                    continue
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                if st.st_mtime >= cutoff:
+                    continue          # färsk — rör ej
+                try:
+                    p.unlink()
+                except OSError:
+                    continue          # låst fil (Windows) — hoppa över
+                if is_pyc:
+                    stats["pyc_filer"] += 1
+                else:
+                    stats["tmp_filer"] += 1
+                stats["frigjorda_bytes"] += st.st_size
+    except Exception as exc:
+        log.warning("clean_caches_smart: %s", exc)
+
+    if (
+        stats["pycache_mappar"]
+        or stats["pyc_filer"]
+        or stats["tmp_filer"]
+    ):
+        log.info(
+            "CACHE_CLEAN_SMART: %d __pycache__, %d pyc, %d tmp äldre "
+            "än %s d borttagna (%.1f KB frigjort)",
+            stats["pycache_mappar"],
+            stats["pyc_filer"],
+            stats["tmp_filer"],
+            days,
+            stats["frigjorda_bytes"] / 1024.0,
+        )
+    else:
+        log.debug("CACHE_CLEAN_SMART: inget gammalt att rensa")
+    return stats
 
 
 def clean_caches(root: Path | None = None) -> dict[str, Any]:
@@ -3820,6 +3915,12 @@ class FakturaApp:
             )
         except Exception as exc:
             log.warning("pycache-städning: %s", exc)
+        # SMARTFILTER-dygnsrensning: automatiskt 1 gång/dygn
+        # (cachefiler äldre än 1 dygn; se maybe_daily_cache_clean).
+        try:
+            self.maybe_daily_cache_clean()
+        except Exception as exc:
+            log.warning("dygnsrensning av cache: %s", exc)
         # Legacy-loggar från äldre versioner (audit/errors/performance/
         # structured + lös app.log i roten) — en-fil-principen.
         try:
@@ -3871,6 +3972,66 @@ class FakturaApp:
         except Exception as exc:
             log.warning("clean_caches_on_exit: %s", exc)
             return {}
+
+    def clean_caches_now(self, mode: str = "old") -> dict[str, Any]:
+        """
+        Manuell SMARTFILTER-rensning (Inställningar-menyn).
+
+        mode="old": rensa bara cachefiler ÄLDRE än 1 dygn (det
+            smartfiltret tar hand om även i dygnsautomatiken).
+        mode="all": rensa ALL cache nu (som avslutrensningen).
+        Rör aldrig data, settings, loggar eller backuper.
+        Returnerar statistik — tom dict vid okänt läge.
+        """
+        try:
+            if mode == "all":
+                return clean_caches(BASE_DIR)
+            if mode == "old":
+                return clean_caches_smart(BASE_DIR, days=1)
+        except Exception as exc:
+            log.warning("clean_caches_now(%s): %s", mode, exc)
+        return {}
+
+    def maybe_daily_cache_clean(self) -> dict[str, Any] | None:
+        """
+        Automatisk SMARTFILTER-rensning EN gång per dygn.
+
+        Körs vid första starten på dagen (stämpeln
+        cache_last_daily_clean sparas först NÄR rensningen
+        genomförts, så ett misslyckande förbrukar inte dagens
+        rensning). Rensar bara cachefiler äldre än 1 dygn —
+        samma smartfilter som det manuella valet.
+        Returnerar statistiken, eller None om dagens rensning
+        redan är gjord.
+        """
+        try:
+            last = str(
+                self.settings.get("cache_last_daily_clean", "") or ""
+            )
+            try:
+                last_dt = datetime.datetime.fromisoformat(last)
+            except Exception:
+                last_dt = None
+            now = datetime.datetime.now()
+            if last_dt is not None and (
+                now - last_dt
+            ) < datetime.timedelta(hours=24):
+                return None
+            stats = clean_caches_smart(BASE_DIR, days=1)
+            self.settings.set(
+                "cache_last_daily_clean", now.isoformat()
+            )
+            log.info(
+                "CACHE_DAILY_CLEAN: dygnsrensning gjord "
+                "(%d __pycache__, %d pyc, %d tmp)",
+                stats["pycache_mappar"],
+                stats["pyc_filer"],
+                stats["tmp_filer"],
+            )
+            return stats
+        except Exception as exc:
+            log.warning("maybe_daily_cache_clean: %s", exc)
+            return None
 
     # ── Session-betalningsdatum API ──────────────────────────────────────
 
