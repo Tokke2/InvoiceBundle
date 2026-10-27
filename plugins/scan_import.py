@@ -261,16 +261,25 @@ def parse_total(text: str) -> float:
     alltid störst). Postnummer-formade träffar efter en etikett
     hoppas över — sökningen fortsätter till nästa förekomst i
     stället för att postadressen blir belopp.
+
+    Flersidiga fakturor: en etikett kan förekomma flera gånger
+    (delsumma på sida 1, slutsumman på sista sidan). Då är det
+    den SISTA giltiga träffen för mönstret som är totalen — den
+    första kan vara en sidodellista (faktura 923682: sida 1 gav
+    2 686,45 medan fakturans total på sida 2 var 6 176).
     """
     upper = text.upper()
     for pat in _TOTAL_PATTERNS:
+        last = 0.0
         for m in re.finditer(pat, upper):
             group = m.group(1)
             if _is_postal_code_group(group):
                 continue
             v = _amount_from_group(group)
             if v > 0:
-                return round(v, 2)
+                last = round(v, 2)
+        if last > 0:
+            return last
     amounts = [_norm_amount(a) for a in _ALL_AMOUNTS.findall(text)]
     amounts = [a for a in amounts if a > 0]
     return round(max(amounts), 2) if amounts else 0.0
@@ -1645,6 +1654,7 @@ def _extract_below_label(text: str, label: str, kind: str) -> str:
     if not lab:
         return ""
     lines = flat.split("\n")
+    amount_hits: list[float] = []
     for m in re.finditer(re.escape(lab), flat, re.IGNORECASE):
         rest_line = flat[m.end():].split("\n", 1)[0]
         if _extract_kind(rest_line, kind, m.group(0)):
@@ -1656,8 +1666,21 @@ def _extract_below_label(text: str, label: str, kind: str) -> str:
                 continue
             hit = _extract_below_line(below, kind)
             if hit:
-                return hit
+                if kind != "amount":
+                    return hit
+                # Flersidig faktura: rubrikraden upprepas per
+                # sida och raden under på sida 1 är en artikelrad
+                # — dess sista belopp är BARA en delsumma. Det
+                # riktiga totalblocket står på sista sidan, så
+                # för belopp samlas alla träffar och den största
+                # (slutsumman) vinner i stället för första sidan.
+                try:
+                    amount_hits.append(float(hit))
+                except (TypeError, ValueError):
+                    pass
             break
+    if amount_hits:
+        return f"{max(amount_hits):.2f}"
     return ""
 
 

@@ -122,6 +122,7 @@ try:
         get_export_base,
         open_file,
         open_folder,
+        attachment_page_count,
         get_session_due_date_str,
         COPYRIGHT_YEAR,
     )
@@ -153,6 +154,7 @@ except ImportError:
         get_export_base,
         open_file,
         open_folder,
+        attachment_page_count,
         get_session_due_date_str,
         COPYRIGHT_YEAR,
     )
@@ -295,6 +297,7 @@ class InvoicesView(QWidget):
         # ÄR exportvalet, men mängden bor här så markeringen
         # överlever filterbyte och refresh (återappliceras per id).
         self._marked_export_ids: set[str] = set()
+        self._page_count_cache: dict[tuple, int] = {}
         self._displayed_ids: list[str] = []
         self._populating_table = False
         self._undo_stack: list[list[tuple[str, str, str]]] = []
@@ -1435,6 +1438,9 @@ class InvoicesView(QWidget):
                 if key == "total_amount":
                     val = _to_float(raw)
                     text = fmt_amount(val, "").strip()
+                elif key == "pages":
+                    pages = self._pages_for(inv)
+                    text = str(pages) if pages else ""
                 elif key == "invoice_type":
                     text = tr_type(str(raw) if raw else "Faktura")
                 elif key == "status":
@@ -1450,6 +1456,10 @@ class InvoicesView(QWidget):
                     fg = "#64b5f6" if dark else "#1565c0"
                 elif key == "total_amount" and _to_float(raw) < 0:
                     fg = "#64b5f6" if dark else "#1565c0"
+                elif key == "pages" and text and int(text or 0) >= 2:
+                    # Flersidig faktura markeras tydligt — totalen
+                    # står ofta på sista sidan.
+                    fg = "#d29922" if dark else "#9a6700"
 
                 item = make_cell(
                     text,
@@ -1461,6 +1471,10 @@ class InvoicesView(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, inv.get("id", ""))
                 if text:
                     item.setToolTip(text)
+                if key == "pages" and text and int(text or 0) >= 2:
+                    item.setToolTip(
+                        tr("invoices.pages_tooltip", n=int(text))
+                    )
                 self._table.setItem(row, col + 1, item)
 
             # Radfärgkodning på HELA raden enligt status
@@ -2558,6 +2572,43 @@ class InvoicesView(QWidget):
         if len(picked) >= 2:
             self._show_combine_dialog()
 
+    def _pages_for(self, inv: dict) -> int:
+        """Sidantal för fakturans original (cachad per filversion)."""
+        path = str(inv.get("attachment", "") or "")
+        if not path:
+            return 0
+        try:
+            st = Path(path).stat()
+            cache_key = (path, st.st_mtime_ns, st.st_size)
+        except OSError:
+            return 0
+        cached = self._page_count_cache.get(cache_key)
+        if cached is None:
+            cached = attachment_page_count(path)
+            self._page_count_cache[cache_key] = cached
+        return cached
+
+    def _open_original_invoice(self) -> None:
+        """Öppnar markerad fakturas original via högerklicksmenyn.
+
+        Samma attachment-sökväg som exporten bifogar och Skriv ut
+        använder. Saknas filen sägs det i statusraden — appen
+        gissar aldrig fram en annan fil.
+        """
+        inv = self._selected_invoice()
+        if not inv:
+            return
+        path = str(inv.get("attachment", "") or "")
+        nr = str(inv.get("invoice_number", "") or "")
+        if not path or not Path(path).exists():
+            self._status(tr("invoices.open_missing", nr=nr))
+            return
+        open_file(path)
+        self._status(
+            tr("invoices.opened", file=Path(path).name)
+        )
+        log.info("INVOICE_OPEN: öppnade original %s", path)
+
     def _print_invoice(self) -> None:
         """Skriver ut markerad fakturas original (alla sidor).
 
@@ -3215,6 +3266,9 @@ class InvoicesView(QWidget):
             tr("invoices.copy_payinfo"), self._copy_payment_info
         )
         menu.addAction(tr("invoices.ctx_print"), self._print_invoice)
+        menu.addAction(
+            tr("invoices.ctx_open_original"), self._open_original_invoice
+        )
         menu.addAction(tr("invoices.ctx_rescan"), self._rescan_invoice)
         menu.addSeparator()
 

@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QGroupBox, QTextEdit, QMessageBox, QFileDialog, QFrame,
     QLineEdit, QCheckBox, QApplication, QInputDialog,
-    QDialog, QListWidget, QPlainTextEdit, QComboBox,
+    QDialog, QListWidget, QPlainTextEdit, QComboBox, QMenu,
 )
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal, QRectF, QSizeF
 from PySide6.QtGui import (
@@ -779,21 +779,34 @@ class TemplateDialog(QDialog):
 
 
 class TemplatesManagerDialog(QDialog):
-    """Lista sparade mallar; radering sker via callback direkt."""
+    """Lista sparade mallar; radera/redigera/skapa via callbacks."""
 
     def __init__(
         self, parent: QWidget | None, templates: dict,
-        on_delete: Any,
+        on_delete: Any, on_edit: Any = None, on_create: Any = None,
     ) -> None:
         super().__init__(parent)
         self._templates = templates
         self._on_delete = on_delete
+        self._on_edit = on_edit
+        self._on_create = on_create
         self.setWindowTitle(tr("tmpl.manager_title"))
         self.setMinimumSize(520, 360)
         root = QVBoxLayout(self)
         self._list = QListWidget()
+        self._list.itemDoubleClicked.connect(
+            lambda _item: self._edit_selected()
+        )
         root.addWidget(self._list, stretch=1)
         row = QHBoxLayout()
+        if on_create is not None:
+            btn_new = QPushButton(tr("tmpl.new"))
+            btn_new.clicked.connect(self._create_new)
+            row.addWidget(btn_new)
+        if on_edit is not None:
+            btn_edit = QPushButton(tr("tmpl.edit"))
+            btn_edit.clicked.connect(self._edit_selected)
+            row.addWidget(btn_edit)
         btn_del = QPushButton(tr("tmpl.delete"))
         btn_del.clicked.connect(self._delete_selected)
         row.addWidget(btn_del)
@@ -802,6 +815,28 @@ class TemplatesManagerDialog(QDialog):
         btn_close.clicked.connect(self.accept)
         row.addWidget(btn_close)
         root.addLayout(row)
+        self._refresh_list()
+
+    def _selected_name(self) -> str:
+        row = self._list.currentRow()
+        names = sorted(self._templates)
+        if row < 0 or row >= len(names):
+            return ""
+        return names[row]
+
+    def _edit_selected(self) -> None:
+        if self._on_edit is None:
+            return
+        name = self._selected_name()
+        if not name:
+            return
+        self._on_edit(name)
+        self._refresh_list()
+
+    def _create_new(self) -> None:
+        if self._on_create is None:
+            return
+        self._on_create()
         self._refresh_list()
 
     def _refresh_list(self) -> None:
@@ -1032,6 +1067,12 @@ class ScanImportView(QWidget):
         )
         self._tbl.setWordWrap(False)
         self._tbl.doubleClicked.connect(self._open_row_dialog)
+        self._tbl.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self._tbl.customContextMenuRequested.connect(
+            self._table_context_menu
+        )
         hh = self._tbl.horizontalHeader()
         for i, (_lbl, _key, width, _al) in enumerate(COLUMNS):
             self._tbl.setColumnWidth(i, width)
@@ -2422,14 +2463,15 @@ class ScanImportView(QWidget):
             )
         return count
 
-    def _open_template_dialog(self) -> None:
+    def _open_template_dialog(self, row: dict | None = None) -> None:
         """Skapa/redigera mall för markerad rad + tolka om raden."""
-        idxs = self._selected_rows()
-        if not idxs:
-            self._lbl_status.setText(tr("scan.select_row"))
-            return
+        if row is None:
+            idxs = self._selected_rows()
+            if not idxs:
+                self._lbl_status.setText(tr("scan.select_row"))
+                return
+            row = self._rows[idxs[0]]
         si = _scan_module()
-        row = self._rows[idxs[0]]
         text = str(row.get("_text", "") or "")
         path = str(row.get("_path", "") or "")
         if si.page_image_count(path) <= 0:
@@ -2495,6 +2537,69 @@ class ScanImportView(QWidget):
             supplier, list(dlg.result_template["fields"]),
         )
 
+    def _example_row_for_template(self, name: str) -> dict | None:
+        """Tolkad rad vars fil kan visa mallens fakturabild."""
+        for row in self._rows:
+            if str(row.get("_path", "") or "") and (
+                str(row.get("template", "") or "") == name
+                or str(row.get("supplier", "") or "") == name
+            ):
+                return row
+        return None
+
+    def _manager_edit_template(self, name: str) -> None:
+        """Redigera en sparad mall mot dess exempelfaktura."""
+        templates = self._get_templates()
+        existing = templates.get(name)
+        if existing is None:
+            return
+        si = _scan_module()
+        example = self._example_row_for_template(name)
+        path = (
+            str(example.get("_path", "") or "") if example else ""
+        )
+        text = str(example.get("_text", "") or "") if example else ""
+        if path and si.page_image_count(path) <= 0:
+            path = ""
+        dlg = TemplateDialog(
+            self, text, supplier=name, existing=existing,
+            path=path or None,
+        )
+        if not dlg.exec() or not dlg.result_template:
+            return
+        supplier = dlg.result_template["supplier"]
+        if supplier != name:
+            templates.pop(name, None)
+        templates[supplier] = {"fields": dlg.result_template["fields"]}
+        self._save_templates_file()
+        self._lbl_status.setText(tr("tmpl.saved", supplier=supplier))
+        log.info("SCAN_TEMPLATE: mall redigerad för %s", supplier)
+
+    def _manager_create_template(self) -> None:
+        """Skapa en NY mall från en tolkad faktura i listan."""
+        si = _scan_module()
+        example = None
+        idxs = self._selected_rows()
+        if idxs and str(self._rows[idxs[0]].get("_path", "") or ""):
+            example = self._rows[idxs[0]]
+        if example is None:
+            example = next(
+                (
+                    r for r in self._rows
+                    if str(r.get("_path", "") or "")
+                ),
+                None,
+            )
+        if example is None or si.page_image_count(
+            str(example.get("_path", "") or "")
+        ) <= 0:
+            QMessageBox.information(
+                self, tr("tmpl.manager_title"),
+                tr("tmpl.manager_need_example"),
+            )
+            return
+        self._open_template_dialog(row=example)
+
     def _open_templates_manager(self) -> None:
         templates = self._get_templates()
 
@@ -2502,14 +2607,48 @@ class ScanImportView(QWidget):
             templates.pop(name, None)
             self._save_templates_file()
 
-        dlg = TemplatesManagerDialog(self, templates, _delete)
+        dlg = TemplatesManagerDialog(
+            self, templates, _delete,
+            on_edit=self._manager_edit_template,
+            on_create=self._manager_create_template,
+        )
         dlg.exec()
+        self._refresh_templates_btn()
 
     def _suppliers(self) -> list[dict]:
         try:
             return self._app.get_suppliers() if self._app else []
         except Exception:
             return []
+
+    def _open_template_for_unmatched(self, rows: list[dict]) -> None:
+        """Öppnar mallskapandet för rader utan matchande mall.
+
+        En importerad faktura som varken träffar en inlärd mall
+        eller ett inbyggt format ska inte bara bli liggande: appen
+        öppnar malldialogen för den direkt, så användaren kan
+        markera fälten på bilden och lära appen formatet. Sparas
+        mallen läses övriga rader om automatiskt (och kan då få
+        sin mall) — avbryter användaren stannar vi, i stället för
+        att öppna dialog efter dialog.
+        """
+        si = _scan_module()
+        for row in list(rows or []):
+            if not isinstance(row, dict):
+                continue
+            if row.get("template") or row.get("match_uncertain"):
+                continue
+            path = str(row.get("_path", "") or "")
+            if not path or si.page_image_count(path) <= 0:
+                continue
+            log.info(
+                "SCAN_IMPORT: %s kunde inte matchas mot någon "
+                "mall — öppnar mallskapandet",
+                row.get("file", ""),
+            )
+            self._open_template_dialog(row=row)
+            if not row.get("template"):
+                break
 
     def _scan_files(self) -> None:
         """Läser och tolkar valda filer."""
@@ -2570,6 +2709,10 @@ class ScanImportView(QWidget):
         # Vid minsta osäkerhet om leverantör/mall: fråga
         # användaren direkt i stället för att gissa.
         self._ask_uncertain_rows(new_rows)
+        # Kunde fakturan inte matchas mot någon mall alls öppnas
+        # mallskapandet direkt för den — användaren ska inte
+        # behöva leta fram rätt knapp själv.
+        self._open_template_for_unmatched(new_rows)
         ok = sum(1 for r in new_rows if not r["missing"])
         self._lbl_status.setText(
             f"{len(new_rows)} fil(er) tolkade — {ok} kompletta, "
@@ -2704,6 +2847,16 @@ class ScanImportView(QWidget):
             text = raw
         if row.get("match_uncertain"):
             text += "  ·  " + tr("scan.match_uncertain_status")
+        # Flersidiga fakturor syns direkt: totalen står ofta på
+        # sista sidan, så 2+ sidor är viktig granskningsinfo.
+        try:
+            _pages = _scan_module().page_image_count(
+                str(row.get("_path", "") or "")
+            )
+        except Exception:
+            _pages = 0
+        if _pages >= 2:
+            text += "  ·  " + tr("scan.pages_status", n=_pages)
         # Dålig kontrollsiffra syns direkt i listan — fångas här
         # i stället för först vid betalning hos banken.
         if ScanImportView._ocr_check_bad(row):
@@ -2726,6 +2879,19 @@ class ScanImportView(QWidget):
         if not idxs and self._tbl.currentRow() >= 0:
             idxs = [self._tbl.currentRow()]
         return [i for i in idxs if 0 <= i < len(self._rows)]
+
+    def _table_context_menu(self, pos) -> None:
+        """Högerklick i granskningstabellen: öppna originalet m.m."""
+        item = self._tbl.itemAt(pos)
+        if item is not None and item.row() >= 0:
+            self._tbl.selectRow(item.row())
+        menu = QMenu(self)
+        menu.addAction(tr("scan.open_original"), self._open_original_row)
+        menu.addAction(tr("scan.print"), self._print_row)
+        menu.addAction(tr("scan.template_btn"), self._open_template_dialog)
+        menu.addSeparator()
+        menu.addAction(tr("scan.remove_row"), self._remove_row)
+        menu.exec(self._tbl.viewport().mapToGlobal(pos))
 
     def _open_original_row(self) -> None:
         """Öppnar markerad rads originalfaktura i systemets visare.

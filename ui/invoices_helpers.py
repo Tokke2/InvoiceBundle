@@ -856,6 +856,7 @@ COLUMNS: list[tuple[str, str, int, Qt.AlignmentFlag]] = [
     ("Kategori",   "category",        72, Qt.AlignmentFlag.AlignLeft),
     ("Referens",   "reference",       72, Qt.AlignmentFlag.AlignLeft),
     ("Notering",   "note",            80, Qt.AlignmentFlag.AlignLeft),
+    ("Sidor",      "pages",           54, Qt.AlignmentFlag.AlignCenter),
 ]
 
 COL_LABELS: list[str] = [c[0] for c in COLUMNS]
@@ -979,6 +980,37 @@ def install_keyboard_navigation(
     for w in order:
         w.installEventFilter(filt)
     dialog._enter_next_filter = filt  # noqa: SLF001 – medvetet
+
+
+def attachment_page_count(path: Any) -> int:
+    """Antal sidor i ett original (0 = okänt/kan inte läsas).
+
+    PDF räknas via PyMuPDF eller pypdf om de finns; en bildfil
+    är alltid en sida. Används för Sidor-kolumnen i Fakturor —
+    flersidiga fakturor (2 sidor eller fler) ska synas direkt,
+    eftersom totalen ofta står på sista sidan.
+    """
+    p = Path(str(path or ""))
+    if not p.is_file():
+        return 0
+    suffix = p.suffix.lower()
+    if suffix in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"):
+        return 1
+    if suffix != ".pdf":
+        return 0
+    try:
+        import fitz  # PyMuPDF
+
+        with fitz.open(str(p)) as doc:
+            return len(doc)
+    except Exception:
+        pass
+    try:
+        from pypdf import PdfReader
+
+        return len(PdfReader(str(p)).pages)
+    except Exception:
+        return 0
 
 
 def fit_table_columns(table: QTableWidget, weights: list[int]) -> None:

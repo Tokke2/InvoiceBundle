@@ -204,6 +204,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "invoices.ctx_status": {"sv": "📊  Ändra status", "en": "📊  Change status"},
     "invoices.ctx_undo_status": {"sv": "↩  Ångra statusändring", "en": "↩  Undo status change"},
     "invoices.ctx_print": {"sv": "🖨  Skriv ut", "en": "🖨  Print"},
+    "invoices.ctx_open_original": {"sv": "📂  Öppna originalfaktura", "en": "📂  Open original invoice"},
+    "invoices.open_missing": {"sv": "📂 Faktura {nr} saknar originalfil — inget att öppna", "en": "📂 Invoice {nr} has no original file — nothing to open"},
+    "invoices.opened": {"sv": "📂 Öppnade originalet {file} i systemets visare", "en": "📂 Opened the original {file} in the system viewer"},
+    "invoices.pages_tooltip": {"sv": "Originalet har {n} sidor — totalen står ofta på sista sidan", "en": "The original has {n} pages — the total is often on the last page"},
     "invoices.print_missing": {"sv": "🖨 Faktura {nr} saknar originalfil — inget att skriva ut", "en": "🖨 Invoice {nr} has no original file — nothing to print"},
     "invoices.ctx_rescan": {"sv": "🔄  Skanna om faktura", "en": "🔄  Rescan invoice"},
     "invoices.rescan_no_original": {"sv": "🔄 Faktura {nr} saknar originalfil — kan inte skannas om", "en": "🔄 Invoice {nr} has no original file — cannot rescan"},
@@ -242,7 +246,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "invoices.active_only": {"sv": "Aktiva (ej arkiv)", "en": "Active (not archived)"},
     "invoices.all_statuses": {"sv": "Alla statusar", "en": "All statuses"},
     "invoices.all_suppliers": {"sv": "Alla leverantörer", "en": "All suppliers"},
-    "invoices.columns": {"sv": "Typ|Leverantör|Fakturanr|OCR|Datum|Förfaller|Betaldatum|Belopp|Valuta|Status|Kategori|Referens|Notering", "en": "Type|Supplier|Invoice no.|OCR|Date|Due|Payment date|Amount|Currency|Status|Category|Reference|Note"},
+    "invoices.columns": {"sv": "Typ|Leverantör|Fakturanr|OCR|Datum|Förfaller|Betaldatum|Belopp|Valuta|Status|Kategori|Referens|Notering|Sidor", "en": "Type|Supplier|Invoice no.|OCR|Date|Due|Payment date|Amount|Currency|Status|Category|Reference|Note|Pages"},
 
     # ── Import (skannade fakturor) ───────────────────────────────────
     "scan.title": {"sv": "📥  Importera skannade fakturor", "en": "📥  Import scanned invoices"},
@@ -468,6 +472,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "scan.match_reason_generic": {"sv": "Matchningen är osäker. Kontrollera fakturan och välj rätt alternativ.", "en": "The match is uncertain. Check the invoice and choose the correct option."},
     "scan.match_uncertain_status": {"sv": "⚠ osäker leverantör/mall — välj själv", "en": "⚠ uncertain supplier/template — choose yourself"},
     "scan.match_unresolved": {"sv": "Följande rader har fortfarande osäker leverantörs-/mallmatchning och registrerades inte:\n\n{files}\n\nVälj leverantör/mall för dem först (appen gissar aldrig).", "en": "The following rows still have an uncertain supplier/template match and were not registered:\n\n{files}\n\nChoose a supplier/template for them first (the app never guesses)."},
+    "scan.pages_status": {"sv": "📄 {n} sidor", "en": "📄 {n} pages"},
 
     "scan.no_text": {"sv": "ingen text hittad", "en": "no text found"},
 
@@ -675,6 +680,9 @@ _STRINGS: dict[str, dict[str, str]] = {
     "tmpl.manager_empty": {"sv": "Inga mallar ännu. Öppna en tolkad rad och välj 'Mall för rad …'.", "en": "No templates yet. Open a parsed row and choose 'Template for row …'."},
     "tmpl.manager_entry": {"sv": "{supplier} — {n} fält: {fields}", "en": "{supplier} — {n} fields: {fields}"},
     "tmpl.delete": {"sv": "🗑  Ta bort vald mall", "en": "🗑  Delete selected template"},
+    "tmpl.edit": {"sv": "✏️  Redigera vald mall", "en": "✏️  Edit selected template"},
+    "tmpl.new": {"sv": "➕  Ny mall …", "en": "➕  New template …"},
+    "tmpl.manager_need_example": {"sv": "Skanna in eller markera först en faktura i Import-listan — en ny mall lärs in från fakturans bild, så appen behöver ett exempel att markera på.", "en": "First scan in or select an invoice in the Import list — a new template is taught from the invoice image, so the app needs an example to mark on."},
     "tmpl.intro_image": {"sv": "Välj ett fält och dra en ruta runt värdet på fakturabilden. Appen kommer ihåg platsen (andel av sidan + sidnummer) och läser framtida fakturor från samma leverantör där. Värdet i rutan visas till höger direkt.", "en": "Select a field and draw a box around the value on the invoice image. The app remembers the place (share of the page + page number) and reads future invoices from the same supplier there. The value in the box is shown on the right at once."},
     "tmpl.fields_header": {"sv": "Fält att markera:", "en": "Fields to mark:"},
     "tmpl.mark": {"sv": "✎ Markera", "en": "✎ Mark"},
