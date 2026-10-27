@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QGroupBox, QTextEdit, QMessageBox, QFileDialog, QFrame,
     QLineEdit, QCheckBox, QApplication, QInputDialog,
-    QDialog, QListWidget, QPlainTextEdit,
+    QDialog, QListWidget, QPlainTextEdit, QComboBox,
 )
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal, QRectF, QSizeF
 from PySide6.QtGui import (
@@ -1212,6 +1212,9 @@ class ScanImportView(QWidget):
                 n=len(infos), files="\n".join(lines),
             ),
         )
+        # Osäkra leverantörs-/mallmatchningar FRÅGAS det om
+        # direkt — appen gissar aldrig och parkerar aldrig tyst.
+        self._ask_uncertain_parked(infos)
         # Varje okänt format ska erbjudas en mall direkt i
         # appen — användaren ska inte behöva leta fram rätt
         # knapp själv. En fråga per leverantör och runda.
@@ -1757,6 +1760,233 @@ class ScanImportView(QWidget):
                 log.warning("verify files: %s", exc)
         return files[:8]
 
+    @staticmethod
+    def _match_candidate_names(row: dict) -> list[str]:
+        """Kandidatnamn ur en matchbedömning (strängar eller dicts)."""
+        raw = row.get("match_candidates") or []
+        if not isinstance(raw, (list, tuple)):
+            raw = [raw]
+        names: list[str] = []
+        seen: set[str] = set()
+        for cand in raw:
+            if isinstance(cand, dict):
+                name = str(
+                    cand.get("name")
+                    or cand.get("supplier")
+                    or cand.get("template")
+                    or ""
+                ).strip()
+            else:
+                name = str(cand or "").strip()
+            if name and name.lower() not in seen:
+                seen.add(name.lower())
+                names.append(name)
+        return names
+
+    @staticmethod
+    def _recalc_missing(row: dict) -> None:
+        try:
+            amount_ok = float(row.get("total_amount") or 0) > 0
+        except (TypeError, ValueError):
+            amount_ok = False
+        row["missing"] = [
+            label for ok, label in (
+                (amount_ok, "belopp"),
+                (bool(row.get("invoice_number")), "fakturanummer"),
+                (bool(row.get("supplier")), "leverantör"),
+            ) if not ok
+        ]
+
+    def _ask_user_for_match(self, row: dict) -> bool:
+        """Frågar användaren vilken leverantör/mall som gäller.
+
+        Anropas vid VARJE osäker matchning — appen gissar aldrig
+        och parkerar aldrig tyst. Returnerar True först när
+        användaren själv valt ett alternativ; vid Avbryt förblir
+        raden osäker och kan inte registreras automatiskt.
+        """
+        if not row.get("match_uncertain"):
+            return True
+        kind = str(row.get("match_kind") or "supplier").strip()
+        candidates = self._match_candidate_names(row)
+        if kind == "template":
+            options = candidates or sorted(
+                str(name) for name in self._get_templates().keys()
+            )
+        else:
+            options = candidates or [
+                str(s.get("name", "")).strip()
+                for s in self._suppliers()
+                if str(s.get("name", "")).strip()
+            ]
+        # Mappens kopplade leverantör är en egen kandidat när
+        # bevakningen pekat ut den men tolkningen var osäker.
+        folder_candidate = str(
+            row.get("folder_supplier_candidate", "") or ""
+        ).strip()
+        if folder_candidate and folder_candidate.lower() not in {
+            name.lower() for name in options
+        }:
+            options.append(folder_candidate)
+        if not options:
+            QMessageBox.information(
+                self, tr("scan.match_ask_title"),
+                tr("scan.match_no_options"),
+            )
+            return False
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr("scan.match_ask_title"))
+        layout = QVBoxLayout(dlg)
+        try:
+            amount_text = _fmt_amount(float(row.get("total_amount") or 0))
+        except (TypeError, ValueError):
+            amount_text = str(row.get("total_amount", "") or "—")
+        intro = QLabel(tr(
+            "scan.match_ask_body",
+            file=str(row.get("file", "") or "—"),
+            nr=str(row.get("invoice_number", "") or "—"),
+            amount=amount_text,
+        ))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        reason = str(row.get("match_reason", "") or "").strip()
+        reason_key = {
+            "weak": "scan.match_reason_weak",
+            "ambiguous": "scan.match_reason_ambiguous",
+            "competing": "scan.match_reason_competing",
+            "template_ambiguous": "scan.match_reason_template",
+            "region_ambiguous": "scan.match_reason_template",
+            "builtin_ambiguous": "scan.match_reason_template",
+        }.get(reason, "scan.match_reason_generic")
+        reason_lbl = QLabel(tr(reason_key))
+        reason_lbl.setWordWrap(True)
+        layout.addWidget(reason_lbl)
+        layout.addWidget(QLabel(tr(
+            "scan.match_ask_template_label"
+            if kind == "template" else "scan.match_ask_supplier_label"
+        )))
+        combo = QComboBox(dlg)
+        combo.addItems(options)
+        combo.setCurrentIndex(-1)
+        combo.setPlaceholderText(tr("scan.match_ask_placeholder"))
+        layout.addWidget(combo)
+        buttons = QHBoxLayout()
+        btn_cancel = QPushButton(tr("common.cancel"))
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_use = QPushButton(tr("scan.match_use"))
+        btn_use.setDefault(True)
+
+        def _accept() -> None:
+            if combo.currentIndex() >= 0:
+                dlg.accept()
+
+        btn_use.clicked.connect(_accept)
+        buttons.addStretch()
+        buttons.addWidget(btn_cancel)
+        buttons.addWidget(btn_use)
+        layout.addLayout(buttons)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            log.info(
+                "SCAN_IMPORT: användaren avbröt matchningsfrågan "
+                "för %s — inget valdes",
+                row.get("file", ""),
+            )
+            return False
+        chosen = combo.currentText().strip()
+        if not chosen:
+            return False
+
+        text = str(row.get("_text", "") or "")
+        row["supplier"] = chosen
+        self._apply_template_to_row(row, text)
+        if kind == "template":
+            if chosen in self._get_templates():
+                row["template"] = chosen
+            row["template_match"] = {
+                "status": "matched", "template": chosen,
+                "candidates": candidates, "uncertain": False,
+                "reason": "user_choice",
+            }
+        row["supplier_match"] = {
+            "status": "matched", "supplier": chosen,
+            "candidates": candidates, "uncertain": False,
+            "reason": "user_choice",
+        }
+        for key in (
+            "match_uncertain", "match_candidates",
+            "match_reason", "match_kind",
+        ):
+            row.pop(key, None)
+        self._recalc_missing(row)
+        row["status"] = self._compute_status(
+            row, bool(text or row.get("_path"))
+        )
+        log.info(
+            "SCAN_IMPORT: användaren valde %s för %s "
+            "(osäker %s-matchning)",
+            chosen, row.get("file", ""), kind,
+        )
+        return True
+
+    def _ask_uncertain_rows(self, rows: list[dict]) -> int:
+        """Frågar om varje osäker rad; returnerar antal lösta."""
+        resolved = 0
+        for row in list(rows or []):
+            if isinstance(row, dict) and row.get("match_uncertain"):
+                if self._ask_user_for_match(row):
+                    resolved += 1
+        if resolved:
+            self._refresh_table()
+        return resolved
+
+    def _ask_uncertain_parked(self, infos: list[dict]) -> None:
+        """Frågar direkt om parkerade filer med osäker matchning.
+
+        Ett bekräftat val flyttar filen till granskningstabellen
+        med vald leverantör/mall; Avbryt lämnar den parkerad —
+        den registreras aldrig automatiskt på en gissning.
+        """
+        watch = getattr(self, "_watch", None)
+        if watch is None:
+            return
+        moved = False
+        for info in infos or []:
+            reason = str(info.get("reason", "") or "")
+            parsed_info = info.get("parsed") or {}
+            if reason != "uncertain-supplier" and not (
+                isinstance(parsed_info, dict)
+                and parsed_info.get("match_uncertain")
+            ):
+                continue
+            parked = None
+            for entry in list(getattr(watch, "parked", []) or []):
+                if str(entry.get("hash", "")) == str(info.get("hash", "")) \
+                        and info.get("hash"):
+                    parked = entry
+                    break
+                if str(entry.get("path", "")) == str(info.get("path", "")):
+                    parked = entry
+                    break
+            source = parked if isinstance(parked, dict) else info
+            parsed = dict(source.get("parsed", {}) or {})
+            parsed["file"] = source.get("file", "")
+            parsed["_path"] = source.get("path", "")
+            parsed["method"] = source.get("method", "")
+            parsed["_text"] = source.get("text", "")
+            if not self._ask_user_for_match(parsed):
+                continue
+            parsed["status"] = self._compute_status(
+                parsed, bool(source.get("text"))
+            )
+            self._rows.append(parsed)
+            if parked is not None:
+                watch.remove_parked(parked.get("hash", ""))
+            moved = True
+        if moved:
+            self._refresh_table()
+            self._refresh_watch_ui()
+
     def _apply_template_to_row(self, parsed: dict, text: str) -> dict:
         """Applicerar leverantörsmallen på en (parkerad) rad.
 
@@ -1841,6 +2071,9 @@ class ScanImportView(QWidget):
             self._rows.append(parsed)
             self._watch.remove_parked(parked.get("hash", ""))
         self._refresh_table()
+        # Osäkra matchningar som följt med till tabellen avgörs
+        # av användaren här — aldrig av en gissning i bakgrunden.
+        self._ask_uncertain_rows(self._rows[start:])
         self._offer_template_repairs(self._rows[start:])
 
     def _offer_template_repairs(self, rows: list[dict]) -> None:
@@ -2334,6 +2567,9 @@ class ScanImportView(QWidget):
 
         self._rows.extend(new_rows)
         self._refresh_table()
+        # Vid minsta osäkerhet om leverantör/mall: fråga
+        # användaren direkt i stället för att gissa.
+        self._ask_uncertain_rows(new_rows)
         ok = sum(1 for r in new_rows if not r["missing"])
         self._lbl_status.setText(
             f"{len(new_rows)} fil(er) tolkade — {ok} kompletta, "
@@ -2368,6 +2604,7 @@ class ScanImportView(QWidget):
         )
         self._rows.append(parsed)
         self._refresh_table()
+        self._ask_uncertain_rows([parsed])
         log.info(
             "SCAN_IMPORT (inklistrad): belopp=%s fakturanr=%s",
             parsed["total_amount"], parsed["invoice_number"] or "-",
@@ -2465,6 +2702,8 @@ class ScanImportView(QWidget):
             text = tr("scan.no_text")
         else:
             text = raw
+        if row.get("match_uncertain"):
+            text += "  ·  " + tr("scan.match_uncertain_status")
         # Dålig kontrollsiffra syns direkt i listan — fångas här
         # i stället för först vid betalning hos banken.
         if ScanImportView._ocr_check_bad(row):
@@ -2700,8 +2939,35 @@ class ScanImportView(QWidget):
             QMessageBox.information(self, "Import", "Markera rader först.")
             return
 
-        ready = [i for i in idxs if not self._rows[i]["missing"]]
-        not_ready = [i for i in idxs if self._rows[i]["missing"]]
+        # En rad med osäker leverantörs-/mallmatchning får aldrig
+        # registreras på en gissning — fråga först, och avbryter
+        # användaren registreras den inte alls.
+        unresolved: set[int] = set()
+        for i in idxs:
+            if self._rows[i].get("match_uncertain"):
+                if not self._ask_user_for_match(self._rows[i]):
+                    unresolved.add(i)
+        if unresolved:
+            self._refresh_table()
+            QMessageBox.warning(
+                self, tr("scan.match_ask_title"),
+                tr(
+                    "scan.match_unresolved",
+                    files="\n".join(
+                        f"• {self._rows[i].get('file', '')}"
+                        for i in sorted(unresolved)
+                    ),
+                ),
+            )
+
+        ready = [
+            i for i in idxs
+            if i not in unresolved and not self._rows[i]["missing"]
+        ]
+        not_ready = [
+            i for i in idxs
+            if i not in unresolved and self._rows[i]["missing"]
+        ]
         if not_ready:
             QMessageBox.warning(
                 self, "Import",

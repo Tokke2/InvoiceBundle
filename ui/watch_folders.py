@@ -213,6 +213,10 @@ _PARK_REASON_SV = {
     "review": (
         "auto-registrering avstängd — väntar på manuell granskning"
     ),
+    "uncertain-supplier": (
+        "osäker leverantörs- eller mallmatchning — appen frågar "
+        "användaren i stället för att gissa"
+    ),
 }
 
 
@@ -985,6 +989,7 @@ class WatchManager(QObject):
             reason = str(parked.get("reason", "") or "")
             if not (
                 reason == "no-template"
+                or reason == "uncertain-supplier"
                 or reason.startswith("missing")
             ):
                 continue
@@ -1171,11 +1176,56 @@ class WatchManager(QObject):
                     folder_supplier, resolved,
                 )
                 folder_supplier = resolved
-            parsed["supplier"] = folder_supplier
-            parsed["missing"] = [
-                m for m in parsed.get("missing", [])
-                if m != "leverantör"
-            ]
+            parsed_supplier = str(parsed.get("supplier", "") or "").strip()
+            names_match = getattr(si, "_names_match", None)
+            same_supplier = bool(
+                parsed_supplier
+                and (
+                    parsed_supplier.lower() == folder_supplier.lower()
+                    or (
+                        callable(names_match)
+                        and names_match(parsed_supplier, folder_supplier)
+                    )
+                )
+            )
+            if parsed.get("match_uncertain"):
+                # Mappens leverantör är bara ännu en kandidat när
+                # tolkningen själv är osäker — den får inte tyst
+                # avgöra valet åt användaren.
+                candidates = [
+                    str(c).strip()
+                    for c in parsed.get("match_candidates", []) or []
+                    if str(c).strip()
+                ]
+                if folder_supplier.lower() not in {
+                    c.lower() for c in candidates
+                }:
+                    candidates.append(folder_supplier)
+                parsed["match_candidates"] = candidates
+                parsed["folder_supplier_candidate"] = folder_supplier
+                if "leverantör" not in parsed.get("missing", []):
+                    parsed.setdefault("missing", []).append("leverantör")
+            elif parsed_supplier and not same_supplier:
+                # Fakturans egen starka leverantörsträff och
+                # mappens kopplade leverantör pekar åt olika håll.
+                # Det är en konflikt användaren ska avgöra, inte
+                # något mappinställningen får köra över i tysthet.
+                parsed["supplier"] = ""
+                parsed["match_uncertain"] = True
+                parsed["match_candidates"] = [
+                    parsed_supplier, folder_supplier,
+                ]
+                parsed["match_reason"] = "competing"
+                parsed["match_kind"] = "supplier"
+                parsed["folder_supplier_candidate"] = folder_supplier
+                if "leverantör" not in parsed.get("missing", []):
+                    parsed.setdefault("missing", []).append("leverantör")
+            else:
+                parsed["supplier"] = folder_supplier
+                parsed["missing"] = [
+                    m for m in parsed.get("missing", [])
+                    if m != "leverantör"
+                ]
         return text, method, parsed
 
     def _find_invoice_for_file(
@@ -1366,12 +1416,18 @@ class WatchManager(QObject):
 
         # Auto-registrering kräver en inlärd leverantörsmall
         # som faktiskt träffar på filen (se punkt 5 ovan).
+        # Osäker leverantörs-/mallmatchning parkeras alltid med
+        # sin egen orsak så att Import-vyn kan FRÅGA användaren —
+        # appen gissar aldrig och registrerar aldrig automatiskt.
         untaught = not parsed.get("template")
+        uncertain = bool(parsed.get("match_uncertain"))
         if (
-            parsed.get("missing") or possible_dup
+            uncertain or parsed.get("missing") or possible_dup
             or not self.auto_create or untaught
         ):
-            if parsed.get("missing"):
+            if uncertain:
+                reason = "uncertain-supplier"
+            elif parsed.get("missing"):
                 reason = "missing: " + ", ".join(
                     parsed.get("missing", [])
                 )

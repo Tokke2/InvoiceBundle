@@ -426,58 +426,273 @@ _SUPPLIER_ID_KEYS = (
 )
 
 
+def _supplier_match_candidates(
+    text: str, suppliers: list[dict]
+) -> list[dict[str, Any]]:
+    """Alla leverantörer med någon positiv träff, starkast först.
+
+    Varje kandidat bär poäng och vilka signaler som gav träffen.
+    Listan används både för säkra val och för att kunna FRÅGA
+    användaren vid svaga eller konkurrerande träffar — appen ska
+    aldrig behöva dölja att flera alternativ var möjliga.
+    """
+    digits = re.sub(r"\D", "", text or "")
+    folded = _fold_text(text)
+    folded_tokens = set(folded.split())
+    by_key: dict[str, dict[str, Any]] = {}
+    for sup in suppliers or []:
+        if not isinstance(sup, dict):
+            continue
+        name = str(sup.get("name", "")).strip()
+        if not name:
+            continue
+        score = 0
+        signals: list[str] = []
+        name_fold = _fold_text(name)
+        tokens = _name_tokens(name)
+        token_set = set(tokens)
+        if name_fold and name_fold in folded:
+            score += 6
+            signals.append("full_name")
+        elif token_set and token_set <= folded_tokens and (
+            len(token_set) >= 2
+            or (tokens and len(tokens[0]) >= 4)
+        ):
+            score += 5
+            signals.append("name_words")
+        elif tokens and len(tokens[0]) >= 5 \
+                and tokens[0] in folded_tokens:
+            # Ensamt särskiljande förstanamn ("Pilkington Sverige
+            # AB" på en faktura som bara trycker "Pilkington").
+            # Det är en ledtråd, inte ett säkert val.
+            score += 3
+            signals.append("first_name_only")
+        for key in _SUPPLIER_ID_KEYS:
+            num = re.sub(r"\D", "", str(sup.get(key, "") or ""))
+            if len(num) >= 6 and num in digits:
+                score += 5
+                signals.append(key)
+                break
+        if score <= 0:
+            continue
+        key = _fold_text(name)
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = {
+                "name": name,
+                "score": score,
+                "signals": signals,
+            }
+        else:
+            existing["score"] = max(existing["score"], score)
+            for signal in signals:
+                if signal not in existing["signals"]:
+                    existing["signals"].append(signal)
+    return sorted(
+        by_key.values(),
+        key=lambda cand: (-int(cand["score"]), _fold_text(cand["name"])),
+    )
+
+
+def assess_supplier_match(
+    text: str, suppliers: list[dict]
+) -> dict[str, Any]:
+    """Bedöm leverantörsmatchningen utan att gissa vid osäkerhet.
+
+    Returnerar ``supplier`` bara vid en unik stark träff. En ensam
+    svag förstanamnsträff, lika starka kandidater eller en annan
+    stark kandidat ger ``uncertain=True`` och hela kandidatlistan,
+    så att gränssnittet kan fråga användaren i stället.
+    """
+    candidates = _supplier_match_candidates(text, suppliers)
+    if not candidates:
+        return {
+            "status": "none",
+            "supplier": "",
+            "candidates": [],
+            "uncertain": False,
+            "reason": "",
+        }
+    top = candidates[0]
+    second = candidates[1] if len(candidates) > 1 else None
+    if int(top["score"]) >= 5 and (
+        second is None or int(second["score"]) < 5
+    ):
+        return {
+            "status": "matched",
+            "supplier": str(top["name"]),
+            "candidates": candidates,
+            "uncertain": False,
+            "reason": "",
+        }
+    if second is not None and int(second["score"]) == int(top["score"]):
+        reason = "ambiguous"
+    elif second is not None and int(second["score"]) >= 5:
+        reason = "competing"
+    else:
+        reason = "weak"
+    return {
+        "status": "uncertain",
+        "supplier": "",
+        "candidates": candidates,
+        "uncertain": True,
+        "reason": reason,
+    }
+
+
+def _merge_match_candidates(
+    *candidate_lists: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Slå ihop kandidatlistor utan att tappa möjliga alternativ."""
+    merged: dict[str, dict[str, Any]] = {}
+    for candidates in candidate_lists:
+        for cand in candidates or []:
+            if not isinstance(cand, dict):
+                continue
+            name = str(cand.get("name", "")).strip()
+            if not name:
+                continue
+            key = _fold_text(name)
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = {
+                    "name": name,
+                    "score": int(cand.get("score", 0) or 0),
+                    "signals": list(cand.get("signals", []) or []),
+                }
+            else:
+                existing["score"] = max(
+                    existing["score"], int(cand.get("score", 0) or 0)
+                )
+                for signal in cand.get("signals", []) or []:
+                    if signal not in existing["signals"]:
+                        existing["signals"].append(signal)
+    return sorted(
+        merged.values(),
+        key=lambda cand: (-int(cand["score"]), _fold_text(cand["name"])),
+    )
+
+
+def _assess_supplier_and_templates(
+    text: str,
+    suppliers: list[dict] | None,
+    templates: dict | None,
+) -> dict[str, Any]:
+    """Gemensam bedömning av registerleverantörer och mallnamn.
+
+    En mallnyckel kan identifiera en leverantör som ännu inte finns
+    i registret, men ett starkt registerresultat och ett annat
+    starkt mallnamn är en konflikt — inte något appen får avgöra
+    själv.
+    """
+    registry = assess_supplier_match(text, suppliers or [])
+    if not templates:
+        return registry
+    template_match = assess_supplier_match(
+        text, [{"name": str(name)} for name in templates.keys()]
+    )
+    if registry["status"] == "matched":
+        accepted = str(registry["supplier"])
+        if template_match["status"] == "matched" and not _names_match(
+            accepted, str(template_match["supplier"])
+        ):
+            return {
+                "status": "uncertain",
+                "supplier": "",
+                "candidates": _merge_match_candidates(
+                    registry["candidates"], template_match["candidates"]
+                ),
+                "uncertain": True,
+                "reason": "competing",
+            }
+        if template_match["status"] == "uncertain":
+            rivals = [
+                cand for cand in template_match["candidates"]
+                if not _names_match(accepted, str(cand.get("name", "")))
+            ]
+            if rivals:
+                return {
+                    "status": "uncertain",
+                    "supplier": "",
+                    "candidates": _merge_match_candidates(
+                        registry["candidates"], rivals
+                    ),
+                    "uncertain": True,
+                    "reason": "competing",
+                }
+        return registry
+    if template_match["status"] == "matched":
+        if registry["status"] == "uncertain":
+            return {
+                "status": "uncertain",
+                "supplier": "",
+                "candidates": _merge_match_candidates(
+                    registry["candidates"], template_match["candidates"]
+                ),
+                "uncertain": True,
+                "reason": "competing",
+            }
+        return template_match
+    if registry["status"] == "uncertain" or \
+            template_match["status"] == "uncertain":
+        return {
+            "status": "uncertain",
+            "supplier": "",
+            "candidates": _merge_match_candidates(
+                registry["candidates"], template_match["candidates"]
+            ),
+            "uncertain": True,
+            "reason": (
+                "ambiguous"
+                if registry["reason"] == "ambiguous"
+                or template_match["reason"] == "ambiguous"
+                else template_match["reason"] or registry["reason"]
+            ),
+        }
+    return registry
+
+
 def match_supplier(text: str, suppliers: list[dict]) -> str:
     """
     Matchar texten mot kända leverantörer och returnerar namnet
-    eller "" (inget gissas vid tvetydighet).
+    eller "" (inget gissas vid tvetydighet eller svag träff).
 
     Starka träffar: org.nr/bankgiro/plusgiro i texten, eller
     leverantörens namn — vikt så att "AB Martin G Anderson",
     "Martin G. Anderson" och OCR-varianten utan prickar är samma
     leverantör. Ordmängden räcker också (alla betydelsebärande
     ord på fakturan), vilket klarar bolagsform före/efter namnet
-    och annan ordning. Delad förstanamns-träff ("Pilkington ...")
-    används bara om den är ensam om bästa poäng.
+    och annan ordning. En ensam förstanamnsträff är numera bara
+    en kandidat i parse-resultatets matchbedömning: den kan vara
+    rätt, men är för svag för att appen ska välja själv.
     """
-    digits = re.sub(r"\D", "", text or "")
-    folded = _fold_text(text)
-    folded_tokens = set(folded.split())
-    best: list[str] = []
-    best_score = 0
-    for sup in suppliers or []:
-        name = str(sup.get("name", "")).strip()
-        if not name:
-            continue
-        score = 0
-        name_fold = _fold_text(name)
-        tokens = _name_tokens(name)
-        token_set = set(tokens)
-        if name_fold and name_fold in folded:
-            score += 6
-        elif token_set and token_set <= folded_tokens and (
-            len(token_set) >= 2
-            or (tokens and len(tokens[0]) >= 4)
-        ):
-            score += 5
-        elif tokens and len(tokens[0]) >= 5 \
-                and tokens[0] in folded_tokens:
-            # Ensamt särskiljande förstanamn ("Pilkington Sverige
-            # AB" på en faktura som bara trycker "Pilkington").
-            score += 3
-        for key in _SUPPLIER_ID_KEYS:
-            num = re.sub(r"\D", "", str(sup.get(key, "") or ""))
-            if len(num) >= 6 and num in digits:
-                score += 5
-                break
-        if score > best_score:
-            best, best_score = [name], score
-        elif score == best_score and score > 0:
-            best.append(name)
-    if best_score >= 5 and len(best) == 1:
-        return best[0]
-    if best_score == 3 and len(best) == 1:
-        return best[0]
-    return ""
+    return str(assess_supplier_match(text, suppliers)["supplier"])
+
+
+def template_candidate_names(
+    templates: dict, supplier: str
+) -> list[str]:
+    """Mallnycklar som kan höra till leverantören, utan gissning.
+
+    Exakt nyckel vinner; annars vikt lika nyckel, annars alla
+    vikt namnträffar. Flera nycklar betyder att mallvalet är
+    osäkert och ska avgöras av användaren.
+    """
+    if not templates or not supplier:
+        return []
+    if supplier in templates:
+        return [supplier]
+    folded = _fold_text(supplier)
+    exact = [
+        str(name) for name in templates.keys()
+        if _fold_text(name) == folded
+    ]
+    if exact:
+        return exact
+    return [
+        str(name) for name in templates.keys()
+        if _names_match(name, supplier)
+    ]
 
 
 def _math_line_amount(text: str, label: str) -> float | None:
@@ -621,6 +836,7 @@ def parse_invoice_text(
     suppliers: list[dict] | None = None,
     templates: dict | None = None,
     region_texts: dict | None = None,
+    region_texts_by_template: dict | None = None,
 ) -> dict[str, Any]:
     """
     Tolkar en fakturatext och returnerar kandidater:
@@ -648,39 +864,114 @@ def parse_invoice_text(
     inv_nr = parse_invoice_number(text or "")
     ocr = parse_ocr(text or "")
     date, due = parse_dates(text or "")
-    supplier = match_supplier(text or "", suppliers or [])
+    supplier_assessment = _assess_supplier_and_templates(
+        text or "", suppliers or [], templates
+    )
+    supplier = str(supplier_assessment.get("supplier", "") or "")
+    match_uncertain = bool(supplier_assessment.get("uncertain"))
+    match_candidates = [
+        str(cand.get("name", "")).strip()
+        for cand in supplier_assessment.get("candidates", []) or []
+        if str(cand.get("name", "")).strip()
+    ]
+    match_reason = str(supplier_assessment.get("reason", "") or "")
+    match_kind = "supplier" if match_uncertain else ""
     template_name = ""
     template_fields: list[str] = []
+    template_key = ""
 
     if templates:
-        if not supplier:
-            supplier = match_supplier(
-                text or "", [{"name": n} for n in templates.keys()]
+        template = None
+        selected_region_texts = region_texts
+        if supplier and not match_uncertain:
+            candidate_names = template_candidate_names(
+                templates, supplier
             )
-        template = find_template(templates, supplier) if supplier else None
-        if template is None and region_texts:
-            # Regionsmall (användaren har pekat ut värdena på
-            # fakturabilden): mallens ruttexter gav träffar —
-            # mallen identifierar då leverantören själv, även
-            # när löptexten saknar igenkännbart namn/nummer.
+            if len(candidate_names) > 1:
+                match_uncertain = True
+                match_candidates = candidate_names
+                match_reason = "template_ambiguous"
+                match_kind = "template"
+            elif len(candidate_names) == 1:
+                template_key = candidate_names[0]
+                template = templates.get(template_key)
+
+        # Regionsmallar (användaren har pekat ut värdena på
+        # fakturabilden) bedöms kandidat för kandidat. Först när
+        # exakt EN mall själv läser fakturanummer + att betala
+        # får rutorna identifiera leverantören; flera sådana
+        # träffar är en fråga till användaren, inte första bästa.
+        if region_texts or region_texts_by_template:
+            credit = is_credit_note(text or "")
+            region_claims: list[tuple[str, dict, dict, dict]] = []
             for cand_name, cand in templates.items():
                 if not isinstance(cand, dict):
                     continue
-                if template_values_from_regions(
-                    cand, region_texts
+                cand_texts = None
+                if region_texts_by_template is not None:
+                    cand_texts = region_texts_by_template.get(
+                        str(cand_name)
+                    )
+                elif template_key and str(cand_name) == template_key:
+                    # Enskild region_texts hör till den redan valda
+                    # mallen — den får aldrig prövas mot alla mallar.
+                    cand_texts = region_texts
+                elif len(templates) == 1:
+                    cand_texts = region_texts
+                if not cand_texts:
+                    continue
+                found_regions = template_values_from_regions(
+                    cand, cand_texts
+                )
+                if found_regions.get("invoice_number") and (
+                    found_regions.get("total_amount") or credit
                 ):
-                    template = cand
+                    region_claims.append((
+                        str(cand_name), cand, found_regions,
+                        dict(cand_texts),
+                    ))
+            if len(region_claims) > 1:
+                match_uncertain = True
+                match_candidates = [
+                    claim[0] for claim in region_claims
+                ]
+                match_reason = "region_ambiguous"
+                match_kind = "template"
+                template = None
+                template_key = ""
+            elif len(region_claims) == 1:
+                claim_name, claim_template, _found, claim_texts = (
+                    region_claims[0]
+                )
+                if supplier and not _names_match(claim_name, supplier):
+                    match_uncertain = True
+                    match_candidates = [supplier, claim_name]
+                    match_reason = "competing"
+                    match_kind = "template"
+                    template = None
+                    template_key = ""
+                else:
+                    template = claim_template
+                    template_key = claim_name
+                    selected_region_texts = claim_texts
                     if not supplier:
-                        supplier = str(cand_name)
-                    break
+                        supplier = claim_name
+                    # En enda regionsmall som själv läser de
+                    # avgörande fälten är uttrycklig, utpekad
+                    # bevisning — den får avgöra även om bara
+                    # namnet i löptexten var svagt/tvetydigt.
+                    match_uncertain = False
+                    match_candidates = []
+                    match_reason = ""
+                    match_kind = ""
         if template:
             found = apply_template(text or "", template)
-            if region_texts:
+            if selected_region_texts:
                 # Utpekade rutor på fakturabilden vinner över
                 # etikettläsningen — platsen är explicit angiven.
                 found.update(
                     template_values_from_regions(
-                        template, region_texts
+                        template, selected_region_texts
                     )
                 )
             for field, value in found.items():
@@ -708,9 +999,21 @@ def parse_invoice_text(
                 template_name = supplier
 
     if not template_name:
-        builtin = builtin_template_for(text or "")
-        if builtin:
-            bname, btmpl = builtin
+        builtin_candidates = _builtin_format_candidates(text or "")
+        if len(builtin_candidates) > 1:
+            # Flera inbyggda format känner igen olika delar av
+            # samma faktura. Att bara ta det första i listan vore
+            # en gissning — lämna valet till användaren.
+            match_uncertain = True
+            match_candidates = [
+                str(cand["name"]) for cand in builtin_candidates
+            ]
+            match_reason = "builtin_ambiguous"
+            match_kind = "template"
+        elif len(builtin_candidates) == 1:
+            builtin_candidate = builtin_candidates[0]
+            bname = str(builtin_candidate["name"])
+            btmpl = builtin_candidate["template"]
             found = apply_template(text or "", btmpl)
             # Strikt krav: fakturanummer OCH att betala måste
             # komma ur själva formatet (på kreditnotor ger
@@ -739,9 +1042,20 @@ def parse_invoice_text(
                     == found["total_amount"]
                 )
             )
-            if "invoice_number" in found and (
+            builtin_claim = "invoice_number" in found and (
                 total_ok or is_credit_note(text or "")
+            )
+            if supplier and not _builtin_format_matches_supplier(
+                builtin_candidate["format"], supplier
             ):
+                # Det inbyggda formatet pekar på en annan
+                # leverantör än den starka registerträffen.
+                # Vilken som har rätt får användaren avgöra.
+                match_uncertain = True
+                match_candidates = [supplier, bname]
+                match_reason = "competing"
+                match_kind = "template"
+            elif builtin_claim:
                 for field, value in found.items():
                     if field == "total_amount":
                         total = float(value)
@@ -782,6 +1096,44 @@ def parse_invoice_text(
     if template_name:
         result["template"] = template_name
         result["template_fields"] = template_fields
+    # Matchbedömningen följer alltid med resultatet. Vid osäker
+    # leverantörs- eller mallmatchning får anroparen därmed veta
+    # exakt vilka alternativ som finns och kan fråga användaren,
+    # i stället för att bara se en tom leverantör eller en fil
+    # som parkerats utan förklaring.
+    if match_uncertain and match_kind == "supplier":
+        result["supplier_match"] = {
+            "status": "uncertain",
+            "supplier": "",
+            "candidates": supplier_assessment.get("candidates", []),
+            "uncertain": True,
+            "reason": match_reason,
+        }
+    elif supplier:
+        result["supplier_match"] = {
+            "status": "matched",
+            "supplier": supplier,
+            "candidates": supplier_assessment.get("candidates", []),
+            "uncertain": False,
+            "reason": "",
+        }
+    else:
+        result["supplier_match"] = supplier_assessment
+    result["template_match"] = {
+        "status": (
+            "uncertain" if match_uncertain and match_kind != "supplier"
+            else ("matched" if template_name else "none")
+        ),
+        "template": template_name,
+        "candidates": match_candidates if match_uncertain else [],
+        "uncertain": bool(match_uncertain and match_kind != "supplier"),
+        "reason": match_reason if match_kind != "supplier" else "",
+    }
+    if match_uncertain:
+        result["match_uncertain"] = True
+        result["match_candidates"] = match_candidates
+        result["match_reason"] = match_reason
+        result["match_kind"] = match_kind
     # Kontrollerna är rådgivande: de ändrar aldrig värdena,
     # men flaggar räkne-/datumfel för granskning och logg.
     result["math_check"] = invoice_math_check(text or "", total)
@@ -804,6 +1156,7 @@ def parse_invoice_file(
     av tolkningen är exakt densamma som för ren text.
     """
     tpl = templates or {}
+    region_texts_by_template: dict[str, dict] = {}
     for _name, cand in tpl.items():
         if not isinstance(cand, dict):
             continue
@@ -813,12 +1166,18 @@ def parse_invoice_file(
             for spec in fields.values()
         ):
             continue
-        rtext = extract_region_texts(path, cand)
-        vals = template_values_from_regions(cand, rtext)
-        if vals.get("invoice_number") or vals.get("total_amount"):
-            return parse_invoice_text(
-                text, suppliers, tpl, region_texts=rtext
-            )
+        region_texts_by_template[str(_name)] = extract_region_texts(
+            path, cand
+        )
+    if region_texts_by_template:
+        # Varje regionsmall bedöms för sig: exakt en mall som
+        # själv läser fakturanummer + att betala får avgöra.
+        # Flera träffar blir en fråga till användaren — aldrig
+        # första mallen i listan.
+        return parse_invoice_text(
+            text, suppliers, tpl,
+            region_texts_by_template=region_texts_by_template,
+        )
     return _parse_with_reader_fallback(path, text, suppliers, tpl)
 
 
@@ -838,7 +1197,9 @@ def _parse_with_reader_fallback(
     tolkningen orörd (filen parkeras som förut).
     """
     result = parse_invoice_text(text, suppliers, templates)
-    if result.get("template"):
+    if result.get("template") or result.get("match_uncertain"):
+        # Ett osäkert resultat får aldrig ersättas av ett annat
+        # textuttag i tysthet — osäkerheten ska nå användaren.
         return result
     try:
         p = Path(path) if path else None
@@ -851,7 +1212,7 @@ def _parse_with_reader_fallback(
         if re.sub(r"\s+", " ", alt_text).strip() == seen:
             continue
         alt = parse_invoice_text(alt_text, suppliers, templates)
-        if alt.get("template"):
+        if alt.get("template") and not alt.get("match_uncertain"):
             log.info(
                 "SCAN_IMPORT: mallen kände igen fakturan via "
                 "alternativt textuttag (%s): %s",
@@ -1730,22 +2091,10 @@ def find_template(templates: dict, supplier: str) -> dict | None:
     namnmatchning ("AB Nordlys Energi" hittar mallen för
     "Nordlys Energi AB"). Tvetydighet ger None — fel leverantörs
     mall får aldrig användas av misstag."""
-    if not templates or not supplier:
+    names = template_candidate_names(templates, supplier)
+    if len(names) != 1:
         return None
-    if supplier in templates:
-        return templates[supplier]
-    folded = _fold_text(supplier)
-    exact = [
-        tmpl for name, tmpl in templates.items()
-        if _fold_text(name) == folded
-    ]
-    if len(exact) == 1:
-        return exact[0]
-    hits = [
-        tmpl for name, tmpl in templates.items()
-        if _names_match(name, supplier)
-    ]
-    return hits[0] if len(hits) == 1 else None
+    return templates.get(names[0])
 
 
 #: Inbyggda, verifierade leverantörsformat. Varje format har
@@ -1842,25 +2191,64 @@ BUILTIN_FORMATS: list[dict] = [
 ]
 
 
+def _builtin_format_matches_supplier(fmt: dict, supplier: str) -> bool:
+    """Hör det inbyggda formatet till den här leverantören?
+
+    Registerpostens namn kan vara ett alias (Direktglas för
+    Saint-Gobain-papper) — därför jämförs mot formatets alla
+    kända alias, aldrig tvärtom med gissningar.
+    """
+    if not supplier:
+        return False
+    return any(
+        _names_match(supplier, str(alias))
+        for alias in fmt.get("aliases", []) or []
+    ) or _names_match(supplier, str(fmt.get("name", "")))
+
+
+def _builtin_format_candidates(text: str) -> list[dict[str, Any]]:
+    """ALLA inbyggda format som känner igen texten.
+
+    Flera kandidater betyder att appen inte får välja själv —
+    anroparen markerar matchningen som osäker och frågar
+    användaren i stället för att ta första formatet i listan.
+    """
+    if not text:
+        return []
+    digits = re.sub(r"\D", "", text)
+    flat = _fold_text(text)
+    out: list[dict[str, Any]] = []
+    for fmt in BUILTIN_FORMATS:
+        hit = bool(
+            (fmt.get("org") and fmt["org"] in digits)
+            or (fmt.get("bg") and fmt["bg"] in digits)
+            or any(
+                _fold_text(p) in flat for p in fmt.get("printed", [])
+            )
+        )
+        if hit:
+            out.append({
+                "name": str(fmt.get("name", "")),
+                "template": {"fields": dict(fmt.get("fields", {}))},
+                "format": fmt,
+            })
+    return out
+
+
 def builtin_template_for(text: str) -> tuple[str, dict] | None:
     """
     Inbyggt verifierat format för texten → (namn, mall) eller
     None. Träff kräver org.nr/bankgiro i texten eller det
     tryckta leverantörsnamnet — registerpostens namn används
     aldrig (det kan vara ett helt annat, t.ex. Direktglas).
+    Bevarad för äldre anropare; tolkningen använder
+    _builtin_format_candidates och väljer aldrig vid flera träffar.
     """
-    if not text:
+    candidates = _builtin_format_candidates(text)
+    if len(candidates) != 1:
         return None
-    digits = re.sub(r"\D", "", text)
-    flat = _fold_text(text)
-    for fmt in BUILTIN_FORMATS:
-        if fmt["org"] and fmt["org"] in digits:
-            return fmt["name"], {"fields": dict(fmt["fields"])}
-        if fmt["bg"] and fmt["bg"] in digits:
-            return fmt["name"], {"fields": dict(fmt["fields"])}
-        if any(_fold_text(p) in flat for p in fmt["printed"]):
-            return fmt["name"], {"fields": dict(fmt["fields"])}
-    return None
+    cand = candidates[0]
+    return str(cand["name"]), cand["template"]
 
 
 def _label_same_line_amount(text: str, label: str) -> float | None:
