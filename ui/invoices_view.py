@@ -59,6 +59,8 @@ from typing import Any
 
 from PySide6.QtWidgets import (
     QApplication,
+    QTextEdit,
+    QPlainTextEdit,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -327,6 +329,17 @@ class InvoicesView(QWidget):
         )
         self._sc_undo.activated.connect(self._undo_last_status)
 
+        # Delete-tangenten tar bort markerad faktura (enstaka).
+        # Fokusskydd i _on_delete_key: står man i ett textfält
+        # (sök/dialog) ska Delete radera text som vanligt.
+        self._sc_delete = QShortcut(
+            QKeySequence.StandardKey.Delete, self
+        )
+        self._sc_delete.setContext(
+            Qt.ShortcutContext.WidgetWithChildrenShortcut
+        )
+        self._sc_delete.activated.connect(self._on_delete_key)
+
         self._do_refresh()
 
         # Lyssna på dataändringar (säker koppling)
@@ -555,10 +568,18 @@ class InvoicesView(QWidget):
         self._btn_edit.setEnabled(False)
 
         self._btn_delete = make_btn(
-            tr("invoices.delete"), "Ta bort markerad faktura", danger=True
+            tr("invoices.delete"), tr("invoices.delete_tip"), danger=True
         )
         self._btn_delete.clicked.connect(self._delete_invoice)
         self._btn_delete.setEnabled(False)
+
+        self._btn_delete_all = make_btn(
+            tr("invoices.delete_all"),
+            tr("invoices.delete_all_tip"),
+            danger=True,
+        )
+        self._btn_delete_all.clicked.connect(self._delete_all_invoices)
+        self._btn_delete_all.setEnabled(False)
 
         self._btn_duplicate = make_btn(
             tr("invoices.duplicate"), "Duplicera markerad faktura"
@@ -606,6 +627,7 @@ class InvoicesView(QWidget):
         )
         self._btn_undo.clicked.connect(self._undo_last_status)
         row_actions.addWidget(self._btn_undo, 4, 1)
+        row_actions.addWidget(self._btn_delete_all, 5, 0, 1, 2)
         side.addWidget(actions_frame)
 
         # ── Export (egen panel: ExportBar) ─────────────────────────────
@@ -1571,6 +1593,8 @@ class InvoicesView(QWidget):
         multi = len(ids) > 0
         self._btn_edit.setEnabled(single)
         self._btn_delete.setEnabled(single)
+        if hasattr(self, "_btn_delete_all"):
+            self._btn_delete_all.setEnabled(bool(self._all_data))
         self._btn_duplicate.setEnabled(single)
         self._btn_mark_paid.setEnabled(multi)
         self._btn_combine.setEnabled(len(ids) >= 2)
@@ -1690,6 +1714,13 @@ class InvoicesView(QWidget):
             self._btn_clear_marked.setText(
                 tr("invoices.clear_marked")
             )
+        if hasattr(self, "_btn_delete_all"):
+            self._btn_delete_all.setText(tr("invoices.delete_all"))
+            self._btn_delete_all.setToolTip(
+                tr("invoices.delete_all_tip")
+            )
+        if hasattr(self, "_btn_delete"):
+            self._btn_delete.setToolTip(tr("invoices.delete_tip"))
         self._btn_export_all.setText(tr("invoices.export_all"))
         self._btn_history.setText(tr("invoices.history"))
         self._btn_open_export.setText(tr("invoices.open_export_folder"))
@@ -2112,6 +2143,39 @@ class InvoicesView(QWidget):
         self._do_refresh()
         self._status(f"✅  '{data['invoice_number']}' uppdaterad")
 
+    def _on_delete_key(self) -> None:
+        """Delete-tangenten: ta bort markerad faktura (enstaka).
+
+        Fokusskydd: står fokus i ett textfält (sökfält, dialogfält)
+        ska Delete radera text som vanligt — aldrig en faktura.
+        """
+        fw = QApplication.focusWidget()
+        if isinstance(fw, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            return
+        if fw is not None and hasattr(fw, "lineEdit"):
+            try:
+                if fw.lineEdit() is not None:
+                    return  # redigerbar combobox — textläge
+            except Exception:
+                pass
+        # Fallback-typnamn (träffar även subklasser som en enkel
+        # isinstance på basklasserna ibland missar hos Qt-binärer)
+        cls = type(fw).__name__ if fw is not None else ""
+        if cls in (
+            "QLineEdit", "QTextEdit", "QPlainTextEdit", "QComboBox",
+            "QSpinBox", "QDoubleSpinBox", "QDateEdit", "QDateTimeEdit",
+        ):
+            return
+        # Om någon dialog (t.ex. ur ett parallellt flöde) äger fokus
+        # ska Delete aldrig nå fram till fakturalistan bakom.
+        if fw is not None:
+            try:
+                if fw.window() is not self.window():
+                    return
+            except Exception:
+                pass
+        self._delete_invoice()
+
     def _delete_invoice(self) -> None:
         inv = self._selected_invoice()
         if not inv:
@@ -2121,7 +2185,10 @@ class InvoicesView(QWidget):
             self,
             "Ta bort faktura",
             f"Är du säker på att du vill ta bort\n"
-            f"faktura '{nr}'?\n\nDetta kan inte ångras.",
+            f"faktura '{nr}' ur registret?\n\n"
+            f"Borttagen = borta: fakturan markeras INTE som\n"
+            f"betald/exporterad och hamnar inte i Historik.\n"
+            f"Detta kan inte ångras.",
             QMessageBox.StandardButton.Yes
             | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -2135,8 +2202,58 @@ class InvoicesView(QWidget):
                 self, "Fel", f"Kunde inte ta bort:\n{exc}"
             )
             return
+        self._marked_export_ids.discard(str(inv["id"]))
         self._do_refresh()
-        self._status(f"🗑  '{nr}' borttagen")
+        self._status(f"🗑  '{nr}' borttagen ur registret")
+
+    def _delete_all_invoices(self) -> None:
+        """Rensa ALLA aktiva fakturor ur registret (knappen).
+
+        Riktig borttagning via delete_invoice för varje post —
+        INGEN markeras betald/exporterad och INGENTING flyttas
+        till Historik/betalda-filerna. Originalfilerna på disk
+        rörs aldrig. Historik (redan betalda) rörs inte heller.
+        """
+        rows = [r for r in self._all_data if r.get("id")]
+        if not rows:
+            return
+        total = sum(_to_float(r.get("total_amount")) for r in rows)
+        reply = QMessageBox.question(
+            self,
+            "Rensa alla fakturor",
+            f"Ta bort ALLA {len(rows)} aktiva fakturor ur "
+            f"registret?\n"
+            f"(sammanlagt {fmt_amount(total)}, alla leverantörer)\n\n"
+            f"Borttaget = borta för gott: fakturorna markeras INTE\n"
+            f"som betalda/exporterade och hamnar INTE i Historik.\n"
+            f"Originalfilerna på disk rörs inte.\n\n"
+            f"Detta kan inte ångras.",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        removed = 0
+        failed = 0
+        for r in rows:
+            try:
+                if self._app.delete_invoice(r["id"]):
+                    removed += 1
+                else:
+                    failed += 1
+            except Exception as exc:
+                log.warning("delete_all %s: %s", r.get("id"), exc)
+                failed += 1
+        self._marked_export_ids.clear()
+        self._do_refresh()
+        msg = (
+            f"🧹  {removed} fakturor borttagna ur registret "
+            f"(ej betalda/exporterade)"
+        )
+        if failed:
+            msg += f" — ⚠ {failed} kunde inte tas bort"
+        self._status(msg)
 
     def _duplicate_invoice(self) -> None:
         inv = self._selected_invoice()
