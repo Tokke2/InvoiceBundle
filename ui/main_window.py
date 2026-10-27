@@ -13,7 +13,8 @@ Huvudfönster — hanterar:
 • 4 teman: Mörkt / Ljust / Auto / System
 • Tydliga dropdown-pilar som anpassas efter tema
 • Autostart med OS via kryssruta i Inställningar-menyn
-• Stäng till tray via kryssruta i Inställningar-menyn
+• Stäng OCH minimera till tray via kryssrutor i Inställningar-menyn
+  (aktivitetsfältets ikon syns bara när fönstret är öppet)
 • Visa/dölj flikar (meny + högerklick på flik)
 • Geometrisparning i JSON (debounced — skriver inte per pixel)
 • Inladdning av InvoicesView och SuppliersView (builtins)
@@ -51,7 +52,7 @@ from PySide6.QtGui import (
     QKeySequence, QShortcut,
 )
 from PySide6.QtCore import (
-    Qt, QTimer, QPoint, Signal, QUrl, QFileSystemWatcher,
+    Qt, QEvent, QTimer, QPoint, Signal, QUrl, QFileSystemWatcher,
 )
 
 # ═════════════════════════════════════════════════════════════════════
@@ -1790,6 +1791,18 @@ class MainWindow(QMainWindow):
         )
         m_set.addAction(self._act_close_to_tray)
 
+        self._act_minimize_to_tray = QAction(
+            tr("menu.minimize_btn_to_tray"), self
+        )
+        self._act_minimize_to_tray.setCheckable(True)
+        self._act_minimize_to_tray.setChecked(
+            bool(self._settings.get("minimize_to_tray", True))
+        )
+        self._act_minimize_to_tray.triggered.connect(
+            self._toggle_minimize_to_tray
+        )
+        m_set.addAction(self._act_minimize_to_tray)
+
         self._act_include_originals = QAction(
             tr("menu.include_originals"), self
         )
@@ -2689,6 +2702,18 @@ class MainWindow(QMainWindow):
         )
         log.info("close_to_tray → %s", checked)
 
+    def _toggle_minimize_to_tray(self, checked: bool) -> None:
+        """Kryssruta: göm till tray även vid minimering."""
+        self._settings.set("minimize_to_tray", checked)
+        self.set_status(
+            tr(
+                "main.minimize_tray_status",
+                state=tr("main.on") if checked else tr("main.off_state"),
+            ),
+            4000,
+        )
+        log.info("minimize_to_tray → %s", checked)
+
     def _toggle_trace_logging(self, checked: bool) -> None:
         """
         Kryssruta: logga VARJE tryck (TRACE) PÅ/AV.
@@ -3007,6 +3032,62 @@ class MainWindow(QMainWindow):
         ensure_window_on_screen(self)
         self.raise_()
         self.activateWindow()
+
+    def _minimize_to_tray_enabled(self) -> bool:
+        """Ska minimering gömma fönstret till systemfältet?
+
+        Standard PÅ (inställningen ``minimize_to_tray``). Kräver
+        att tray-ikonen faktiskt finns och syns — utan systemfält
+        minimeras fönstret som vanligt i stället för att försvinna.
+        """
+        settings = getattr(self, "_settings", None)
+        try:
+            if settings is not None and not bool(
+                settings.get("minimize_to_tray", True)
+            ):
+                return False
+        except Exception:
+            pass
+        tray = getattr(self, "tray", None)
+        return bool(tray is not None and tray.isVisible())
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        """Minimera-knappen → göm till systemfältet (tray).
+
+        Aktivitetsfältets ikon ska bara synas när appen är öppen:
+        ett minimerat fönster göms därför helt till tray-ikonen,
+        precis som krysset gör när 'Stäng till systemfältet' är
+        på. Beteendet kan slås av i Inställningar — då minimeras
+        fönstret som vanligt. Fönstret tas fram igen med ett
+        klick på tray-ikonen.
+        """
+        super().changeEvent(event)
+        try:
+            if (
+                event.type() == QEvent.Type.WindowStateChange
+                and self.isMinimized()
+                and self._minimize_to_tray_enabled()
+            ):
+                # Skjut upp gömmandet tills tillståndsbytet är
+                # klart — att gömma mitt i det kan lämna en
+                # spökikon kvar i aktivitetsfältet på Windows.
+                QTimer.singleShot(0, self._hide_minimized_to_tray)
+        except Exception:
+            pass
+
+    def _hide_minimized_to_tray(self) -> None:
+        """Gömmer ett minimerat fönster till tray-ikonen.
+
+        Körs uppskjutet efter minimeringshändelsen. Hann
+        användaren återställa fönstret under tiden görs inget.
+        """
+        try:
+            if not self.isMinimized():
+                return
+            self.hide()
+            log.info("Minimerad till systemfältet (tray)")
+        except Exception:
+            pass
 
     def closeEvent(self, event) -> None:
         """Kryss → göm till tray (om close_to_tray), annars avsluta."""
