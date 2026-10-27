@@ -93,6 +93,16 @@ COLUMNS: list[tuple[str, str, int, Any]] = [
 ]
 
 
+#: Radfärger för matchningssäkerhet i importtabellen:
+#: (mörkt tema, ljust tema). OSÄKER matchning = röd rad, SÄKER
+#: matchning = grön rad — samma röda/gröna princip och palett
+#: som Fakturor-flikens radfärger (Förfallen/Betald). Rader utan
+#: någon matchning alls (okänt format) lämnas neutrala — de får
+#: i stället mall-dialogen direkt.
+ROW_BG_MATCH_UNCERTAIN = ("#3b1113", "#fdecea")
+ROW_BG_MATCH_SECURE = ("#0f2e17", "#e8f5e9")
+
+
 def _fmt_amount(value: float) -> str:
     """45546.0 → '45 546,00' (svenskt format)."""
     try:
@@ -2758,6 +2768,26 @@ class ScanImportView(QWidget):
     #  TABELL
     # ══════════════════════════════════════════════════════════════════
 
+    @staticmethod
+    def _row_match_state(row: dict) -> str:
+        """Radens matchningssäkerhet: "uncertain" / "secure" / "".
+
+        Osäker leverantörs-/mallmatchning (appen har frågat eller
+        ska fråga användaren) → "uncertain" (röd rad). En rad med
+        säkert identifierad leverantör eller mall → "secure"
+        (grön rad). Ingen träff alls (okänt format, tom rad)
+        → "" — neutral rad, ingen färg gissas fram.
+        """
+        if not isinstance(row, dict):
+            return ""
+        if row.get("match_uncertain"):
+            return "uncertain"
+        if str(row.get("supplier", "") or "").strip() or str(
+            row.get("template", "") or ""
+        ).strip():
+            return "secure"
+        return ""
+
     def _refresh_table(self) -> None:
         self._tbl.setRowCount(len(self._rows))
         for r, row in enumerate(self._rows):
@@ -2785,6 +2815,26 @@ class ScanImportView(QWidget):
                             QApplication.palette().link()
                         )
                 self._tbl.setItem(r, c, item)
+            # Hela raden färgas efter matchningssäkerhet:
+            # OSÄKER matchning = röd rad, SÄKER = grön rad.
+            # Rader utan någon träff alls lämnas neutrala.
+            _state = self._row_match_state(row)
+            if _state:
+                _pair = (
+                    ROW_BG_MATCH_UNCERTAIN if _state == "uncertain"
+                    else ROW_BG_MATCH_SECURE
+                )
+                _bg = QColor(_pair[0] if self._dark else _pair[1])
+                _tip = (
+                    tr("scan.match_uncertain_status")
+                    if _state == "uncertain"
+                    else tr("scan.match_secure_tip")
+                )
+                for _c in range(len(COLUMNS)):
+                    _cell = self._tbl.item(r, _c)
+                    if _cell is not None:
+                        _cell.setBackground(_bg)
+                        _cell.setToolTip(_tip)
         self._update_sum()
         self._tbl.resizeRowsToContents()
         self._tbl.resizeRowsToContents()
@@ -3291,6 +3341,13 @@ class ScanImportView(QWidget):
             self._dark = bg not in (
                 "#ffffff", "#f6f8fa", "#eaeef2", "#f5f7fa",
             )
+        except Exception:
+            pass
+        # Radfärgerna (röd osäker / grön säker) följer temat —
+        # rita om tabellen så färgerna byter mörkt/ljust direkt.
+        try:
+            if hasattr(self, "_tbl"):
+                self._refresh_table()
         except Exception:
             pass
 

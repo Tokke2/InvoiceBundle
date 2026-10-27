@@ -471,6 +471,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "scan.match_reason_template": {"sv": "Flera mallar eller format skulle kunna läsa fakturan. Appen använder ingen av dem förrän du valt.", "en": "Several templates or formats could read the invoice. The app uses none of them until you choose."},
     "scan.match_reason_generic": {"sv": "Matchningen är osäker. Kontrollera fakturan och välj rätt alternativ.", "en": "The match is uncertain. Check the invoice and choose the correct option."},
     "scan.match_uncertain_status": {"sv": "⚠ osäker leverantör/mall — välj själv", "en": "⚠ uncertain supplier/template — choose yourself"},
+    "scan.match_secure_tip": {"sv": "✔ säker matchning — leverantören/mallen är säkert identifierad", "en": "✔ confident match — the supplier/template is identified with confidence"},
     "scan.match_unresolved": {"sv": "Följande rader har fortfarande osäker leverantörs-/mallmatchning och registrerades inte:\n\n{files}\n\nVälj leverantör/mall för dem först (appen gissar aldrig).", "en": "The following rows still have an uncertain supplier/template match and were not registered:\n\n{files}\n\nChoose a supplier/template for them first (the app never guesses)."},
     "scan.pages_status": {"sv": "📄 {n} sidor", "en": "📄 {n} pages"},
 
