@@ -54,6 +54,7 @@ Copyright © dynamiskt år Rickard Längkvist
 
 import datetime
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +71,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QLineEdit,
     QComboBox,
+    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
@@ -2662,21 +2664,28 @@ class InvoicesView(QWidget):
             log.warning("print invoice: %s", exc)
             self._status(tr("scan.print_failed", error=str(exc)))
 
+    def _scan_data_dir(self) -> Path:
+        """Datakatalogen där tolkningsmallarna och inlärnings-
+        minnet bor (samma som Import-fliken använder)."""
+        raw = ""
+        try:
+            raw = str(self._app.settings.get("db_path", "data"))
+        except Exception:
+            raw = str(self._app.get_setting("db_path", "data"))
+        data_dir = Path(raw or "data")
+        if not data_dir.is_absolute():
+            data_dir = (
+                Path(__file__).resolve().parent.parent / data_dir
+            )
+        return data_dir
+
     def _load_scan_templates(self, si: Any) -> dict:
         """Användarens inlärda mallar (samma fil som Import-fliken
         använder) — så omskanningen tolkar med dagens mallar."""
         try:
-            raw = ""
-            try:
-                raw = str(self._app.settings.get("db_path", "data"))
-            except Exception:
-                raw = str(self._app.get_setting("db_path", "data"))
-            data_dir = Path(raw or "data")
-            if not data_dir.is_absolute():
-                data_dir = (
-                    Path(__file__).resolve().parent.parent / data_dir
-                )
-            return si.load_templates(data_dir / "invoice_templates.json")
+            return si.load_templates(
+                self._scan_data_dir() / "invoice_templates.json"
+            )
         except Exception as exc:
             log.debug("rescan templates: %s", exc)
             return {}
@@ -2804,6 +2813,389 @@ class InvoicesView(QWidget):
         )
         self._do_refresh()
         self._status(tr("invoices.rescan_updated", nr=nr), timeout=8000)
+
+    def _manual_template_match(self) -> None:
+        """Högerklick: matcha fakturan mot en mall användaren väljer.
+
+        "Skanna om faktura" väljer tolkningen själv — här väljer
+        ANVÄNDAREN vilken leverantör/mall som gäller (för fakturor
+        den automatiska matchningen missade). Originalet läses om
+        med den valda mallen, ändringarna visas gammalt → nytt för
+        kontroll, beloppet kan rättas i dialogen, och inget sparas
+        förrän användaren bekräftar. Matchningen lär appen på
+        samma sätt som Import-matchningarna (inlärningsminne +
+        verifierad mall), så nästa faktura från leverantören
+        matchas bättre.
+        """
+        inv = self._selected_invoice()
+        if not inv:
+            return
+        path = str(inv.get("attachment", "") or "")
+        nr = str(inv.get("invoice_number", "") or "")
+        if not path or not Path(path).exists():
+            self._status(tr("invoices.rescan_no_original", nr=nr))
+            return
+        try:
+            try:
+                from ui.scan_import_view import _scan_module
+            except ImportError:
+                from scan_import_view import _scan_module  # type: ignore[no-redef]
+            si = _scan_module()
+            text, _method = si.extract_text(Path(path))
+        except Exception as exc:
+            log.warning("manual match %s: %s", nr, exc)
+            self._status(tr("invoices.rescan_failed", nr=nr))
+            return
+        if not text or not text.strip():
+            self._status(tr("invoices.manual_match_no_text", nr=nr))
+            return
+        try:
+            suppliers = list(self._app.get_suppliers() or [])
+        except Exception:
+            suppliers = []
+        templates = self._load_scan_templates(si)
+        try:
+            pages = si.page_image_count(Path(path))
+        except Exception:
+            pages = 0
+
+        options: list[str] = []
+        seen_opts: set[str] = set()
+
+        def _add(name: Any) -> None:
+            name = str(name or "").strip()
+            if name and name.lower() not in seen_opts:
+                seen_opts.add(name.lower())
+                options.append(name)
+
+        for s in suppliers:
+            _add(s.get("name", "") if isinstance(s, dict) else "")
+        for name in templates.keys():
+            _add(str(name))
+        for fmt in getattr(si, "BUILTIN_FORMATS", []) or []:
+            _add(str(fmt.get("name", "") or ""))
+        if not options:
+            QMessageBox.information(
+                self, tr("invoices.manual_match_title"),
+                tr("invoices.manual_match_no_options"),
+            )
+            return
+
+        _nm = getattr(si, "_names_match", None)
+
+        def _names_match(a: str, b: str) -> bool:
+            if callable(_nm):
+                try:
+                    return bool(_nm(a, b))
+                except Exception:
+                    pass
+            return str(a).strip().lower() == str(b).strip().lower()
+
+        def _template_for(name: str):
+            """Mallen för ett valt namn — egen mall först, annars
+            det inbyggda formatets etikettskarta. None = ingen mall."""
+            tmpl = si.find_template(templates, name)
+            if tmpl is not None:
+                return tmpl
+            for fmt in getattr(si, "BUILTIN_FORMATS", []) or []:
+                names = [fmt.get("name", "")] + list(
+                    fmt.get("aliases", []) or []
+                )
+                if any(
+                    n and _names_match(name, str(n)) for n in names
+                ):
+                    return {"fields": dict(fmt.get("fields", {}) or {})}
+            return None
+
+        def _read(name: str) -> tuple[Any, dict]:
+            """Läser om fakturans fält med vald mall; generisk
+            läsning fyller fält mallen inte träffar."""
+            tmpl = _template_for(name)
+            found: dict[str, Any] = {}
+            if tmpl:
+                try:
+                    found = dict(si.apply_template(text, tmpl) or {})
+                except Exception as exc:
+                    log.debug("manual match apply: %s", exc)
+                    found = {}
+                try:
+                    fields = tmpl.get("fields", {}) or {}
+                    if any(
+                        isinstance(spec, dict) and spec.get("region")
+                        for spec in fields.values()
+                    ):
+                        found.update(
+                            si.template_values_from_regions(
+                                tmpl,
+                                si.extract_region_texts(path, tmpl),
+                            )
+                        )
+                except Exception as exc:
+                    log.debug("manual match regions: %s", exc)
+            try:
+                base = si.parse_invoice_text(
+                    text, suppliers, templates={}
+                )
+            except Exception:
+                base = {}
+            after: dict[str, Any] = {}
+            for field in ("invoice_number", "date", "due_date", "ocr"):
+                value = found.get(field)
+                if value in (None, ""):
+                    value = base.get(field, "")
+                after[field] = str(value or "")
+            total = found.get("total_amount")
+            if total in (None, "", 0, 0.0):
+                total = base.get("total_amount", 0)
+            try:
+                after["total_amount"] = float(total or 0)
+            except (TypeError, ValueError):
+                after["total_amount"] = 0.0
+            return tmpl, after
+
+        def _parse_sv_amount(raw: str) -> float:
+            """'13 480,00 SEK' → 13480.0 (tål valuta + tusental)."""
+            t = re.sub(r"[^0-9,.\-]", "", str(raw or ""))
+            if "," in t and "." in t:
+                if t.rfind(",") > t.rfind("."):
+                    t = t.replace(".", "").replace(",", ".")
+                else:
+                    t = t.replace(",", "")
+            elif "," in t:
+                t = t.replace(",", ".")
+            try:
+                return float(t)
+            except ValueError:
+                return 0.0
+
+        cur_supplier = str(inv.get("supplier", "") or "")
+        try:
+            cur_amount = fmt_amount(float(inv.get("total_amount") or 0))
+        except (TypeError, ValueError):
+            cur_amount = str(inv.get("total_amount", "") or "—")
+        field_labels = {
+            "invoice_number": tr("invoices.rescan_field_number"),
+            "date": tr("invoices.rescan_field_date"),
+            "due_date": tr("invoices.rescan_field_due"),
+            "total_amount": tr("invoices.rescan_field_total"),
+            "ocr": tr("invoices.manual_match_field_ocr"),
+        }
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr("invoices.manual_match_title"))
+        layout = QVBoxLayout(dlg)
+        intro = QLabel(tr(
+            "invoices.manual_match_intro",
+            nr=nr or "—", supplier=cur_supplier or "—",
+            amount=cur_amount,
+        ))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        layout.addWidget(QLabel(tr("invoices.manual_match_pick")))
+        combo = QComboBox(dlg)
+        combo.addItems(options)
+        start = next(
+            (i for i, n in enumerate(options)
+             if _names_match(n, cur_supplier)),
+            -1,
+        )
+        combo.setCurrentIndex(start)
+        combo.setPlaceholderText(tr("scan.match_ask_placeholder"))
+        layout.addWidget(combo)
+        if pages >= 2:
+            note = QLabel(tr("scan.match_multipage_note", n=pages))
+            note.setWordWrap(True)
+            layout.addWidget(note)
+        tmpl_lbl = QLabel(dlg)
+        layout.addWidget(tmpl_lbl)
+        preview = QLabel(dlg)
+        preview.setWordWrap(True)
+        layout.addWidget(preview)
+        layout.addWidget(QLabel(tr("scan.match_amount_label")))
+        amount_edit = QLineEdit(dlg)
+        layout.addWidget(amount_edit)
+        buttons = QHBoxLayout()
+        btn_cancel = QPushButton(tr("common.cancel"))
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_save = QPushButton(tr("invoices.manual_match_save"))
+        btn_save.setDefault(True)
+        buttons.addStretch()
+        buttons.addWidget(btn_cancel)
+        buttons.addWidget(btn_save)
+        layout.addLayout(buttons)
+
+        state: dict[str, Any] = {"after": {}, "template": None}
+
+        def _refresh_preview() -> None:
+            name = combo.currentText().strip()
+            if combo.currentIndex() < 0 or not name:
+                tmpl_lbl.setText("")
+                preview.setText("")
+                amount_edit.setText("")
+                state["after"] = {}
+                state["template"] = None
+                return
+            tmpl, after = _read(name)
+            state["after"] = after
+            state["template"] = tmpl
+            tmpl_lbl.setText(
+                tr("invoices.manual_match_template_used", template=name)
+                if tmpl else tr("invoices.manual_match_template_none")
+            )
+            lines = []
+            for field in (
+                "invoice_number", "date", "due_date", "ocr",
+                "total_amount",
+            ):
+                if field == "total_amount":
+                    old_s = cur_amount
+                    new_s = (
+                        fmt_amount(after["total_amount"])
+                        if after.get("total_amount") else "—"
+                    )
+                else:
+                    old_s = str(inv.get(field, "") or "—")
+                    new_s = str(after.get(field) or "—")
+                mark = (
+                    "  " + tr("invoices.manual_match_changes")
+                    if new_s != old_s else ""
+                )
+                lines.append(
+                    f"{field_labels[field]}: {old_s} → {new_s}{mark}"
+                )
+            preview.setText("\n".join(lines))
+            amount_edit.setText(
+                fmt_amount(after["total_amount"])
+                if after.get("total_amount") else ""
+            )
+
+        def _accept() -> None:
+            if combo.currentIndex() >= 0:
+                dlg.accept()
+
+        btn_save.clicked.connect(_accept)
+        combo.currentIndexChanged.connect(
+            lambda _i: _refresh_preview()
+        )
+        _refresh_preview()
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = combo.currentText().strip()
+        if not chosen:
+            return
+        after = dict(state.get("after") or {})
+        resolved = next(
+            (
+                str(s.get("name", "")).strip()
+                for s in suppliers
+                if isinstance(s, dict)
+                and str(s.get("name", "")).strip()
+                and _names_match(str(s.get("name", "")), chosen)
+            ),
+            chosen,
+        )
+        new_nr = str(after.get("invoice_number", "") or "").strip()
+        if new_nr and new_nr.lower() != nr.lower():
+            others = [
+                r for r in self._all_data
+                if r.get("id") != inv.get("id")
+                and str(r.get("supplier", "")).strip().lower()
+                == resolved.strip().lower()
+                and str(r.get("invoice_number", "")).strip().lower()
+                == new_nr.lower()
+            ]
+            if others:
+                self._status(tr(
+                    "invoices.rescan_number_taken", nr=nr, new=new_nr
+                ))
+                return
+        updates: dict[str, Any] = {}
+        if resolved and not _names_match(resolved, cur_supplier):
+            updates["supplier"] = resolved
+        for field in ("invoice_number", "date", "due_date", "ocr"):
+            new = str(after.get(field, "") or "").strip()
+            if new and new != str(inv.get(field, "") or "").strip():
+                updates[field] = new
+        edited_total = _parse_sv_amount(amount_edit.text())
+        final_total = edited_total
+        if edited_total > 0:
+            try:
+                old_total = float(inv.get("total_amount") or 0)
+            except (TypeError, ValueError):
+                old_total = 0.0
+            if abs(edited_total - old_total) > 0.005:
+                updates["total_amount"] = edited_total
+        elif after.get("total_amount"):
+            final_total = float(after["total_amount"])
+        final_nr = str(updates.get("invoice_number") or new_nr or nr)
+        if updates:
+            try:
+                self._app.update_invoice(inv["id"], updates)
+            except Exception as exc:
+                log.warning("manual match update %s: %s", nr, exc)
+                self._status(tr("invoices.rescan_failed", nr=nr))
+                return
+            self._do_refresh()
+        learned = self._learn_manual_match(
+            si, resolved, text, final_nr, final_total, pages
+        )
+        log.info(
+            "SCAN_MATCH: faktura %s matchad manuellt mot %s "
+            "(ändringar: %s)",
+            nr, resolved,
+            ", ".join(updates) or "inga",
+        )
+        msg = (
+            tr("invoices.manual_match_updated", nr=nr or final_nr,
+               supplier=resolved)
+            if updates else
+            tr("invoices.manual_match_unchanged", nr=nr or final_nr,
+               supplier=resolved)
+        )
+        if learned:
+            msg += "  ·  " + learned
+        self._status(msg, timeout=8000)
+
+    def _learn_manual_match(
+        self, si: Any, supplier: str, text: str,
+        invoice_number: str, total: float, pages: int,
+    ) -> str:
+        """Inlärning ur en manuell matchning i Fakturor-fliken —
+        samma regler som i Import: bekräftelsen räknas i
+        inlärningsminnet, och saknar leverantören både egen mall
+        och inbyggt format härleds en VERIFIERAD mall ur de
+        bekräftade värdena och sparas bland mallarna.
+        Returnerar en statusnotis (eller "")."""
+        try:
+            data_dir = self._scan_data_dir()
+            learning = si.load_match_learning(
+                data_dir / "match_memory.json"
+            )
+            si.record_match_confirmation(
+                learning, supplier, multipage=int(pages or 0) >= 2
+            )
+            si.save_match_learning(
+                data_dir / "match_memory.json", learning
+            )
+            templates = self._load_scan_templates(si)
+            if si.find_template(templates, supplier) or \
+                    si.has_builtin_format(supplier):
+                return ""
+            tmpl = si.derive_template_from_confirmation(
+                text, invoice_number, total
+            )
+            if not tmpl:
+                return ""
+            templates[supplier] = tmpl
+            if si.save_templates(
+                data_dir / "invoice_templates.json", templates
+            ):
+                return tr(
+                    "invoices.manual_match_learned", supplier=supplier
+                )
+        except Exception as exc:
+            log.warning("learn manual match: %s", exc)
+        return ""
 
     def _copy_payment_info(self) -> None:
         """Kopierar BG/PG/IBAN + OCR + belopp för markerad faktura."""
@@ -3270,6 +3662,10 @@ class InvoicesView(QWidget):
             tr("invoices.ctx_open_original"), self._open_original_invoice
         )
         menu.addAction(tr("invoices.ctx_rescan"), self._rescan_invoice)
+        menu.addAction(
+            tr("invoices.ctx_manual_match"),
+            self._manual_template_match,
+        )
         menu.addSeparator()
 
         status_menu = menu.addMenu(tr("invoices.ctx_status"))
