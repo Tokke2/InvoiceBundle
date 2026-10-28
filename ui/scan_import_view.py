@@ -37,10 +37,12 @@ from PySide6.QtWidgets import (
     QGroupBox, QTextEdit, QMessageBox, QFileDialog, QFrame,
     QLineEdit, QCheckBox, QApplication, QInputDialog,
     QDialog, QListWidget, QPlainTextEdit, QComboBox, QMenu,
+    QGridLayout, QScrollArea,
 )
-from PySide6.QtCore import Qt, QTimer, QUrl, Signal, QRectF, QSizeF
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal, QRectF, QSizeF, QSize
 from PySide6.QtGui import (
-    QColor, QDesktopServices, QFont, QImage, QPixmap, QPainter, QPen,
+    QColor, QDesktopServices, QFont, QIcon, QImage, QPixmap,
+    QPainter, QPen,
 )
 
 try:
@@ -101,6 +103,57 @@ COLUMNS: list[tuple[str, str, int, Any]] = [
 #: i stället mall-dialogen direkt.
 ROW_BG_MATCH_UNCERTAIN = ("#3b1113", "#fdecea")
 ROW_BG_MATCH_SECURE = ("#0f2e17", "#e8f5e9")
+
+
+def _supplier_monogram(name: str) -> str:
+    """Logotyp-monom för leverantörsvalet: första bokstäverna ur
+    namnets två första ord ("Martin G Anderson" → "MG")."""
+    words = [
+        w for w in re.split(r"[\s\-/]+", str(name or ""))
+        if w and any(c.isalpha() for c in w)
+    ]
+    if not words:
+        return "?"
+    initials = "".join(w[0] for w in words[:2])
+    return initials.upper()
+
+
+#: Palett för leverantörernas logotyp-rutor (samma namn ger
+#: alltid samma färg, så leverantören känns igen visuellt).
+_SUPPLIER_TILE_COLORS: tuple[str, ...] = (
+    "#1565c0", "#6a1b9a", "#00838f", "#2e7d32", "#ad1457",
+    "#4e342e", "#37474f", "#283593", "#00695c", "#bf360c",
+)
+
+
+def _supplier_tile_pixmap(name: str, size: int = 44) -> QPixmap:
+    """Ritar leverantörens logotyp-ruta: färgad rundad platta med
+    monogrammet — igenkänning på en blick i matchningsdialogen."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        idx = sum(ord(c) for c in str(name or "")) % len(
+            _SUPPLIER_TILE_COLORS
+        )
+        painter.setBrush(QColor(_SUPPLIER_TILE_COLORS[idx]))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(
+            1, 1, size - 2, size - 2, 9, 9
+        )
+        painter.setPen(QColor("#ffffff"))
+        font = QFont()
+        font.setBold(True)
+        font.setPixelSize(int(size * 0.36))
+        painter.setFont(font)
+        painter.drawText(
+            pixmap.rect(), Qt.AlignmentFlag.AlignCenter,
+            _supplier_monogram(name),
+        )
+    finally:
+        painter.end()
+    return pixmap
 
 
 def _fmt_amount(value: float) -> str:
@@ -1220,6 +1273,9 @@ class ScanImportView(QWidget):
             self._watch.changed.connect(self._refresh_watch_ui)
             self._chk_auto_watch.setChecked(self._watch.auto_create)
             self._refresh_watch_ui()
+            # Osäkra parkeringar hör hemma i Import-tabellen —
+            # lägg in dem direkt (även från tidigare körningar).
+            QTimer.singleShot(0, self._collect_uncertain_parked)
         except Exception as exc:
             log.warning("WatchManager start: %s", exc)
 
@@ -1264,9 +1320,32 @@ class ScanImportView(QWidget):
                 n=len(infos), files="\n".join(lines),
             ),
         )
-        # Osäkra leverantörs-/mallmatchningar FRÅGAS det om
-        # direkt — appen gissar aldrig och parkerar aldrig tyst.
-        self._ask_uncertain_parked(infos)
+        # Osäkra matchningar läggs DIREKT i Import-tabellen som
+        # röda rader och frågas om där — användaren avgör dem i
+        # tabellen (välj leverantör via logotyp/dropdown), och
+        # avbryts frågan blir raden kvar i sikte i tabellen i
+        # stället för att bara ligga gömd i parkeringen. Appen
+        # gissar aldrig och parkerar aldrig tyst.
+        added = self._add_parked_rows_to_table(infos)
+        for row in added:
+            if row.get("match_uncertain") and self._ask_user_for_match(row):
+                self._unpark_row(row)
+        if added:
+            self._refresh_table()
+            self._lbl_status.setText(
+                tr("scan.parked_added_table", n=len(added))
+            )
+        # Parkeringar som inte kunde läggas i tabellen (t.ex.
+        # saknad tolkning) frågas det om på den äldre vägen.
+        added_paths = {str(r.get("_path", "")) for r in added}
+        leftover = [
+            i for i in infos
+            if str(i.get("path", "")) not in added_paths
+            and isinstance(i.get("parsed"), dict)
+            and i["parsed"].get("match_uncertain")
+        ]
+        if leftover:
+            self._ask_uncertain_parked(leftover)
         # Varje okänt format ska erbjudas en mall direkt i
         # appen — användaren ska inte behöva leta fram rätt
         # knapp själv. En fråga per leverantör och runda.
@@ -1849,6 +1928,52 @@ class ScanImportView(QWidget):
             ) if not ok
         ]
 
+    def _add_supplier_logo_picker(self, layout, options, combo) -> None:
+        """Klickbara logotyprutor för leverantörsvalet.
+
+        Varje alternativ får en färgad logotyp-ruta med sitt
+        monogram bredvid namnet — användaren väljer leverantör via
+        logotypen på en blick i stället för att läsa en lång lista.
+        Rutorna och dropdownen hålls i sync åt båda hållen. Fler
+        alternativ än en handfull rullas i en egen yta så dialogen
+        aldrig växer iväg.
+        """
+        if len(options) < 2:
+            return
+        layout.addWidget(QLabel(tr("scan.match_pick_logo")))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(190)
+        holder = QWidget()
+        grid = QGridLayout(holder)
+        grid.setSpacing(6)
+        buttons: list[QPushButton] = []
+
+        def _sync(idx: int) -> None:
+            for j, btn in enumerate(buttons):
+                btn.setChecked(j == idx)
+
+        def _pick(idx: int) -> None:
+            combo.setCurrentIndex(idx)
+            _sync(idx)
+
+        for i, name in enumerate(options):
+            btn = QPushButton(str(name))
+            btn.setCheckable(True)
+            btn.setMinimumHeight(48)
+            btn.setIcon(QIcon(_supplier_tile_pixmap(str(name))))
+            btn.setIconSize(QSize(36, 36))
+            btn.setToolTip(str(name))
+            btn.clicked.connect(
+                lambda _checked=False, idx=i: _pick(idx)
+            )
+            grid.addWidget(btn, i // 3, i % 3)
+            buttons.append(btn)
+        scroll.setWidget(holder)
+        layout.addWidget(scroll)
+        combo.currentIndexChanged.connect(_sync)
+        _sync(combo.currentIndex())
+
     def _add_multipage_amount_field(self, layout, row: dict):
         """Flersidig faktura: notis + redigerbart att betala-fält.
 
@@ -1955,6 +2080,7 @@ class ScanImportView(QWidget):
         combo.setCurrentIndex(-1)
         combo.setPlaceholderText(tr("scan.match_ask_placeholder"))
         layout.addWidget(combo)
+        self._add_supplier_logo_picker(layout, options, combo)
         amount_edit = self._add_multipage_amount_field(layout, row)
         buttons = QHBoxLayout()
         btn_cancel = QPushButton(tr("common.cancel"))
@@ -2166,6 +2292,7 @@ class ScanImportView(QWidget):
         combo.setCurrentIndex(idx)
         combo.setPlaceholderText(tr("scan.match_ask_placeholder"))
         layout.addWidget(combo)
+        self._add_supplier_logo_picker(layout, options, combo)
         amount_edit = self._add_multipage_amount_field(layout, row)
         buttons = QHBoxLayout()
         btn_cancel = QPushButton(tr("common.cancel"))
@@ -2211,6 +2338,117 @@ class ScanImportView(QWidget):
         if resolved:
             self._refresh_table()
         return resolved
+
+    def _parked_entry_for(self, info: dict) -> dict | None:
+        """Parkerade posten som hör till ett parkeringsevent."""
+        watch = getattr(self, "_watch", None)
+        if watch is not None:
+            for entry in list(getattr(watch, "parked", []) or []):
+                if info.get("hash") and str(entry.get("hash", "")) \
+                        == str(info.get("hash", "")):
+                    return entry
+                if str(entry.get("path", "")) \
+                        == str(info.get("path", "")):
+                    return entry
+        if isinstance(info, dict) and info.get("parsed"):
+            return info
+        return None
+
+    def _add_parked_rows_to_table(
+        self, infos: list[dict]
+    ) -> list[dict]:
+        """Lägger OSÄKRA parkerade fakturor direkt i Import-tabellen.
+
+        Alla fakturor vars matchning är osäker (leverantör/mall/
+        flersidor) ska ligga i Import-tabellen — inte bara gömda
+        i bevakningens parkering. Raderna kommer dit röda
+        (osäkra) och stannar tills användaren matchat dem, skapat
+        fakturor av dem eller tagit bort dem; samma fil läggs
+        aldrig in två gånger. Returnerar de NYA raderna.
+        """
+        added: list[dict] = []
+        for info in infos or []:
+            if not isinstance(info, dict):
+                continue
+            source = self._parked_entry_for(info)
+            if not isinstance(source, dict):
+                continue
+            parsed = dict(source.get("parsed", {}) or {})
+            if not parsed.get("match_uncertain"):
+                continue
+            digest = str(
+                source.get("hash", "") or info.get("hash", "") or ""
+            )
+            path = str(
+                source.get("path", "") or info.get("path", "") or ""
+            )
+            if any(
+                (digest and str(r.get("_parked_hash", "")) == digest)
+                or (path and str(r.get("_path", "")) == path)
+                for r in self._rows
+            ):
+                continue
+            text = str(source.get("text", "") or "")
+            parsed["file"] = source.get("file", "") or Path(path).name
+            parsed["_path"] = path
+            parsed["method"] = source.get("method", "")
+            parsed["_text"] = text
+            if digest:
+                parsed["_parked_hash"] = digest
+            parsed = self._apply_template_to_row(parsed, text)
+            try:
+                si = _scan_module()
+                if "math_check" not in parsed:
+                    parsed["math_check"] = si.invoice_math_check(
+                        text, float(parsed.get("total_amount") or 0)
+                    )
+                if "date_check" not in parsed:
+                    parsed["date_check"] = si.invoice_date_check(
+                        parsed.get("date", ""),
+                        parsed.get("due_date", ""),
+                    )
+            except Exception:
+                pass
+            parsed["status"] = self._compute_status(
+                parsed, bool(text)
+            )
+            self._rows.append(parsed)
+            added.append(parsed)
+        if added:
+            self._refresh_table()
+            log.info(
+                "SCAN_IMPORT: %d osäkra parkerade fakturor lades "
+                "direkt i Import-tabellen för manuell matchning",
+                len(added),
+            )
+        return added
+
+    def _unpark_row(self, row: dict) -> None:
+        """Tar bort radens parkerade post när raden avgjorts i
+        tabellen (matchad, skapad eller borttagen) — parkeringen
+        ska aldrig berätta en gammal historia om en fil som
+        användaren redan hanterat här."""
+        watch = getattr(self, "_watch", None)
+        digest = str(row.get("_parked_hash", "") or "")
+        if watch is None or not digest:
+            return
+        try:
+            watch.remove_parked(digest)
+            self._refresh_watch_ui()
+        except Exception as exc:
+            log.debug("unpark row: %s", exc)
+
+    def _collect_uncertain_parked(self) -> None:
+        """Vid start: osäkra parkeringar från tidigare körningar
+        läggs i Import-tabellen direkt (utan dialogregn — de
+        väntar där som röda rader tills användaren matchar dem)."""
+        try:
+            watch = getattr(self, "_watch", None)
+            if watch is None:
+                return
+            self._add_parked_rows_to_table(list(watch.parked))
+        except Exception as exc:
+            log.debug("collect uncertain parked: %s", exc)
 
     def _ask_uncertain_parked(self, infos: list[dict]) -> None:
         """Frågar direkt om parkerade filer med osäker matchning.
@@ -2312,6 +2550,15 @@ class ScanImportView(QWidget):
             return
         start = len(self._rows)
         for parked in list(self._watch.parked):
+            digest = str(parked.get("hash", "") or "")
+            if digest and any(
+                str(r.get("_parked_hash", "")) == digest
+                for r in self._rows
+            ):
+                # Redan i Import-tabellen (osäker parkering som
+                # lades dit automatiskt) — lägg aldrig in samma
+                # faktura två gånger.
+                continue
             parsed = dict(parked.get("parsed", {}))
             parsed["file"] = parked.get("file", "")
             parsed["_path"] = parked.get("path", "")
@@ -3287,6 +3534,9 @@ class ScanImportView(QWidget):
 
     def _remove_row(self) -> None:
         for i in reversed(self._selected_rows()):
+            # En parkerad fil användaren tar bort ur tabellen är
+            # avgjord — lämna ingen zombiepost i parkeringen.
+            self._unpark_row(self._rows[i])
             self._rows.pop(i)
         self._refresh_table()
 
@@ -3500,6 +3750,9 @@ class ScanImportView(QWidget):
             data = self._invoice_data_from_row(row)
             if self._save_invoice(data, source=row.get("file", "")):
                 created += 1
+                # Registrerad = avgjord: den parkerade posten
+                # (om raden kom från parkeringen) tas bort.
+                self._unpark_row(row)
                 self._rows.pop(i)
 
         self._refresh_table()
