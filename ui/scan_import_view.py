@@ -894,6 +894,7 @@ class ScanImportView(QWidget):
             Path(templates_path) if templates_path else None
         )
         self._templates_cache: dict | None = None
+        self._learning_cache: dict | None = None
         self._watch = None
         self._build_ui()
         self._init_watch()
@@ -1848,6 +1849,38 @@ class ScanImportView(QWidget):
             ) if not ok
         ]
 
+    def _add_multipage_amount_field(self, layout, row: dict):
+        """Flersidig faktura: notis + redigerbart att betala-fält.
+
+        Delsumman på en tidig sida är precis felet användaren
+        råkat ut för (857,25 i stället för 13 480 på sida 3) —
+        därför får hen se och vid behov rätta SLUTSUMMAN direkt
+        i bekräftelsen, inte bara välja leverantör blint.
+        Returnerar QLineEdit för flersidiga rader, annars None.
+        """
+        pages = self._row_pages(row)
+        if pages < 2:
+            return None
+        note = QLabel(tr("scan.match_multipage_note", n=pages))
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addWidget(QLabel(tr("scan.match_amount_label")))
+        edit = QLineEdit()
+        try:
+            edit.setText(_fmt_amount(float(row.get("total_amount") or 0)))
+        except (TypeError, ValueError):
+            edit.setText(str(row.get("total_amount", "") or ""))
+        layout.addWidget(edit)
+        return edit
+
+    @staticmethod
+    def _amount_override(edit) -> float | None:
+        """Användarens rättade belopp ur bekräftelsefältet."""
+        if edit is None:
+            return None
+        value = _parse_amount(edit.text())
+        return value if value > 0 else None
+
     def _ask_user_for_match(self, row: dict) -> bool:
         """Frågar användaren vilken leverantör/mall som gäller.
 
@@ -1922,6 +1955,7 @@ class ScanImportView(QWidget):
         combo.setCurrentIndex(-1)
         combo.setPlaceholderText(tr("scan.match_ask_placeholder"))
         layout.addWidget(combo)
+        amount_edit = self._add_multipage_amount_field(layout, row)
         buttons = QHBoxLayout()
         btn_cancel = QPushButton(tr("common.cancel"))
         btn_cancel.clicked.connect(dlg.reject)
@@ -1948,14 +1982,16 @@ class ScanImportView(QWidget):
         if not chosen:
             return False
         self._apply_manual_match(
-            row, chosen, kind=kind, candidates=candidates
+            row, chosen, kind=kind, candidates=candidates,
+            amount=self._amount_override(amount_edit),
         )
         return True
 
     def _apply_manual_match(
         self, row: dict, chosen: str,
         kind: str = "", candidates: list | None = None,
-    ) -> None:
+        amount: float | None = None,
+    ) -> str:
         """Tillämpar användarens eget leverantörsval på en rad.
 
         Delas av osäkerhetsfrågan och högerklickets manuella
@@ -1963,11 +1999,19 @@ class ScanImportView(QWidget):
         finns) läses in i radens fält och osäkerhetsflaggorna
         rensas — raden är därefter användarens eget val, aldrig
         en gissning, och kan registreras via Skapa fakturor.
+        Ett rättat belopp ur bekräftelsen vinner alltid över det
+        avlästa. Efteråt lär sig appen av valet (se
+        _learn_from_match); inlärningsnotisen returneras för
+        statustexten.
         """
         candidates = list(candidates or [])
         text = str(row.get("_text", "") or "")
         row["supplier"] = chosen
         self._apply_template_to_row(row, text)
+        if amount is not None and amount > 0:
+            # Användarens bekräftade slutsumma vinner alltid över
+            # den avlästa (som kan vara en delsumma på sida 1).
+            row["total_amount"] = float(amount)
         if kind == "template" or chosen in self._get_templates():
             if chosen in self._get_templates():
                 row["template"] = chosen
@@ -1994,6 +2038,64 @@ class ScanImportView(QWidget):
             "SCAN_IMPORT: användaren matchade %s mot %s manuellt",
             row.get("file", ""), chosen,
         )
+        return self._learn_from_match(row, chosen)
+
+    def _learn_from_match(self, row: dict, chosen: str) -> str:
+        """Appen lär sig av användarens matchning — varje gång.
+
+        Två saker lärs, båda ur användarens eget bekräftade val
+        (aldrig ur appens automatiska träffar):
+
+        1. Inlärningsminnet räknar bekräftelsen. Flersidiga
+           bekräftelser för samma leverantör bygger mot att den
+           leverantörens flersidiga fakturor till slut får
+           passera utan fråga — men bara med avstämning mot
+           texten (tolkarens flersidighetsvakt avgör).
+        2. Saknar leverantören både mall och inbyggt format
+           härleds en mall ur de just bekräftade värdena: bara
+           etiketter som läser tillbaka EXAKT dem sparas, och
+           övriga rader i listan läses genast om mot mallen.
+
+        Inlärningen får aldrig fälla matchningen — fel loggas
+        och tystas. Returnerar en kort notis för statusraden.
+        """
+        try:
+            si = _scan_module()
+            pages = self._row_pages(row)
+            learning = self._get_match_learning()
+            entry = si.record_match_confirmation(
+                learning, chosen, multipage=pages >= 2
+            )
+            notes: list[str] = []
+            if pages >= 2:
+                notes.append(tr(
+                    "scan.learning_progress",
+                    supplier=chosen,
+                    n=int(entry.get("multipage_confirmed", 0) or 0),
+                ))
+            templates = self._get_templates()
+            if not si.find_template(templates, chosen) \
+                    and not si.has_builtin_format(chosen):
+                tmpl = si.derive_template_from_confirmation(
+                    str(row.get("_text", "") or ""),
+                    str(row.get("invoice_number", "") or ""),
+                    row.get("total_amount"),
+                )
+                if tmpl:
+                    templates[chosen] = tmpl
+                    self._save_templates_file()
+                    entry["template_learned"] = True
+                    self._reread_rows_with_template(
+                        chosen, tmpl, exclude=row
+                    )
+                    notes.append(tr(
+                        "scan.learned_template", supplier=chosen
+                    ))
+            self._save_match_learning()
+            return " ".join(notes)
+        except Exception as exc:
+            log.warning("learn from match: %s", exc)
+            return ""
 
     def _manual_match_row(self) -> None:
         """Högerklick: matcha markerad rad mot en leverantör själv.
@@ -2064,6 +2166,7 @@ class ScanImportView(QWidget):
         combo.setCurrentIndex(idx)
         combo.setPlaceholderText(tr("scan.match_ask_placeholder"))
         layout.addWidget(combo)
+        amount_edit = self._add_multipage_amount_field(layout, row)
         buttons = QHBoxLayout()
         btn_cancel = QPushButton(tr("common.cancel"))
         btn_cancel.clicked.connect(dlg.reject)
@@ -2084,13 +2187,19 @@ class ScanImportView(QWidget):
         chosen = combo.currentText().strip()
         if not chosen:
             return
-        self._apply_manual_match(row, chosen, candidates=options)
+        note = self._apply_manual_match(
+            row, chosen, candidates=options,
+            amount=self._amount_override(amount_edit),
+        )
         self._refresh_table()
-        self._lbl_status.setText(tr(
+        status = tr(
             "scan.manual_matched",
             file=str(row.get("file", "") or "—"),
             supplier=chosen,
-        ))
+        )
+        if note:
+            status += "  ·  " + note
+        self._lbl_status.setText(status)
 
     def _ask_uncertain_rows(self, rows: list[dict]) -> int:
         """Frågar om varje osäker rad; returnerar antal lösta."""
@@ -2493,6 +2602,37 @@ class ScanImportView(QWidget):
                 Path(__file__).resolve().parent.parent / data_dir
             )
         return data_dir / "invoice_templates.json"
+
+    def _learning_file(self) -> Path:
+        """Inlärningsminnet bor bredvid mallfilen."""
+        return self._templates_file().parent / "match_memory.json"
+
+    def _get_match_learning(self) -> dict:
+        if self._learning_cache is None:
+            self._learning_cache = _scan_module().load_match_learning(
+                self._learning_file()
+            )
+        return self._learning_cache
+
+    def _save_match_learning(self) -> None:
+        _scan_module().save_match_learning(
+            self._learning_file(), self._get_match_learning()
+        )
+
+    def _row_pages(self, row: dict) -> int:
+        """Radens sidantal (tolkningens värde, annars filen)."""
+        try:
+            pages = int(row.get("pages") or 0)
+        except (TypeError, ValueError):
+            pages = 0
+        if pages:
+            return pages
+        try:
+            return _scan_module().page_image_count(
+                str(row.get("_path", "") or "")
+            )
+        except Exception:
+            return 0
 
     def _get_templates(self) -> dict:
         if self._templates_cache is None:

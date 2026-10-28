@@ -1155,6 +1155,7 @@ def parse_invoice_file(
     text: str,
     suppliers: list[dict] | None = None,
     templates: dict | None = None,
+    match_learning: dict | None = None,
 ) -> dict[str, Any]:
     """Tolkning av en FIL: löptext + eventuella regionsmallar.
 
@@ -1163,6 +1164,14 @@ def parse_invoice_file(
     får avgöra fälten. Första mallen vars rutor ger ett
     fakturanummer eller ett att betala-belopp används — resten
     av tolkningen är exakt densamma som för ren text.
+
+    `match_learning` (inlärningsminnet ur match_memory.json)
+    används bara av flersidighetsvakten: en leverantör vars
+    flersidiga fakturor bekräftats upprepade gånger av användaren
+    OCH vars total dessutom stäms av mot texten får passera utan
+    ny bekräftelse — alla andra flersidiga fakturor flaggas så
+    att appen ber användaren matcha dem manuellt (se
+    _apply_multipage_guard).
     """
     tpl = templates or {}
     region_texts_by_template: dict[str, dict] = {}
@@ -1183,11 +1192,15 @@ def parse_invoice_file(
         # själv läser fakturanummer + att betala får avgöra.
         # Flera träffar blir en fråga till användaren — aldrig
         # första mallen i listan.
-        return parse_invoice_text(
+        result = parse_invoice_text(
             text, suppliers, tpl,
             region_texts_by_template=region_texts_by_template,
         )
-    return _parse_with_reader_fallback(path, text, suppliers, tpl)
+        return _apply_multipage_guard(
+            result, path, text, match_learning
+        )
+    result = _parse_with_reader_fallback(path, text, suppliers, tpl)
+    return _apply_multipage_guard(result, path, text, match_learning)
 
 
 def _parse_with_reader_fallback(
@@ -1229,6 +1242,99 @@ def _parse_with_reader_fallback(
                 alt.get("template"),
             )
             return alt
+    return result
+
+
+def _multipage_total_corroborated(
+    result: dict, text: str, learning: dict | None
+) -> bool:
+    """Får en flersidig total passera utan användarens ögon?
+
+    Bara när appen LÄRT SIG leverantören av användarens egna
+    bekräftelser (≥2 bekräftade flersidiga fakturor) OCH den
+    generiska etikettläsningen av hela texten ger exakt samma
+    total OCH räknekontrollen inte protesterar. Allt annat är
+    en gissning i en flersidig faktura — och gissningar om
+    delsummor på sida 1 är precis felet detta vaktar mot.
+    """
+    if not learning:
+        return False
+    name = str(
+        result.get("supplier") or result.get("template") or ""
+    ).strip()
+    if not name or not learning_graduated(learning, name):
+        return False
+    try:
+        total = float(result.get("total_amount") or 0)
+    except (TypeError, ValueError):
+        return False
+    if total <= 0:
+        return False
+    if abs(parse_total(text or "") - total) > 0.005:
+        return False
+    if (result.get("math_check") or {}).get("status") == "mismatch":
+        return False
+    return True
+
+
+def _apply_multipage_guard(
+    result: dict, path: Any, text: str,
+    learning: dict | None = None,
+) -> dict:
+    """Flersidig faktura = användaren bekräftar matchningen.
+
+    Sidtexterna limmas ihop utan sidmarkörer, så tolkaren kan
+    aldrig bevisa att ett avläst belopp är slutsumman och inte
+    en delsumma på en tidig sida (921040: 857,25 på sida 1 mot
+    13 480 på sida 3). Därför flaggas varje komplett tolkad
+    flersidig faktura som OSÄKER matchning: Import frågar och
+    bevakningen parkerar i stället för att auto-registrera.
+    Enda undantaget är den inlärda, avstämda leverantören (se
+    _multipage_total_corroborated) — det är så appen blir
+    bättre av varje manuell matchning utan att någonsin gissa.
+    """
+    if not isinstance(result, dict):
+        return result
+    try:
+        pages = page_image_count(path)
+    except Exception:
+        pages = 0
+    if pages:
+        result["pages"] = pages
+    if pages < 2 or result.get("match_uncertain"):
+        return result
+    try:
+        total = float(result.get("total_amount") or 0)
+    except (TypeError, ValueError):
+        total = 0.0
+    name = str(
+        result.get("supplier") or result.get("template") or ""
+    ).strip()
+    if total <= 0 or not name:
+        return result
+    if _multipage_total_corroborated(result, text, learning):
+        return result
+    result["match_uncertain"] = True
+    result["match_kind"] = "multipage"
+    result["match_reason"] = "multipage"
+    result["match_candidates"] = [name]
+    result["supplier_match"] = {
+        "status": "uncertain", "supplier": "",
+        "candidates": [{"name": name}], "uncertain": True,
+        "reason": "multipage",
+    }
+    if result.get("template"):
+        result["template_match"] = {
+            "status": "uncertain", "template": "",
+            "candidates": [name], "uncertain": True,
+            "reason": "multipage",
+        }
+    log.info(
+        "SCAN_IMPORT: flersidig faktura (%d sidor, %s) — "
+        "användaren får bekräfta matchningen i stället för "
+        "att totalen litas på blint",
+        pages, name,
+    )
     return result
 
 
@@ -2356,6 +2462,184 @@ def save_templates(path: Path, templates: dict) -> bool:
     except Exception as exc:
         log.warning("save_templates: %s", exc)
         return False
+
+
+# ── Inlärningsminne: appen blir bättre av varje matchning ────
+# Varje gång ANVÄNDAREN matchar/bekräftar en faktura (fråge-
+# dialogen eller högerklickets manuella matchning) noteras det
+# i match_memory.json bredvid mallfilen:
+#   {leverantör: {"confirmed": n, "multipage_confirmed": m,
+#                 "last_confirmed": "…", "template_learned": bool}}
+# Minnet gissar aldrig något självt — det räknar bara
+# användarens egna bekräftelser. Vid
+# MULTIPAGE_CONFIRMATIONS_TO_GRADUATE bekräftade flersidiga
+# fakturor för samma leverantör får den leverantörens flersidiga
+# fakturor passera flersidighetsvakten UTAN ny fråga, men bara
+# när totalen dessutom stäms av mot texten (se
+# _multipage_total_corroborated). Så lär sig appen av matchning
+# efter matchning, utan att någonsin sluta vara försiktig på
+# ett obeprövat format.
+
+MULTIPAGE_CONFIRMATIONS_TO_GRADUATE = 2
+
+
+def load_match_learning(path: Path) -> dict:
+    """Läser inlärningsminnet tolerant ({} vid saknad/trasig fil)."""
+    try:
+        import json as _json
+
+        data = _json.loads(Path(path).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_match_learning(path: Path, learning: dict) -> bool:
+    """Skriver inlärningsminnet (atomärt via tmp-fil)."""
+    try:
+        import json as _json
+
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(
+            _json.dumps(learning, ensure_ascii=False, indent=1),
+            encoding="utf-8",
+        )
+        tmp.replace(target)
+        return True
+    except Exception as exc:
+        log.warning("save_match_learning: %s", exc)
+        return False
+
+
+def learning_entry(learning: dict | None, supplier: str) -> dict:
+    """Minnesposten för en leverantör (namnvarianter tillåts)."""
+    if not learning or not supplier:
+        return {}
+    entry = learning.get(supplier)
+    if isinstance(entry, dict):
+        return entry
+    for name, cand in learning.items():
+        if isinstance(cand, dict) and _names_match(
+            str(supplier), str(name)
+        ):
+            return cand
+    return {}
+
+
+def record_match_confirmation(
+    learning: dict, supplier: str, *, multipage: bool = False
+) -> dict:
+    """Noterar att användaren bekräftat en matchning.
+
+    Returnerar leverantörens uppdaterade post. Enda författaren
+    till minnet är användarens egna val — appen noterar aldrig
+    sina automatiska träffar som "inlärda".
+    """
+    name = str(supplier or "").strip()
+    if not name:
+        return {}
+    key = name
+    if key not in learning:
+        for existing in learning:
+            if _names_match(name, str(existing)):
+                key = str(existing)
+                break
+    entry = learning.get(key)
+    if not isinstance(entry, dict):
+        entry = {}
+        learning[key] = entry
+    entry["confirmed"] = int(entry.get("confirmed", 0) or 0) + 1
+    if multipage:
+        entry["multipage_confirmed"] = (
+            int(entry.get("multipage_confirmed", 0) or 0) + 1
+        )
+    entry["last_confirmed"] = datetime.datetime.now().isoformat(
+        timespec="seconds"
+    )
+    return entry
+
+
+def learning_graduated(learning: dict | None, supplier: str) -> bool:
+    """True när leverantörens flersidiga fakturor bekräftats av
+    användaren tillräckligt många gånger för att få passera
+    flersidighetsvakten (med avstämning mot texten)."""
+    entry = learning_entry(learning, supplier)
+    try:
+        count = int(entry.get("multipage_confirmed", 0) or 0)
+    except (TypeError, ValueError):
+        count = 0
+    return count >= MULTIPAGE_CONFIRMATIONS_TO_GRADUATE
+
+
+def derive_template_from_confirmation(
+    text: str, invoice_number: str, total: Any
+) -> dict | None:
+    """Härled en leverantörsmall ur användarens BEKRÄFTADE värden.
+
+    När en faktura matchats för hand och leverantören saknar mall
+    prövas vanliga etiketter mot fakturans egen text: en etikett
+    som läser tillbaka EXAKT de värden användaren just bekräftat
+    (fakturanummer + att betala) får bli leverantörens mall.
+    Verifieringen är hela poängen — kan etiketterna inte läsa
+    tillbaka de bekräftade värdena lär sig appen ingenting alls
+    (None), i stället för att spara en gissad mall.
+    """
+    if not text:
+        return None
+    want_nr = str(invoice_number or "").strip()
+    try:
+        want_total = float(total or 0)
+    except (TypeError, ValueError):
+        return None
+    if not want_nr or want_total <= 0:
+        return None
+    fields: dict[str, dict] = {}
+    for field, want in (
+        ("invoice_number", want_nr), ("total_amount", None),
+    ):
+        kind = TEMPLATE_FIELD_KINDS[field]
+        for cand in _REPAIR_LABELS.get(field, ()):
+            spec: dict[str, Any] = {"label": cand}
+            raw = extract_with_label(text, cand, kind)
+            if not _confirmed_value_matches(raw, kind, want, want_total):
+                below = _extract_below_label(text, cand, kind)
+                if not _confirmed_value_matches(
+                    below, kind, want, want_total
+                ):
+                    continue
+                spec["below"] = True
+            fields[field] = spec
+            break
+    if set(fields) != {"invoice_number", "total_amount"}:
+        return None
+    template = {"fields": fields}
+    # Hela mallen måste läsa tillbaka de bekräftade värdena —
+    # annars är den ingen inlärning, bara en ny gissning.
+    found = apply_template(text, template)
+    if str(found.get("invoice_number", "")).strip() != want_nr:
+        return None
+    try:
+        if abs(float(found.get("total_amount") or 0) - want_total) > 0.005:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return template
+
+
+def _confirmed_value_matches(
+    raw: str, kind: str, want_nr: str, want_total: float
+) -> bool:
+    """Stämmer en avläsning med det användaren bekräftade?"""
+    if not raw:
+        return False
+    if kind == "amount":
+        try:
+            return abs(float(raw) - want_total) <= 0.005
+        except (TypeError, ValueError):
+            return False
+    return str(raw).strip() == want_nr
 
 
 # ═════════════════════════════════════════════════════════════════════

@@ -538,6 +538,7 @@ class WatchManager(QObject):
         app: Any = None,
         templates_provider: Callable[[], dict] | None = None,
         extract_fn: Callable[[Path], tuple[str, str]] | None = None,
+        learning_provider: Callable[[], dict] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -545,6 +546,7 @@ class WatchManager(QObject):
         self._app = app
         self._templates_provider = templates_provider
         self._extract_fn = extract_fn
+        self._learning_provider = learning_provider
         self._config: dict[str, Any] = self._load()
         self._warned_missing: set[str] = set()
         self._scan_stats: dict[str, int] = {
@@ -1156,12 +1158,24 @@ class WatchManager(QObject):
                 templates = self._templates_provider() or {}
             except Exception:
                 templates = {}
+        learning = None
+        if self._learning_provider is not None:
+            try:
+                learning = self._learning_provider() or {}
+            except Exception:
+                learning = None
         parse_file = getattr(si, "parse_invoice_file", None)
         if parse_file is not None:
-            parsed = parse_file(
-                path, text or "", self._suppliers(),
-                templates=templates,
-            )
+            try:
+                parsed = parse_file(
+                    path, text or "", self._suppliers(),
+                    templates=templates, match_learning=learning,
+                )
+            except TypeError:
+                parsed = parse_file(
+                    path, text or "", self._suppliers(),
+                    templates=templates,
+                )
         else:
             parsed = si.parse_invoice_text(
                 text or "", self._suppliers(), templates=templates
