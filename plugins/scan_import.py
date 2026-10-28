@@ -846,6 +846,7 @@ def parse_invoice_text(
     templates: dict | None = None,
     region_texts: dict | None = None,
     region_texts_by_template: dict | None = None,
+    match_learning: dict | None = None,
 ) -> dict[str, Any]:
     """
     Tolkar en fakturatext och returnerar kandidater:
@@ -885,6 +886,32 @@ def parse_invoice_text(
     ]
     match_reason = str(supplier_assessment.get("reason", "") or "")
     match_kind = "supplier" if match_uncertain else ""
+    # Inlärd koppling: hittade den vanliga bedömningen ingen
+    # leverantör alls får appen använda det den lärt sig av
+    # användarens egna matchningar — ett kännetecken (org.nr/
+    # bankgiro) som upprepade gånger bekräftats för EN leverantör
+    # kopplar fakturan dit. Flera kvalificerade leverantörer är
+    # däremot en fråga, aldrig en gissning. En redan osäker
+    # bedömning löses aldrig upp av inlärningen i tysthet.
+    learned_connect = ""
+    if not supplier and not match_uncertain and match_learning:
+        learned = learned_supplier_candidates(
+            text or "", match_learning
+        )
+        if len(learned) == 1:
+            supplier = learned[0]
+            learned_connect = supplier
+            log.info(
+                "SCAN_IMPORT: inlärd koppling — fakturan kopplas "
+                "till %s på sina kännetecken (appen har lärt sig "
+                "leverantören av användarens matchningar)",
+                supplier,
+            )
+        elif len(learned) > 1:
+            match_uncertain = True
+            match_candidates = learned
+            match_reason = "learned_ambiguous"
+            match_kind = "supplier"
     template_name = ""
     template_fields: list[str] = []
     template_key = ""
@@ -1128,6 +1155,15 @@ def parse_invoice_text(
         }
     else:
         result["supplier_match"] = supplier_assessment
+    if learned_connect:
+        # Inlärd koppling märks som sådan — den är varken en
+        # registerträff eller en gissning, utan frukten av
+        # användarens egna bekräftade matchningar.
+        result["supplier_match"] = {
+            "status": "matched", "supplier": learned_connect,
+            "candidates": [], "uncertain": False,
+            "reason": "learned",
+        }
     result["template_match"] = {
         "status": (
             "uncertain" if match_uncertain and match_kind != "supplier"
@@ -1195,11 +1231,14 @@ def parse_invoice_file(
         result = parse_invoice_text(
             text, suppliers, tpl,
             region_texts_by_template=region_texts_by_template,
+            match_learning=match_learning,
         )
         return _apply_multipage_guard(
             result, path, text, match_learning
         )
-    result = _parse_with_reader_fallback(path, text, suppliers, tpl)
+    result = _parse_with_reader_fallback(
+        path, text, suppliers, tpl, match_learning=match_learning
+    )
     return _apply_multipage_guard(result, path, text, match_learning)
 
 
@@ -1208,6 +1247,7 @@ def _parse_with_reader_fallback(
     text: str,
     suppliers: list[dict] | None,
     templates: dict,
+    match_learning: dict | None = None,
 ) -> dict[str, Any]:
     """Tolka texten; utan mallträff prövas övriga PDF-läsares text.
 
@@ -1218,7 +1258,9 @@ def _parse_with_reader_fallback(
     ingen läsares text något om formatet gäller den första
     tolkningen orörd (filen parkeras som förut).
     """
-    result = parse_invoice_text(text, suppliers, templates)
+    result = parse_invoice_text(
+        text, suppliers, templates, match_learning=match_learning
+    )
     if result.get("template") or result.get("match_uncertain"):
         # Ett osäkert resultat får aldrig ersättas av ett annat
         # textuttag i tysthet — osäkerheten ska nå användaren.
@@ -1233,7 +1275,10 @@ def _parse_with_reader_fallback(
     for alt_text, method in extract_pdf_texts(p):
         if re.sub(r"\s+", " ", alt_text).strip() == seen:
             continue
-        alt = parse_invoice_text(alt_text, suppliers, templates)
+        alt = parse_invoice_text(
+            alt_text, suppliers, templates,
+            match_learning=match_learning,
+        )
         if alt.get("template") and not alt.get("match_uncertain"):
             log.info(
                 "SCAN_IMPORT: mallen kände igen fakturan via "
@@ -2482,6 +2527,60 @@ def save_templates(path: Path, templates: dict) -> bool:
 
 MULTIPAGE_CONFIRMATIONS_TO_GRADUATE = 2
 
+#: Efter så här många av användaren bekräftade matchningar mot
+#: samma leverantör får appen koppla nya fakturor till den
+#: leverantören SJÄLV — när fakturan bär ett kännetecken appen
+#: lärt sig av de bekräftade fakturorna (användarens tumregel:
+#: 5–10 fakturor, sedan ska det sitta).
+LEARNED_SUPPLIER_CONFIRMATIONS = 5
+
+#: Ett kännetecken (org.nr/bankgiro) måste ha setts i minst så
+#: här många bekräftade fakturor innan det får koppla — ett
+#: enstaka nummer på en faktura kan tillhöra någon annan
+#: (kundens eget org.nr, en underleverantör i texten …).
+LEARNED_IDENTIFIER_CONFIRMATIONS = 2
+
+
+def _org_nr_checksum_ok(num: str) -> bool:
+    """Kontrollsiffran (Luhn) på ett svenskt organisationsnummer."""
+    if len(num) != 10 or not num.isdigit():
+        return False
+    total = 0
+    for i, ch in enumerate(num):
+        d = int(ch)
+        if i % 2 == 0:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
+_BANKGIRO_LABEL_RE = re.compile(
+    r"bankgiro[^0-9]{0,16}(\d[\d\s\-]{4,14}\d)", re.IGNORECASE
+)
+
+
+def _invoice_identifiers(text: str) -> dict[str, set[str]]:
+    """Fakturans starka kännetecken: org.nr (med giltig
+    kontrollsiffra) och bankgiro vid sin etikett.
+
+    Bara signaler som är svåra att träffa av en slump tas med —
+    det är dessa appen lär sig koppla leverantörer med när
+    användaren matchat tillräckligt många fakturor för hand.
+    """
+    ids: dict[str, set[str]] = {"org": set(), "bg": set()}
+    flat = str(text or "")
+    for m in re.finditer(r"(?<!\d)(\d{6})[-\s]?(\d{4})(?!\d)", flat):
+        num = m.group(1) + m.group(2)
+        if _org_nr_checksum_ok(num):
+            ids["org"].add(num)
+    for m in _BANKGIRO_LABEL_RE.finditer(flat):
+        num = re.sub(r"\D", "", m.group(1))
+        if 7 <= len(num) <= 8:
+            ids["bg"].add(num)
+    return ids
+
 
 def load_match_learning(path: Path) -> dict:
     """Läser inlärningsminnet tolerant ({} vid saknad/trasig fil)."""
@@ -2529,13 +2628,17 @@ def learning_entry(learning: dict | None, supplier: str) -> dict:
 
 
 def record_match_confirmation(
-    learning: dict, supplier: str, *, multipage: bool = False
+    learning: dict, supplier: str, *, multipage: bool = False,
+    text: str = "",
 ) -> dict:
     """Noterar att användaren bekräftat en matchning.
 
     Returnerar leverantörens uppdaterade post. Enda författaren
     till minnet är användarens egna val — appen noterar aldrig
-    sina automatiska träffar som "inlärda".
+    sina automatiska träffar som "inlärda". Fakturans starka
+    kännetecken (org.nr/bankgiro ur `text`) räknas in per
+    leverantör: det är de som efter tillräckligt många
+    bekräftelser får koppla nya fakturor automatiskt.
     """
     name = str(supplier or "").strip()
     if not name:
@@ -2555,6 +2658,18 @@ def record_match_confirmation(
         entry["multipage_confirmed"] = (
             int(entry.get("multipage_confirmed", 0) or 0) + 1
         )
+    if text:
+        identifiers = entry.setdefault("identifiers", {})
+        if not isinstance(identifiers, dict):
+            identifiers = {}
+            entry["identifiers"] = identifiers
+        for kind, values in _invoice_identifiers(text).items():
+            bucket = identifiers.setdefault(kind, {})
+            if not isinstance(bucket, dict):
+                bucket = {}
+                identifiers[kind] = bucket
+            for value in values:
+                bucket[value] = int(bucket.get(value, 0) or 0) + 1
     entry["last_confirmed"] = datetime.datetime.now().isoformat(
         timespec="seconds"
     )
@@ -2571,6 +2686,63 @@ def learning_graduated(learning: dict | None, supplier: str) -> bool:
     except (TypeError, ValueError):
         count = 0
     return count >= MULTIPAGE_CONFIRMATIONS_TO_GRADUATE
+
+
+def learned_supplier_candidates(
+    text: str, learning: dict | None
+) -> list[str]:
+    """Leverantörer appen LÄRT SIG koppla till den här fakturan.
+
+    En leverantör kvalificerar sig först när användaren själv
+    matchat LEARNED_SUPPLIER_CONFIRMATIONS fakturor till den —
+    och bara via ett kännetecken (org.nr/bankgiro) som setts i
+    minst LEARNED_IDENTIFIER_CONFIRMATIONS av de bekräftade
+    fakturorna. Samma kännetecken hos FLERA leverantörer kopplar
+    aldrig (det är förorenat — lika gärna fel som rätt) och två
+    kvalificerade leverantörer på samma faktura ger båda som
+    kandidater, så anroparen frågar i stället för att gissa.
+    """
+    if not learning or not text:
+        return []
+    ids = _invoice_identifiers(text)
+    if not any(ids.values()):
+        return []
+    owners: dict[tuple[str, str], set[str]] = {}
+    confirmed: dict[str, int] = {}
+    for name, entry in learning.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            confirmed[str(name)] = int(entry.get("confirmed", 0) or 0)
+        except (TypeError, ValueError):
+            confirmed[str(name)] = 0
+        buckets = entry.get("identifiers", {}) or {}
+        if not isinstance(buckets, dict):
+            continue
+        for kind, bucket in buckets.items():
+            if not isinstance(bucket, dict):
+                continue
+            for value, count in bucket.items():
+                try:
+                    seen = int(count or 0)
+                except (TypeError, ValueError):
+                    seen = 0
+                if seen >= LEARNED_IDENTIFIER_CONFIRMATIONS:
+                    owners.setdefault(
+                        (str(kind), str(value)), set()
+                    ).add(str(name))
+    out: list[str] = []
+    for kind, values in ids.items():
+        for value in sorted(values):
+            names = owners.get((kind, value), set())
+            if len(names) != 1:
+                continue  # okänt eller förorenat kännetecken
+            name = next(iter(names))
+            if confirmed.get(name, 0) < LEARNED_SUPPLIER_CONFIRMATIONS:
+                continue  # för få bekräftade fakturor än
+            if name not in out:
+                out.append(name)
+    return out
 
 
 def derive_template_from_confirmation(

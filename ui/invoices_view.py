@@ -3171,28 +3171,36 @@ class InvoicesView(QWidget):
             learning = si.load_match_learning(
                 data_dir / "match_memory.json"
             )
-            si.record_match_confirmation(
-                learning, supplier, multipage=int(pages or 0) >= 2
+            entry = si.record_match_confirmation(
+                learning, supplier,
+                multipage=int(pages or 0) >= 2, text=text,
             )
             si.save_match_learning(
                 data_dir / "match_memory.json", learning
             )
+            notes: list[str] = []
+            confirmed = int(entry.get("confirmed", 0) or 0)
+            if confirmed >= si.LEARNED_SUPPLIER_CONFIRMATIONS \
+                    and confirmed - 1 < si.LEARNED_SUPPLIER_CONFIRMATIONS:
+                notes.append(tr(
+                    "scan.learned_auto_supplier", supplier=supplier
+                ))
             templates = self._load_scan_templates(si)
-            if si.find_template(templates, supplier) or \
-                    si.has_builtin_format(supplier):
-                return ""
-            tmpl = si.derive_template_from_confirmation(
-                text, invoice_number, total
-            )
-            if not tmpl:
-                return ""
-            templates[supplier] = tmpl
-            if si.save_templates(
-                data_dir / "invoice_templates.json", templates
-            ):
-                return tr(
-                    "invoices.manual_match_learned", supplier=supplier
+            if not si.find_template(templates, supplier) and \
+                    not si.has_builtin_format(supplier):
+                tmpl = si.derive_template_from_confirmation(
+                    text, invoice_number, total
                 )
+                if tmpl:
+                    templates[supplier] = tmpl
+                    if si.save_templates(
+                        data_dir / "invoice_templates.json", templates
+                    ):
+                        notes.append(tr(
+                            "invoices.manual_match_learned",
+                            supplier=supplier,
+                        ))
+            return " ".join(notes)
         except Exception as exc:
             log.warning("learn manual match: %s", exc)
         return ""

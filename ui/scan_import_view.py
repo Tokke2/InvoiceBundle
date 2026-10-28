@@ -2067,6 +2067,8 @@ class ScanImportView(QWidget):
             "template_ambiguous": "scan.match_reason_template",
             "region_ambiguous": "scan.match_reason_template",
             "builtin_ambiguous": "scan.match_reason_template",
+            "multipage": "scan.match_reason_multipage",
+            "learned_ambiguous": "scan.match_reason_learned",
         }.get(reason, "scan.match_reason_generic")
         reason_lbl = QLabel(tr(reason_key))
         reason_lbl.setWordWrap(True)
@@ -2190,7 +2192,8 @@ class ScanImportView(QWidget):
             pages = self._row_pages(row)
             learning = self._get_match_learning()
             entry = si.record_match_confirmation(
-                learning, chosen, multipage=pages >= 2
+                learning, chosen, multipage=pages >= 2,
+                text=str(row.get("_text", "") or ""),
             )
             notes: list[str] = []
             if pages >= 2:
@@ -2198,6 +2201,15 @@ class ScanImportView(QWidget):
                     "scan.learning_progress",
                     supplier=chosen,
                     n=int(entry.get("multipage_confirmed", 0) or 0),
+                ))
+            confirmed = int(entry.get("confirmed", 0) or 0)
+            if confirmed >= si.LEARNED_SUPPLIER_CONFIRMATIONS \
+                    and confirmed - 1 < si.LEARNED_SUPPLIER_CONFIRMATIONS:
+                # Tröskeln passerad med den här matchningen:
+                # från och med nu kopplar appen leverantörens
+                # fakturor själv på sina inlärda kännetecken.
+                notes.append(tr(
+                    "scan.learned_auto_supplier", supplier=chosen
                 ))
             templates = self._get_templates()
             if not si.find_template(templates, chosen) \
