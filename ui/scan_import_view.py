@@ -1947,11 +1947,28 @@ class ScanImportView(QWidget):
         chosen = combo.currentText().strip()
         if not chosen:
             return False
+        self._apply_manual_match(
+            row, chosen, kind=kind, candidates=candidates
+        )
+        return True
 
+    def _apply_manual_match(
+        self, row: dict, chosen: str,
+        kind: str = "", candidates: list | None = None,
+    ) -> None:
+        """Tillämpar användarens eget leverantörsval på en rad.
+
+        Delas av osäkerhetsfrågan och högerklickets manuella
+        matchning: leverantören sätts, dess mall (om en sådan
+        finns) läses in i radens fält och osäkerhetsflaggorna
+        rensas — raden är därefter användarens eget val, aldrig
+        en gissning, och kan registreras via Skapa fakturor.
+        """
+        candidates = list(candidates or [])
         text = str(row.get("_text", "") or "")
         row["supplier"] = chosen
         self._apply_template_to_row(row, text)
-        if kind == "template":
+        if kind == "template" or chosen in self._get_templates():
             if chosen in self._get_templates():
                 row["template"] = chosen
             row["template_match"] = {
@@ -1974,11 +1991,106 @@ class ScanImportView(QWidget):
             row, bool(text or row.get("_path"))
         )
         log.info(
-            "SCAN_IMPORT: användaren valde %s för %s "
-            "(osäker %s-matchning)",
-            chosen, row.get("file", ""), kind,
+            "SCAN_IMPORT: användaren matchade %s mot %s manuellt",
+            row.get("file", ""), chosen,
         )
-        return True
+
+    def _manual_match_row(self) -> None:
+        """Högerklick: matcha markerad rad mot en leverantör själv.
+
+        När den automatiska matchningen misslyckats (ingen eller
+        osäker träff) ska användaren inte vara låst till att lära
+        in en helt ny mall — här väljer man helt enkelt vilken
+        leverantör i registret fakturan tillhör. Leverantörens
+        mall, om en sådan finns, läses direkt in i radens fält;
+        finns ingen mall behåller raden sina avlästa värden och
+        får bara leverantören satt. Raden markeras som användarens
+        eget val (grön, aldrig som en automatgissning).
+        """
+        idxs = self._selected_rows()
+        if not idxs:
+            self._lbl_status.setText(tr("scan.select_row"))
+            return
+        row = self._rows[idxs[0]]
+        options: list[str] = []
+        seen: set[str] = set()
+
+        def _add(name: str) -> None:
+            name = str(name or "").strip()
+            if name and name.lower() not in seen:
+                seen.add(name.lower())
+                options.append(name)
+
+        # Osäkerhetens kandidater först (sannolikast rätt), sedan
+        # mappens leverantör, hela registret och mallnamnen.
+        for name in self._match_candidate_names(row):
+            _add(name)
+        _add(str(row.get("folder_supplier_candidate", "") or ""))
+        for supplier in self._suppliers():
+            _add(str(supplier.get("name", "") or ""))
+        for name in self._get_templates().keys():
+            _add(str(name))
+        if not options:
+            QMessageBox.information(
+                self, tr("scan.manual_match_title"),
+                tr("scan.manual_no_suppliers"),
+            )
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr("scan.manual_match_title"))
+        layout = QVBoxLayout(dlg)
+        try:
+            amount_text = _fmt_amount(float(row.get("total_amount") or 0))
+        except (TypeError, ValueError):
+            amount_text = str(row.get("total_amount", "") or "—")
+        intro = QLabel(tr(
+            "scan.manual_match_body",
+            file=str(row.get("file", "") or "—"),
+            nr=str(row.get("invoice_number", "") or "—"),
+            amount=amount_text,
+        ))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        layout.addWidget(QLabel(tr("scan.match_ask_supplier_label")))
+        combo = QComboBox(dlg)
+        combo.addItems(options)
+        current = str(row.get("supplier", "") or "").strip()
+        idx = next(
+            (i for i, name in enumerate(options)
+             if name.lower() == current.lower()),
+            -1,
+        )
+        combo.setCurrentIndex(idx)
+        combo.setPlaceholderText(tr("scan.match_ask_placeholder"))
+        layout.addWidget(combo)
+        buttons = QHBoxLayout()
+        btn_cancel = QPushButton(tr("common.cancel"))
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_use = QPushButton(tr("scan.match_use"))
+        btn_use.setDefault(True)
+
+        def _accept() -> None:
+            if combo.currentIndex() >= 0:
+                dlg.accept()
+
+        btn_use.clicked.connect(_accept)
+        buttons.addStretch()
+        buttons.addWidget(btn_cancel)
+        buttons.addWidget(btn_use)
+        layout.addLayout(buttons)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = combo.currentText().strip()
+        if not chosen:
+            return
+        self._apply_manual_match(row, chosen, candidates=options)
+        self._refresh_table()
+        self._lbl_status.setText(tr(
+            "scan.manual_matched",
+            file=str(row.get("file", "") or "—"),
+            supplier=chosen,
+        ))
 
     def _ask_uncertain_rows(self, rows: list[dict]) -> int:
         """Frågar om varje osäker rad; returnerar antal lösta."""
@@ -2938,6 +3050,7 @@ class ScanImportView(QWidget):
         menu = QMenu(self)
         menu.addAction(tr("scan.open_original"), self._open_original_row)
         menu.addAction(tr("scan.print"), self._print_row)
+        menu.addAction(tr("scan.manual_match"), self._manual_match_row)
         menu.addAction(tr("scan.template_btn"), self._open_template_dialog)
         menu.addSeparator()
         menu.addAction(tr("scan.remove_row"), self._remove_row)
