@@ -1779,6 +1779,21 @@ class MainWindow(QMainWindow):
             self._m_autostart_method.addAction(_act)
             self._autostart_method_actions[_method] = _act
 
+        self._act_start_minimized = QAction(
+            tr("menu.start_minimized"), self
+        )
+        self._act_start_minimized.setCheckable(True)
+        self._act_start_minimized.setChecked(
+            bool(self._settings.get("start_minimized", True))
+        )
+        self._act_start_minimized.setToolTip(
+            tr("menu.start_minimized_tip")
+        )
+        self._act_start_minimized.triggered.connect(
+            self._toggle_start_minimized
+        )
+        m_set.addAction(self._act_start_minimized)
+
         self._act_close_to_tray = QAction(
             tr("menu.close_to_tray"), self
         )
@@ -2701,6 +2716,24 @@ class MainWindow(QMainWindow):
             4000,
         )
         log.info("close_to_tray → %s", checked)
+
+    def _toggle_start_minimized(self, checked: bool) -> None:
+        """Kryssruta: starta gömd i systemfältet vid autostart.
+
+        Styr `start_minimized`-inställningen som main.py:s
+        startlogik läser: vid OS-autostart (--minimized) lägger
+        sig appen i tray i stället för att visa fönstret.
+        Manuell start (dubbelklick) visar alltid fönstret.
+        """
+        self._settings.set("start_minimized", checked)
+        self.set_status(
+            tr(
+                "main.start_min_status",
+                state=tr("main.on") if checked else tr("main.off_state"),
+            ),
+            4000,
+        )
+        log.info("start_minimized → %s", checked)
 
     def _toggle_minimize_to_tray(self, checked: bool) -> None:
         """Kryssruta: göm till tray även vid minimering."""
