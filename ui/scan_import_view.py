@@ -104,6 +104,14 @@ COLUMNS: list[tuple[str, str, int, Any]] = [
 ROW_BG_MATCH_UNCERTAIN = ("#3b1113", "#fdecea")
 ROW_BG_MATCH_SECURE = ("#0f2e17", "#e8f5e9")
 
+#: Textfärger till radfärgerna ovan: (mörkt tema, ljust tema).
+#: De sätts EXPLICIT på varje färgad rad — radtexten får aldrig
+#: ärva palettens textfärg, för då kan en mörk radbakgrund möta
+#: mörk text (oläsligt tills raden markeras). Paren håller
+#: WCAG-AA-kontrast (≥ 4,5:1) mot sina bakgrunder.
+ROW_FG_MATCH_UNCERTAIN = ("#ffd9d6", "#8a1a12")
+ROW_FG_MATCH_SECURE = ("#d9f4e2", "#14532d")
+
 
 def _supplier_monogram(name: str) -> str:
     """Logotyp-monom för leverantörsvalet: första bokstäverna ur
@@ -1534,33 +1542,6 @@ class ScanImportView(QWidget):
     def _toggle_watch_auto(self, state) -> None:
         if self._watch:
             self._watch.set_auto_create(bool(state))
-
-    def _maybe_year_sort(self, row: dict, path: str) -> str:
-        """Årssortera ett original vars faktura just registrerats
-        ur granskningen — samma årsmapp (<år>/ under den bevakade
-        mappen) som auto-registreringar får. Parkerade rörs inte;
-        sker bara när fakturan faktiskt registreras och datumet
-        är läsbart. Aldrig ett fel som stoppar registreringen."""
-        try:
-            from pathlib import Path as _P
-
-            from invoices_helpers import (
-                invoice_year, read_watch_folders, sort_into_year_folder,
-            )
-
-            year = invoice_year(row.get("date", ""))
-            if not year:
-                return path
-            cfg = _P(self._templates_file()).parent / "watch_folders.json"
-            for entry in read_watch_folders(cfg):
-                moved = sort_into_year_folder(
-                    str(path), str(entry.get("path", "")), year
-                )
-                if moved != str(path):
-                    return moved
-        except Exception:
-            pass
-        return path
 
     def _on_watch_invoice(self, row: dict, path: str) -> None:
         """Ny komplett faktura från bevakad mapp → registrera direkt.
@@ -3336,6 +3317,11 @@ class ScanImportView(QWidget):
                     else ROW_BG_MATCH_SECURE
                 )
                 _bg = QColor(_pair[0] if self._dark else _pair[1])
+                _fg_pair = (
+                    ROW_FG_MATCH_UNCERTAIN if _state == "uncertain"
+                    else ROW_FG_MATCH_SECURE
+                )
+                _fg = QColor(_fg_pair[0] if self._dark else _fg_pair[1])
                 _tip = (
                     tr("scan.match_uncertain_status")
                     if _state == "uncertain"
@@ -3345,6 +3331,10 @@ class ScanImportView(QWidget):
                     _cell = self._tbl.item(r, _c)
                     if _cell is not None:
                         _cell.setBackground(_bg)
+                        # Explicit textfärg parad med radbakgrunden —
+                        # raden ska gå att läsa även omarkerad, i
+                        # båda temana (aldrig palettens textfärg).
+                        _cell.setForeground(_fg)
                         _cell.setToolTip(_tip)
         self._update_sum()
         self._tbl.resizeRowsToContents()
@@ -3599,11 +3589,10 @@ class ScanImportView(QWidget):
             if dlg.exec() == QDialogAccepted:
                 data = dlg.get_data()
                 if row.get("_path"):
-                    moved = self._maybe_year_sort(
-                        row, str(row["_path"])
-                    )
-                    if moved != str(row["_path"]):
-                        data["attachment"] = moved
+                    # Originalet flyttas ALDRIG — det ligger kvar
+                    # exakt där det ligger (även i bevakad mapp)
+                    # och fakturans sökväg pekar dit.
+                    data["attachment"] = str(row["_path"])
                 self._save_invoice(data, source=row.get("file", ""))
                 self._rows.pop(idxs[0])
                 self._refresh_table()
@@ -3755,10 +3744,9 @@ class ScanImportView(QWidget):
                     f"'Öppna i fakturadialogen'.",
                 )
                 continue
-            if row.get("_path"):
-                row["_path"] = self._maybe_year_sort(
-                    row, str(row.get("_path", ""))
-                )
+            # Originalet flyttas ALDRIG vid registrering —
+            # row["_path"] (fakturans sökväg) pekar kvar på
+            # filen exakt där den ligger.
             data = self._invoice_data_from_row(row)
             if self._save_invoice(data, source=row.get("file", "")):
                 created += 1
@@ -3855,10 +3843,17 @@ class ScanImportView(QWidget):
     def apply_theme(self, theme: dict) -> None:
         """Anpassar små detaljer efter aktivt tema."""
         try:
-            bg = str(theme.get("bg", "#0d1117")).lower()
-            self._dark = bg not in (
-                "#ffffff", "#f6f8fa", "#eaeef2", "#f5f7fa",
-            )
+            # Samma temadetektering som övriga vyer: temats namn
+            # ("dark"/"light") i första hand, bakgrundens luminans
+            # som reserv. (En hårdkodad lista över ljusa bakgrunder
+            # kände förr inte igen det ljusa temat #f4f1ea — då
+            # målades mörka radbakgrunder med mörk text i ljust läge
+            # och raderna gick inte att läsa omarkerade.)
+            try:
+                from ui.invoices_helpers import is_dark_theme
+            except ImportError:
+                from invoices_helpers import is_dark_theme  # type: ignore
+            self._dark = is_dark_theme(theme)
         except Exception:
             pass
         # Radfärgerna (röd osäker / grön säker) följer temat —

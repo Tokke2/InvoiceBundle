@@ -3399,19 +3399,11 @@ class InvoicesView(QWidget):
         # betalningsdatum gäller alla delfiler i exporten, och
         # historik + arkivering sker per fil. Misslyckas en delfil
         # stannar exporten där — resten förblir oexporterat.
-        # Original från BEVAKADE mappar flyttas till
-        # <mapp>/Arkiv/<exportår>/ i samband med exporten och
-        # fakturorna pekas om dit i registret (JSON).
-        try:
-            _data_dir = Path(self._app.settings.get("db_path", "data"))
-        except Exception:
-            _data_dir = Path("data")
-        if not _data_dir.is_absolute():
-            _data_dir = Path(__file__).parent.parent / _data_dir
-
-        # Originalen flyttas bara EN gång i livet — till
-        # årsmappen (<år>/) vid registrering. Vid export stannar
-        # de där de är; betalda spåras i registret (JSON).
+        # Originalen flyttas ALDRIG — inte vid registrering och
+        # inte vid export. De ligger kvar exakt där användaren
+        # lagt dem (t.ex. i bevakade mappen); bara en KOPIA följer
+        # med i PDF:en, och bara registerposten (JSON) flyttas —
+        # som Betald till leverantörens historik i data/betalda/.
 
         chunks = chunk_export_rows(exportable)
         made_files: list[str] = []

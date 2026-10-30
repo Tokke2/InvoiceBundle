@@ -178,3 +178,86 @@ def test_row_colors_follow_light_theme(tmp_path):
         assert _bg_names(view, 1)[0] == ROW_BG_MATCH_SECURE[0]
     finally:
         view.close()
+
+
+def _fg_names(view, r):
+    from ui.scan_import_view import COLUMNS
+    return [
+        view._tbl.item(r, c).foreground().color().name()
+        for c in range(len(COLUMNS))
+    ]
+
+
+def test_row_colors_follow_the_real_app_themes(tmp_path):
+    """Regression: appens RIKTIGA ljusa tema (name=light,
+    bg=#f4f1ea) får aldrig klassas som mörkt — då målades mörka
+    radbakgrunder med palettens mörka text och raderna gick inte
+    att läsa förrän de markerades."""
+    _qapp()
+    from ui.scan_import_view import (
+        ROW_BG_MATCH_SECURE,
+        ROW_BG_MATCH_UNCERTAIN,
+        ROW_FG_MATCH_SECURE,
+        ROW_FG_MATCH_UNCERTAIN,
+        ScanImportView,
+    )
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        view._rows = [
+            _row(match_uncertain=True),
+            _row(supplier="Alpha AB"),
+        ]
+        view._refresh_table()
+
+        # Ljust tema exakt som huvudfönstret skickar det.
+        view.apply_theme({"name": "light", "bg": "#f4f1ea"})
+        assert view._dark is False
+        assert _bg_names(view, 0)[0] == ROW_BG_MATCH_UNCERTAIN[1]
+        assert _bg_names(view, 1)[0] == ROW_BG_MATCH_SECURE[1]
+        assert _fg_names(view, 0)[0] == ROW_FG_MATCH_UNCERTAIN[1]
+        assert _fg_names(view, 1)[0] == ROW_FG_MATCH_SECURE[1]
+
+        # Bara bakgrundsfärgen (inget namn) → luminansen avgör.
+        view.apply_theme({"bg": "#f4f1ea"})
+        assert view._dark is False
+
+        view.apply_theme({"name": "dark", "bg": "#0c1218"})
+        assert view._dark is True
+        assert _bg_names(view, 0)[0] == ROW_BG_MATCH_UNCERTAIN[0]
+        assert _bg_names(view, 1)[0] == ROW_BG_MATCH_SECURE[0]
+        assert _fg_names(view, 0)[0] == ROW_FG_MATCH_UNCERTAIN[0]
+        assert _fg_names(view, 1)[0] == ROW_FG_MATCH_SECURE[0]
+    finally:
+        view.close()
+
+
+def test_row_text_readable_without_selection_both_themes(tmp_path):
+    """Varje färgad rads text ska hålla WCAG-AA-kontrast (≥ 4,5:1)
+    mot radbakgrunden i BÅDA temana — läsbar utan markering."""
+    _qapp()
+    from ui.invoices_helpers import _contrast
+    from ui.scan_import_view import ScanImportView
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        view._rows = [
+            _row(match_uncertain=True),
+            _row(supplier="Alpha AB"),
+        ]
+        for theme in (
+            {"name": "light", "bg": "#f4f1ea"},
+            {"name": "dark", "bg": "#0c1218"},
+        ):
+            view.apply_theme(theme)
+            for r in (0, 1):
+                for bg, fg in zip(_bg_names(view, r), _fg_names(view, r)):
+                    assert _contrast(bg, fg) >= 4.5, (theme, bg, fg)
+    finally:
+        view.close()

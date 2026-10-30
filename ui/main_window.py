@@ -2499,8 +2499,8 @@ class MainWindow(QMainWindow):
                 continue
             # Exporterade = Betald + flytt till leverantörens fil
             # i data/betalda/ (Historik, dubblettskydd vid import).
-            # Originalet rörs inte vid export — det har redan sin
-            # plats i årsmappen (<år>/); betalda spåras i JSON.
+            # Originalet rörs inte vid export — det ligger kvar i
+            # bevakade mappen; betalda spåras i JSON.
             paid = 0
             _engine = getattr(self._app, "invoices", None)
             _ids = [

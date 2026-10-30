@@ -420,11 +420,14 @@ def test_watch_builtin_format_registers_without_teaching(tmp_path):
     assert ready[0]["template"]
 
 
-# ── Årssortering i bevakad mapp (<år>/ efter fakturadatum) ──────
-# Registrerade fakturors original får årsmapp; parkerade och
-# annat lämnas orört. Skanningen hittar även årsmapparna (så
-# en fil som lagts direkt i /2023/ behandlas), men Arkiv/
-# skannas aldrig om. Eftersortering vid skanning tar backlog.
+# ── Originalet ligger ALLTID kvar i bevakade mappen ───────────
+# Användarens regel (2026-10-30): originalfilen flyttas ALDRIG —
+# inte vid registrering, inte vid skanning, inte vid export.
+# Den ligger kvar exakt där den lagts; registrets sökväg pekar
+# dit och bara en KOPIA följer med i PDF-exporten, medan
+# JSON-posten blir Betald/historik. Skanningen hittar även
+# undermappar (t.ex. en fil användaren själv lagt i /2023/),
+# men Arkiv/ skannas aldrig om.
 
 class _YearApp(FakeApp):
     """FakeApp som kan ta emot registry-uppdateringar."""
@@ -465,30 +468,31 @@ def _year_manager(tmp_path, app):
     return mgr, folder
 
 
-def test_watch_year_sort_new_invoice(tmp_path):
-    """Ny registrerad faktura → originalet i <år>/ direkt."""
+def test_watch_original_stays_new_invoice(tmp_path):
+    """Ny registrerad faktura → originalet ligger KVAR i
+    bevakade mappen, exakt där det lagts (ingen årsmapp)."""
     _qapp()
     app = _YearApp()
     mgr, folder = _year_manager(tmp_path, app)
     ready = []
     mgr.invoice_ready.connect(lambda row, path: ready.append((row, path)))
     _persist_emitted(mgr)
-    (folder / "f2023.pdf").write_bytes(b"%PDF-2023")
+    src = folder / "f2023.pdf"
+    src.write_bytes(b"%PDF-2023")
     mgr.scan_all()
     assert len(ready) == 1
     row, emitted = ready[0]
-    target = folder / "2023" / "f2023.pdf"
-    assert target.exists()
-    assert not (folder / "f2023.pdf").exists()
-    assert emitted == str(target)
-    assert row["_path"] == str(target)
-    # Hash-skyddet gäller även i årsmappen (ingen dubblett)
+    assert src.exists()
+    assert not (folder / "2023").exists()
+    assert emitted == str(src)
+    assert row["_path"] == str(src)
+    # Hash-skyddet gäller fortfarande (ingen dubblett)
     mgr.scan_all()
     assert len(ready) == 1
 
 
-def test_watch_year_sort_parked_untouched(tmp_path):
-    """Parkerade (olärd leverantör) flyttas INTE av sorteringen."""
+def test_watch_parked_untouched(tmp_path):
+    """Parkerade (olärd leverantör) lämnas alltid orörda."""
     _qapp()
     from ui.watch_folders import WatchManager
 
@@ -510,9 +514,9 @@ def test_watch_year_sort_parked_untouched(tmp_path):
     assert not (folder / "2023").exists()
 
 
-def test_watch_year_sort_backlog_registered(tmp_path):
-    """Redan registrerat original överst → eftersorteras och
-    registrets sökväg pekas om."""
+def test_watch_backlog_registered_never_moved(tmp_path):
+    """Redan registrerat original i bevakade mappen flyttas
+    ALDRIG vid skanning — sökvägen i registret rörs inte."""
     _qapp()
     src = tmp_path / "PilkingtonIn" / "gammal.pdf"
     inv = {
@@ -526,20 +530,19 @@ def test_watch_year_sort_backlog_registered(tmp_path):
     # lägg den nu och skanna igen.
     src.write_bytes(b"%PDF-old")
     mgr.scan_all()
-    target = folder / "2023" / "gammal.pdf"
-    assert target.exists()
-    assert not src.exists()
-    assert inv["attachment"] == str(target)
-    assert app.updated == [("7", {"attachment": str(target)})]
-    # Andra svepet: inget mer att göra (idempotent)
-    app.updated.clear()
+    assert src.exists()
+    assert not (folder / "2023").exists()
+    assert inv["attachment"] == str(src)
+    assert app.updated == []
+    # Andra svepet: fortfarande ingenting (idempotent)
     mgr.scan_all()
+    assert src.exists()
     assert app.updated == []
 
 
-def test_watch_year_sort_path_separator_variants(tmp_path):
+def test_watch_backlog_separator_variant_never_moved(tmp_path):
     """Registrets sökväg kan ha / där skanningen bygger \ —
-    årssorteringen ska ändå hitta originalet i mappen."""
+    originalet i bevakade mappen flyttas ändå aldrig."""
     _qapp()
     src = tmp_path / "PilkingtonIn" / "gammal.pdf"
     inv = {
@@ -552,9 +555,10 @@ def test_watch_year_sort_path_separator_variants(tmp_path):
     mgr, folder = _year_manager(tmp_path, app)
     src.write_bytes(b"%PDF-old")
     mgr.scan_all()
-    target = folder / "2023" / "gammal.pdf"
-    assert target.exists()
-    assert inv["attachment"] == str(target)
+    assert src.exists()
+    assert not (folder / "2023").exists()
+    assert inv["attachment"] == str(src).replace("\\", "/")
+    assert app.updated == []
 
 
 def test_watch_recursive_scan_and_arkiv_skipped(tmp_path):
@@ -572,15 +576,15 @@ def test_watch_recursive_scan_and_arkiv_skipped(tmp_path):
     (arkiv / "betald.pdf").write_bytes(b"%PDF-arkiv")
     mgr.scan_all()
     assert len(ready) == 1
-    # Årssorteringen flyttar inte filen igen (redan 2023) —
-    # den STANNAR i 2023/, registreras, ingen ny dubblett
+    # Filen användaren själv lagt i 2023/ STANNAR där —
+    # den registreras därifrån och flyttas aldrig, ingen dubblett
     assert ready[0][1] == str(folder / "2023" / "direkt.pdf")
     mgr.scan_all()
     assert len(ready) == 1
 
 
-def test_watch_year_sort_no_date_stays_top(tmp_path):
-    """Oläsbart år → originalet ligger kvar överst, orört."""
+def test_watch_no_date_stays_top(tmp_path):
+    """Utan läsbart datum ligger originalet kvar överst, orört."""
     _qapp()
     from ui.watch_folders import WatchManager
 
@@ -766,9 +770,9 @@ def test_watch_heals_import_marked_file_without_invoice(tmp_path):
     assert mgr.last_scan_stats["imported"] == 1
 
     # Men: finns en faktura i registret som pekar på originalet
-    # (årssorterat vid registreringen) ska filen lämnas ifred
-    final = folder / "2026" / "f1.pdf"
-    assert final.is_file()  # årssorterad vid importen
+    # (som ligger kvar i bevakade mappen) ska filen lämnas ifred
+    final = folder / "f1.pdf"
+    assert final.is_file()  # originalet flyttas aldrig
     mgr2, _f2 = _manager(
         tmp_path / "b",
         invoices=[{"supplier": "Pilkington",

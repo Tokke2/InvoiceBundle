@@ -74,16 +74,6 @@ def supported_file(path: Path) -> bool:
     return Path(path).suffix.lower() in SUPPORTED_SUFFIXES
 
 
-def _invoice_year(date_str) -> str:
-    """
-    Året ur fakturadatumet ("2023-06-16" → "2023"); "" om det
-    saknas eller inte ser rimligt ut. Ingen gissning härifrån:
-    utan år får originalet ligga kvar överst i mappen.
-    """
-    m = re.match(r"^(?:19|20)\d{2}", str(date_str or "").strip())
-    return str(date_str or "").strip()[:4] if m else ""
-
-
 def supported_invoice_files(folder) -> list[Path]:
     """
     PDF/bild-filerna i en (bevakad) mapp — även i årsmappar
@@ -175,7 +165,7 @@ def _norm_path_key(path: str) -> str:
     """Sökväg som jämförelsenyckel: "D:/gewgg/f.pdf" och
     "D:\\gewgg\\f.pdf" är samma fil. Registrets sökvägar kan
     komma från fil dialogs (/) medan skanningen bygger dem med
-    OS-separator — utan normalisering missar årssorteringen
+    OS-separator — utan normalisering missar jämförelserna
     tyst fast originalet ligger mitt i den bevakade mappen.
     Båda snedstrecksslagen slås ihop på alla plattformar (inte
     bara Windows), så även felsökningsdiagnosens jämförelser
@@ -1028,7 +1018,6 @@ class WatchManager(QObject):
                     folder, entry.get("supplier", "?"),
                 )
             return
-        self._sort_registered_backlog(folder)
         si = None
         for path in supported_invoice_files(folder):
             if not path.is_file():
@@ -1087,59 +1076,6 @@ class WatchManager(QObject):
             if si is None:
                 si = self._scan_module()
             self._process_file(si, entry, path, digest)
-
-    def _sort_registered_backlog(self, folder: Path) -> None:
-        """
-        Eftersortering: redan registrerade original som
-        fortfarande ligger direkt i den bevakade mappen flyttas
-        till sin årsmapp (<år>/ efter fakturadatum) och registrets
-        sökväg pekas om. Parkerade rörs inte — sorteringen
-        gäller bara registrerade fakturor, precis som valt.
-        Kastar aldrig: ett sorteringsfel får inte stoppa
-        skanningen.
-        """
-        try:
-            invoices = self._invoices()
-            if not invoices:
-                return
-            by_path = {
-                _norm_path_key(
-                    str(inv.get("attachment", "") or "")
-                ): inv
-                for inv in invoices
-                if str(inv.get("attachment", "") or "")
-            }
-            if not by_path:
-                return
-            from invoices_helpers import sort_into_year_folder
-
-            for child in sorted(folder.iterdir()):
-                if not child.is_file() or not supported_file(child):
-                    continue
-                inv = by_path.get(_norm_path_key(str(child)))
-                if inv is None:
-                    continue
-                year = _invoice_year(inv.get("date", ""))
-                if not year:
-                    continue
-                new_path = sort_into_year_folder(
-                    str(child), str(folder), year
-                )
-                if new_path == str(child):
-                    continue
-                try:
-                    self._app.update_invoice(
-                        inv["id"], {"attachment": new_path}
-                    )
-                    inv["attachment"] = new_path
-                    by_path[new_path] = inv
-                except Exception as exc:
-                    log.warning(
-                        "SCAN_WATCH årssortering registry-update"
-                        " %s: %s", child.name, exc
-                    )
-        except Exception as exc:
-            log.warning("SCAN_WATCH årssortering: %s", exc)
 
     def _parse_file(
         self, si: Any, entry: dict, path: Path
@@ -1480,20 +1416,13 @@ class WatchManager(QObject):
             )
             return
 
-        # Årssortering: det nya originalet får sin årsmapp
-        # direkt (<bevakad mapp>/<fakturaår>/) — innan raden
-        # ens når registret, så alla sökvägar pekar rätt från
-        # början. Utan läsbart år ligger det kvar överst.
+        # Originalet ligger ALLTID kvar exakt där användaren
+        # lagt det i den bevakade mappen — det flyttas aldrig
+        # (ingen årssortering). Registrets sökväg pekar dit,
+        # och vid PDF-export följer bara en KOPIA med; även
+        # efter export (fakturan Betald i historiken) ligger
+        # originalfilen kvar orörd.
         final_path = path
-        year = _invoice_year(parsed.get("date", ""))
-        if year:
-            from invoices_helpers import sort_into_year_folder
-
-            moved = sort_into_year_folder(
-                str(path), str(Path(str(entry.get("path", "")))), year
-            )
-            if moved != str(path):
-                final_path = Path(moved)
 
         row = {
             **parsed,

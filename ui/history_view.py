@@ -11,8 +11,8 @@ invoices.json: varje leverantör har en egen fil i data/betalda/
 * Vid import/skanning söks BÅDA registren igenom (motorns all()),
   så en redan betald faktura känns igen som dubblett och
   registreras aldrig en gång till.
-* Originalen ligger kvar där de alltid legat (bevakad mapp/
-  årsmapp) — det som flyttats hit är bara registerposten.
+* Originalen ligger kvar där de alltid legat (t.ex. i den
+  bevakade mappen) — det som flyttats hit är bara registerposten.
 """
 from __future__ import annotations
 

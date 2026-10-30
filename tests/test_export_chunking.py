@@ -277,11 +277,11 @@ def test_export_4_rows_keeps_single_plain_filename(
         tmp_path, monkeypatch):
     import json
 
-    # En av fakturorna har originalet i sin årsmapp (2023/)
-    # under en bevakad mapp. Exporten får ALDRIG flytta
-    # originalet igen — det flyttas bara EN gång i livet,
-    # till årsmappen vid registrering. Betalt-spårning sker i
-    # registret (JSON), inte i mappstrukturen.
+    # En av fakturorna har originalet i en undermapp (2023/)
+    # under en bevakad mapp — där användaren själv lagt det.
+    # Exporten får ALDRIG flytta originalet; det ligger kvar
+    # exakt där det ligger. Betalt-spårning sker i registret
+    # (JSON), inte i mappstrukturen.
     wf = tmp_path / "PilkingtonIn"
     (wf / "2023").mkdir(parents=True)
     src = wf / "2023" / "fk-1001.pdf"
@@ -309,6 +309,48 @@ def test_export_4_rows_keeps_single_plain_filename(
     # Originalet ligger KVAR i årsmappen, orört; inga
     # sökvägsuppdateringar alls vid exporten
     assert src.exists()
+    assert not (wf / "Arkiv").exists()
+    att_updates = [
+        (rid, f) for rid, f in app.archived if f.get("attachment")
+    ]
+    assert att_updates == []
+
+
+def test_export_watched_folder_original_stays_put(tmp_path, monkeypatch):
+    """Användarregel 2026-10-30: originalet i BEVAKADE mappen
+    ligger kvar exakt där vid export — bara en kopia följer med
+    i PDF:en. JSON-posten blir samtidigt Betald/historik."""
+    import json
+
+    wf = tmp_path / "PilkingtonIn"
+    wf.mkdir(parents=True)
+    src = wf / "fk-2001.pdf"
+    src.write_bytes(b"%PDF-original")
+    (tmp_path / "watch_folders.json").write_text(
+        json.dumps({"folders": [
+            {"supplier": "Pilkington", "path": str(wf)}
+        ]}),
+        encoding="utf-8",
+    )
+
+    rows = [_row(1)]
+    rows[0]["attachment"] = str(src)
+    app, exporter, view = _run_export(tmp_path, monkeypatch, rows)
+
+    # Exporten kördes med original påslaget (kopian i PDF:en)
+    assert len(exporter.calls) == 1
+    assert exporter.calls[0][2]["include_originals"] is True
+    # JSON-posten sparades som Betald/exporterad …
+    status_updates = [
+        (rid, f) for rid, f in app.archived
+        if f.get("status") == "Betald"
+    ]
+    assert len(status_updates) == 1
+    # … men originalfilen ligger kvar i bevakade mappen, orörd:
+    # ingen flytt, ingen årsmapp, inget Arkiv, ingen ny sökväg.
+    assert src.exists()
+    assert src.read_bytes() == b"%PDF-original"
+    assert not (wf / "2023").exists()
     assert not (wf / "Arkiv").exists()
     att_updates = [
         (rid, f) for rid, f in app.archived if f.get("attachment")
