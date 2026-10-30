@@ -137,7 +137,6 @@ PDF_LABELS: dict[str, dict[str, str]] = {
         "exported": "Exporterad", "payment_date": "BETALNINGSDATUM:",
         "rounding": "avrundning",
         "terms": "Betalvillkor", "contact": "Kontaktperson",
-        "attachment_divider": "Originalfaktura",
         "email": "E-post", "phone": "Telefon", "address": "Adress",
         "days": "dagar", "rows": "Rader", "suppliers": "Leverantorer",
     },
@@ -154,7 +153,6 @@ PDF_LABELS: dict[str, dict[str, str]] = {
         "exported": "Exported", "payment_date": "PAYMENT DATE:",
         "rounding": "rounding",
         "terms": "Payment terms", "contact": "Contact person",
-        "attachment_divider": "Original invoice",
         "email": "E-mail", "phone": "Phone", "address": "Address",
         "days": "days", "rows": "Rows", "suppliers": "Suppliers",
     },
@@ -804,59 +802,18 @@ class InvoiceNumberGuard:
 # ═════════════════════════════════════════════════════════════════════
 
 
-def _divider_page_bytes(
-    band: str, text: str, note: str = "",
-) -> bytes | None:
-    """
-    Avdelarsida före ett original — bytes, eller None utan reportlab.
-
-    Vit sida med marinblått band + guldlinje (utskriftsvänligt;
-    tidigare helnavy sida med en "📎"-emoji som blev "?" i PDF:en).
-    *band* = rubrik (t.ex. "Originalfaktura"), *text* = leverantör ·
-    fakturanr · filnamn, *note* = sidkontext (t.ex. "2 / 5").
-    """
-    try:
-        import io
-
-        from reportlab.lib.pagesizes import A4
-        from reportlab.pdfgen import canvas
-
-        buf = io.BytesIO()
-        c = canvas.Canvas(buf, pagesize=A4)
-        w, h = A4
-        c.setFillColorRGB(0.07, 0.16, 0.29)      # marinblått band
-        c.rect(0, h - 84, w, 84, fill=1, stroke=0)
-        c.setFillColorRGB(0.83, 0.63, 0.09)      # guldlinje
-        c.rect(0, h - 88, w, 4, fill=1, stroke=0)
-        c.setFillColorRGB(1, 1, 1)
-        c.setFont("Helvetica-Bold", 16)
-        c.drawString(48, h - 54, to_ascii(band))
-        body = text
-        prefix = f"{band}:"
-        if body.startswith(prefix):
-            body = body[len(prefix):].strip()
-        c.setFillColorRGB(0.07, 0.16, 0.29)
-        c.setFont("Helvetica-Bold", 12.5)
-        c.drawString(48, h - 140, to_ascii(truncate(body, 64)))
-        if note:
-            c.setFillColorRGB(0.29, 0.33, 0.41)
-            c.setFont("Helvetica-Bold", 11)
-            c.drawString(48, h - 166, to_ascii(note))
-        c.showPage()
-        c.save()
-        return buf.getvalue()
-    except Exception:
-        return None
-
-
 def merge_originals(
     base_pdf: Path,
     attachments: list,
-    divider_label: str = "Originalfaktura",
+    divider_label: str | None = None,
 ) -> dict:
     """
-    Lägger originalfakturorna EFTER huvud-PDF:en i samma fil:
-    avdelarsida + original (PDF-sidor direkt; bilder som helsidor).
+    Lägger originalfakturorna EFTER huvud-PDF:en i samma fil —
+    UTAN avdelarsidor (användarregel: avdelarsidan "Originalfaktura"
+    är mestadels tom och ska inte följa med). Originalets egna
+    sidor läggs direkt efter huvud-PDF:en (PDF-sidor direkt;
+    bilder som helsidor). *divider_label* accepteras fortfarande
+    för bakåtkompatibilitet men används inte längre.
     Returnerar {"included": n, "missing": m, "pages_added": p}.
     """
     result = {"included": 0, "missing": 0, "pages_added": 0}
@@ -877,18 +834,13 @@ def merge_originals(
 
     import io
 
-    total_att = len(attachments)
-    for att_idx, (label, raw_path) in enumerate(attachments):
+    for _label, raw_path in attachments:
         path = Path(str(raw_path))
         if not str(raw_path).strip() or not path.is_file():
             result["missing"] += 1
             continue
         pages_before = len(writer.pages)
         try:
-            divider = _divider_page_bytes(
-                divider_label, label, f"{att_idx + 1} / {total_att}")
-            if divider is not None:
-                writer.append(io.BytesIO(divider))
             suffix = path.suffix.lower()
             if suffix == ".pdf":
                 writer.append(str(path))
@@ -1301,7 +1253,10 @@ class PDFExporter:
             )
 
         # ── Bifoga originalfakturor — ALLTID (användarregel) ─────
-        # Originalfakturan ska ALLTID följa med i PDF-exporten.
+        # Originalfakturan ska ALLTID följa med i PDF-exporten,
+        # men UTAN avdelarsidor: den mestadels tomma "Original-
+        # faktura"-sidan ska inte följa med (användarregel), så
+        # originalets egna sidor läggs direkt efter huvud-PDF:en.
         # Parametern include_originals finns kvar för bakåtkompa-
         # tibilitet men kan inte längre stänga av bilagorna; fakturor
         # utan originalsökväg räknas som saknade så det syns i
@@ -1325,10 +1280,7 @@ class PDFExporter:
                 x for x in (who, candidate.name) if x
             )
             attachments.append((label, candidate))
-        merged = merge_originals(
-            file_path, attachments,
-            divider_label=self._t("attachment_divider"),
-        )
+        merged = merge_originals(file_path, attachments)
         result["attachments_included"] = merged["included"]
         result["attachments_missing"] = (
             merged["missing"] + len(missing_labels)

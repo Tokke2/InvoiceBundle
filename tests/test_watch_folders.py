@@ -205,7 +205,7 @@ def _base_pdf(path: Path) -> None:
     c.save()
 
 
-def test_merge_originals_appends_with_divider(tmp_path):
+def test_merge_originals_appends_without_divider(tmp_path):
     from PIL import Image
     from pypdf import PdfReader
     from plugins.pdf_export_helpers import merge_originals
@@ -217,8 +217,14 @@ def test_merge_originals_appends_with_divider(tmp_path):
         base, [("Pilkington · 9911 · orig.png", img)],
         "Originalfaktura",
     )
-    assert result == {"included": 1, "missing": 0, "pages_added": 2}
-    assert len(PdfReader(str(base)).pages) == 3  # bas+avdelare+bild
+    # Ingen avdelarsida: bara originalets egen sida läggs till
+    assert result == {"included": 1, "missing": 0, "pages_added": 1}
+    reader = PdfReader(str(base))
+    assert len(reader.pages) == 2  # bas+bild
+    all_text = "\n".join(
+        (p.extract_text() or "") for p in reader.pages
+    )
+    assert "Originalfaktura" not in all_text  # ingen avdelarsida
     saknas = merge_originals(
         base, [("x", tmp_path / "finns_inte.pdf")], "Originalfaktura"
     )
@@ -255,7 +261,8 @@ def test_exporter_include_originals_flag(tmp_path):
         payment_date="2026-09-15", mark_exported=False,
     )
     assert plain["success"] and plain["attachments_included"] == 1
-    assert len(PdfReader(plain["file_path"]).pages) == n_plain + 2
+    # Bara originalsidan — ingen avdelarsida före den
+    assert len(PdfReader(plain["file_path"]).pages) == n_plain + 1
     # Även ett uttryckligt False ignoreras — alltid med
     med = exporter.export_invoice_list(
         [dict(inv[0])], filename="export.pdf", ask_payment_date=False,
@@ -263,7 +270,7 @@ def test_exporter_include_originals_flag(tmp_path):
         include_originals=False,
     )
     assert med["success"] and med["attachments_included"] == 1
-    assert len(PdfReader(med["file_path"]).pages) == n_plain + 2
+    assert len(PdfReader(med["file_path"]).pages) == n_plain + 1
 
 
 def test_watch_untaught_supplier_parked_until_taught(tmp_path):
