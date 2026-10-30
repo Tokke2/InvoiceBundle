@@ -7,7 +7,7 @@ Reglerna (önskade uttryckligen):
   * EN exportfil får innehålla högst 10 fakturor — fler delas
     i flera filer (…-del1avN.pdf, …-del2avN.pdf, …), både vid
     manuell export och i autoexportens batcher.
-  * Originalfakturorna bifogas i PDF:en som standard.
+  * Originalfakturorna bifogas ALLTID i PDF:en (går inte stänga av).
 """
 from __future__ import annotations
 
@@ -99,21 +99,27 @@ def test_plan_batches_splits_supplier_over_ten():
     assert sorted(ids, key=int) == [str(i) for i in range(23)]
 
 
-# ── Original vid export: standard PÅ ────────────────────────────
+# ── Original vid export: ALLTID PÅ ──────────────────────────────
 
 def test_include_originals_default_on(tmp_path):
-    """Inställningen export_include_originals: PÅ om inget valts."""
+    """Originalfakturan följer ALLTID med (användarregel
+    2026-10-30) — inte ens en avstängd gammal inställning kan
+    stoppa det, och Inställningar-menyn har ingen avstängning."""
     _qapp()
     from ui.invoices_view import InvoicesView
 
     app = _export_app(tmp_path, [], _Exporter())
     view = InvoicesView(app)
     try:
-        assert view._include_originals() is True     # standard: på
+        assert view._include_originals() is True
         app.get_setting = lambda key, default=None: False
-        assert view._include_originals() is False    # går att stänga av
+        assert view._include_originals() is True  # går INTE stänga av
     finally:
         view.close()
+    mw_src = (PROJECT_DIR / "ui" / "main_window.py").read_text(
+        encoding="utf-8"
+    )
+    assert "_toggle_include_originals" not in mw_src
 
 
 # ── Manuell export: flera filer, arkivering per fil ─────────────

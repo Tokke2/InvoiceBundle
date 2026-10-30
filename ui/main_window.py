@@ -1818,17 +1818,9 @@ class MainWindow(QMainWindow):
         )
         m_set.addAction(self._act_minimize_to_tray)
 
-        self._act_include_originals = QAction(
-            tr("menu.include_originals"), self
-        )
-        self._act_include_originals.setCheckable(True)
-        self._act_include_originals.setChecked(
-            bool(self._settings.get("export_include_originals", True))
-        )
-        self._act_include_originals.triggered.connect(
-            self._toggle_include_originals
-        )
-        m_set.addAction(self._act_include_originals)
+        # OBS: ingen kryssruta för original i PDF-export längre —
+        # originalfakturan följer ALLTID med (användarregel
+        # 2026-10-30), så det finns inget att stänga av.
 
         self._act_update_auto = QAction(tr("update.auto_menu"), self)
         self._act_update_auto.setCheckable(True)
@@ -2697,13 +2689,6 @@ class MainWindow(QMainWindow):
                 )
             except Exception:
                 pass
-
-    def _toggle_include_originals(self, checked: bool) -> None:
-        """Kryss i Inställningar-menyn: original i betal-PDF:en."""
-        try:
-            self._settings.set("export_include_originals", checked)
-        except Exception as exc:
-            log.warning("_toggle_include_originals: %s", exc)
 
     def _toggle_close_to_tray(self, checked: bool) -> None:
         """Kryssruta: göm till tray vid kryss."""

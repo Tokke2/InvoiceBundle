@@ -1144,7 +1144,9 @@ class PDFExporter:
         session_due_date: str = "",
         ask_payment_date: bool = True,
         parent_widget: Any = None,
-        include_originals: bool = False,
+        # Ignoreras numera: original bifogas ALLTID (användarregel
+        # 2026-10-30). Behålls för bakåtkompatibla anrop.
+        include_originals: bool = True,
     ) -> dict[str, Any]:
         self._refresh_lang()
         """
@@ -1298,33 +1300,52 @@ class PDFExporter:
                 effective_payment_date,   # ← betalningsdatum lagras
             )
 
-        # ── Bifoga originalfakturor (om valt) ─────────────────────
-        if include_originals and self._has_rl:
-            attachments = []
-            for inv in invoices:
-                raw = str(inv.get("attachment", "") or "").strip()
-                if not raw:
-                    continue
-                candidate = Path(raw)
-                if not candidate.is_absolute():
-                    candidate = APP_ROOT / candidate
-                label = " · ".join(x for x in (
-                    str(inv.get("supplier", "")),
-                    str(inv.get("invoice_number", "")),
-                    candidate.name,
-                ) if x)
-                attachments.append((label, candidate))
-            merged = merge_originals(
-                file_path, attachments,
-                divider_label=self._t("attachment_divider"),
+        # ── Bifoga originalfakturor — ALLTID (användarregel) ─────
+        # Originalfakturan ska ALLTID följa med i PDF-exporten.
+        # Parametern include_originals finns kvar för bakåtkompa-
+        # tibilitet men kan inte längre stänga av bilagorna; fakturor
+        # utan originalsökväg räknas som saknade så det syns i
+        # resultatet i stället för att tyst exporteras utan original.
+        attachments = []
+        missing_labels: list[str] = []
+        for inv in invoices:
+            raw = str(inv.get("attachment", "") or "").strip()
+            who = " · ".join(x for x in (
+                str(inv.get("supplier", "")),
+                str(inv.get("invoice_number", "")),
+            ) if x)
+            if not raw:
+                if who:
+                    missing_labels.append(who)
+                continue
+            candidate = Path(raw)
+            if not candidate.is_absolute():
+                candidate = APP_ROOT / candidate
+            label = " · ".join(
+                x for x in (who, candidate.name) if x
             )
-            result["attachments_included"] = merged["included"]
-            result["attachments_missing"] = merged["missing"]
-            if merged["included"]:
-                log.info(
-                    "PDF: %d original bifogade (+%d sidor)",
-                    merged["included"], merged["pages_added"],
-                )
+            attachments.append((label, candidate))
+        merged = merge_originals(
+            file_path, attachments,
+            divider_label=self._t("attachment_divider"),
+        )
+        result["attachments_included"] = merged["included"]
+        result["attachments_missing"] = (
+            merged["missing"] + len(missing_labels)
+        )
+        if missing_labels:
+            result["attachments_missing_labels"] = missing_labels
+        if merged["included"]:
+            log.info(
+                "PDF: %d original bifogade (+%d sidor)",
+                merged["included"], merged["pages_added"],
+            )
+        elif attachments:
+            log.warning(
+                "PDF: %d original kunde INTE bifogas (saknas på disk "
+                "eller pypdf saknas) — exporten gick ändå igenom",
+                len(attachments),
+            )
 
         result.update({
             "success":           True,

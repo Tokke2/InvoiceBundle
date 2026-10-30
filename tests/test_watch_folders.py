@@ -226,6 +226,9 @@ def test_merge_originals_appends_with_divider(tmp_path):
 
 
 def test_exporter_include_originals_flag(tmp_path):
+    """Originalfakturan följer ALLTID med i PDF-exporten
+    (användarregel 2026-10-30) — även utan flagga och även med
+    include_originals=False; det går inte att stänga av."""
     from PIL import Image
     from pypdf import PdfReader
     from plugins.pdf_export_helpers import PDFExporter
@@ -237,18 +240,27 @@ def test_exporter_include_originals_flag(tmp_path):
         "due_date": "2026-10-01", "attachment": str(img),
     }]
     exporter = PDFExporter(tmp_path, tmp_path)
+    # Baslinje: faktura UTAN original → inga bilagor, färre sidor
+    utan = exporter.export_invoice_list(
+        [dict(inv[0], attachment="")], filename="export.pdf",
+        ask_payment_date=False, payment_date="2026-09-15",
+        mark_exported=False,
+    )
+    assert utan["success"]
+    n_plain = len(PdfReader(utan["file_path"]).pages)
+    assert utan["attachments_missing"] == 1  # saknat original syns
+    # Utan flagga: originalet följer ändå ALLTID med
     plain = exporter.export_invoice_list(
         [dict(inv[0])], filename="export.pdf", ask_payment_date=False,
         payment_date="2026-09-15", mark_exported=False,
     )
-    assert plain["success"]
-    pdf_path = plain["file_path"]
-    n_plain = len(PdfReader(pdf_path).pages)
-    assert not plain.get("attachments_included")
+    assert plain["success"] and plain["attachments_included"] == 1
+    assert len(PdfReader(plain["file_path"]).pages) == n_plain + 2
+    # Även ett uttryckligt False ignoreras — alltid med
     med = exporter.export_invoice_list(
         [dict(inv[0])], filename="export.pdf", ask_payment_date=False,
         payment_date="2026-09-15", mark_exported=False,
-        include_originals=True,
+        include_originals=False,
     )
     assert med["success"] and med["attachments_included"] == 1
     assert len(PdfReader(med["file_path"]).pages) == n_plain + 2

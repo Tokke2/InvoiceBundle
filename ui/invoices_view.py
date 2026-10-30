@@ -1093,22 +1093,15 @@ class InvoicesView(QWidget):
         self._apply_table_selection()
 
     def _include_originals(self) -> bool:
-        """Inställningen export_include_originals (standard: PÅ —
-        originalen ska följa med i betal-PDF:en)."""
-        try:
-            if hasattr(self._app, "get_setting"):
-                return bool(
-                    self._app.get_setting(
-                        "export_include_originals", True
-                    )
-                )
-            return bool(
-                self._app.settings.get(
-                    "export_include_originals", True
-                )
-            )
-        except Exception:
-            return False
+        """Originalen följer ALLTID med i betal-PDF:en.
+
+        Användarregel (2026-10-30): originalfakturan ska alltid
+        följa med i PDF-exporten. Den gamla inställningen
+        export_include_originals kan inte längre stänga av det —
+        exportmotorn bifogar alltid och rapporterar saknade
+        original i stället för att tyst hoppa över dem.
+        """
+        return True
 
     def _update_export_buttons(self) -> None:
         """Uppdaterar exportknappar (alla/markerade), markerings-
