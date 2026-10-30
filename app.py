@@ -1128,8 +1128,10 @@ class AutostartManager:
 
     Båda metoderna startar gömt (--minimized → pythonw på Windows).
 
-    Windows : HKCU Run-nyckel (direct: pythonw main.pyw;
-              launcher: wscript → start_hidden.vbs)
+    Windows : Autostart-mappens genväg Fakturabunten.lnk med
+              app_icon.ico (aldrig pythonw:s Python-ikon i Start-
+              listan). Run-nyckeln används bara som reserv och
+              rensas när genvägen finns.
     Linux   : ~/.config/autostart/Fakturabunten.desktop (Path=)
     macOS   : ~/Library/LaunchAgents/com.fakturabunten.plist
               (WorkingDirectory)
@@ -1475,6 +1477,12 @@ class AutostartManager:
     def get_registered_command(self) -> str:
         if CURRENT_PLATFORM != "windows":
             return ""
+        # Med genväg som post är det byggkommandot som gäller.
+        try:
+            if self._startup_shortcut_path().exists():
+                return self.build_command()
+        except Exception:
+            pass
         try:
             import winreg
 
@@ -1641,6 +1649,13 @@ class AutostartManager:
             self._write_launcher()
 
         if CURRENT_PLATFORM == "windows":
+            # Gammal registerpost (pythonw/Python-ikonen) flyttas till
+            # genvägen med appens egen ikon vid första kontrollen.
+            if not self._startup_shortcut_path().exists():
+                log.info(
+                    "AUTOSTART: flyttar posten till genväg med appens ikon"
+                )
+                return self._win_set(True)
             expected = self.build_command()
             current = self.get_registered_command()
             if current != expected:
@@ -1681,6 +1696,12 @@ class AutostartManager:
     # ── Windows ──────────────────────────────────────────────────────────
 
     def _win_check(self) -> bool:
+        # Genvägen i Autostart-mappen räknas först (huvudvägen).
+        try:
+            if self._startup_shortcut_path().exists():
+                return True
+        except Exception:
+            pass
         try:
             import winreg
 
@@ -1700,6 +1721,88 @@ class AutostartManager:
         except Exception:
             return False
 
+    # ── Windows: genväg i Autostart-mappen (egen ikon) ────────────────
+    #
+    # En Run-registerpost som pekar på pythonw.exe visas i Windows
+    # Start-lista/aktivitetshanteraren som "Python" med ormloggan.
+    # En genväg (.lnk) i användarens Autostart-mapp bär i stället
+    # app_icon.ico och namnet Fakturabunten — appens egen ikon överallt.
+
+    def _startup_folder(self) -> Path:
+        """%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup."""
+        appdata = os.environ.get("APPDATA", "")
+        base = (
+            Path(appdata) if appdata
+            else Path.home() / "AppData" / "Roaming"
+        )
+        return (
+            base / "Microsoft" / "Windows" / "Start Menu"
+            / "Programs" / "Startup"
+        )
+
+    def _startup_shortcut_path(self) -> Path:
+        return self._startup_folder() / f"{self._app_name}.lnk"
+
+    def _shortcut_target(self) -> tuple[str, str]:
+        """(målprogram, argument) för autostart-genvägen."""
+        if self.resolved_method() == "launcher":
+            return (
+                self._wscript_exe(),
+                f'//nologo //B "{self._launcher_path()}"',
+            )
+        if self._main_py:
+            return self._python_exe, f'"{self._main_py}" --minimized'
+        return self._python_exe, "--minimized"
+
+    def _shortcut_powershell(self) -> str:
+        """PowerShell som skapar genvägen — med APPENS ikon, aldrig pyw:s."""
+        target, args = self._shortcut_target()
+        lnk = self._startup_shortcut_path()
+        ico = BASE_DIR / "app_icon.ico"
+        return (
+            "$w = New-Object -ComObject WScript.Shell; "
+            f"$s = $w.CreateShortcut('{lnk}'); "
+            f"$s.TargetPath = '{target}'; "
+            f"$s.Arguments = '{args}'; "
+            f"$s.WorkingDirectory = '{BASE_DIR}'; "
+            f"$s.IconLocation = '{ico},0'; "
+            "$s.WindowStyle = 7; "
+            f"$s.Description = '{self._app_name}'; "
+            "$s.Save()"
+        )
+
+    def _write_startup_shortcut(self) -> bool:
+        """Skapar genvägen. True bara om .lnk verkligen finns efteråt."""
+        lnk = self._startup_shortcut_path()
+        try:
+            _ensure_dir(lnk.parent)
+            import subprocess
+
+            subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-ExecutionPolicy",
+                    "Bypass", "-Command", self._shortcut_powershell(),
+                ],
+                cwd=str(BASE_DIR),
+                check=False,
+                timeout=30,
+                capture_output=True,
+                # PowerShell är ett konsolprogram — inget blinkande fönster.
+                creationflags=getattr(
+                    subprocess, "CREATE_NO_WINDOW", 0
+                ),
+            )
+            return lnk.exists()
+        except Exception as exc:
+            log.warning("Autostart-genväg kunde inte skapas: %s", exc)
+            return False
+
+    def _remove_startup_shortcut(self) -> None:
+        try:
+            self._startup_shortcut_path().unlink(missing_ok=True)
+        except Exception as exc:
+            log.warning("Kunde inte ta bort autostart-genväg: %s", exc)
+
     def _win_set(self, enable: bool) -> bool:
         try:
             import winreg
@@ -1713,6 +1816,21 @@ class AutostartManager:
                     winreg.KEY_SET_VALUE,
                 )
                 if enable:
+                    # FÖRSTAHANDSVAL: genväg i Autostart-mappen med
+                    # appens egen ikon — ingen pythonw/Python-ikon i
+                    # Start-listan. Run-värdet rensas alltid så appen
+                    # aldrig startar dubbelt.
+                    if self._write_startup_shortcut():
+                        try:
+                            winreg.DeleteValue(key, self._app_name)
+                        except Exception:
+                            pass
+                        log.info(
+                            "Windows autostart: genväg %s (egen ikon)",
+                            self._startup_shortcut_path(),
+                        )
+                        return True
+                    # Reservväg (t.ex. miljö utan PowerShell): Run-nyckeln.
                     cmd = self.build_command()
                     winreg.SetValueEx(
                         key, self._app_name, 0, winreg.REG_SZ, cmd
@@ -1723,6 +1841,8 @@ class AutostartManager:
                         cmd,
                     )
                 else:
+                    # Bort med BÅDA: genvägen och ett eventuellt Run-värde.
+                    self._remove_startup_shortcut()
                     try:
                         winreg.DeleteValue(key, self._app_name)
                         log.info("Windows registry DELETE: %s", self._app_name)
