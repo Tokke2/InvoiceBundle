@@ -245,6 +245,16 @@ def _setup_logging() -> None:
         handlers.append(console_handler)
 
     logging.basicConfig(level=level, handlers=handlers, force=True)
+    # Felsamling (logs/felsamling.log) redan från första raden:
+    # startfel speglas dit direkt. advanced_logger:s setup tar
+    # över loggningen senare och ser till att spegeln läggs tillbaka.
+    try:
+        sys.path.insert(0, str(BASE_DIR / "plugins"))
+        from error_collect import install_error_mirror
+
+        install_error_mirror(BASE_DIR)
+    except Exception:
+        pass
 
 
 _setup_logging()
@@ -1704,6 +1714,14 @@ def main() -> None:
         # ── Watchers, snabbknappar, startläge, startinfo ─────────────
         _setup_window_watchers(window, app_core)
         _install_shortcuts(window)
+        # Felsamling: skörda fel ur alla loggar till logs/felsamling.log
+        # vid varje start (nya fel speglas sedan dit direkt).
+        try:
+            from error_collect import collect_errors
+
+            collect_errors(BASE_DIR)
+        except Exception:
+            pass
         _start_minimized_or_show(window, app_core, AUTOSTART_LAUNCH)
 
         _log_startup_info(app_core)

@@ -354,6 +354,16 @@ def setup_logging(trace_on: bool = True) -> MemoryHandler:
     )
     root.addHandler(_memory_handler)
 
+    # Felsamling (logs/felsamling.log): varje ERROR/CRITICAL speglas
+    # direkt till EN samlad fellogg för snabb felsökning. Root-
+    # handlers byttes nyss ut ovan — spegeln läggs därför (om) här.
+    try:
+        from error_collect import install_error_mirror
+
+        install_error_mirror()
+    except Exception:
+        pass
+
     _logger_ready = True
     set_trace_enabled(trace_on, log_change=False)
 

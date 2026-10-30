@@ -430,13 +430,16 @@ class LogView(QWidget):
         self._btn_copy_diag.clicked.connect(self._copy_diagnostics)
         self._btn_open_dir = QPushButton()
         self._btn_open_dir.clicked.connect(self._open_log_dir)
+        self._btn_errors = QPushButton()
+        self._btn_errors.clicked.connect(self._collect_all_errors)
         self._btn_export = QPushButton()
         self._btn_export.clicked.connect(self._export_shown)
         self._btn_reset = QPushButton()
         self._btn_reset.clicked.connect(self._reset_filters)
         for b in (self._btn_refresh, self._btn_pause, self._btn_mark,
                   self._btn_copy_marked, self._btn_copy_diag,
-                  self._btn_open_dir, self._btn_export, self._btn_reset):
+                  self._btn_open_dir, self._btn_errors,
+                  self._btn_export, self._btn_reset):
             b.setMinimumHeight(34)
             row2.addWidget(b)
         row2.addStretch()
@@ -763,6 +766,35 @@ class LogView(QWidget):
             QUrl.fromLocalFile(str(self._log_file.parent))
         )
 
+    def _collect_all_errors(self) -> None:
+        """Samlar ALLA fel från alla loggar till logs/felsamling.log
+        och visar resultatet — snabbaste vägen vid felsökning."""
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins"))
+            from error_collect import collect_errors, error_log_path
+
+            root = self._log_file.parent.parent
+            report = collect_errors(root)
+            path = error_log_path(root)
+            content = ""
+            try:
+                content = path.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+            except OSError:
+                pass
+            # Visa senaste delen i detaljrutans stora yta
+            self._detail.setPlainText(content[-20000:])
+            self._lbl_info.setText(
+                tr(
+                    "log.collect_done",
+                    total=report.get("total", 0),
+                    added=report.get("added", 0),
+                )
+            )
+        except Exception as exc:
+            self._lbl_info.setText(f"⚠ {exc}")
+
     def _export_shown(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
             self, tr("log.export_title"), "logg-export.txt",
@@ -812,6 +844,7 @@ class LogView(QWidget):
         self._btn_copy_marked.setText(tr("log.copy_marked"))
         self._btn_copy_diag.setText(tr("log.copy_diag"))
         self._btn_open_dir.setText(tr("log.open_dir"))
+        self._btn_errors.setText(tr("log.collect_errors"))
         self._btn_export.setText(tr("log.export_shown"))
         self._btn_reset.setText(tr("log.reset_filters"))
         self._btn_copy_row.setText(tr("log.copy_row"))

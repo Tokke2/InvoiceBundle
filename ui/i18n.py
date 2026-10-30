@@ -667,6 +667,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     "log.copy_marked": {"sv": "📋  Kopiera efter markering", "en": "📋  Copy after marker"},
     "log.copy_diag": {"sv": "📋  Kopiera felsökningspaket", "en": "📋  Copy diagnostics"},
     "log.open_dir": {"sv": "📁  Öppna loggmapp", "en": "📁  Open log folder"},
+    "log.collect_errors": {"sv": "🧰  Samla alla fel", "en": "🧰  Collect all errors"},
+    "log.collect_done": {"sv": "🧰  {total} fel samlade ({added} nya) i logs/felsamling.log — alla fel på ett ställe för snabb felsökning", "en": "🧰  {total} errors collected ({added} new) in logs/felsamling.log — every error in one place for quick troubleshooting"},
     "log.export_shown": {"sv": "💾  Exportera visade", "en": "💾  Export shown"},
     "log.export_title": {"sv": "Exportera logg", "en": "Export log"},
     "log.reset_filters": {"sv": "🧹  Nollställ filter", "en": "🧹  Reset filters"},
