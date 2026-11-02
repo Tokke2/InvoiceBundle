@@ -278,6 +278,7 @@ _FIELD_COLORS = {
     "due_date": "#d97706",
     "total_amount": "#dc2626",
     "ocr": "#7c3aed",
+    "supplier_logo": "#0f766e",
 }
 
 
@@ -540,10 +541,28 @@ class TemplateDialog(QDialog):
         supplier: str = "",
         existing: dict | None = None,
         path: Any = None,
+        suppliers: list[dict] | None = None,
     ) -> None:
         super().__init__(parent)
         self._text = text or ""
         self._path = Path(path) if path else None
+        if suppliers is None:
+            supplier_loader = getattr(parent, "_suppliers", None)
+            try:
+                suppliers = (
+                    list(supplier_loader() or [])
+                    if callable(supplier_loader) else []
+                )
+            except Exception:
+                suppliers = []
+        self._suppliers = list(suppliers or [])
+        template_loader = getattr(parent, "_get_templates", None)
+        try:
+            self._templates = dict(
+                template_loader() or []
+            ) if callable(template_loader) else {}
+        except Exception:
+            self._templates = {}
         self.result_template: dict | None = None
         si = _scan_module()
         self._page_count = (
@@ -574,6 +593,20 @@ class TemplateDialog(QDialog):
                     )
                 except (TypeError, ValueError):
                     continue
+        self._logo_region: tuple[int, tuple] | None = None
+        self._logo_hash = ""
+        logo_spec = (existing or {}).get("supplier_logo", {}) or {}
+        if isinstance(logo_spec, dict):
+            logo_region = logo_spec.get("region")
+            if isinstance(logo_region, (list, tuple)) and len(logo_region) == 4:
+                try:
+                    logo_page = max(0, int(logo_spec.get("page", 0) or 0))
+                    logo_rect = tuple(float(v) for v in logo_region)
+                    if all(0.0 <= v <= 1.0 for v in logo_rect):
+                        self._logo_region = (logo_page, logo_rect)
+                        self._logo_hash = str(logo_spec.get("dhash", ""))
+                except (TypeError, ValueError):
+                    pass
         self._active = ""
 
         self.setWindowTitle(tr("tmpl.title", supplier=supplier or "…"))
@@ -585,6 +618,9 @@ class TemplateDialog(QDialog):
         row_sup.addWidget(QLabel(tr("tmpl.supplier")))
         self._supplier_edit = QLineEdit(supplier)
         row_sup.addWidget(self._supplier_edit, stretch=1)
+        self._btn_match_bg = QPushButton(tr("tmpl.match_bg"))
+        self._btn_match_bg.clicked.connect(self._match_supplier_by_bankgiro)
+        row_sup.addWidget(self._btn_match_bg)
         root.addLayout(row_sup)
 
         intro = QLabel(tr("tmpl.intro_image"))
@@ -667,6 +703,29 @@ class TemplateDialog(QDialog):
             right.addLayout(row)
             self._previews[field] = prev
             self._mark_buttons[field] = btn
+
+        logo_row = QHBoxLayout()
+        logo_chip = QLabel("■")
+        logo_chip.setStyleSheet(
+            f"color:{_FIELD_COLORS['supplier_logo']};"
+            "font-size:15px;background:transparent;"
+        )
+        logo_row.addWidget(logo_chip)
+        logo_texts = QVBoxLayout()
+        logo_title = QLabel(tr("tmpl.field_supplier_logo"))
+        logo_title.setStyleSheet("font-weight:bold;background:transparent;")
+        logo_texts.addWidget(logo_title)
+        self._logo_preview = QLabel()
+        self._logo_preview.setMinimumWidth(120)
+        logo_texts.addWidget(self._logo_preview)
+        logo_row.addLayout(logo_texts, stretch=1)
+        self._btn_mark_logo = QPushButton(tr("tmpl.mark"))
+        self._btn_mark_logo.setToolTip(tr("tmpl.logo_help"))
+        self._btn_mark_logo.clicked.connect(
+            lambda _c=False: self._set_active("supplier_logo")
+        )
+        logo_row.addWidget(self._btn_mark_logo)
+        right.addLayout(logo_row)
         right.addStretch(1)
         middle.addLayout(right, stretch=2)
         root.addLayout(middle, stretch=1)
@@ -692,7 +751,8 @@ class TemplateDialog(QDialog):
         row_btn.addWidget(btn_save)
         root.addLayout(row_btn)
 
-        self._view.set_regions(self._regions)
+        self._view.set_regions(self._all_regions())
+        self._set_logo_preview()
         self._reload_page()
         self._set_active(
             next(
@@ -731,7 +791,138 @@ class TemplateDialog(QDialog):
         self._btn_prev.setEnabled(self._page > 0)
         self._btn_next.setEnabled(self._page + 1 < self._page_count)
 
-    # ── Markering ─────────────────────────────────────────────
+    # ── Matchning av leverantör och fältmarkering ─────────────
+    def _all_regions(self) -> dict:
+        regions = dict(self._regions)
+        if self._logo_region is not None:
+            regions["supplier_logo"] = self._logo_region
+        return regions
+
+    def _set_logo_preview(self) -> None:
+        if self._logo_region is None:
+            text = tr("tmpl.logo_not_marked")
+        elif self._logo_hash:
+            text = tr("tmpl.logo_marked")
+        else:
+            text = tr("tmpl.logo_unusable")
+        self._logo_preview.setText(text)
+
+    def _match_supplier_by_bankgiro(self) -> None:
+        """Låt användaren matcha med exakt BG ur fakturatexten."""
+        si = _scan_module()
+        matches = si.suppliers_matching_bankgiro(
+            self._text, self._suppliers
+        )
+        if not matches:
+            values = si.invoice_bankgiro_values(self._text)
+            if values:
+                message = tr(
+                    "tmpl.bg_unregistered", bankgiro=", ".join(values)
+                )
+            else:
+                message = tr("tmpl.bg_not_found")
+            self._lbl_hint.setText(message)
+            return
+        if len(matches) == 1:
+            picked = matches[0]
+        else:
+            choices = [
+                f"{item['name']} — BG {item['bankgiro']}"
+                for item in matches
+            ]
+            choice, ok = QInputDialog.getItem(
+                self, tr("tmpl.match_bg"), tr("tmpl.bg_choose"),
+                choices, -1, False,
+            )
+            if not ok or choice not in choices:
+                return
+            index = choices.index(choice)
+            picked = matches[index]
+        self._supplier_edit.setText(picked["name"])
+        self.setWindowTitle(
+            tr("tmpl.title", supplier=picked["name"] or "…")
+        )
+        self._lbl_hint.setText(tr(
+            "tmpl.bg_match_found",
+            bankgiro=picked["bankgiro"], supplier=picked["name"],
+        ))
+
+    def _logo_match_candidates(self, signature: str) -> list[dict]:
+        """Existing saved logo signatures close to this marked PDF crop."""
+        if not signature:
+            return []
+        si = _scan_module()
+        candidates: list[dict] = []
+        for name, template in self._templates.items():
+            if not isinstance(template, dict):
+                continue
+            spec = template.get("supplier_logo", {}) or {}
+            if not isinstance(spec, dict):
+                continue
+            distance = si.supplier_logo_distance(
+                signature, str(spec.get("dhash", ""))
+            )
+            if (
+                distance is not None
+                and distance <= si.SUPPLIER_LOGO_CANDIDATE_MAX_DISTANCE
+            ):
+                candidates.append({
+                    "name": str(name), "distance": distance,
+                })
+        return sorted(
+            candidates,
+            key=lambda item: (item["distance"], item["name"].casefold()),
+        )
+
+    def _match_supplier_by_logo(self, signature: str) -> None:
+        """Use the selected real PDF logo to suggest saved suppliers.
+
+        Even a single visual match is explicitly confirmed; competing
+        candidates are always shown as a user choice.
+        """
+        candidates = self._logo_match_candidates(signature)
+        if not candidates:
+            self._lbl_hint.setText(tr("tmpl.logo_no_match"))
+            return
+        if len(candidates) == 1:
+            picked = candidates[0]
+            current = self._supplier_edit.text().strip()
+            si = _scan_module()
+            body_key = (
+                "tmpl.logo_conflict_confirm"
+                if current and not si._names_match(current, picked["name"])
+                else "tmpl.logo_confirm"
+            )
+            answer = QMessageBox.question(
+                self, tr("tmpl.match_logo"),
+                tr(
+                    body_key, supplier=picked["name"], current=current
+                ),
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self._lbl_hint.setText(tr("tmpl.logo_not_selected"))
+                return
+        else:
+            choices = [
+                f"{item['name']} — d={item['distance']}"
+                for item in candidates
+            ]
+            choice, ok = QInputDialog.getItem(
+                self, tr("tmpl.match_logo"), tr("tmpl.logo_choose"),
+                choices, -1, False,
+            )
+            if not ok or choice not in choices:
+                return
+            picked = candidates[choices.index(choice)]
+        self._supplier_edit.setText(picked["name"])
+        self.setWindowTitle(
+            tr("tmpl.title", supplier=picked["name"] or "…")
+        )
+        self._lbl_hint.setText(tr(
+            "tmpl.logo_matched", supplier=picked["name"],
+            distance=picked["distance"],
+        ))
+
     def _set_active(self, field: str) -> None:
         self._active = field
         self._view.set_active(field)
@@ -743,12 +934,37 @@ class TemplateDialog(QDialog):
             btn.setStyleSheet(
                 "font-weight:bold;" if f == field else ""
             )
+        self._btn_mark_logo.setText(
+            tr("tmpl.marked")
+            if self._logo_region is not None else tr("tmpl.mark")
+        )
+        self._btn_mark_logo.setStyleSheet(
+            "font-weight:bold;" if field == "supplier_logo" else ""
+        )
 
     def _on_region_drawn(
         self, field: str, page: int, rect: tuple
     ) -> None:
+        if field == "supplier_logo":
+            si = _scan_module()
+            self._logo_region = (page, tuple(rect))
+            self._logo_hash = si.supplier_logo_signature(
+                self._path, page, rect
+            ) if self._path else ""
+            self._view.set_regions(self._all_regions())
+            self._set_logo_preview()
+            if self._logo_hash:
+                self._match_supplier_by_logo(self._logo_hash)
+            else:
+                self._lbl_hint.setText(tr("tmpl.logo_unusable"))
+            nxt = next(
+                (f for f in _TEMPLATE_FIELDS if f not in self._regions),
+                _TEMPLATE_FIELDS[0],
+            )
+            self._set_active(nxt)
+            return
         self._regions[field] = (page, tuple(rect))
-        self._view.set_regions(self._regions)
+        self._view.set_regions(self._all_regions())
         self._preview_field(field)
         nxt = next(
             (f for f in _TEMPLATE_FIELDS if f not in self._regions),
@@ -758,7 +974,10 @@ class TemplateDialog(QDialog):
 
     def _clear_marks(self) -> None:
         self._regions = {}
-        self._view.set_regions(self._regions)
+        self._logo_region = None
+        self._logo_hash = ""
+        self._view.set_regions(self._all_regions())
+        self._set_logo_preview()
         self._set_active(_TEMPLATE_FIELDS[0])
         self._test_all()
 
@@ -847,6 +1066,13 @@ class TemplateDialog(QDialog):
         self.result_template = {
             "supplier": supplier, "fields": rules
         }
+        if self._logo_region is not None and self._logo_hash:
+            page, rect = self._logo_region
+            self.result_template["supplier_logo"] = {
+                "page": int(page),
+                "region": [round(float(v), 4) for v in rect],
+                "dhash": self._logo_hash,
+            }
         self.accept()
 
 
@@ -1790,7 +2016,10 @@ class ScanImportView(QWidget):
         if not dlg.exec() or not dlg.result_template:
             return False
         name = dlg.result_template["supplier"]
-        templates[name] = {"fields": dlg.result_template["fields"]}
+        templates[name] = {
+            key: value for key, value in dlg.result_template.items()
+            if key != "supplier"
+        }
         self._save_templates_file()
         log.info(
             "SCAN_TEMPLATE: mall inlärd från mapp %s → %s",
@@ -1815,7 +2044,8 @@ class ScanImportView(QWidget):
                 break
             name = dlg2.result_template["supplier"]
             templates[name] = {
-                "fields": dlg2.result_template["fields"]
+                key: value for key, value in dlg2.result_template.items()
+                if key != "supplier"
             }
             self._save_templates_file()
             action = self._verify_template(
@@ -2068,6 +2298,8 @@ class ScanImportView(QWidget):
             "builtin_ambiguous": "scan.match_reason_template",
             "multipage": "scan.match_reason_multipage",
             "learned_ambiguous": "scan.match_reason_learned",
+            "supplier_logo": "scan.match_reason_supplier_logo",
+            "logo_conflict": "scan.match_reason_logo_conflict",
         }.get(reason, "scan.match_reason_generic")
         reason_lbl = QLabel(tr(reason_key))
         reason_lbl.setWordWrap(True)
@@ -2191,9 +2423,46 @@ class ScanImportView(QWidget):
             si = _scan_module()
             pages = self._row_pages(row)
             learning = self._get_match_learning()
+            templates = self._get_templates()
+            entry_before = si.learning_entry(learning, chosen)
+            try:
+                confirmations_before = int(
+                    entry_before.get("confirmed", 0) or 0
+                )
+            except (TypeError, ValueError):
+                confirmations_before = 0
+            logo_signature = ""
+            logo_count_before = 0
+            template = si.find_template(templates, chosen)
+            logo_spec = (template or {}).get("supplier_logo", {}) or {}
+            path = str(row.get("_path", "") or "")
+            if path and isinstance(logo_spec, dict):
+                try:
+                    page = int(logo_spec.get("page", 0) or 0)
+                    region = logo_spec.get("region", ())
+                    observed = si.supplier_logo_signature(
+                        path, page, region
+                    )
+                    signature = str(logo_spec.get("dhash", ""))
+                    distance = si.supplier_logo_distance(
+                        observed, signature
+                    )
+                    if (
+                        distance is not None
+                        and distance <= si.SUPPLIER_LOGO_CANDIDATE_MAX_DISTANCE
+                    ):
+                        logo_signature = signature
+                        logo_count_before = int(
+                            (entry_before.get("logos", {}) or {}).get(
+                                logo_signature, 0
+                            ) or 0
+                        )
+                except Exception as exc:
+                    log.debug("confirm supplier logo: %s", exc)
             entry = si.record_match_confirmation(
                 learning, chosen, multipage=pages >= 2,
                 text=str(row.get("_text", "") or ""),
+                logo_signature=logo_signature,
             )
             notes: list[str] = []
             if pages >= 2:
@@ -2211,7 +2480,20 @@ class ScanImportView(QWidget):
                 notes.append(tr(
                     "scan.learned_auto_supplier", supplier=chosen
                 ))
-            templates = self._get_templates()
+            logo_count = int(
+                (entry.get("logos", {}) or {}).get(logo_signature, 0) or 0
+            ) if logo_signature else 0
+            if (
+                confirmed >= si.LEARNED_SUPPLIER_CONFIRMATIONS
+                and logo_count >= si.LEARNED_IDENTIFIER_CONFIRMATIONS
+                and not (
+                    confirmations_before >= si.LEARNED_SUPPLIER_CONFIRMATIONS
+                    and logo_count_before >= si.LEARNED_IDENTIFIER_CONFIRMATIONS
+                )
+            ):
+                notes.append(tr(
+                    "scan.learned_auto_logo", supplier=chosen
+                ))
             if not si.find_template(templates, chosen) \
                     and not si.has_builtin_format(chosen):
                 tmpl = si.derive_template_from_confirmation(
@@ -2597,7 +2879,8 @@ class ScanImportView(QWidget):
                 tmpl = builtin[1] if builtin else None
             if not tmpl:
                 return parsed
-            found = si.apply_template(text, tmpl)
+            path = str(parsed.get("_path", "") or "")
+            found = si.template_values(path or None, text, tmpl)
         except Exception as exc:
             log.warning("apply template on parked: %s", exc)
             return parsed
@@ -3088,40 +3371,18 @@ class ScanImportView(QWidget):
         if not dlg.exec() or not dlg.result_template:
             return
         supplier = dlg.result_template["supplier"]
-        templates[supplier] = {"fields": dlg.result_template["fields"]}
+        templates[supplier] = {
+            key: value for key, value in dlg.result_template.items()
+            if key != "supplier"
+        }
         self._save_templates_file()
 
-        # Den just sparade mallen appliceras ALLTID på den här raden
-        # (även om leverantörsnamnet inte står ordagrant i texten).
-        found = si.template_values(
-            path or None, text, templates[supplier]
+        # Spara mall är också användarens uttryckliga leverantörsval.
+        # Applicera mallen på originalet, lär av bekräftelsen och gå
+        # genom samma säkra registrering som övriga manuella matchningar.
+        note = self._apply_manual_match(
+            row, supplier, kind="template", candidates=[supplier]
         )
-        if found:
-            for field, value in found.items():
-                row[field] = value
-            row["supplier"] = supplier
-            row["template"] = supplier
-            miss = []
-            if not float(row.get("total_amount") or 0) > 0:
-                miss.append("belopp")
-            if not row.get("invoice_number"):
-                miss.append("fakturanummer")
-            row["missing"] = miss
-            row["status"] = (
-                "redo" if not miss
-                else "saknas: " + ", ".join(miss)
-            )
-        else:
-            reparsed = si.parse_invoice_text(
-                text, self._suppliers(), templates=templates
-            )
-            for key in ("supplier", "invoice_number", "date",
-                        "due_date", "ocr", "total_amount", "missing"):
-                row[key] = reparsed.get(key, row.get(key))
-            row["template"] = reparsed.get("template", "")
-            row["status"] = self._compute_status(reparsed, bool(text))
-        # De andra tolkade raderna läses om med samma mall —
-        # kan de använda den fylls deras fält i direkt.
         n_others = self._reread_rows_with_template(
             supplier, templates[supplier], exclude=row
         )
@@ -3129,11 +3390,15 @@ class ScanImportView(QWidget):
         status = tr("tmpl.saved", supplier=supplier)
         if n_others:
             status += " " + tr("tmpl.reread_others", n=n_others)
+        if note:
+            status += "  ·  " + note
         self._lbl_status.setText(status)
         log.info(
             "SCAN_TEMPLATE: mall sparad för %s, fält=%s",
             supplier, list(dlg.result_template["fields"]),
         )
+        if not row.get("missing"):
+            self._auto_register_matched_rows([row])
 
     def _example_row_for_template(self, name: str) -> dict | None:
         """Tolkad rad vars fil kan visa mallens fakturabild."""
@@ -3168,7 +3433,10 @@ class ScanImportView(QWidget):
         supplier = dlg.result_template["supplier"]
         if supplier != name:
             templates.pop(name, None)
-        templates[supplier] = {"fields": dlg.result_template["fields"]}
+        templates[supplier] = {
+            key: value for key, value in dlg.result_template.items()
+            if key != "supplier"
+        }
         self._save_templates_file()
         self._lbl_status.setText(tr("tmpl.saved", supplier=supplier))
         log.info("SCAN_TEMPLATE: mall redigerad för %s", supplier)

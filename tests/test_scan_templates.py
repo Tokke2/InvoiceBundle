@@ -108,9 +108,15 @@ def test_template_dialog_marks_regions_on_image(tmp_path):
     bild = tmp_path / "exempel.png"
     Image.new("RGB", (600, 840), "white").save(bild)
 
-    existing = {"fields": {
-        "due_date": {"label": "Förfallodatum"},
-    }}
+    existing = {
+        "fields": {
+            "due_date": {"label": "Förfallodatum"},
+        },
+        "supplier_logo": {
+            "page": 0, "region": [0.05, 0.05, 0.20, 0.20],
+            "dhash": "dhash128-v1:" + "1234abcd" * 4,
+        },
+    }
     dlg = TemplateDialog(
         None, "", supplier="Nordlys Energi AB",
         existing=existing, path=bild,
@@ -132,10 +138,178 @@ def test_template_dialog_marks_regions_on_image(tmp_path):
         assert fields["total_amount"] == {
             "region": [0.70, 0.80, 0.97, 0.85], "page": 0,
         }
-        # Omarkerat etikettfält bevaras oförändrat.
+        # Omarkerat etikettfält och sparad logotyp bevaras oförändrade.
         assert fields["due_date"] == {"label": "Förfallodatum"}
+        assert dlg.result_template["supplier_logo"] == existing["supplier_logo"]
     finally:
         dlg.close()
+
+
+def test_template_dialog_matches_unique_bankgiro():
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import TemplateDialog
+
+    dlg = TemplateDialog(
+        None, "Bankgiro 123-4567", supplier="",
+        suppliers=[{"name": "Alpha AB", "bankgiro": "1234567"}],
+    )
+    try:
+        dlg._match_supplier_by_bankgiro()
+        assert dlg._supplier_edit.text() == "Alpha AB"
+        assert "1234567" in dlg._lbl_hint.text()
+    finally:
+        dlg.close()
+
+
+def test_template_dialog_asks_when_bankgiro_has_competing_suppliers(
+    monkeypatch,
+):
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as scan_ui
+    from ui.scan_import_view import TemplateDialog
+
+    class FakeInputDialog:
+        @staticmethod
+        def getItem(_parent, _title, _label, choices, *_args):
+            return choices[1], True
+
+    monkeypatch.setattr(scan_ui, "QInputDialog", FakeInputDialog)
+    dlg = TemplateDialog(
+        None, "Bankgiro 1234567", supplier="",
+        suppliers=[
+            {"name": "Alpha AB", "bankgiro": "1234567"},
+            {"name": "Beta AB", "bg": "123-4567"},
+        ],
+    )
+    try:
+        dlg._match_supplier_by_bankgiro()
+        assert dlg._supplier_edit.text() == "Beta AB"
+    finally:
+        dlg.close()
+
+
+def test_template_dialog_logo_match_requires_and_accepts_confirmation(
+    monkeypatch,
+):
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as scan_ui
+    from ui.scan_import_view import TemplateDialog
+
+    signature = "dhash128-v1:" + "89abcdef" * 4
+    templates = {"Alpha AB": {"supplier_logo": {"dhash": signature}}}
+
+    class Parent(QWidget):
+        def _get_templates(self):
+            return templates
+
+    class FakeMessageBox:
+        class StandardButton:
+            Yes = 1
+
+        @staticmethod
+        def question(*_args):
+            return FakeMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(scan_ui, "QMessageBox", FakeMessageBox)
+    parent = Parent()
+    dlg = TemplateDialog(parent, "", supplier="Alpha AB")
+    try:
+        dlg._match_supplier_by_logo(signature)
+        assert dlg._supplier_edit.text() == "Alpha AB"
+        assert "Alpha AB" in dlg._lbl_hint.text()
+    finally:
+        dlg.close()
+        parent.close()
+
+
+def test_template_dialog_asks_user_when_logos_compete(monkeypatch):
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as scan_ui
+    from ui.scan_import_view import TemplateDialog
+
+    signature = "dhash128-v1:" + "89abcdef" * 4
+    templates = {
+        name: {"supplier_logo": {"dhash": signature}}
+        for name in ("Alpha AB", "Beta AB")
+    }
+
+    class Parent(QWidget):
+        def _get_templates(self):
+            return templates
+
+    class FakeInputDialog:
+        @staticmethod
+        def getItem(_parent, _title, _label, choices, *_args):
+            return choices[1], True
+
+    monkeypatch.setattr(scan_ui, "QInputDialog", FakeInputDialog)
+    parent = Parent()
+    dlg = TemplateDialog(parent, "", supplier="")
+    try:
+        dlg._match_supplier_by_logo(signature)
+        assert dlg._supplier_edit.text() == "Beta AB"
+    finally:
+        dlg.close()
+        parent.close()
+
+
+def test_template_manager_edit_preserves_saved_logo_metadata(
+    tmp_path, monkeypatch,
+):
+    from PySide6.QtWidgets import QApplication, QDialog
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as scan_ui
+    from ui.scan_import_view import ScanImportView
+
+    logo = {
+        "page": 0, "region": [0.12, 0.14, 0.38, 0.42],
+        "dhash": "dhash128-v1:" + "a1b2c3d4" * 4,
+    }
+    path = tmp_path / "invoice_templates.json"
+    original = {"Alpha AB": {
+        "fields": {"total_amount": {"label": "Att betala"}},
+        "supplier_logo": logo,
+    }}
+    si.save_templates(path, original)
+
+    class FakeCore:
+        def get_suppliers(self):
+            return []
+
+        def get_setting(self, key, default=None):
+            return default
+
+    class FakeDialog:
+        last_existing = None
+
+        def __init__(self, _parent, _text, *, supplier, existing, path=None):
+            FakeDialog.last_existing = existing
+            self.result_template = {
+                "supplier": supplier,
+                "fields": dict(existing["fields"]),
+                "supplier_logo": dict(existing["supplier_logo"]),
+            }
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(scan_ui, "TemplateDialog", FakeDialog)
+    view = ScanImportView(app=FakeCore(), templates_path=path)
+    try:
+        view._manager_edit_template("Alpha AB")
+        assert FakeDialog.last_existing["supplier_logo"] == logo
+        assert si.load_templates(path)["Alpha AB"]["supplier_logo"] == logo
+    finally:
+        view.close()
 
 
 def test_scan_view_uses_templates_and_reparses(tmp_path):

@@ -1186,6 +1186,167 @@ def parse_invoice_text(
     return result
 
 
+def _apply_supplier_logo_match(
+    result: dict[str, Any],
+    path: Any,
+    text: str,
+    templates: dict,
+    match_learning: dict | None,
+) -> dict[str, Any]:
+    """Använd sparade PDF-logotyper som kandidater, aldrig som gissning.
+
+    Innan samma leverantör bekräftats fem gånger och logotypen setts
+    i minst två manuella bekräftelser blir logotypen en fråga. En
+    redan osäker text-/mallträff blir aldrig tyst säker av loggan.
+    """
+    candidates = supplier_logo_match_candidates(path, templates)
+    if not candidates:
+        return result
+
+    logo_names: list[str] = []
+    for candidate in candidates:
+        name = str(candidate.get("name", "") or "").strip()
+        if name and not any(_names_match(name, old) for old in logo_names):
+            logo_names.append(name)
+
+    current = str(result.get("supplier", "") or "").strip()
+    if result.get("match_uncertain"):
+        existing: list[dict[str, Any]] = []
+        for raw in result.get("match_candidates", []) or []:
+            if isinstance(raw, dict):
+                existing.append(raw)
+            elif str(raw or "").strip():
+                existing.append({"name": str(raw).strip()})
+        additions = [
+            {"name": name, "score": 4, "signals": ["supplier_logo"]}
+            for name in logo_names
+        ]
+        merged = _merge_match_candidates(existing, additions)
+        result["match_candidates"] = merged
+        supplier_match = dict(result.get("supplier_match", {}) or {})
+        supplier_match.update({
+            "status": "uncertain", "supplier": "",
+            "candidates": merged, "uncertain": True,
+        })
+        if logo_names and not supplier_match.get("reason"):
+            supplier_match["reason"] = "supplier_logo"
+        result["supplier_match"] = supplier_match
+        return result
+
+    conflicts = [
+        name for name in logo_names
+        if current and not _names_match(name, current)
+    ]
+    if current and not conflicts:
+        # Text/BG och logotyp bekräftar samma leverantör.
+        return result
+
+    if current and conflicts:
+        possible = [current, *conflicts]
+        reason = "logo_conflict"
+    else:
+        possible = logo_names
+        reason = "supplier_logo"
+
+    # En enda unik, redan inlärd logotyp får koppla automatiskt —
+    # men bara vid mycket stark likhet och utan annan träff.
+    if (
+        not current and len(possible) == 1
+        and int(candidates[0].get("distance", 999))
+        <= SUPPLIER_LOGO_AUTO_MAX_DISTANCE
+    ):
+        supplier = possible[0]
+        candidate = next(
+            (cand for cand in candidates
+             if _names_match(str(cand.get("name", "")), supplier)),
+            None,
+        )
+        signature = str(candidate.get("dhash", "")) if candidate else ""
+        if learned_supplier_logo(match_learning, supplier, signature):
+            template_names = template_candidate_names(templates, supplier)
+            if len(template_names) == 1:
+                template_name = template_names[0]
+                template = templates.get(template_name, {})
+                found = template_values(path, text, template)
+                for field in (
+                    "invoice_number", "total_amount", "date",
+                    "due_date", "ocr",
+                ):
+                    if found.get(field) not in (None, "", 0, 0.0):
+                        result[field] = found[field]
+                if result.get("total_amount") and is_credit_note(text):
+                    result["total_amount"] = -abs(
+                        float(result["total_amount"])
+                    )
+                result["supplier"] = supplier
+                result["template"] = template_name
+                result["template_fields"] = list(found)
+                result["math_check"] = invoice_math_check(
+                    text or "", float(result.get("total_amount") or 0)
+                )
+                result["date_check"] = invoice_date_check(
+                    str(result.get("date", "") or ""),
+                    str(result.get("due_date", "") or ""),
+                )
+                result["supplier_match"] = {
+                    "status": "matched", "supplier": supplier,
+                    "candidates": [], "uncertain": False,
+                    "reason": "learned_logo",
+                }
+                result["template_match"] = {
+                    "status": "matched", "template": template_name,
+                    "candidates": [], "uncertain": False,
+                    "reason": "learned_logo",
+                }
+                result.pop("match_uncertain", None)
+                result.pop("match_candidates", None)
+                result.pop("match_reason", None)
+                result.pop("match_kind", None)
+                result["missing"] = [
+                    label for ok, label in (
+                        (float(result.get("total_amount") or 0) != 0,
+                         "belopp"),
+                        (bool(result.get("invoice_number")),
+                         "fakturanummer"),
+                        (bool(supplier), "leverantör"),
+                    ) if not ok
+                ]
+                log.info(
+                    "SCAN_IMPORT: inlärd logotyp kopplade fakturan "
+                    "till %s (starkt hash-avstånd %s)",
+                    supplier, candidate.get("distance"),
+                )
+                return result
+
+    # Alla ej inlärda eller konkurrerande logoträffar ska avgöras
+    # av användaren — inte av den första kandidaten i listan.
+    merged = _merge_match_candidates(
+        [{"name": current}] if current else [],
+        [
+            {"name": name, "score": 4, "signals": ["supplier_logo"]}
+            for name in possible
+        ],
+    )
+    result["supplier"] = ""
+    result["match_uncertain"] = True
+    result["match_candidates"] = merged
+    result["match_reason"] = reason
+    result["match_kind"] = "supplier"
+    result["supplier_match"] = {
+        "status": "uncertain", "supplier": "",
+        "candidates": merged, "uncertain": True,
+        "reason": reason,
+    }
+    result["missing"] = [
+        label for ok, label in (
+            (float(result.get("total_amount") or 0) != 0, "belopp"),
+            (bool(result.get("invoice_number")), "fakturanummer"),
+            (False, "leverantör"),
+        ) if not ok
+    ]
+    return result
+
+
 def parse_invoice_file(
     path: Any,
     text: str,
@@ -1233,11 +1394,17 @@ def parse_invoice_file(
             region_texts_by_template=region_texts_by_template,
             match_learning=match_learning,
         )
+        result = _apply_supplier_logo_match(
+            result, path, text, tpl, match_learning
+        )
         return _apply_multipage_guard(
             result, path, text, match_learning
         )
     result = _parse_with_reader_fallback(
         path, text, suppliers, tpl, match_learning=match_learning
+    )
+    result = _apply_supplier_logo_match(
+        result, path, text, tpl, match_learning
     )
     return _apply_multipage_guard(result, path, text, match_learning)
 
@@ -2274,6 +2441,135 @@ def render_page_image(
     return None
 
 
+_SUPPLIER_LOGO_HASH_PREFIX = "dhash128-v1:"
+SUPPLIER_LOGO_CANDIDATE_MAX_DISTANCE = 20
+SUPPLIER_LOGO_AUTO_MAX_DISTANCE = 8
+
+
+def _supplier_logo_hash_from_png(
+    png: bytes, region: Any
+) -> str:
+    """Visuell 128-bit dHash av en markerad logotypyta.
+
+    Hashen lagrar inte själva logotypbilden. En detaljfattig/tom
+    markering avvisas, så en vit ruta aldrig blir en identifierare.
+    """
+    try:
+        import io
+        from PIL import Image as PILImage, ImageOps
+
+        rect = _clamp_rect(region)
+        with PILImage.open(io.BytesIO(png)) as source:
+            image = ImageOps.grayscale(source)
+            width, height = image.size
+            left = max(0, min(width - 1, int(rect[0] * width)))
+            top = max(0, min(height - 1, int(rect[1] * height)))
+            right = max(left + 1, min(width, int(rect[2] * width)))
+            bottom = max(top + 1, min(height, int(rect[3] * height)))
+            crop = image.crop((left, top, right, bottom))
+            if crop.width < 8 or crop.height < 8:
+                return ""
+            lo, hi = crop.getextrema()
+            if hi - lo < 24:
+                return ""
+            resampling = getattr(PILImage, "Resampling", PILImage)
+            tiny = ImageOps.autocontrast(crop).resize(
+                (9, 9), resampling.LANCZOS
+            )
+            get_flattened_data = getattr(tiny, "get_flattened_data", None)
+            pixels = list(
+                get_flattened_data() if callable(get_flattened_data)
+                else tiny.getdata()
+            )
+        horizontal = 0
+        vertical = 0
+        for y in range(8):
+            for x in range(8):
+                horizontal = (horizontal << 1) | int(
+                    pixels[y * 9 + x] > pixels[y * 9 + x + 1]
+                )
+                vertical = (vertical << 1) | int(
+                    pixels[y * 9 + x] > pixels[(y + 1) * 9 + x]
+                )
+        if horizontal == 0 and vertical == 0:
+            return ""
+        return (
+            _SUPPLIER_LOGO_HASH_PREFIX
+            + f"{horizontal:016x}{vertical:016x}"
+        )
+    except Exception as exc:
+        log.debug("supplier logo hash: %s", exc)
+        return ""
+
+
+def supplier_logo_signature(
+    path: Any, page_index: int, region: Any
+) -> str:
+    """Hashar den användarmarkerade logoytan på en PDF-/bildsida."""
+    png = render_page_image(path, page_index, dpi=150)
+    return _supplier_logo_hash_from_png(png, region) if png else ""
+
+
+def supplier_logo_distance(left: str, right: str) -> int | None:
+    """Hammingavstånd mellan två kompatibla logotyphashar."""
+    if not (
+        str(left or "").startswith(_SUPPLIER_LOGO_HASH_PREFIX)
+        and str(right or "").startswith(_SUPPLIER_LOGO_HASH_PREFIX)
+    ):
+        return None
+    try:
+        a = int(str(left).split(":", 1)[1], 16)
+        b = int(str(right).split(":", 1)[1], 16)
+        return bin(a ^ b).count("1")
+    except (TypeError, ValueError):
+        return None
+
+
+def supplier_logo_match_candidates(
+    path: Any,
+    templates: dict | None,
+    max_distance: int = SUPPLIER_LOGO_CANDIDATE_MAX_DISTANCE,
+) -> list[dict[str, Any]]:
+    """Mallleverantörer vars sparade riktiga PDF-logotyp syns igen.
+
+    Jämförelsen görs i samma sid-/koordinatregion som användaren
+    markerade i exempelfakturan. Svaga träffar lämnas bort; returnerade
+    kandidater måste fortfarande bekräftas innan de används.
+    """
+    out: list[dict[str, Any]] = []
+    page_images: dict[int, bytes | None] = {}
+    for name, template in (templates or {}).items():
+        if not isinstance(template, dict):
+            continue
+        spec = template.get("supplier_logo")
+        if not isinstance(spec, dict):
+            continue
+        try:
+            page = max(0, int(spec.get("page", 0) or 0))
+        except (TypeError, ValueError):
+            page = 0
+        if page not in page_images:
+            page_images[page] = render_page_image(path, page, dpi=150)
+        png = page_images[page]
+        if not png:
+            continue
+        current = _supplier_logo_hash_from_png(
+            png, spec.get("region", ())
+        )
+        distance = supplier_logo_distance(
+            current, str(spec.get("dhash", ""))
+        )
+        if distance is not None and distance <= max_distance:
+            out.append({
+                "name": str(name), "distance": distance,
+                "dhash": str(spec.get("dhash", "")),
+            })
+    return sorted(
+        out, key=lambda item: (int(item["distance"]),
+                               _fold_text(item["name"]))
+    )
+
+
 def find_template(templates: dict, supplier: str) -> dict | None:
     """Mall för leverantörsnamn: exakt först, annars vikt
     namnmatchning ("AB Nordlys Energi" hittar mallen för
@@ -2582,6 +2878,39 @@ def _invoice_identifiers(text: str) -> dict[str, set[str]]:
     return ids
 
 
+def invoice_bankgiro_values(text: str) -> list[str]:
+    """Bankgironummer som hittats vid en uttrycklig BG-etikett."""
+    return sorted(_invoice_identifiers(text).get("bg", set()))
+
+
+def suppliers_matching_bankgiro(
+    text: str, suppliers: list[dict] | None
+) -> list[dict[str, str]]:
+    """Registerleverantörer vars BG finns på fakturan.
+
+    Träffen kräver BG-etikett på dokumentet och exakt nummer i
+    registret. Returnerar aldrig en fuzzy/partiell matchning.
+    """
+    invoice_bgs = set(invoice_bankgiro_values(text))
+    if not invoice_bgs:
+        return []
+    matches: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for supplier in suppliers or []:
+        if not isinstance(supplier, dict):
+            continue
+        name = str(supplier.get("name", "") or "").strip()
+        if not name:
+            continue
+        for key in ("bankgiro", "bg"):
+            number = re.sub(r"\D", "", str(supplier.get(key, "") or ""))
+            identity = (name.casefold(), number)
+            if number and number in invoice_bgs and identity not in seen:
+                matches.append({"name": name, "bankgiro": number})
+                seen.add(identity)
+    return sorted(matches, key=lambda item: item["name"].casefold())
+
+
 def load_match_learning(path: Path) -> dict:
     """Läser inlärningsminnet tolerant ({} vid saknad/trasig fil)."""
     try:
@@ -2629,7 +2958,7 @@ def learning_entry(learning: dict | None, supplier: str) -> dict:
 
 def record_match_confirmation(
     learning: dict, supplier: str, *, multipage: bool = False,
-    text: str = "",
+    text: str = "", logo_signature: str = "",
 ) -> dict:
     """Noterar att användaren bekräftat en matchning.
 
@@ -2670,6 +2999,13 @@ def record_match_confirmation(
                 identifiers[kind] = bucket
             for value in values:
                 bucket[value] = int(bucket.get(value, 0) or 0) + 1
+    signature = str(logo_signature or "").strip()
+    if signature.startswith(_SUPPLIER_LOGO_HASH_PREFIX):
+        logos = entry.setdefault("logos", {})
+        if not isinstance(logos, dict):
+            logos = {}
+            entry["logos"] = logos
+        logos[signature] = int(logos.get(signature, 0) or 0) + 1
     entry["last_confirmed"] = datetime.datetime.now().isoformat(
         timespec="seconds"
     )
@@ -2743,6 +3079,30 @@ def learned_supplier_candidates(
             if name not in out:
                 out.append(name)
     return out
+
+
+def learned_supplier_logo(
+    learning: dict | None, supplier: str, signature: str
+) -> bool:
+    """Logo får auto-koppla först efter samma säkra inlärningströskel.
+
+    Kräver fem manuellt bekräftade fakturor för leverantören,
+    logotypen sedd minst två gånger och ett starkt visuellt hash-avstånd.
+    """
+    if not signature:
+        return False
+    entry = learning_entry(learning, supplier)
+    try:
+        confirmations = int(entry.get("confirmed", 0) or 0)
+        logo_count = int(
+            (entry.get("logos", {}) or {}).get(signature, 0) or 0
+        )
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return (
+        confirmations >= LEARNED_SUPPLIER_CONFIRMATIONS
+        and logo_count >= LEARNED_IDENTIFIER_CONFIRMATIONS
+    )
 
 
 def derive_template_from_confirmation(
