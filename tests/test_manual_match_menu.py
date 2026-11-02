@@ -177,6 +177,109 @@ def test_context_menu_offers_manual_match(tmp_path, monkeypatch):
         view.close()
 
 
+def test_manual_match_rereads_other_rows_and_leaves_uncertain_in_import(
+    tmp_path, monkeypatch,
+):
+    """Ny bekräftad kunskap prövas på övriga rader; bara kompletta,
+    säkra träffar går till registrering och osäkra stannar kvar."""
+    _qapp()
+    import scan_import as si
+
+    view = _view(tmp_path)
+    current = _row(
+        supplier="Testbolaget AB", supplier_match={
+            "status": "matched", "supplier": "Testbolaget AB",
+            "reason": "user_choice", "uncertain": False,
+        },
+    )
+    newly_matched = _row(
+        file="second.pdf", _text="newly-matchable",
+        match_uncertain=True, match_kind="supplier",
+        match_reason="weak", match_candidates=["Testbolaget AB"],
+    )
+    still_uncertain = _row(
+        file="third.pdf", _text="still-uncertain",
+        match_uncertain=True, match_kind="supplier",
+        match_reason="ambiguous", match_candidates=["Annan AB", "Testbolaget AB"],
+    )
+    already_safe = _row(
+        file="already-safe.pdf", _text="already-safe",
+        supplier="Testbolaget AB", invoice_number="OLD-1",
+        total_amount=100.0, missing=[], status="redo",
+        supplier_match={
+            "status": "matched", "supplier": "Testbolaget AB",
+            "uncertain": False,
+        },
+        template_match={"status": "none", "uncertain": False},
+    )
+    view._rows = [current, newly_matched, still_uncertain, already_safe]
+    view._refresh_table()
+    parsed_texts = []
+    learning_at_read = []
+    registered = []
+
+    def _parse(text, _suppliers, _templates, match_learning=None):
+        parsed_texts.append(text)
+        learning_at_read.append(dict(match_learning or {}))
+        if text in {"newly-matchable", "already-safe"}:
+            invoice_number = (
+                "B-2" if text == "newly-matchable" else "OLD-1"
+            )
+            return {
+                "supplier": "Testbolaget AB",
+                "invoice_number": invoice_number,
+                "total_amount": 250.0, "missing": [], "status": "redo",
+                "supplier_match": {
+                    "status": "matched", "supplier": "Testbolaget AB",
+                    "reason": "learned", "uncertain": False,
+                },
+                "template_match": {
+                    "status": "none", "template": "",
+                    "candidates": [], "uncertain": False,
+                },
+            }
+        return {
+            "supplier": "", "invoice_number": "C-3",
+            "total_amount": 300.0, "missing": ["leverantör"],
+            "match_uncertain": True, "match_kind": "supplier",
+            "match_reason": "ambiguous",
+            "match_candidates": ["Annan AB", "Testbolaget AB"],
+            "supplier_match": {
+                "status": "uncertain", "supplier": "",
+                "candidates": ["Annan AB", "Testbolaget AB"],
+                "uncertain": True, "reason": "ambiguous",
+            },
+            "template_match": {
+                "status": "none", "template": "",
+                "candidates": [], "uncertain": False,
+            },
+        }
+
+    monkeypatch.setattr(si, "parse_invoice_text", _parse)
+    view._auto_register_matched_rows = lambda rows: (
+        registered.extend(rows) or len(rows)
+    )
+    try:
+        view._apply_manual_match(current, "Testbolaget AB")
+        assert set(parsed_texts) == {
+            "newly-matchable", "still-uncertain", "already-safe",
+        }
+        assert all(
+            memory["Testbolaget AB"]["confirmed"] == 1
+            for memory in learning_at_read
+        )
+        assert newly_matched["supplier"] == "Testbolaget AB"
+        assert not newly_matched.get("match_uncertain")
+        assert registered == [newly_matched]
+        assert already_safe in view._rows
+        assert already_safe not in registered
+        assert still_uncertain in view._rows
+        assert still_uncertain["match_uncertain"] is True
+        assert still_uncertain["supplier"] == ""
+    finally:
+        view.close()
+
+
 # ── Manuell matchning tillämpas ─────────────────────────────
 
 def test_manual_match_registers_invoice_and_opens_invoices_tab(tmp_path):

@@ -2495,17 +2495,143 @@ class ScanImportView(QWidget):
                     templates[chosen] = tmpl
                     self._save_templates_file()
                     entry["template_learned"] = True
-                    self._reread_rows_with_template(
-                        chosen, tmpl, exclude=row
-                    )
                     notes.append(tr(
                         "scan.learned_template", supplier=chosen
                     ))
             self._save_match_learning()
+            reread_count, ready_count = self._reread_rows_after_manual_match(
+                exclude=row
+            )
+            if reread_count:
+                notes.append(tr(
+                    "scan.learning_reread",
+                    n=reread_count, ready=ready_count,
+                ))
             return " ".join(notes)
         except Exception as exc:
             log.warning("learn from match: %s", exc)
             return ""
+
+    def _reread_rows_after_manual_match(
+        self, exclude: dict | None = None,
+    ) -> tuple[int, int]:
+        """Tolka om de andra Import-raderna efter ny, bekräftad kunskap.
+
+        Bara kompletta och säkert matchade rader skickas vidare till
+        registrering. Osäkra, ofullständiga och okända rader ligger kvar
+        i Import; en tidigare uttrycklig användarmatchning skrivs inte
+        över av en ny automatisk bedömning.
+        """
+        si = _scan_module()
+        templates = self._get_templates()
+        learning = self._get_match_learning()
+        suppliers = self._suppliers()
+        reread_count = 0
+        ready: list[dict] = []
+        uncertain_keys = (
+            "match_uncertain", "match_candidates",
+            "match_reason", "match_kind",
+        )
+        for other in list(self._rows):
+            if other is exclude or not isinstance(other, dict):
+                continue
+            previous_match = other.get("supplier_match", {}) or {}
+            if (
+                isinstance(previous_match, dict)
+                and previous_match.get("reason") == "user_choice"
+            ):
+                continue
+            previous_template_match = (
+                other.get("template_match", {}) or {}
+            )
+            previously_uncertain = bool(
+                other.get("match_uncertain")
+                or (
+                    isinstance(previous_match, dict)
+                    and (
+                        previous_match.get("uncertain")
+                        or previous_match.get("status") == "uncertain"
+                    )
+                )
+                or (
+                    isinstance(previous_template_match, dict)
+                    and (
+                        previous_template_match.get("uncertain")
+                        or previous_template_match.get("status") == "uncertain"
+                    )
+                )
+            )
+            previously_ready = bool(
+                not previously_uncertain
+                and not other.get("missing")
+                and str(other.get("supplier", "") or "").strip()
+            )
+            text = str(other.get("_text", "") or "")
+            path = str(other.get("_path", "") or "")
+            if not text and not path:
+                continue
+            try:
+                if path:
+                    parsed = si.parse_invoice_file(
+                        path, text, suppliers, templates,
+                        match_learning=learning,
+                    )
+                else:
+                    parsed = si.parse_invoice_text(
+                        text, suppliers, templates,
+                        match_learning=learning,
+                    )
+            except Exception as exc:
+                log.warning(
+                    "reread after manual match %s: %s",
+                    other.get("file", ""), exc,
+                )
+                continue
+            if not isinstance(parsed, dict):
+                continue
+
+            other.update(parsed)
+            for key in uncertain_keys:
+                if key not in parsed:
+                    other.pop(key, None)
+            if "missing" not in parsed:
+                self._recalc_missing(other)
+            other["status"] = self._compute_status(
+                other, bool(text or path)
+            )
+            reread_count += 1
+
+            supplier_match = other.get("supplier_match", {}) or {}
+            template_match = other.get("template_match", {}) or {}
+            still_uncertain = bool(
+                other.get("match_uncertain")
+                or (
+                    isinstance(supplier_match, dict)
+                    and supplier_match.get("uncertain")
+                )
+                or (
+                    isinstance(template_match, dict)
+                    and template_match.get("uncertain")
+                )
+            )
+            if (
+                not previously_ready
+                and not still_uncertain
+                and not other.get("missing")
+                and str(other.get("supplier", "") or "").strip()
+            ):
+                ready.append(other)
+
+        if reread_count:
+            self._refresh_table()
+            log.info(
+                "SCAN_IMPORT: efter manuell matchning lästes %d andra "
+                "rader om; %d kompletta och säkra",
+                reread_count, len(ready),
+            )
+        if ready:
+            self._auto_register_matched_rows(ready)
+        return reread_count, len(ready)
 
     def _manual_match_row(self) -> None:
         """Högerklick: matcha markerad rad mot en leverantör själv.
@@ -3373,13 +3499,8 @@ class ScanImportView(QWidget):
         note = self._apply_manual_match(
             row, supplier, kind="template", candidates=[supplier]
         )
-        n_others = self._reread_rows_with_template(
-            supplier, templates[supplier], exclude=row
-        )
         self._refresh_table()
         status = tr("tmpl.saved", supplier=supplier)
-        if n_others:
-            status += " " + tr("tmpl.reread_others", n=n_others)
         if note:
             status += "  ·  " + note
         self._lbl_status.setText(status)
