@@ -2531,45 +2531,100 @@ def supplier_logo_distance(left: str, right: str) -> int | None:
         return None
 
 
+def supplier_logo_specs(template: dict | None) -> list[dict[str, Any]]:
+    """Alla sparade logotypvarianter, även äldre enkelmallsformat.
+
+    `supplier_logo` är den äldre primärnyckeln. Nya mallar kan också
+    innehålla `supplier_logos`, en lista med flera sid-/regionsignaturer.
+    Dubbletten mellan primärnyckeln och listans första objekt tas bort.
+    """
+    if not isinstance(template, dict):
+        return []
+    raw: list[Any] = []
+    legacy = template.get("supplier_logo")
+    if isinstance(legacy, dict):
+        raw.append(legacy)
+    variants = template.get("supplier_logos", [])
+    if isinstance(variants, dict):
+        raw.append(variants)
+    elif isinstance(variants, (list, tuple)):
+        raw.extend(variants)
+
+    out: list[dict[str, Any]] = []
+    seen: set[tuple] = set()
+    for candidate in raw:
+        if not isinstance(candidate, dict):
+            continue
+        signature = str(candidate.get("dhash", "") or "").strip()
+        if not signature.startswith(_SUPPLIER_LOGO_HASH_PREFIX):
+            continue
+        try:
+            page = max(0, int(candidate.get("page", 0) or 0))
+        except (TypeError, ValueError):
+            page = 0
+        region = candidate.get("region", ())
+        try:
+            normalized_region = tuple(
+                round(float(value), 4) for value in region
+            )
+            if len(normalized_region) != 4:
+                normalized_region = ()
+        except (TypeError, ValueError):
+            normalized_region = ()
+        key = (page, normalized_region, signature)
+        if key in seen:
+            continue
+        seen.add(key)
+        spec = dict(candidate)
+        spec["page"] = page
+        spec["dhash"] = signature
+        if normalized_region:
+            spec["region"] = list(normalized_region)
+        out.append(spec)
+    return out
+
+
 def supplier_logo_match_candidates(
     path: Any,
     templates: dict | None,
     max_distance: int = SUPPLIER_LOGO_CANDIDATE_MAX_DISTANCE,
 ) -> list[dict[str, Any]]:
-    """Mallleverantörer vars sparade riktiga PDF-logotyp syns igen.
+    """Mallleverantörer vars sparade riktiga PDF-logotypvarianter syns.
 
-    Jämförelsen görs i samma sid-/koordinatregion som användaren
-    markerade i exempelfakturan. Svaga träffar lämnas bort; returnerade
-    kandidater måste fortfarande bekräftas innan de används.
+    Alla sparade sid-/koordinatregioner prövas, men varje leverantör
+    returneras högst en gång med sin starkaste träff. Svaga träffar
+    lämnas bort; kandidater måste fortfarande bekräftas innan de används.
     """
     out: list[dict[str, Any]] = []
     page_images: dict[int, bytes | None] = {}
     for name, template in (templates or {}).items():
-        if not isinstance(template, dict):
-            continue
-        spec = template.get("supplier_logo")
-        if not isinstance(spec, dict):
-            continue
-        try:
-            page = max(0, int(spec.get("page", 0) or 0))
-        except (TypeError, ValueError):
-            page = 0
-        if page not in page_images:
-            page_images[page] = render_page_image(path, page, dpi=150)
-        png = page_images[page]
-        if not png:
-            continue
-        current = _supplier_logo_hash_from_png(
-            png, spec.get("region", ())
-        )
-        distance = supplier_logo_distance(
-            current, str(spec.get("dhash", ""))
-        )
-        if distance is not None and distance <= max_distance:
-            out.append({
-                "name": str(name), "distance": distance,
-                "dhash": str(spec.get("dhash", "")),
-            })
+        best: dict[str, Any] | None = None
+        for spec in supplier_logo_specs(template):
+            try:
+                page = max(0, int(spec.get("page", 0) or 0))
+            except (TypeError, ValueError):
+                page = 0
+            if page not in page_images:
+                page_images[page] = render_page_image(
+                    path, page, dpi=150
+                )
+            png = page_images[page]
+            if not png:
+                continue
+            current = _supplier_logo_hash_from_png(
+                png, spec.get("region", ())
+            )
+            signature = str(spec.get("dhash", ""))
+            distance = supplier_logo_distance(current, signature)
+            if distance is None or distance > max_distance:
+                continue
+            if best is None or distance < int(best["distance"]):
+                best = {
+                    "name": str(name), "distance": distance,
+                    "dhash": signature,
+                }
+        if best is not None:
+            out.append(best)
     return sorted(
         out, key=lambda item: (int(item["distance"]),
                                _fold_text(item["name"]))
@@ -2601,21 +2656,23 @@ def confirmed_supplier_logo_signature(
     if not path or not supplier:
         return ""
     template = find_template(templates or {}, supplier)
-    spec = (template or {}).get("supplier_logo", {}) or {}
-    if not isinstance(spec, dict):
-        return ""
-    signature = str(spec.get("dhash", "") or "")
-    try:
-        page = max(0, int(spec.get("page", 0) or 0))
-        region = spec.get("region", ())
-        observed = supplier_logo_signature(path, page, region)
-    except Exception as exc:
-        log.debug("confirmed supplier logo: %s", exc)
-        return ""
-    distance = supplier_logo_distance(observed, signature)
-    if distance is not None and distance <= max_distance:
-        return signature
-    return ""
+    best: tuple[int, str] | None = None
+    for spec in supplier_logo_specs(template):
+        signature = str(spec.get("dhash", "") or "")
+        try:
+            page = max(0, int(spec.get("page", 0) or 0))
+            observed = supplier_logo_signature(
+                path, page, spec.get("region", ())
+            )
+        except Exception as exc:
+            log.debug("confirmed supplier logo: %s", exc)
+            continue
+        distance = supplier_logo_distance(observed, signature)
+        if distance is None or distance > max_distance:
+            continue
+        if best is None or distance < best[0]:
+            best = (distance, signature)
+    return best[1] if best is not None else ""
 
 
 #: Inbyggda, verifierade leverantörsformat. Varje format har

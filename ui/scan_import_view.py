@@ -549,6 +549,7 @@ class TemplateDialog(QDialog):
         super().__init__(parent)
         self._text = text or ""
         self._path = Path(path) if path else None
+        self._original_supplier = str(supplier or "").strip()
         self._logo_only = bool(logo_only)
         self._suggest_logo_match = bool(suggest_logo_match)
         if suppliers is None:
@@ -600,20 +601,25 @@ class TemplateDialog(QDialog):
                     )
                 except (TypeError, ValueError):
                     continue
+        self._logo_specs = si.supplier_logo_specs(existing)
+        self._logo_new_specs: list[dict] = []
         self._logo_region: tuple[int, tuple] | None = None
         self._logo_hash = ""
-        logo_spec = (existing or {}).get("supplier_logo", {}) or {}
-        if isinstance(logo_spec, dict):
+        for logo_spec in self._logo_specs:
             logo_region = logo_spec.get("region")
-            if isinstance(logo_region, (list, tuple)) and len(logo_region) == 4:
-                try:
-                    logo_page = max(0, int(logo_spec.get("page", 0) or 0))
-                    logo_rect = tuple(float(v) for v in logo_region)
-                    if all(0.0 <= v <= 1.0 for v in logo_rect):
-                        self._logo_region = (logo_page, logo_rect)
-                        self._logo_hash = str(logo_spec.get("dhash", ""))
-                except (TypeError, ValueError):
-                    pass
+            if not isinstance(logo_region, (list, tuple)) \
+                    or len(logo_region) != 4:
+                continue
+            try:
+                logo_page = max(0, int(logo_spec.get("page", 0) or 0))
+                logo_rect = tuple(float(v) for v in logo_region)
+                if not all(0.0 <= v <= 1.0 for v in logo_rect):
+                    continue
+                self._logo_region = (logo_page, logo_rect)
+                self._logo_hash = str(logo_spec.get("dhash", ""))
+                break
+            except (TypeError, ValueError):
+                continue
         self._active = ""
 
         self.setWindowTitle(tr("tmpl.title", supplier=supplier or "…"))
@@ -814,10 +820,12 @@ class TemplateDialog(QDialog):
         return regions
 
     def _set_logo_preview(self) -> None:
-        if self._logo_region is None:
+        if self._logo_specs:
+            text = tr(
+                "tmpl.logo_variants_saved", n=len(self._logo_specs)
+            )
+        elif self._logo_region is None:
             text = tr("tmpl.logo_not_marked")
-        elif self._logo_hash:
-            text = tr("tmpl.logo_marked")
         else:
             text = tr("tmpl.logo_unusable")
         self._logo_preview.setText(text)
@@ -869,20 +877,20 @@ class TemplateDialog(QDialog):
         si = _scan_module()
         candidates: list[dict] = []
         for name, template in self._templates.items():
-            if not isinstance(template, dict):
-                continue
-            spec = template.get("supplier_logo", {}) or {}
-            if not isinstance(spec, dict):
-                continue
-            distance = si.supplier_logo_distance(
-                signature, str(spec.get("dhash", ""))
-            )
-            if (
-                distance is not None
-                and distance <= si.SUPPLIER_LOGO_CANDIDATE_MAX_DISTANCE
-            ):
+            best_distance: int | None = None
+            for spec in si.supplier_logo_specs(template):
+                distance = si.supplier_logo_distance(
+                    signature, str(spec.get("dhash", ""))
+                )
+                if (
+                    distance is not None
+                    and distance <= si.SUPPLIER_LOGO_CANDIDATE_MAX_DISTANCE
+                    and (best_distance is None or distance < best_distance)
+                ):
+                    best_distance = distance
+            if best_distance is not None:
                 candidates.append({
-                    "name": str(name), "distance": distance,
+                    "name": str(name), "distance": best_distance,
                 })
         return sorted(
             candidates,
@@ -950,8 +958,8 @@ class TemplateDialog(QDialog):
                 "font-weight:bold;" if f == field else ""
             )
         self._btn_mark_logo.setText(
-            tr("tmpl.marked")
-            if self._logo_region is not None else tr("tmpl.mark")
+            tr("tmpl.add_logo_variant")
+            if self._logo_specs else tr("tmpl.mark")
         )
         self._btn_mark_logo.setStyleSheet(
             "font-weight:bold;" if field == "supplier_logo" else ""
@@ -966,12 +974,44 @@ class TemplateDialog(QDialog):
             self._logo_hash = si.supplier_logo_signature(
                 self._path, page, rect
             ) if self._path else ""
+            if self._logo_hash:
+                spec = {
+                    "page": int(page),
+                    "region": [round(float(v), 4) for v in rect],
+                    "dhash": self._logo_hash,
+                }
+                identity = (
+                    spec["page"], tuple(spec["region"]), spec["dhash"]
+                )
+                duplicate = False
+                for old in self._logo_specs:
+                    if not isinstance(old, dict):
+                        continue
+                    try:
+                        old_identity = (
+                            int(old.get("page", 0) or 0),
+                            tuple(
+                                round(float(value), 4)
+                                for value in old.get("region", ())
+                            ),
+                            str(old.get("dhash", "")),
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    if old_identity == identity:
+                        duplicate = True
+                        break
+                if not duplicate:
+                    self._logo_specs.append(spec)
+                    self._logo_new_specs.append(spec)
             self._view.set_regions(self._all_regions())
             self._set_logo_preview()
             if self._logo_hash and self._suggest_logo_match:
                 self._match_supplier_by_logo(self._logo_hash)
             elif self._logo_hash:
-                self._lbl_hint.setText(tr("tmpl.logo_marked_hint"))
+                self._lbl_hint.setText(tr(
+                    "tmpl.logo_variant_saved", n=len(self._logo_specs)
+                ))
             else:
                 self._lbl_hint.setText(tr("tmpl.logo_unusable"))
             nxt = next(
@@ -993,11 +1033,15 @@ class TemplateDialog(QDialog):
 
     def _clear_marks(self) -> None:
         self._regions = {}
+        self._logo_specs = []
+        self._logo_new_specs = []
         self._logo_region = None
         self._logo_hash = ""
         self._view.set_regions(self._all_regions())
         self._set_logo_preview()
-        self._set_active(_TEMPLATE_FIELDS[0])
+        self._set_active(
+            "supplier_logo" if self._logo_only else _TEMPLATE_FIELDS[0]
+        )
         self._test_all()
 
     # ── Förhandsvisning / spara ───────────────────────────────
@@ -1079,7 +1123,16 @@ class TemplateDialog(QDialog):
             self._supplier_edit.setFocus()
             return
         rules = self._rules()
-        has_logo = bool(self._logo_region is not None and self._logo_hash)
+        si = _scan_module()
+        same_supplier = bool(
+            self._original_supplier
+            and si._names_match(supplier, self._original_supplier)
+        )
+        logo_specs = (
+            list(self._logo_specs) if same_supplier
+            else list(self._logo_new_specs)
+        )
+        has_logo = bool(logo_specs)
         if self._logo_only and not has_logo:
             self._lbl_hint.setText(tr("tmpl.need_logo"))
             return
@@ -1089,13 +1142,12 @@ class TemplateDialog(QDialog):
         self.result_template = {
             "supplier": supplier, "fields": rules
         }
-        if self._logo_region is not None and self._logo_hash:
-            page, rect = self._logo_region
-            self.result_template["supplier_logo"] = {
-                "page": int(page),
-                "region": [round(float(v), 4) for v in rect],
-                "dhash": self._logo_hash,
-            }
+        if logo_specs:
+            normalized_specs = [dict(spec) for spec in logo_specs]
+            self.result_template["supplier_logos"] = normalized_specs
+            self.result_template["supplier_logo"] = dict(
+                normalized_specs[0]
+            )
         self.accept()
 
 
@@ -1169,8 +1221,11 @@ class TemplatesManagerDialog(QDialog):
             template = self._templates[name] or {}
             fields = template.get("fields", {}) or {}
             field_names = list(fields.keys())
-            if template.get("supplier_logo"):
-                field_names.append(tr("tmpl.logo_label_short"))
+            logo_count = len(_scan_module().supplier_logo_specs(template))
+            if logo_count:
+                field_names.append(tr(
+                    "tmpl.logo_label_count", n=logo_count
+                ))
             self._list.addItem(tr(
                 "tmpl.manager_entry", supplier=name,
                 n=len(field_names), fields=", ".join(field_names),
@@ -2320,14 +2375,8 @@ class ScanImportView(QWidget):
             return False
         if not isinstance(result, dict):
             return False
-        logo_spec = result.get("supplier_logo")
-        signature = str(
-            logo_spec.get("dhash", "")
-            if isinstance(logo_spec, dict) else ""
-        )
-        if not signature or si.supplier_logo_distance(
-            signature, signature
-        ) is None:
+        logo_specs = si.supplier_logo_specs(result)
+        if not logo_specs:
             note_label.setText(tr("tmpl.logo_unusable"))
             return False
 
@@ -2344,7 +2393,10 @@ class ScanImportView(QWidget):
         )
         if not isinstance(merged_template.get("fields"), dict):
             merged_template["fields"] = {}
-        merged_template["supplier_logo"] = dict(logo_spec)
+        merged_template["supplier_logos"] = [
+            dict(spec) for spec in logo_specs
+        ]
+        merged_template["supplier_logo"] = dict(logo_specs[0])
         updated_templates[template_name] = merged_template
         if not si.save_templates(
             self._templates_file(), updated_templates

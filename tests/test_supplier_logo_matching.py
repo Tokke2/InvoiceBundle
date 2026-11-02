@@ -105,6 +105,71 @@ def test_logo_signature_and_matching_run_on_a_real_pdf_page(tmp_path):
     }]
 
 
+def test_multiple_saved_logo_variants_match_once_per_supplier(monkeypatch):
+    png = _logo_png()
+    region_a = (0.10, 0.15, 0.62, 0.85)
+    region_b = (0.12, 0.17, 0.65, 0.87)
+    signature_a = si._supplier_logo_hash_from_png(png, region_a)
+    signature_b = si._supplier_logo_hash_from_png(png, region_b)
+    assert signature_a and signature_b
+    rendered_pages = []
+
+    def render(_path, page, dpi=150):
+        rendered_pages.append(page)
+        return png if page == 1 else None
+
+    monkeypatch.setattr(si, "render_page_image", render)
+    logo_a = {
+        "page": 0, "region": list(region_a), "dhash": signature_a,
+    }
+    logo_b = {
+        "page": 1, "region": list(region_b), "dhash": signature_b,
+    }
+    templates = {
+        "Alpha AB": {
+            "supplier_logo": logo_a,
+            "supplier_logos": [logo_a, logo_b],
+        },
+        "Beta AB": {"supplier_logo": {
+            "page": 0, "region": region_a,
+            "dhash": "dhash128-v1:" + "f" * 32,
+        }},
+    }
+    assert len(si.supplier_logo_specs(templates["Alpha AB"])) == 2
+    matches = si.supplier_logo_match_candidates("invoice.pdf", templates)
+    assert rendered_pages == [0, 1]
+    assert len(matches) == 1
+    assert matches[0]["name"] == "Alpha AB"
+    assert matches[0]["distance"] == 0
+    assert matches[0]["dhash"] == signature_b
+
+
+def test_confirmed_logo_signature_checks_all_saved_variants(monkeypatch):
+    first = "dhash128-v1:" + "1" * 32
+    second = "dhash128-v1:" + "2" * 32
+    templates = {"Alpha AB": {
+        "supplier_logo": {
+            "page": 0, "region": [0.1, 0.1, 0.3, 0.3],
+            "dhash": first,
+        },
+        "supplier_logos": [
+            {"page": 0, "region": [0.1, 0.1, 0.3, 0.3],
+             "dhash": first},
+            {"page": 0, "region": [0.6, 0.1, 0.8, 0.3],
+             "dhash": second},
+        ],
+    }}
+    monkeypatch.setattr(
+        si, "supplier_logo_signature",
+        lambda _path, _page, region: (
+            second if region[0] > 0.5 else "dhash128-v1:" + "f" * 32
+        ),
+    )
+    assert si.confirmed_supplier_logo_signature(
+        "invoice.pdf", "Alpha AB", templates
+    ) == second
+
+
 def test_confirmed_logo_signature_is_counted_only_for_its_supplier(
     monkeypatch,
 ):

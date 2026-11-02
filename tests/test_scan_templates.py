@@ -162,13 +162,19 @@ def test_template_dialog_can_save_a_logo_only_supplier_template(
     draw.ellipse((105, 80, 190, 155), fill="#e6c94c")
     image.save(image_path)
 
+    old_signature = "dhash128-v1:" + "2468ace0" * 4
+    old_logo = {
+        "page": 0, "region": [0.01, 0.02, 0.2, 0.18],
+        "dhash": old_signature,
+    }
     signature = "dhash128-v1:" + "13579bdf" * 4
     monkeypatch.setattr(
         si, "supplier_logo_signature", lambda *_args: signature,
     )
     dlg = TemplateDialog(
-        None, "", supplier="Alpha AB", path=image_path,
-        logo_only=True, suggest_logo_match=False,
+        None, "", supplier="Alpha AB",
+        existing={"fields": {}, "supplier_logo": old_logo},
+        path=image_path, logo_only=True, suggest_logo_match=False,
     )
     try:
         assert dlg._active == "supplier_logo"
@@ -182,11 +188,13 @@ def test_template_dialog_can_save_a_logo_only_supplier_template(
         assert dlg.result_template is not None
         assert dlg.result_template["supplier"] == "Alpha AB"
         assert dlg.result_template["fields"] == {}
-        assert dlg.result_template["supplier_logo"] == {
+        new_logo = {
             "page": 0,
             "region": [0.1, 0.08, 0.4, 0.22],
             "dhash": signature,
         }
+        assert dlg.result_template["supplier_logo"] == old_logo
+        assert dlg.result_template["supplier_logos"] == [old_logo, new_logo]
     finally:
         dlg.close()
 
