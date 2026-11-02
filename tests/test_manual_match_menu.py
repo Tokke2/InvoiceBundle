@@ -14,6 +14,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -42,18 +44,65 @@ _TEMPLATES = {
 
 
 class _Core:
+    def __init__(self):
+        self.created = []
+
     def get_suppliers(self):
         return list(_SUPPLIERS)
+
+    def get_invoices(self):
+        return list(self.created)
+
+    def add_invoice(self, data):
+        record = dict(data, id=f"fake-{len(self.created) + 1}")
+        self.created.append(record)
+        return record
 
     def get_setting(self, key, default=None):
         return default
 
 
-def _view(tmp_path, templates=None):
+@pytest.fixture(autouse=True)
+def _no_success_dialogs(monkeypatch):
+    import ui.scan_import_view as sv
+
+    monkeypatch.setattr(
+        sv.QMessageBox, "information", lambda *_a, **_k: None
+    )
+
+
+def _stub_message_boxes(monkeypatch, question_answer=None):
+    """Replace only this view's QMessageBox calls with non-modal stubs."""
+    import ui.scan_import_view as sv
+    from PySide6.QtWidgets import QMessageBox as QtMessageBox
+
+    class StubMessageBox:
+        StandardButton = QtMessageBox.StandardButton
+
+        @staticmethod
+        def information(*_args, **_kwargs):
+            return None
+
+        @staticmethod
+        def warning(*_args, **_kwargs):
+            return None
+
+        @staticmethod
+        def question(*_args, **_kwargs):
+            if question_answer is not None:
+                return question_answer
+            return QtMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(sv, "QMessageBox", StubMessageBox)
+    return StubMessageBox
+
+
+def _view(tmp_path, templates=None, parent=None):
     from ui.scan_import_view import ScanImportView
 
     view = ScanImportView(
-        app=_Core(), templates_path=tmp_path / "invoice_templates.json"
+        app=_Core(), parent=parent,
+        templates_path=tmp_path / "invoice_templates.json"
     )
     view._templates_cache = dict(_TEMPLATES if templates is None
                                  else templates)
@@ -130,15 +179,38 @@ def test_context_menu_offers_manual_match(tmp_path, monkeypatch):
 
 # ── Manuell matchning tillämpas ─────────────────────────────
 
-def test_manual_match_sets_supplier_and_reads_template(tmp_path):
-    """Omatchad rad + manuellt val: leverantören sätts, mallens
-    värden läses in och raden blir redo/grön (eget val)."""
+def test_manual_match_registers_invoice_and_opens_invoices_tab(tmp_path):
+    """Ett uttryckligt val matchar, skapar och visar fakturan i
+    Fakturor när de obligatoriska fälten finns."""
     _qapp()
-    from ui.scan_import_view import ROW_BG_MATCH_SECURE, ScanImportView
+    from PySide6.QtWidgets import QWidget
+    from ui.scan_import_view import ScanImportView
 
-    view = _view(tmp_path)
+    class _InvoicesView:
+        def __init__(self):
+            self.refreshes = 0
+
+        def refresh(self):
+            self.refreshes += 1
+
+    class _Host(QWidget):
+        def __init__(self):
+            super().__init__()
+            self._invoices_view = _InvoicesView()
+            self.destination = None
+
+        def _tab_title(self, key):
+            return "Fakturor" if key == "invoices" else key
+
+        def _goto_tab(self, key, title):
+            self.destination = (key, title)
+
+    host = _Host()
+    view = _view(tmp_path, parent=host)
+    original = tmp_path / "original.pdf"
+    original.write_bytes(b"original invoice bytes")
     try:
-        row = _row()
+        row = _row(_path=str(original))
         view._rows = [row]
         view._refresh_table()
         view._tbl.selectRow(0)
@@ -156,9 +228,16 @@ def test_manual_match_sets_supplier_and_reads_template(tmp_path):
         assert row["status"] == "redo"
         assert row["supplier_match"]["reason"] == "user_choice"
         assert ScanImportView._row_match_state(row) == "secure"
-        bg = view._tbl.item(0, 0).background().color().name()
-        assert bg == ROW_BG_MATCH_SECURE[0]
-        assert "Testbolaget AB" in view._lbl_status.text()
+        assert view._rows == []
+        assert len(view._app.created) == 1
+        assert view._app.created[0]["supplier"] == "Testbolaget AB"
+        assert view._app.created[0]["invoice_number"] == "777"
+        assert view._app.created[0]["total_amount"] == 1500.0
+        assert view._app.created[0]["attachment"] == str(original)
+        assert original.read_bytes() == b"original invoice bytes"
+        assert "registrerad i Fakturor" in view._lbl_status.text()
+        assert host.destination == ("invoices", "Fakturor")
+        assert host._invoices_view.refreshes == 1
     finally:
         view.close()
 
@@ -181,6 +260,11 @@ def test_manual_match_without_template_keeps_parsed_values(tmp_path):
         assert float(row["total_amount"]) == 200.0
         assert row["missing"] == []
         assert row["status"] == "redo"
+        assert view._rows == []
+        assert len(view._app.created) == 1
+        assert view._app.created[0]["supplier"] == "Annan AB"
+        assert view._app.created[0]["invoice_number"] == "555"
+        assert view._app.created[0]["total_amount"] == 200.0
     finally:
         view.close()
 
@@ -205,6 +289,34 @@ def test_manual_match_resolves_uncertain_row(tmp_path):
         assert not row.get("match_uncertain")
         assert "match_candidates" not in row
         assert ScanImportView._row_match_state(row) == "secure"
+        assert view._rows == []
+        assert len(view._app.created) == 1
+    finally:
+        view.close()
+
+
+def test_manual_match_missing_fields_stays_in_interpreted_table(tmp_path):
+    """En matchning får inte skapa en faktura förrän belopp och
+    fakturanummer är kompletta."""
+    _qapp()
+    view = _view(tmp_path, templates={})
+    try:
+        row = _row(
+            invoice_number="555", total_amount=0.0,
+            missing=["belopp", "leverantör"],
+            _text="text utan läsbart belopp eller fakturanummer",
+        )
+        view._rows = [row]
+        view._refresh_table()
+        view._tbl.selectRow(0)
+        _choose_in_dialog("Annan AB")
+        view._manual_match_row()
+
+        assert row["supplier"] == "Annan AB"
+        assert row["missing"] == ["belopp"]
+        assert view._rows == [row]
+        assert view._app.created == []
+        assert "belopp" in view._lbl_status.text()
     finally:
         view.close()
 
@@ -259,5 +371,103 @@ def test_manual_match_no_suppliers_informs(tmp_path, monkeypatch):
         view._manual_match_row()
         assert "inga leverantörer" in seen.get("text", "")
         assert row["supplier"] == ""
+    finally:
+        view.close()
+
+
+def test_manual_match_declined_duplicate_stays_in_import(tmp_path, monkeypatch):
+    """Att tacka nej till dubblettregistrering lämnar raden kvar."""
+    _qapp()
+    from PySide6.QtWidgets import QMessageBox as QtMessageBox
+
+    _stub_message_boxes(
+        monkeypatch, QtMessageBox.StandardButton.No
+    )
+    view = _view(tmp_path)
+    navigations = []
+    view._show_invoices_tab = lambda: navigations.append(True)
+    try:
+        existing = {
+            "id": "existing", "supplier": "Testbolaget AB",
+            "invoice_number": "777", "total_amount": 1500.0,
+        }
+        view._app.created.append(existing)
+        row = _row()
+        view._rows = [row]
+        view._refresh_table()
+        view._tbl.selectRow(0)
+
+        _choose_in_dialog("Testbolaget AB")
+        view._manual_match_row()
+
+        assert view._rows == [row]
+        assert view._app.created == [existing]
+        assert navigations == []
+    finally:
+        view.close()
+
+
+def test_manual_match_unknown_supplier_stays_in_import(tmp_path, monkeypatch):
+    """En mall som saknar registerleverantör får inte registreras."""
+    _qapp()
+    import ui.scan_import_view as sv
+    from ui.scan_import_view import ScanImportView
+
+    _stub_message_boxes(monkeypatch)
+
+    class CoreWithoutTemplateSupplier(_Core):
+        def get_suppliers(self):
+            return [{"name": "Annan AB"}]
+
+    view = ScanImportView(
+        app=CoreWithoutTemplateSupplier(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    view._templates_cache = dict(_TEMPLATES)
+    navigations = []
+    view._show_invoices_tab = lambda: navigations.append(True)
+    try:
+        row = _row()
+        view._rows = [row]
+        view._refresh_table()
+        view._tbl.selectRow(0)
+
+        _choose_in_dialog("Testbolaget AB")
+        view._manual_match_row()
+
+        assert row["supplier"] == "Testbolaget AB"
+        assert view._rows == [row]
+        assert view._app.created == []
+        assert navigations == []
+    finally:
+        view.close()
+
+
+def test_manual_match_storage_failure_stays_in_import(tmp_path, monkeypatch):
+    """Skrivfel lämnar original och import-rad på plats."""
+    _qapp()
+    _stub_message_boxes(monkeypatch)
+    view = _view(tmp_path)
+    navigations = []
+    view._show_invoices_tab = lambda: navigations.append(True)
+    original = tmp_path / "original.pdf"
+    original.write_bytes(b"original invoice bytes")
+
+    def fail_save(_data):
+        raise OSError("disk full")
+
+    view._app.add_invoice = fail_save
+    try:
+        row = _row(_path=str(original))
+        view._rows = [row]
+        view._refresh_table()
+        view._tbl.selectRow(0)
+
+        _choose_in_dialog("Testbolaget AB")
+        view._manual_match_row()
+
+        assert view._rows == [row]
+        assert original.read_bytes() == b"original invoice bytes"
+        assert navigations == []
     finally:
         view.close()

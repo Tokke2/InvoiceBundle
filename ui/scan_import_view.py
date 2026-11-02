@@ -8,7 +8,7 @@ Författare : Rickard Längkvist
 År     : Dynamiskt (auto)
 
 Import-fliken: läser in skannade fakturor (PDF/bild), visar vad som
-tolkades och låter användaren bekräfta/rätta INNAN fakturan skapas.
+tolkades och låter användaren kontrollera värdena.
 
 Kärnan i appen är oförändrad — ange fakturor, räkna ihop ATT BETALA.
 Den här vyn är bara en snabbväg in till samma registrering.
@@ -17,8 +17,9 @@ Flöde
 ─────
     1. Dra in filer / välj filer / klistra in text
     2. "Läs in och tolka"  → visar tabell med kandidater
-    3. Markera rad → "Skapa faktura" → fakturan registreras
-       (belopp läggs till ATT BETALA precis som vid manuell inmatning)
+    3. Användaren väljer själv leverantör vid osäker matchning;
+       kompletta rader registreras då direkt och visas i Fakturor
+    4. Övriga rader kan markeras och skapas med "Skapa fakturor"
 
 Allt loggas som SCAN_IMPORT / SCAN_CREATE i logs/app.log.
 
@@ -937,9 +938,9 @@ class ScanImportView(QWidget):
     """
     Import-vy för skannade fakturor.
 
-    Integritet: läser bara filer användaren själv väljer, skickar
-    aldrig något över nätet, sparar inget förrän användaren klickar
-    "Skapa faktura".
+    Integritet: läser bara filer användaren själv väljer och skickar
+    aldrig något över nätet. En osäker matchning registreras först
+    efter användarens uttryckliga val och när obligatoriska fält finns.
     """
 
     def __init__(
@@ -1335,14 +1336,31 @@ class ScanImportView(QWidget):
         # stället för att bara ligga gömd i parkeringen. Appen
         # gissar aldrig och parkerar aldrig tyst.
         added = self._add_parked_rows_to_table(infos)
+        self._ask_uncertain_rows(added)
+        # En bekräftad men ofullständig rad lämnas synlig i Import,
+        # men behöver inte längre ligga kvar i parkeringen. Rader som
+        # redan registrerats togs bort och avparkerades av skapaflödet.
         for row in added:
-            if row.get("match_uncertain") and self._ask_user_for_match(row):
+            if row.get("match_uncertain"):
+                continue
+            if any(current is row for current in self._rows):
                 self._unpark_row(row)
-        if added:
+        remaining = [
+            row for row in added
+            if any(current is row for current in self._rows)
+        ]
+        if remaining:
             self._refresh_table()
-            self._lbl_status.setText(
-                tr("scan.parked_added_table", n=len(added))
-            )
+            uncertain = sum(bool(row.get("match_uncertain"))
+                            for row in remaining)
+            if uncertain:
+                self._lbl_status.setText(
+                    tr("scan.parked_added_table", n=uncertain)
+                )
+            else:
+                self._lbl_status.setText(
+                    tr("scan.parked_pending_table", n=len(remaining))
+                )
         # Parkeringar som inte kunde läggas i tabellen (t.ex.
         # saknad tolkning) frågas det om på den äldre vägen.
         added_paths = {str(r.get("_path", "")) for r in added}
@@ -2107,7 +2125,8 @@ class ScanImportView(QWidget):
         matchning: leverantören sätts, dess mall (om en sådan
         finns) läses in i radens fält och osäkerhetsflaggorna
         rensas — raden är därefter användarens eget val, aldrig
-        en gissning, och kan registreras via Skapa fakturor.
+        en gissning. Är den komplett registreras den direkt; annars
+        ligger den kvar för komplettering.
         Ett rättat belopp ur bekräftelsen vinner alltid över det
         avlästa. Efteråt lär sig appen av valet (se
         _learn_from_match); inlärningsnotisen returneras för
@@ -2226,7 +2245,8 @@ class ScanImportView(QWidget):
         mall, om en sådan finns, läses direkt in i radens fält;
         finns ingen mall behåller raden sina avlästa värden och
         får bara leverantören satt. Raden markeras som användarens
-        eget val (grön, aldrig som en automatgissning).
+        eget val (grön, aldrig som en automatgissning). När raden
+        är komplett registreras den direkt och visas i Fakturor.
         """
         idxs = self._selected_rows()
         if not idxs:
@@ -2317,20 +2337,79 @@ class ScanImportView(QWidget):
             file=str(row.get("file", "") or "—"),
             supplier=chosen,
         )
-        if note:
-            status += "  ·  " + note
         self._lbl_status.setText(status)
 
+        if row.get("missing"):
+            pending = tr(
+                "scan.manual_match_pending",
+                fields=tr_missing(list(row.get("missing") or [])),
+            )
+            self._lbl_status.setText(f"{status} · {pending}")
+            if note:
+                self._lbl_status.setText(
+                    self._lbl_status.text() + "  ·  " + note
+                )
+            return
+
+        # Ett uttryckligt leverantörsval i Tolkade fakturor räcker
+        # för att registrera en komplett faktura. Dubblettkontrollen,
+        # leverantörskontrollen och sparvägen är samma som vid
+        # knappen Skapa fakturor.
+        self._auto_register_matched_rows([row])
+        still_present = any(candidate is row for candidate in self._rows)
+        if not still_present:
+            status = tr(
+                "scan.manual_match_registered",
+                file=str(row.get("file", "") or "—"),
+                supplier=chosen,
+            )
+            if note:
+                status += "  ·  " + note
+            self._lbl_status.setText(status)
+        elif note:
+            self._lbl_status.setText(
+                self._lbl_status.text() + "  ·  " + note
+            )
+
     def _ask_uncertain_rows(self, rows: list[dict]) -> int:
-        """Frågar om varje osäker rad; returnerar antal lösta."""
-        resolved = 0
+        """Frågar om osäkra rader och registrerar kompletta rader
+        när användaren uttryckligen har bekräftat matchningen."""
+        resolved_rows: list[dict] = []
         for row in list(rows or []):
             if isinstance(row, dict) and row.get("match_uncertain"):
                 if self._ask_user_for_match(row):
-                    resolved += 1
-        if resolved:
+                    resolved_rows.append(row)
+        if resolved_rows:
             self._refresh_table()
-        return resolved
+            self._auto_register_matched_rows(resolved_rows)
+        return len(resolved_rows)
+
+    def _auto_register_matched_rows(self, rows: list[dict]) -> int:
+        """Registrerar kompletta rader efter ett uttryckligt
+        manuellt leverantörs-/mallval; osäkra/ofullständiga rader
+        lämnas kvar i Tolkade fakturor."""
+        indexes: list[int] = []
+        for row in list(rows or []):
+            if (
+                not isinstance(row, dict)
+                or row.get("match_uncertain")
+                or row.get("missing")
+            ):
+                continue
+            index = next(
+                (i for i, current in enumerate(self._rows)
+                 if current is row),
+                -1,
+            )
+            if index >= 0 and index not in indexes:
+                indexes.append(index)
+        if not indexes:
+            return 0
+        self._tbl.clearSelection()
+        for index in indexes:
+            self._tbl.selectRow(index)
+        self._create_invoices()
+        return len(indexes)
 
     def _parked_entry_for(self, info: dict) -> dict | None:
         """Parkerade posten som hör till ett parkeringsevent."""
@@ -2426,6 +2505,12 @@ class ScanImportView(QWidget):
         if watch is None or not digest:
             return
         try:
+            parked = getattr(watch, "parked", None)
+            if isinstance(parked, list) and not any(
+                str(entry.get("hash", "")) == digest
+                for entry in parked if isinstance(entry, dict)
+            ):
+                return
             watch.remove_parked(digest)
             self._refresh_watch_ui()
         except Exception as exc:
@@ -2447,13 +2532,15 @@ class ScanImportView(QWidget):
         """Frågar direkt om parkerade filer med osäker matchning.
 
         Ett bekräftat val flyttar filen till granskningstabellen
-        med vald leverantör/mall; Avbryt lämnar den parkerad —
+        med vald leverantör/mall; om obligatoriska fält finns
+        registreras den direkt. Avbryt lämnar den parkerad —
         den registreras aldrig automatiskt på en gissning.
         """
         watch = getattr(self, "_watch", None)
         if watch is None:
             return
         moved = False
+        matched_rows: list[dict] = []
         for info in infos or []:
             reason = str(info.get("reason", "") or "")
             parsed_info = info.get("parsed") or {}
@@ -2485,9 +2572,11 @@ class ScanImportView(QWidget):
             self._rows.append(parsed)
             if parked is not None:
                 watch.remove_parked(parked.get("hash", ""))
+            matched_rows.append(parsed)
             moved = True
         if moved:
             self._refresh_table()
+            self._auto_register_matched_rows(matched_rows)
             self._refresh_watch_ui()
 
     def _apply_template_to_row(self, parsed: dict, text: str) -> dict:
@@ -2583,10 +2672,17 @@ class ScanImportView(QWidget):
             self._rows.append(parsed)
             self._watch.remove_parked(parked.get("hash", ""))
         self._refresh_table()
+        # Behåll objektreferenserna: kompletta, manuellt bekräftade
+        # rader kan registreras och tas bort ur tabellen direkt.
+        added_rows = list(self._rows[start:])
         # Osäkra matchningar som följt med till tabellen avgörs
         # av användaren här — aldrig av en gissning i bakgrunden.
-        self._ask_uncertain_rows(self._rows[start:])
-        self._offer_template_repairs(self._rows[start:])
+        self._ask_uncertain_rows(added_rows)
+        pending_rows = [
+            row for row in added_rows
+            if any(current is row for current in self._rows)
+        ]
+        self._offer_template_repairs(pending_rows)
 
     def _offer_template_repairs(self, rows: list[dict]) -> None:
         """Malldriftsassistenten för nyligen granskade parkeringar.
@@ -3138,6 +3234,8 @@ class ScanImportView(QWidget):
         for row in list(rows or []):
             if not isinstance(row, dict):
                 continue
+            if not any(current is row for current in self._rows):
+                continue
             if row.get("template") or row.get("match_uncertain"):
                 continue
             path = str(row.get("_path", "") or "")
@@ -3216,10 +3314,17 @@ class ScanImportView(QWidget):
         # behöva leta fram rätt knapp själv.
         self._open_template_for_unmatched(new_rows)
         ok = sum(1 for r in new_rows if not r["missing"])
-        self._lbl_status.setText(
+        registered = sum(
+            not any(current is row for current in self._rows)
+            for row in new_rows
+        )
+        summary = (
             f"{len(new_rows)} fil(er) tolkade — {ok} kompletta, "
             f"{len(new_rows) - ok} behöver kompletteras"
         )
+        if registered:
+            summary += " · " + tr("scan.auto_registered", n=registered)
+        self._lbl_status.setText(summary)
 
     def _scan_pasted(self) -> None:
         """Tolkar inklistrad fakturatext (fallback utan OCR)."""
@@ -3254,7 +3359,14 @@ class ScanImportView(QWidget):
             "SCAN_IMPORT (inklistrad): belopp=%s fakturanr=%s",
             parsed["total_amount"], parsed["invoice_number"] or "-",
         )
-        self._lbl_status.setText("Inklistrad text tolkad")
+        if not any(current is parsed for current in self._rows):
+            self._lbl_status.setText(tr(
+                "scan.manual_match_registered",
+                file=parsed.get("file", "(inklistrad text)"),
+                supplier=parsed.get("supplier", ""),
+            ))
+        else:
+            self._lbl_status.setText("Inklistrad text tolkad")
 
     # ══════════════════════════════════════════════════════════════════
     #  TABELL
@@ -3593,9 +3705,13 @@ class ScanImportView(QWidget):
                     # exakt där det ligger (även i bevakad mapp)
                     # och fakturans sökväg pekar dit.
                     data["attachment"] = str(row["_path"])
-                self._save_invoice(data, source=row.get("file", ""))
-                self._rows.pop(idxs[0])
-                self._refresh_table()
+                if self._save_invoice(
+                    data, source=row.get("file", "")
+                ):
+                    self._unpark_row(row)
+                    self._rows.pop(idxs[0])
+                    self._refresh_table()
+                    self._show_invoices_tab()
         except Exception as exc:
             log.error("SCAN_OPEN_DIALOG: %s", exc, exc_info=True)
             QMessageBox.warning(
@@ -3651,6 +3767,25 @@ class ScanImportView(QWidget):
                 hits.append((i, hit))
             earlier.append(row)
         return hits
+
+    def _show_invoices_tab(self) -> None:
+        """Uppdaterar och visar Fakturor efter lyckad import."""
+        host = self.window()
+        if host is self:
+            return
+        try:
+            invoices_view = getattr(host, "_invoices_view", None)
+            refresh = getattr(invoices_view, "refresh", None)
+            if callable(refresh):
+                refresh()
+            goto_tab = getattr(host, "_goto_tab", None)
+            tab_title = getattr(host, "_tab_title", None)
+            if callable(goto_tab) and callable(tab_title):
+                # MainWindow._goto_tab visar även en dold flik innan
+                # den byter vy.
+                goto_tab("invoices", tab_title("invoices"))
+        except Exception as exc:
+            log.debug("show invoices after import: %s", exc)
 
     def _create_invoices(self) -> None:
         """Registrerar markerade rader som fakturor (belopp → summan)."""
@@ -3763,6 +3898,7 @@ class ScanImportView(QWidget):
                 f"✅  {created} faktura{'r' if created != 1 else ''} "
                 f"registrerade och inräknade i ATT BETALA.",
             )
+            self._show_invoices_tab()
 
     def _invoice_data_from_row(
         self, row: dict, attachment: str | None = None

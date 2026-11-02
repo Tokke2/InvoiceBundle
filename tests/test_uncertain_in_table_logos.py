@@ -28,8 +28,19 @@ def _qapp():
 
 
 class _Core:
+    def __init__(self):
+        self.created = []
+
     def get_suppliers(self):
         return [{"name": "Testbolaget AB"}, {"name": "Annan AB"}]
+
+    def get_invoices(self):
+        return list(self.created)
+
+    def add_invoice(self, data):
+        record = dict(data, id=f"fake-{len(self.created) + 1}")
+        self.created.append(record)
+        return record
 
     def get_setting(self, key, default=None):
         return default
@@ -98,6 +109,9 @@ def test_uncertain_parked_goes_to_table_and_unparks_on_match(
     monkeypatch.setattr(
         siv.QMessageBox, "warning", lambda *_a, **_k: None
     )
+    monkeypatch.setattr(
+        siv.QMessageBox, "information", lambda *_a, **_k: None
+    )
     watch = _FakeWatch([_parked_entry()])
     view = _view(tmp_path, watch)
     try:
@@ -123,11 +137,11 @@ def test_uncertain_parked_goes_to_table_and_unparks_on_match(
             "hash": "H1", "reason": "uncertain-supplier",
         }]
         view._show_parked_dialog()
-        assert len(view._rows) == 1
-        row = view._rows[0]
-        assert row["supplier"] == "Testbolaget AB"
-        assert row["_parked_hash"] == "H1"
-        # Bekräftad i tabellen = borta ur parkeringen.
+        assert view._rows == []
+        assert len(view._app.created) == 1
+        assert view._app.created[0]["supplier"] == "Testbolaget AB"
+        assert view._app.created[0]["attachment"] == "/tmp/x/osaker.pdf"
+        # Bekräftad och registrerad = borta ur parkeringen.
         assert watch.removed == ["H1"]
         assert watch.parked == []
     finally:
@@ -280,10 +294,12 @@ def test_supplier_monograms():
     assert _supplier_monogram("") == "?"
 
 
-def test_choose_supplier_by_clicking_logo_tile(tmp_path):
+def test_choose_supplier_by_clicking_logo_tile(tmp_path, monkeypatch):
     """Matchningsdialogen: klick på leverantörens logotyp-ruta
     väljer den (dropdownen följer med) och valet tillämpas."""
     _qapp()
+    import ui.scan_import_view as siv
+    monkeypatch.setattr(siv.QMessageBox, "information", lambda *_a, **_k: None)
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import (
         QApplication, QComboBox, QDialog, QPushButton,

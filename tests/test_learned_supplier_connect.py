@@ -188,9 +188,23 @@ def test_view_records_identifiers_and_announces_threshold(
     from PySide6.QtWidgets import QApplication, QComboBox, QDialog
     from ui.scan_import_view import ScanImportView
 
+    import ui.scan_import_view as sv
+    monkeypatch.setattr(sv.QMessageBox, "information", lambda *_a, **_k: None)
+
     class Core:
+        def __init__(self):
+            self.created = []
+
         def get_suppliers(self):
             return [{"name": "Okanda AB"}]
+
+        def get_invoices(self):
+            return list(self.created)
+
+        def add_invoice(self, data):
+            record = dict(data, id=f"fake-{len(self.created) + 1}")
+            self.created.append(record)
+            return record
 
         def get_setting(self, key, default=None):
             return default

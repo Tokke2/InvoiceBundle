@@ -228,9 +228,18 @@ def test_watch_graduated_supplier_registers_multipage(tmp_path):
 class _Core:
     def __init__(self, suppliers):
         self._suppliers = suppliers
+        self.created = []
 
     def get_suppliers(self):
         return list(self._suppliers)
+
+    def get_invoices(self):
+        return list(self.created)
+
+    def add_invoice(self, data):
+        record = dict(data, id=f"fake-{len(self.created) + 1}")
+        self.created.append(record)
+        return record
 
     def get_setting(self, key, default=None):
         return default
@@ -281,11 +290,13 @@ def _drive_dialog(choose: str, amount: str | None = None):
     QTimer.singleShot(50, _act)
 
 
-def test_manual_match_corrects_amount_and_learns(tmp_path):
+def test_manual_match_corrects_amount_and_learns(tmp_path, monkeypatch):
     """921040 i praktiken: appen läste 857,25 — användaren
     matchar, rättar beloppet till sista sidans 13 480 i samma
     dialog, och bekräftelsen räknas i inlärningsminnet."""
     _qapp()
+    import ui.scan_import_view as sv
+    monkeypatch.setattr(sv.QMessageBox, "information", lambda *_a, **_k: None)
     view = _view(tmp_path, SUPPLIERS, TEMPLATES)
     try:
         row = _row(total_amount=857.25, invoice_number="921040",
@@ -298,6 +309,8 @@ def test_manual_match_corrects_amount_and_learns(tmp_path):
         view._manual_match_row()
         assert row["supplier"] == "Testbolaget AB"
         assert float(row["total_amount"]) == 13480.0
+        assert view._rows == []
+        assert view._app.created[0]["total_amount"] == 13480.0
         learning = view._get_match_learning()
         entry = si.learning_entry(learning, "Testbolaget AB")
         assert entry.get("multipage_confirmed") == 1
@@ -308,10 +321,12 @@ def test_manual_match_corrects_amount_and_learns(tmp_path):
         view.close()
 
 
-def test_ask_confirmation_counts_towards_learning(tmp_path):
+def test_ask_confirmation_registers_after_user_match(tmp_path, monkeypatch):
     """Den automatiska frågan vid Skapa fakturor lär också:
     bekräftad flersidig matchning räknas i minnet."""
     _qapp()
+    import ui.scan_import_view as sv
+    monkeypatch.setattr(sv.QMessageBox, "information", lambda *_a, **_k: None)
     view = _view(tmp_path, SUPPLIERS, TEMPLATES)
     try:
         row = _row(supplier="Testbolaget AB", invoice_number="921040",
@@ -319,9 +334,13 @@ def test_ask_confirmation_counts_towards_learning(tmp_path):
                    match_kind="multipage", match_reason="multipage",
                    match_candidates=["Testbolaget AB"], missing=[],
                    status="redo")
+        view._rows = [row]
+        view._refresh_table()
         _drive_dialog("Testbolaget AB")
-        assert view._ask_user_for_match(row) is True
+        assert view._ask_uncertain_rows([row]) == 1
         assert not row.get("match_uncertain")
+        assert view._rows == []
+        assert view._app.created[0]["total_amount"] == 13480.0
         entry = si.learning_entry(
             view._get_match_learning(), "Testbolaget AB"
         )
@@ -330,11 +349,13 @@ def test_ask_confirmation_counts_towards_learning(tmp_path):
         view.close()
 
 
-def test_manual_match_teaches_template_for_new_supplier(tmp_path):
+def test_manual_match_teaches_template_for_new_supplier(tmp_path, monkeypatch):
     """Ny leverantör utan mall: matchningen lär appen en
     VERIFIERAD mall (etiketterna läser tillbaka de bekräftade
     värdena), så nästa faktura matchas automatiskt."""
     _qapp()
+    import ui.scan_import_view as sv
+    monkeypatch.setattr(sv.QMessageBox, "information", lambda *_a, **_k: None)
     suppliers = [{"name": "Nya Bolaget AB"}]
     view = _view(tmp_path, suppliers, {})
     try:
@@ -356,5 +377,8 @@ def test_manual_match_teaches_template_for_new_supplier(tmp_path):
             view._get_match_learning(), "Nya Bolaget AB"
         )
         assert entry.get("template_learned") is True
+        assert view._rows == []
+        assert view._app.created[0]["invoice_number"] == "55"
+        assert view._app.created[0]["total_amount"] == 700.0
     finally:
         view.close()

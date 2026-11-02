@@ -405,6 +405,9 @@ def test_unmatched_import_opens_template_creation(tmp_path, monkeypatch):
         }
         matched = dict(unmatched, template="Alpha AB")
         uncertain = dict(unmatched, match_uncertain=True)
+        # The helper only offers a template for rows still present in
+        # the interpreted-invoices table (saved rows have already moved).
+        view._rows = [unmatched]
         view._open_template_for_unmatched([matched, uncertain])
         assert calls == []
         view._open_template_for_unmatched([unmatched])
