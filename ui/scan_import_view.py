@@ -542,10 +542,15 @@ class TemplateDialog(QDialog):
         existing: dict | None = None,
         path: Any = None,
         suppliers: list[dict] | None = None,
+        templates: dict | None = None,
+        logo_only: bool = False,
+        suggest_logo_match: bool = True,
     ) -> None:
         super().__init__(parent)
         self._text = text or ""
         self._path = Path(path) if path else None
+        self._logo_only = bool(logo_only)
+        self._suggest_logo_match = bool(suggest_logo_match)
         if suppliers is None:
             supplier_loader = getattr(parent, "_suppliers", None)
             try:
@@ -558,9 +563,11 @@ class TemplateDialog(QDialog):
         self._suppliers = list(suppliers or [])
         template_loader = getattr(parent, "_get_templates", None)
         try:
-            self._templates = dict(
-                template_loader() or []
-            ) if callable(template_loader) else {}
+            self._templates = (
+                dict(templates or {}) if templates is not None
+                else (dict(template_loader() or [])
+                      if callable(template_loader) else {})
+            )
         except Exception:
             self._templates = {}
         self.result_template: dict | None = None
@@ -623,7 +630,10 @@ class TemplateDialog(QDialog):
         row_sup.addWidget(self._btn_match_bg)
         root.addLayout(row_sup)
 
-        intro = QLabel(tr("tmpl.intro_image"))
+        intro = QLabel(tr(
+            "tmpl.logo_only_intro" if self._logo_only
+            else "tmpl.intro_image"
+        ))
         intro.setWordWrap(True)
         root.addWidget(intro)
 
@@ -741,6 +751,11 @@ class TemplateDialog(QDialog):
         btn_test = QPushButton(tr("tmpl.test"))
         btn_test.clicked.connect(self._test_all)
         row_btn.addWidget(btn_test)
+        if self._logo_only:
+            for mark_button in self._mark_buttons.values():
+                mark_button.setEnabled(False)
+            btn_clear.hide()
+            btn_test.hide()
         row_btn.addStretch()
         btn_cancel = QPushButton(f"✖  {tr('common.cancel')}")
         btn_cancel.clicked.connect(self.reject)
@@ -755,7 +770,7 @@ class TemplateDialog(QDialog):
         self._set_logo_preview()
         self._reload_page()
         self._set_active(
-            next(
+            "supplier_logo" if self._logo_only else next(
                 (f for f in _TEMPLATE_FIELDS if f not in self._regions),
                 _TEMPLATE_FIELDS[0],
             )
@@ -953,15 +968,19 @@ class TemplateDialog(QDialog):
             ) if self._path else ""
             self._view.set_regions(self._all_regions())
             self._set_logo_preview()
-            if self._logo_hash:
+            if self._logo_hash and self._suggest_logo_match:
                 self._match_supplier_by_logo(self._logo_hash)
+            elif self._logo_hash:
+                self._lbl_hint.setText(tr("tmpl.logo_marked_hint"))
             else:
                 self._lbl_hint.setText(tr("tmpl.logo_unusable"))
             nxt = next(
                 (f for f in _TEMPLATE_FIELDS if f not in self._regions),
                 _TEMPLATE_FIELDS[0],
             )
-            self._set_active(nxt)
+            self._set_active(
+                "supplier_logo" if self._logo_only else nxt
+            )
             return
         self._regions[field] = (page, tuple(rect))
         self._view.set_regions(self._all_regions())
@@ -1060,7 +1079,11 @@ class TemplateDialog(QDialog):
             self._supplier_edit.setFocus()
             return
         rules = self._rules()
-        if not rules:
+        has_logo = bool(self._logo_region is not None and self._logo_hash)
+        if self._logo_only and not has_logo:
+            self._lbl_hint.setText(tr("tmpl.need_logo"))
+            return
+        if not rules and not has_logo:
             self._lbl_hint.setText(tr("tmpl.need_field"))
             return
         self.result_template = {
@@ -1143,10 +1166,14 @@ class TemplatesManagerDialog(QDialog):
             self._list.addItem(tr("tmpl.manager_empty"))
             return
         for name in sorted(self._templates):
-            fields = (self._templates[name] or {}).get("fields", {})
+            template = self._templates[name] or {}
+            fields = template.get("fields", {}) or {}
+            field_names = list(fields.keys())
+            if template.get("supplier_logo"):
+                field_names.append(tr("tmpl.logo_label_short"))
             self._list.addItem(tr(
                 "tmpl.manager_entry", supplier=name,
-                n=len(fields), fields=", ".join(fields.keys()),
+                n=len(field_names), fields=", ".join(field_names),
             ))
 
     def _delete_selected(self) -> None:
@@ -2235,6 +2262,106 @@ class ScanImportView(QWidget):
         value = _parse_amount(edit.text())
         return value if value > 0 else None
 
+    def _mark_supplier_logo_for_match(
+        self, row: dict, combo: QComboBox, parent: QWidget,
+        note_label: QLabel,
+    ) -> bool:
+        """Markera originalets riktiga logotyp från matchningsfrågan.
+
+        Sparar bara leverantörens logotypregion/signatur i den valda
+        mallen. Själva leverantörsbekräftelsen sker först när användaren
+        går tillbaka och trycker på Använd vald.
+        """
+        chosen = str(combo.currentText() or "").strip()
+        if combo.currentIndex() < 0 or not chosen:
+            QMessageBox.information(
+                parent, tr("scan.match_ask_title"),
+                tr("scan.match_logo_pick_supplier"),
+            )
+            return False
+        path = str(row.get("_path", "") or "")
+        si = _scan_module()
+        try:
+            page_count = si.page_image_count(path) if path else 0
+        except Exception:
+            page_count = 0
+        if page_count <= 0:
+            QMessageBox.information(
+                parent, tr("scan.match_ask_title"),
+                tr("tmpl.need_image"),
+            )
+            return False
+
+        current_templates = self._get_templates()
+        existing = si.find_template(current_templates, chosen)
+        try:
+            logo_dlg = TemplateDialog(
+                parent,
+                str(row.get("_text", "") or ""),
+                supplier=chosen,
+                existing=existing,
+                path=path,
+                suppliers=self._suppliers(),
+                templates=current_templates,
+                logo_only=True,
+                suggest_logo_match=False,
+            )
+            logo_dlg.setWindowTitle(
+                tr("scan.match_logo_dialog_title", supplier=chosen)
+            )
+            logo_dlg._supplier_edit.setReadOnly(True)
+            logo_dlg._btn_match_bg.setEnabled(False)
+            if logo_dlg.exec() != QDialog.DialogCode.Accepted:
+                return False
+            result = logo_dlg.result_template
+        except Exception as exc:
+            log.warning("mark supplier logo in match prompt: %s", exc)
+            note_label.setText(tr("scan.match_logo_save_failed"))
+            return False
+        if not isinstance(result, dict):
+            return False
+        logo_spec = result.get("supplier_logo")
+        signature = str(
+            logo_spec.get("dhash", "")
+            if isinstance(logo_spec, dict) else ""
+        )
+        if not signature or si.supplier_logo_distance(
+            signature, signature
+        ) is None:
+            note_label.setText(tr("tmpl.logo_unusable"))
+            return False
+
+        template_names = si.template_candidate_names(
+            current_templates, chosen
+        )
+        template_name = (
+            template_names[0] if len(template_names) == 1 else chosen
+        )
+        updated_templates = dict(current_templates)
+        old_template = updated_templates.get(template_name, {})
+        merged_template = (
+            dict(old_template) if isinstance(old_template, dict) else {}
+        )
+        if not isinstance(merged_template.get("fields"), dict):
+            merged_template["fields"] = {}
+        merged_template["supplier_logo"] = dict(logo_spec)
+        updated_templates[template_name] = merged_template
+        if not si.save_templates(
+            self._templates_file(), updated_templates
+        ):
+            note_label.setText(tr("scan.match_logo_save_failed"))
+            return False
+        self._templates_cache = updated_templates
+        self._refresh_templates_btn()
+        note_label.setText(tr(
+            "scan.match_logo_saved", supplier=chosen
+        ))
+        log.info(
+            "SCAN_IMPORT: användaren markerade logotyp för %s i %s",
+            chosen, row.get("file", ""),
+        )
+        return True
+
     def _ask_user_for_match(self, row: dict) -> bool:
         """Frågar användaren vilken leverantör/mall som gäller.
 
@@ -2314,6 +2441,18 @@ class ScanImportView(QWidget):
         combo.setPlaceholderText(tr("scan.match_ask_placeholder"))
         layout.addWidget(combo)
         self._add_supplier_logo_picker(layout, options, combo)
+        btn_mark_logo = QPushButton(tr("scan.match_mark_logo"))
+        btn_mark_logo.setObjectName("matchMarkInvoiceLogo")
+        logo_note = QLabel()
+        logo_note.setObjectName("supplierLogoNote")
+        logo_note.setWordWrap(True)
+        btn_mark_logo.clicked.connect(
+            lambda _checked=False: self._mark_supplier_logo_for_match(
+                row, combo, dlg, logo_note
+            )
+        )
+        layout.addWidget(btn_mark_logo)
+        layout.addWidget(logo_note)
         amount_edit = self._add_multipage_amount_field(layout, row)
         buttons = QHBoxLayout()
         btn_cancel = QPushButton(tr("common.cancel"))

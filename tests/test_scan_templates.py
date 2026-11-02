@@ -145,6 +145,52 @@ def test_template_dialog_marks_regions_on_image(tmp_path):
         dlg.close()
 
 
+def test_template_dialog_can_save_a_logo_only_supplier_template(
+    tmp_path, monkeypatch,
+):
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from PIL import Image, ImageDraw
+
+    from ui.scan_import_view import TemplateDialog
+
+    image_path = tmp_path / "logo-example.png"
+    image = Image.new("RGB", (600, 840), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((60, 60, 230, 170), fill="#197357")
+    draw.ellipse((105, 80, 190, 155), fill="#e6c94c")
+    image.save(image_path)
+
+    signature = "dhash128-v1:" + "13579bdf" * 4
+    monkeypatch.setattr(
+        si, "supplier_logo_signature", lambda *_args: signature,
+    )
+    dlg = TemplateDialog(
+        None, "", supplier="Alpha AB", path=image_path,
+        logo_only=True, suggest_logo_match=False,
+    )
+    try:
+        assert dlg._active == "supplier_logo"
+        assert all(
+            not button.isEnabled()
+            for button in dlg._mark_buttons.values()
+        )
+        region = (0.10, 0.08, 0.40, 0.22)
+        dlg._on_region_drawn("supplier_logo", 0, region)
+        dlg._save()
+        assert dlg.result_template is not None
+        assert dlg.result_template["supplier"] == "Alpha AB"
+        assert dlg.result_template["fields"] == {}
+        assert dlg.result_template["supplier_logo"] == {
+            "page": 0,
+            "region": [0.1, 0.08, 0.4, 0.22],
+            "dhash": signature,
+        }
+    finally:
+        dlg.close()
+
+
 def test_template_dialog_matches_unique_bankgiro():
     from PySide6.QtWidgets import QApplication
 

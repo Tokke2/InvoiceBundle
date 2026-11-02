@@ -177,6 +177,90 @@ def test_context_menu_offers_manual_match(tmp_path, monkeypatch):
         view.close()
 
 
+def test_uncertain_match_can_mark_logo_on_original_and_learn_it(
+    tmp_path, monkeypatch,
+):
+    """Loggan kan markeras direkt i frågan och räknas först när
+    användaren sedan bekräftar leverantören."""
+    _qapp()
+    from PIL import Image, ImageDraw
+    from PySide6.QtWidgets import QComboBox, QDialog, QLabel, QLineEdit, QPushButton
+
+    import scan_import as si
+    import ui.scan_import_view as sv
+
+    image_path = tmp_path / "uncertain-invoice.png"
+    image = Image.new("RGB", (500, 700), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((40, 35, 190, 135), fill="#146b54")
+    draw.ellipse((75, 52, 155, 118), fill="#e4c64f")
+    image.save(image_path)
+
+    signature = "dhash128-v1:" + "abcdef01" * 4
+    monkeypatch.setattr(
+        si, "supplier_logo_signature", lambda *_args: signature,
+    )
+    view = _view(tmp_path, templates={})
+    row = _row(
+        file="uncertain-invoice.png", _path=str(image_path),
+        supplier="", match_uncertain=True, match_kind="supplier",
+        match_reason="weak", match_candidates=["Testbolaget AB"],
+    )
+    view._rows = [row]
+
+    class FakeLogoDialog:
+        def __init__(
+            self, parent, text, supplier, existing, path, suppliers,
+            templates, logo_only, suggest_logo_match,
+        ):
+            assert supplier == "Testbolaget AB"
+            assert logo_only is True
+            assert suggest_logo_match is False
+            self.result_template = {
+                "supplier": supplier, "fields": {},
+                "supplier_logo": {
+                    "page": 0,
+                    "region": [0.08, 0.05, 0.39, 0.20],
+                    "dhash": signature,
+                },
+            }
+            self._supplier_edit = QLineEdit(supplier)
+            self._btn_match_bg = QPushButton()
+
+        def setWindowTitle(self, _title):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(sv, "TemplateDialog", FakeLogoDialog)
+
+    def _accept_after_marking(dialog):
+        combo = dialog.findChild(QComboBox)
+        assert combo is not None
+        combo.setCurrentIndex(combo.findText("Testbolaget AB"))
+        mark_button = dialog.findChild(
+            QPushButton, "matchMarkInvoiceLogo"
+        )
+        assert mark_button is not None
+        mark_button.click()
+        note = dialog.findChild(QLabel, "supplierLogoNote")
+        assert note is not None and note.text()
+        dialog.accept()
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QDialog, "exec", _accept_after_marking)
+    try:
+        assert view._ask_user_for_match(row) is True
+        saved = si.load_templates(tmp_path / "invoice_templates.json")
+        assert saved["Testbolaget AB"]["supplier_logo"]["dhash"] == signature
+        learning = si.load_match_learning(tmp_path / "match_memory.json")
+        assert learning["Testbolaget AB"]["confirmed"] == 1
+        assert learning["Testbolaget AB"]["logos"][signature] == 1
+    finally:
+        view.close()
+
+
 def test_manual_match_rereads_other_rows_and_leaves_uncertain_in_import(
     tmp_path, monkeypatch,
 ):
