@@ -76,6 +76,35 @@ def test_logo_signature_hashes_the_marked_pdf_image_region():
     ) == ""
 
 
+def test_logo_signature_and_matching_run_on_a_real_pdf_page(tmp_path):
+    import fitz
+
+    path = tmp_path / "invoice.pdf"
+    document = fitz.open()
+    page = document.new_page(width=400, height=300)
+    page.draw_rect(
+        fitz.Rect(40, 40, 180, 160),
+        color=(0.08, 0.35, 0.25), fill=(0.08, 0.35, 0.25),
+    )
+    page.draw_circle((110, 100), 38, color=(1, 1, 1), fill=(1, 1, 1))
+    page.draw_line((84, 116), (110, 68), color=(0.85, 0.65, 0.1), width=9)
+    page.draw_line((110, 68), (136, 116), color=(0.85, 0.65, 0.1), width=9)
+    document.save(path)
+    document.close()
+
+    region = (0.10, 0.13, 0.46, 0.55)
+    signature = si.supplier_logo_signature(path, 0, region)
+    assert signature.startswith("dhash128-v1:")
+    matches = si.supplier_logo_match_candidates(path, {
+        "Alpha AB": {"supplier_logo": {
+            "page": 0, "region": region, "dhash": signature,
+        }},
+    })
+    assert matches == [{
+        "name": "Alpha AB", "distance": 0, "dhash": signature,
+    }]
+
+
 def test_logo_candidates_compare_saved_real_pdf_regions(monkeypatch):
     png = _logo_png()
     region = (0.10, 0.15, 0.62, 0.85)
