@@ -312,6 +312,59 @@ def test_template_manager_edit_preserves_saved_logo_metadata(
         view.close()
 
 
+def test_import_manual_match_keeps_learning_logo_after_threshold(
+    tmp_path, monkeypatch,
+):
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as scan_ui
+    from ui.scan_import_view import ScanImportView
+
+    signature = "dhash128-v1:" + "13579bdf" * 4
+    templates_file = tmp_path / "invoice_templates.json"
+    si.save_templates(templates_file, {"Alpha AB": {
+        "fields": {"total_amount": {"label": "Att betala"}},
+        "supplier_logo": {
+            "page": 0, "region": [0.1, 0.1, 0.4, 0.4],
+            "dhash": signature,
+        },
+    }})
+
+    class FakeCore:
+        def get_suppliers(self):
+            return []
+
+        def get_setting(self, key, default=None):
+            return default
+
+    monkeypatch.setattr(
+        si, "confirmed_supplier_logo_signature",
+        lambda path, supplier, templates: signature,
+    )
+    view = ScanImportView(
+        app=FakeCore(), templates_path=templates_file,
+    )
+    view._learning_cache = {
+        "Alpha AB": {"confirmed": 4, "logos": {signature: 1}},
+    }
+    try:
+        note = view._learn_from_match({
+            "_path": str(tmp_path / "invoice.pdf"),
+            "_text": "Fakturanr A-1\nAtt betala 250,00",
+            "pages": 1, "invoice_number": "A-1",
+            "total_amount": 250.0,
+        }, "Alpha AB")
+        learning = si.load_match_learning(
+            tmp_path / "match_memory.json"
+        )
+        assert learning["Alpha AB"]["confirmed"] == 5
+        assert learning["Alpha AB"]["logos"][signature] == 2
+        assert "logotyp" in note.lower() or "logo" in note.lower()
+    finally:
+        view.close()
+
+
 def test_scan_view_uses_templates_and_reparses(tmp_path):
     from PySide6.QtWidgets import QApplication
 

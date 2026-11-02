@@ -105,6 +105,52 @@ def test_logo_signature_and_matching_run_on_a_real_pdf_page(tmp_path):
     }]
 
 
+def test_confirmed_logo_signature_is_counted_only_for_its_supplier(
+    monkeypatch,
+):
+    signature = LOGO_HASH
+    monkeypatch.setattr(
+        si, "supplier_logo_signature", lambda *_args: signature,
+    )
+    templates = {"Alpha AB": {"supplier_logo": {
+        "page": 0, "region": [0.1, 0.1, 0.4, 0.4],
+        "dhash": signature,
+    }}}
+    assert si.confirmed_supplier_logo_signature(
+        "invoice.pdf", "Alpha AB", templates
+    ) == signature
+    assert si.confirmed_supplier_logo_signature(
+        "invoice.pdf", "Unknown AB", templates
+    ) == ""
+
+    monkeypatch.setattr(
+        si, "supplier_logo_signature",
+        lambda *_args: "dhash128-v1:" + "f" * 32,
+    )
+    assert si.confirmed_supplier_logo_signature(
+        "invoice.pdf", "Alpha AB", templates
+    ) == ""
+
+
+def test_learned_match_from_alternate_pdf_text_reader_is_used(monkeypatch):
+    learning = {}
+    confirmed_text = "Bankgiro 999-1234\nFakturanr A-99\nAtt betala 250,00"
+    for _ in range(si.LEARNED_SUPPLIER_CONFIRMATIONS):
+        si.record_match_confirmation(
+            learning, "Alpha AB", text=confirmed_text,
+        )
+    monkeypatch.setattr(
+        si, "extract_pdf_texts",
+        lambda _path: [(confirmed_text, "secondary-reader")],
+    )
+    result = si._parse_with_reader_fallback(
+        "invoice.pdf", "Fakturanr A-99\nAtt betala 250,00",
+        [], {}, match_learning=learning,
+    )
+    assert result["supplier"] == "Alpha AB"
+    assert result["supplier_match"]["reason"] == "learned"
+
+
 def test_logo_candidates_compare_saved_real_pdf_regions(monkeypatch):
     png = _logo_png()
     region = (0.10, 0.15, 0.62, 0.85)

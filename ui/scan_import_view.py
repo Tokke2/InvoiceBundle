@@ -2433,32 +2433,19 @@ class ScanImportView(QWidget):
                 confirmations_before = 0
             logo_signature = ""
             logo_count_before = 0
-            template = si.find_template(templates, chosen)
-            logo_spec = (template or {}).get("supplier_logo", {}) or {}
             path = str(row.get("_path", "") or "")
-            if path and isinstance(logo_spec, dict):
-                try:
-                    page = int(logo_spec.get("page", 0) or 0)
-                    region = logo_spec.get("region", ())
-                    observed = si.supplier_logo_signature(
-                        path, page, region
+            try:
+                logo_signature = si.confirmed_supplier_logo_signature(
+                    path, chosen, templates
+                )
+                if logo_signature:
+                    logo_count_before = int(
+                        (entry_before.get("logos", {}) or {}).get(
+                            logo_signature, 0
+                        ) or 0
                     )
-                    signature = str(logo_spec.get("dhash", ""))
-                    distance = si.supplier_logo_distance(
-                        observed, signature
-                    )
-                    if (
-                        distance is not None
-                        and distance <= si.SUPPLIER_LOGO_CANDIDATE_MAX_DISTANCE
-                    ):
-                        logo_signature = signature
-                        logo_count_before = int(
-                            (entry_before.get("logos", {}) or {}).get(
-                                logo_signature, 0
-                            ) or 0
-                        )
-                except Exception as exc:
-                    log.debug("confirm supplier logo: %s", exc)
+            except Exception as exc:
+                log.debug("confirm supplier logo: %s", exc)
             entry = si.record_match_confirmation(
                 learning, chosen, multipage=pages >= 2,
                 text=str(row.get("_text", "") or ""),
@@ -2472,6 +2459,9 @@ class ScanImportView(QWidget):
                     n=int(entry.get("multipage_confirmed", 0) or 0),
                 ))
             confirmed = int(entry.get("confirmed", 0) or 0)
+            notes.append(tr(
+                "scan.learning_count", supplier=chosen, n=confirmed
+            ))
             if confirmed >= si.LEARNED_SUPPLIER_CONFIRMATIONS \
                     and confirmed - 1 < si.LEARNED_SUPPLIER_CONFIRMATIONS:
                 # Tröskeln passerad med den här matchningen:

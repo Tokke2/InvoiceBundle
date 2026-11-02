@@ -3130,7 +3130,7 @@ class InvoicesView(QWidget):
                 return
             self._do_refresh()
         learned = self._learn_manual_match(
-            si, resolved, text, final_nr, final_total, pages
+            si, resolved, text, final_nr, final_total, pages, path
         )
         log.info(
             "SCAN_MATCH: faktura %s matchad manuellt mot %s "
@@ -3152,6 +3152,7 @@ class InvoicesView(QWidget):
     def _learn_manual_match(
         self, si: Any, supplier: str, text: str,
         invoice_number: str, total: float, pages: int,
+        path: str = "",
     ) -> str:
         """Inlärning ur en manuell matchning i Fakturor-fliken —
         samma regler som i Import: bekräftelsen räknas i
@@ -3164,21 +3165,54 @@ class InvoicesView(QWidget):
             learning = si.load_match_learning(
                 data_dir / "match_memory.json"
             )
+            templates = self._load_scan_templates(si)
+            entry_before = si.learning_entry(learning, supplier)
+            try:
+                confirmations_before = int(
+                    entry_before.get("confirmed", 0) or 0
+                )
+            except (TypeError, ValueError):
+                confirmations_before = 0
+            logo_signature = si.confirmed_supplier_logo_signature(
+                path, supplier, templates
+            )
+            logo_count_before = int(
+                (entry_before.get("logos", {}) or {}).get(
+                    logo_signature, 0
+                ) or 0
+            ) if logo_signature else 0
             entry = si.record_match_confirmation(
                 learning, supplier,
                 multipage=int(pages or 0) >= 2, text=text,
+                logo_signature=logo_signature,
             )
             si.save_match_learning(
                 data_dir / "match_memory.json", learning
             )
             notes: list[str] = []
             confirmed = int(entry.get("confirmed", 0) or 0)
+            notes.append(tr(
+                "scan.learning_count", supplier=supplier, n=confirmed
+            ))
             if confirmed >= si.LEARNED_SUPPLIER_CONFIRMATIONS \
                     and confirmed - 1 < si.LEARNED_SUPPLIER_CONFIRMATIONS:
                 notes.append(tr(
                     "scan.learned_auto_supplier", supplier=supplier
                 ))
-            templates = self._load_scan_templates(si)
+            logo_count = int(
+                (entry.get("logos", {}) or {}).get(logo_signature, 0) or 0
+            ) if logo_signature else 0
+            if (
+                confirmed >= si.LEARNED_SUPPLIER_CONFIRMATIONS
+                and logo_count >= si.LEARNED_IDENTIFIER_CONFIRMATIONS
+                and not (
+                    confirmations_before >= si.LEARNED_SUPPLIER_CONFIRMATIONS
+                    and logo_count_before >= si.LEARNED_IDENTIFIER_CONFIRMATIONS
+                )
+            ):
+                notes.append(tr(
+                    "scan.learned_auto_logo", supplier=supplier
+                ))
             if not si.find_template(templates, supplier) and \
                     not si.has_builtin_format(supplier):
                 tmpl = si.derive_template_from_confirmation(

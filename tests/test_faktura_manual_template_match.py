@@ -212,6 +212,54 @@ def test_manual_match_rereads_with_chosen_template(tmp_path):
         view.close()
 
 
+def test_manual_match_invoices_view_keeps_learning_the_logo(
+    tmp_path, monkeypatch,
+):
+    """Bekräftelser i Fakturor-fliken bidrar också till samma
+    kontinuerliga logotypinlärning som matchningar i Import."""
+    _qapp()
+    pdf = _pdf(tmp_path / "f.pdf", [
+        "Testbolaget AB\nFaktnr 921040\nSumma 857,25",
+    ])
+    signature = "dhash128-v1:" + "76543210" * 4
+    si.save_templates(tmp_path / "invoice_templates.json", {
+        "Testbolaget AB": {
+            "fields": {"total_amount": {"label": "Summa"}},
+            "supplier_logo": {
+                "page": 0, "region": [0.1, 0.1, 0.4, 0.4],
+                "dhash": signature,
+            },
+        },
+    })
+    learning = {}
+    si.record_match_confirmation(
+        learning, "Testbolaget AB", logo_signature=signature,
+    )
+    for _ in range(3):
+        si.record_match_confirmation(learning, "Testbolaget AB")
+    si.save_match_learning(tmp_path / "match_memory.json", learning)
+    monkeypatch.setattr(
+        si, "confirmed_supplier_logo_signature",
+        lambda path, supplier, templates: signature,
+    )
+
+    app = _FakeApp([_invoice(pdf)], [], tmp_path)
+    view = _view(app)
+    try:
+        note = view._learn_manual_match(
+            si, "Testbolaget AB", "Faktnr 921040\nSumma 857,25",
+            "921040", 857.25, 1, str(pdf),
+        )
+        after = json.loads(
+            (tmp_path / "match_memory.json").read_text("utf-8")
+        )["Testbolaget AB"]
+        assert after["confirmed"] == 5
+        assert after["logos"][signature] == 2
+        assert "logotyp" in note.lower() or "logo" in note.lower()
+    finally:
+        view.close()
+
+
 def test_manual_match_user_can_edit_total(tmp_path):
     """Beloppsfältet i dialogen vinner över omläsningen —
     användarens bekräftade slutsumma sparas."""

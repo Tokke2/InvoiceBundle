@@ -1446,12 +1446,18 @@ def _parse_with_reader_fallback(
             alt_text, suppliers, templates,
             match_learning=match_learning,
         )
-        if alt.get("template") and not alt.get("match_uncertain"):
+        learned_supplier = (
+            (alt.get("supplier_match") or {}).get("reason") == "learned"
+        )
+        if not alt.get("match_uncertain") and (
+            alt.get("template") or learned_supplier
+        ):
             log.info(
-                "SCAN_IMPORT: mallen kände igen fakturan via "
+                "SCAN_IMPORT: %s kände igen fakturan via "
                 "alternativt textuttag (%s): %s",
+                "inlärningen" if learned_supplier else "mallen",
                 method,
-                alt.get("template"),
+                alt.get("supplier") or alt.get("template"),
             )
             return alt
     return result
@@ -2581,6 +2587,37 @@ def find_template(templates: dict, supplier: str) -> dict | None:
     return templates.get(names[0])
 
 
+def confirmed_supplier_logo_signature(
+    path: Any, supplier: str, templates: dict | None,
+    max_distance: int = SUPPLIER_LOGO_CANDIDATE_MAX_DISTANCE,
+) -> str:
+    """Logosignatur som får räknas efter att användaren bekräftat raden.
+
+    Returnerar bara den sparade leverantörssignaturen om den verkliga
+    PDF-bilden ligger inom kandidatgränsen. Därmed kan varje manuell
+    matchningsvy mata samma inlärningsminne utan att räkna en annan
+    leverantörs logotyp som bekräftelse.
+    """
+    if not path or not supplier:
+        return ""
+    template = find_template(templates or {}, supplier)
+    spec = (template or {}).get("supplier_logo", {}) or {}
+    if not isinstance(spec, dict):
+        return ""
+    signature = str(spec.get("dhash", "") or "")
+    try:
+        page = max(0, int(spec.get("page", 0) or 0))
+        region = spec.get("region", ())
+        observed = supplier_logo_signature(path, page, region)
+    except Exception as exc:
+        log.debug("confirmed supplier logo: %s", exc)
+        return ""
+    distance = supplier_logo_distance(observed, signature)
+    if distance is not None and distance <= max_distance:
+        return signature
+    return ""
+
+
 #: Inbyggda, verifierade leverantörsformat. Varje format har
 #: matchats manuellt mot riktiga exempelfakturor tillsammans
 #: med användaren INNAN det byggdes in — det är den manuella
@@ -2810,9 +2847,12 @@ def save_templates(path: Path, templates: dict) -> bool:
 # dialogen eller högerklickets manuella matchning) noteras det
 # i match_memory.json bredvid mallfilen:
 #   {leverantör: {"confirmed": n, "multipage_confirmed": m,
-#                 "last_confirmed": "…", "template_learned": bool}}
-# Minnet gissar aldrig något självt — det räknar bara
-# användarens egna bekräftelser. Vid
+#                 "identifiers": {"org"/"bg": {värde: n}},
+#                 "logos": {bildhash: n}, "last_confirmed": "…"}}
+# Varje uttrycklig manuell matchning lägger till ny evidens; räknarna
+# nollställs inte när automatisk koppling börjar, så senare bekräftelser
+# och nya kännetecken fortsätter att stärka inlärningen. Minnet gissar
+# aldrig något självt — det räknar bara användarens egna bekräftelser. Vid
 # MULTIPAGE_CONFIRMATIONS_TO_GRADUATE bekräftade flersidiga
 # fakturor för samma leverantör får den leverantörens flersidiga
 # fakturor passera flersidighetsvakten UTAN ny fråga, men bara
@@ -2964,10 +3004,10 @@ def record_match_confirmation(
 
     Returnerar leverantörens uppdaterade post. Enda författaren
     till minnet är användarens egna val — appen noterar aldrig
-    sina automatiska träffar som "inlärda". Fakturans starka
-    kännetecken (org.nr/bankgiro ur `text`) räknas in per
-    leverantör: det är de som efter tillräckligt många
-    bekräftelser får koppla nya fakturor automatiskt.
+    sina automatiska träffar som "inlärda". Org.nr/bankgiro ur
+    fakturatexten och en verifierad logotypsignatur räknas per
+    leverantör vid varje manuell bekräftelse; nya identifierare
+    fortsätter samlas även efter att automatisk koppling börjat.
     """
     name = str(supplier or "").strip()
     if not name:
