@@ -1,0 +1,1042 @@
+# -*- coding: utf-8 -*-
+"""
+Fakturabunten — språkmodul (svenska / engelska)
+================================================
+Hela appen finns på svenska (standard) och engelska.
+
+* Språket sparas i settings.json (``"language": "sv" | "en"``) och
+  byts direkt i menyn 🌐 Språk — ingen omstart behövs.
+* Moduler hämtar texter med ``tr("nyckel")``. Dialoger som byggs
+  vid öppning (Donate, Om, Leverantör …) får automatiskt aktuellt
+  språk; fasta vyer implementerar ``retranslate()`` som
+  MainWindow anropar vid språkbyte.
+* Saknas en översättning faller texten tillbaka på svenska —
+  aldrig på en rå nyckel mitt i GUI:t (nyckeln loggas i stället).
+
+Inga Qt-beroenden: modulen kan importeras i tester och i ren
+logik. GUI:t kopplar lyssnare med ``on_language_changed()``.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Callable
+
+logger = logging.getLogger("i18n")
+
+#: Språk som stöds, i menyordning.
+LANGUAGES: tuple[str, ...] = ("sv", "en")
+
+#: Mänskliga namn (visas i språkmenyn, alltid på eget språk).
+LANGUAGE_NAMES: dict[str, str] = {"sv": "Svenska", "en": "English"}
+
+_current: str = "sv"
+_listeners: list[Callable[[str], None]] = []
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  ÖVERSÄTTNINGAR   nyckel → {sv, en}
+# ═════════════════════════════════════════════════════════════════════
+
+_STRINGS: dict[str, dict[str, str]] = {
+    # ── App / gemensamt ──────────────────────────────────────────────
+    "app.name": {"sv": "Fakturabunten", "en": "InvoiceBundle"},
+    "common.close": {"sv": "Stäng", "en": "Close"},
+    "common.cancel": {"sv": "Avbryt", "en": "Cancel"},
+    "common.save": {"sv": "Spara", "en": "Save"},
+    "common.add": {"sv": "Lägg till", "en": "Add"},
+    "common.edit": {"sv": "Redigera", "en": "Edit"},
+    "common.delete": {"sv": "Ta bort", "en": "Delete"},
+    "common.duplicate": {"sv": "Duplicera", "en": "Duplicate"},
+    "common.export": {"sv": "Exportera", "en": "Export"},
+    "common.refresh": {"sv": "Uppdatera", "en": "Refresh"},
+    "common.ready": {"sv": "Redo", "en": "Ready"},
+
+    # ── Flikar ───────────────────────────────────────────────────────
+    "tab.dashboard": {"sv": "🏠  Dashboard", "en": "🏠  Dashboard"},
+    "tab.invoices": {"sv": "🧾  Fakturor", "en": "🧾  Invoices"},
+    "tab.suppliers": {"sv": "🏢  Leverantörer", "en": "🏢  Suppliers"},
+    "tab.payments": {"sv": "💳  Betalningar", "en": "💳  Payments"},
+    "tab.import_tab": {"sv": "📥  Import", "en": "📥  Import"},
+    "tab.reports": {"sv": "📊  Rapporter", "en": "📊  Reports"},
+    "tab.settings_tab": {"sv": "⚙️  Inställningar", "en": "⚙️  Settings"},
+    "tab.log_tab": {"sv": "🪵  Logg", "en": "🪵  Log"},
+    "tab.history": {"sv": "🗂  Historik", "en": "🗂  History"},
+    "tab.dashboard.sub": {"sv": "Översikt och nyckeltal", "en": "Overview and key figures"},
+    "tab.invoices.sub": {"sv": "Hantera inkommande fakturor", "en": "Manage incoming invoices"},
+    "tab.suppliers.sub": {"sv": "Leverantörsregister", "en": "Supplier register"},
+    "tab.payments.sub": {"sv": "Betalbatcher och betalhistorik", "en": "Payment batches and history"},
+    "tab.import_tab.sub": {"sv": "Importera fakturor via PDF / e-post", "en": "Import invoices via PDF / e-mail"},
+    "tab.reports.sub": {"sv": "Månads- och leverantörsrapporter", "en": "Monthly and supplier reports"},
+    "tab.settings_tab.sub": {"sv": "Program- och företagsinställningar", "en": "App and company settings"},
+    "tab.log_tab.sub": {"sv": "Systemlogg — hitta fel på sekunder", "en": "System log — find errors in seconds"},
+    "tab.history.sub": {"sv": "Exporterade/betalda per leverantör (data/betalda/)", "en": "Exported/paid per supplier (data/betalda/)"},
+    "history.title": {"sv": "🗂  Exporterade & betalda fakturor — en fil per leverantör", "en": "🗂  Exported & paid invoices — one file per supplier"},
+    "history.search": {"sv": "Sök fakturanummer, leverantör, OCR, referens …", "en": "Search invoice number, supplier, OCR, reference …"},
+    "history.all_suppliers": {"sv": "Alla leverantörer", "en": "All suppliers"},
+    "history.count": {"sv": "Poster: {shown} av {total}  ·  Betalt totalt: {sum}", "en": "Entries: {shown} of {total}  ·  Total paid: {sum}"},
+    "history.open_folder": {"sv": "📂 Öppna arkivmappen (data/betalda)", "en": "📂 Open archive folder (data/betalda)"},
+    "history.empty": {"sv": "Inga exporterade/betalda fakturor ännu — de hamnar här efter första exporten.", "en": "No exported/paid invoices yet — they appear here after the first export."},
+
+    # ── Menyer ───────────────────────────────────────────────────────
+    "menu.file": {"sv": "&Arkiv", "en": "&File"},
+    "menu.view": {"sv": "&Visa", "en": "&View"},
+    "menu.theme": {"sv": "&Tema", "en": "&Theme"},
+    "menu.language": {"sv": "🌐  &Språk", "en": "🌐  &Language"},
+    "menu.settings": {"sv": "&Inställningar", "en": "&Settings"},
+    "menu.help": {"sv": "&Hjälp", "en": "&Help"},
+    "menu.new_supplier": {"sv": "🏢  Ny leverantör", "en": "🏢  New supplier"},
+    "menu.new_invoice": {"sv": "🧾  Ny faktura", "en": "🧾  New invoice"},
+    "menu.backup_now": {"sv": "💾  Skapa backup nu", "en": "💾  Create backup now"},
+    "menu.open_exports": {"sv": "📁  Öppna exportmapp", "en": "📁  Open export folder"},
+    "menu.open_log": {"sv": "📋  Öppna loggfil", "en": "📋  Open log file"},
+    "menu.minimize_tray": {"sv": "🙈  Minimera till systemfältet", "en": "🙈  Minimize to system tray"},
+    "menu.quit": {"sv": "❌  Avsluta programmet helt", "en": "❌  Quit completely"},
+    "menu.show_all_tabs": {"sv": "👁  Visa alla flikar", "en": "👁  Show all tabs"},
+    "menu.hide_tab": {"sv": "🙈  Dölj denna flik", "en": "🙈  Hide this tab"},
+    "menu.show_hidden": {"sv": "👁  Visa dold flik …", "en": "👁  Show hidden tab …"},
+    "menu.theme_dark": {"sv": "🌙  Mörkt", "en": "🌙  Dark"},
+    "menu.theme_light": {"sv": "☀️  Ljust", "en": "☀️  Light"},
+    "menu.theme_auto": {"sv": "🔄  Auto (tidbaserat)", "en": "🔄  Auto (time-based)"},
+    "menu.theme_system": {"sv": "💻  System", "en": "💻  System"},
+    "menu.autostart": {"sv": "🚀  Starta med operativsystemet", "en": "🚀  Start with operating system"},
+    "menu.close_to_tray": {"sv": "🙈  Stäng till systemfältet (kryss-knappen)", "en": "🙈  Close to system tray (X button)"},
+    "menu.minimize_btn_to_tray": {"sv": "🙈  Minimera till systemfältet (minimera-knappen)", "en": "🙈  Minimize to system tray (minimize button)"},
+    "menu.trace": {"sv": "🔬  Logga varje tryck (TRACE-nivå)", "en": "🔬  Log every click (TRACE level)"},
+    "menu.clean_cache": {"sv": "🧹  Töm cache vid avslut (Smart Cache)", "en": "🧹  Clear cache on exit (Smart Cache)"},
+    "menu.clean_cache_now": {"sv": "🧹  Rensa cache nu…", "en": "🧹  Clear cache now…"},
+    "menu.clean_cache_old": {"sv": "Bara gamla filer (äldre än 1 dygn) — smartfilter", "en": "Old files only (older than 1 day) — smart filter"},
+    "menu.clean_cache_all": {"sv": "All cache nu", "en": "All cache now"},
+    "menu.about": {"sv": "ℹ️  Om programmet", "en": "ℹ️  About"},
+    "menu.donate": {"sv": "💖  Stöd Fakturabunten…", "en": "💖  Support InvoiceBundle…"},
+    "menu.diagnostics": {"sv": "🩺  Kopiera diagnostik", "en": "🩺  Copy diagnostics"},
+    "menu.language_changed": {"sv": "🌐  Språk: Svenska", "en": "🌐  Language: English"},
+
+    # ── Verktygsfält / status ────────────────────────────────────────
+    "toolbar.new_supplier": {"sv": "🏢  Ny leverantör", "en": "🏢  New supplier"},
+    "toolbar.new_invoice": {"sv": "🧾  Ny faktura", "en": "🧾  New invoice"},
+    "toolbar.refresh": {"sv": "🔄  Uppdatera", "en": "🔄  Refresh"},
+    "toolbar.backup": {"sv": "💾  Backup", "en": "💾  Backup"},
+    "toolbar.exports": {"sv": "📁  Exporter", "en": "📁  Exports"},
+    "toolbar.dark": {"sv": "🌙  Mörkt", "en": "🌙  Dark"},
+    "toolbar.light": {"sv": "☀️  Ljust", "en": "☀️  Light"},
+    "toolbar.minimize": {"sv": "🙈  Minimera", "en": "🙈  Minimize"},
+    "toolbar.quit": {"sv": "❌  Avsluta", "en": "❌  Quit"},
+    "toolbar.donate_tip": {"sv": "Fakturabunten är gratis. Stöd utvecklingen med en frivillig donation.", "en": "InvoiceBundle is free. Support development with a voluntary donation."},
+    "status.donate": {"sv": "💖  Stöd", "en": "💖  Support"},
+
+    # ── Inställningsfliken ───────────────────────────────────────────
+    "settings.title": {"sv": "⚙️  Programinställningar", "en": "⚙️  Settings"},
+    "settings.shortcuts": {"sv": "⌨️  Kortkommandon (sparas i shortcuts.json)", "en": "⌨️  Keyboard shortcuts (saved in shortcuts.json)"},
+    "settings.save_shortcuts": {"sv": "💾  Spara kortkommandon", "en": "💾  Save shortcuts"},
+    "settings.reset_shortcuts": {"sv": "↩️  Återställ standard", "en": "↩️  Reset to defaults"},
+    "settings.shortcuts_hint": {"sv": "Klicka i fältet och tryck önskad tangentkombination. Tomt fält = ingen tangent.", "en": "Click a field and press the desired key combination. Empty = no shortcut."},
+    "settings.plugins": {"sv": "🧩  Plugins (3-strikes-recovery)", "en": "🧩  Plugins (3-strikes recovery)"},
+    "settings.reenable_plugins": {"sv": "♻️  Återställ avaktiverade plugins", "en": "♻️  Re-enable disabled plugins"},
+    "settings.language": {"sv": "🌐  Språk / Language", "en": "🌐  Language / Språk"},
+    "settings.language_hint": {"sv": "Byts direkt — ingen omstart behövs.", "en": "Applied instantly — no restart needed."},
+    "settings.text_size": {"sv": "Aa  Textstorlek", "en": "Aa  Text size"},
+    "settings.text_size_hint": {"sv": "Ändras direkt och sparas. Rad- och kontrollhöjder följer med.", "en": "Applies immediately and is saved. Row and control heights adjust too."},
+    "settings.text_size_small": {"sv": "Liten · 85 %", "en": "Small · 85%"},
+    "settings.text_size_standard": {"sv": "Standard · 100 %", "en": "Standard · 100%"},
+    "settings.text_size_large": {"sv": "Stor · 115 %", "en": "Large · 115%"},
+    "settings.text_size_extra_large": {"sv": "Extra stor · 131 %", "en": "Extra large · 131%"},
+    "settings.text_size_applied": {"sv": "Textstorlek ändrad", "en": "Text size changed"},
+    "settings.donate_group": {"sv": "💖  Stöd Fakturabunten (frivilligt)", "en": "💖  Support InvoiceBundle (voluntary)"},
+    "settings.donate_text": {"sv": "Programmet är gratis och utan reklam. En donation hjälper utveckling och underhåll — men appen fungerar exakt lika bra utan.", "en": "The app is free with no ads. A donation helps development and maintenance — but the app works exactly the same without one."},
+    "settings.donate_open": {"sv": "💖  Donationsalternativ …", "en": "💖  Donation options …"},
+    "settings.note": {"sv": "Övriga inställningar (tema, autostart, stäng till tray, visa/dölj flikar, logga varje tryck/TRACE, töm cache vid avslut) finns i menyerna ovan. Alla data lagras lokalt i JSON-filer i appmappen.", "en": "Other settings (theme, autostart, close to tray, show/hide tabs, TRACE logging, clear cache on exit) are in the menus above. All data is stored locally in JSON files in the app folder."},
+
+    # ── Vy-fel (när en flik inte kan laddas) ──────────────────────────
+    "view.load_failed_title": {"sv": "⚠  Vyn kunde inte laddas", "en": "⚠  The view could not be loaded"},
+    "view.load_failed_body": {"sv": "Fliken är inte trasig data — programmet kunde bara inte starta vyn.\nFelet nedan kan klistras in i en felrapport.", "en": "Your data is not broken — the app just could not start this view.\nThe error below can be pasted into a bug report."},
+    "view.retry": {"sv": "🔄  Försök igen", "en": "🔄  Try again"},
+
+    # ── Leverantörer ─────────────────────────────────────────────────
+    "suppliers.title": {"sv": "🏢  Leverantörer", "en": "🏢  Suppliers"},
+    "suppliers.search_ph": {"sv": "🔍  Sök namn, org.nr, e-post, kontakt …", "en": "🔍  Search name, org no., e-mail, contact …"},
+    "suppliers.new": {"sv": "➕  Ny leverantör", "en": "➕  New supplier"},
+    "suppliers.edit": {"sv": "✏️  Redigera", "en": "✏️  Edit"},
+    "suppliers.duplicate": {"sv": "📋  Duplicera", "en": "📋  Duplicate"},
+    "suppliers.delete": {"sv": "🗑  Ta bort", "en": "🗑  Delete"},
+    "suppliers.export": {"sv": "📄  Exportera", "en": "📄  Export"},
+    "suppliers.count": {"sv": "Leverantörer: {n}", "en": "Suppliers: {n}"},
+    "suppliers.count_of": {"sv": "Leverantörer: {shown} av {total}", "en": "Suppliers: {shown} of {total}"},
+    "suppliers.empty_title": {"sv": "Inga leverantörer ännu", "en": "No suppliers yet"},
+    "suppliers.empty_body": {"sv": "Klicka på ”➕  Ny leverantör” för att lägga till den första.\nFakturor kan inte registreras förrän minst en leverantör finns.", "en": "Click “➕  New supplier” to add the first one.\nInvoices cannot be registered until at least one supplier exists."},
+    "suppliers.empty_search": {"sv": "Ingen leverantör matchar sökningen.", "en": "No supplier matches your search."},
+    "supplier.columns": {"sv": "Namn|Org.nr|Bankgiro|Plusgiro|IBAN|BIC|Villkor|Kontakt|E-post|Telefon|Adress|Notering", "en": "Name|Org no.|Bankgiro|Plusgiro|IBAN|BIC|Terms|Contact|E-mail|Phone|Address|Note"},
+    "supplier.new_title": {"sv": "Ny leverantör", "en": "New supplier"},
+    "supplier.edit_title": {"sv": "Redigera leverantör", "en": "Edit supplier"},
+    "supplier.name": {"sv": "Namn *:", "en": "Name *:"},
+    "supplier.org": {"sv": "Org.nummer:", "en": "Org number:"},
+    "supplier.required_ph": {"sv": "Obligatoriskt", "en": "Required"},
+    "supplier.favorite": {"sv": "⭐  Favorit (hamnar överst i fakturavyn)", "en": "⭐  Favourite (shown first in the invoice view)"},
+    "supplier.terms_days": {"sv": "  dagar", "en": "  days"},
+    "supplier.name_required": {"sv": "Namn är obligatoriskt.", "en": "Name is required."},
+    "supplier.validation": {"sv": "Validering", "en": "Validation"},
+    "supplier.duplicate_title": {"sv": "Möjlig dublett", "en": "Possible duplicate"},
+    "supplier.duplicate_body": {"sv": "'{name}' finns redan.\nLägg till ändå?", "en": "'{name}' already exists.\nAdd anyway?"},
+    "supplier.delete_title": {"sv": "Ta bort leverantör", "en": "Delete supplier"},
+    "supplier.delete_body": {"sv": "Ta bort '{name}'?\nKan inte ångras.", "en": "Delete '{name}'?\nThis cannot be undone."},
+    "supplier.saved": {"sv": "✅  Leverantör '{name}' sparad.", "en": "✅  Supplier '{name}' saved."},
+    "supplier.updated": {"sv": "✅  Leverantör '{name}' uppdaterad.", "en": "✅  Supplier '{name}' updated."},
+    "supplier.deleted": {"sv": "🗑  Leverantör '{name}' borttagen.", "en": "🗑  Supplier '{name}' deleted."},
+    "supplier.export_none": {"sv": "Inga leverantörer att exportera.", "en": "No suppliers to export."},
+    "supplier.export_done": {"sv": "✅  {n} leverantörer exporterade.", "en": "✅  Exported {n} suppliers."},
+
+    # ── Fakturor (vyns krom — datavärden översätts inte) ─────────────
+    "invoices.title": {"sv": "🧾  Registrerade leverantörsfakturor", "en": "🧾  Registered supplier invoices"},
+    "invoices.choose_supplier": {"sv": "🏢  Välj leverantör:", "en": "🏢  Choose supplier:"},
+    "invoices.choose_ph": {"sv": "— välj leverantör —", "en": "— choose supplier —"},
+    "invoices.supplier_selector_tip": {"sv": "Välj en leverantör för att visa bara dess fakturor. Rensa valet för att visa alla. Valet används också när du registrerar en ny faktura.", "en": "Choose a supplier to show only its invoices. Clear the selection to show all. The selection is also used when registering a new invoice."},
+    "invoices.supplier_with_count": {"sv": "{name} ({n})", "en": "{name} ({n})"},
+    "invoices.supplier_active_count_tip": {"sv": "{n} aktiva fakturor för leverantören", "en": "{n} active invoices for this supplier"},
+    "invoices.table_density": {"sv": "Radhöjd:", "en": "Row height:"},
+    "invoices.table_density_accessible": {"sv": "Fakturornas tabelltäthet", "en": "Invoice table density"},
+    "invoices.table_density_tip": {"sv": "Välj om fakturaraderna ska vara kompakta eller luftigare.", "en": "Choose compact or more spacious invoice rows."},
+    "invoices.density_comfortable": {"sv": "Bekväm", "en": "Comfortable"},
+    "invoices.density_compact": {"sv": "Kompakt", "en": "Compact"},
+    "invoices.search_shortcut_tip": {"sv": "Sök bland fakturor (Ctrl+F)", "en": "Search invoices (Ctrl+F)"},
+    "invoices.table_keyboard_tip": {"sv": "↑/↓ flyttar markeringen · Ctrl+F söker · Ctrl+N registrerar · Ctrl+E redigerar · Delete tar bort · Ctrl+Shift+E exporterar markerade", "en": "↑/↓ moves selection · Ctrl+F searches · Ctrl+N registers · Ctrl+E edits · Delete removes · Ctrl+Shift+E exports marked"},
+    "invoices.export_check_header_accessible": {"sv": "Exportval", "en": "Export selection"},
+    "invoices.export_check_accessible": {"sv": "Markera fakturan för PDF-export", "en": "Mark invoice for PDF export"},
+    "invoices.status_accessible": {"sv": "Status: {status}", "en": "Status: {status}"},
+    "invoices.delete_selected_n": {"sv": "🗑  Ta bort {n} valda", "en": "🗑  Delete {n} selected"},
+    "invoices.delete_confirm_single": {"sv": "Är du säker på att du vill ta bort faktura '{nr}' ur registret?\n\nBorttagen = borta: den markeras inte som betald/exporterad och hamnar inte i Historik. Originalfilen på disk rörs inte. Detta kan inte ångras.", "en": "Delete invoice '{nr}' from the register?\n\nDeleted means gone: it will not be marked paid/exported or moved to History. The original file on disk is untouched. This cannot be undone."},
+    "invoices.delete_selected_title": {"sv": "Ta bort {n} valda fakturor", "en": "Delete {n} selected invoices"},
+    "invoices.delete_confirm_multiple": {"sv": "Ta bort {n} valda fakturor (sammanlagt {amount}) ur registret?\n\nDe markeras inte som betalda/exporterade och hamnar inte i Historik. Originalfilerna på disk rörs inte. Detta kan inte ångras.", "en": "Delete {n} selected invoices (total {amount}) from the register?\n\nThey will not be marked paid/exported or moved to History. Original files on disk are untouched. This cannot be undone."},
+    "invoices.delete_partial_title": {"sv": "Delvis borttagning", "en": "Partial deletion"},
+    "invoices.delete_partial_body": {"sv": "{removed} fakturor togs bort. Kunde inte ta bort: {failed}.", "en": "Deleted {removed} invoices. Could not delete: {failed}."},
+    "invoices.deleted_one": {"sv": "🗑  '{nr}' borttagen ur registret", "en": "🗑  '{nr}' removed from the register"},
+    "invoices.deleted_many": {"sv": "🗑  {n} fakturor borttagna ur registret", "en": "🗑  {n} invoices removed from the register"},
+    "invoices.search_ph": {"sv": "🔍  Sök fakturanummer, leverantör, OCR, referens …", "en": "🔍  Search invoice number, supplier, OCR, reference …"},
+    "invoices.add": {"sv": "➕  Registrera faktura", "en": "➕  Register invoice"},
+    "invoices.edit": {"sv": "✏️  Redigera", "en": "✏️  Edit"},
+    "invoices.delete": {"sv": "🗑  Ta bort", "en": "🗑  Delete"},
+    "invoices.delete_all": {"sv": "🧹  Rensa alla fakturor", "en": "🧹  Clear all invoices"},
+    "invoices.delete_tip": {"sv": "Ta bort markerad(e) faktura(or) ur registret (eller Delete-tangenten). Borttaget = borta — inget markeras som betalt/exporterat; originalfilerna rörs inte.", "en": "Remove the selected invoice(s) from the register (or press Delete). Deleted means gone — nothing is marked paid/exported; original files are untouched."},
+    "invoices.delete_all_tip": {"sv": "Ta bort ALLA aktiva fakturor ur registret. Borttaget = borta för gott — inget markeras betald/exporterat och inget hamnar i Historik", "en": "Remove ALL active invoices from the register. Deleted = gone for good — nothing is marked paid/exported and nothing goes to History"},
+    "invoices.duplicate": {"sv": "📋  Duplicera", "en": "📋  Duplicate"},
+    "invoices.mark_paid": {"sv": "✅  Markera betald", "en": "✅  Mark paid"},
+    "invoices.pay_today": {"sv": "⚡  Betala idag", "en": "⚡  Pay today"},
+    "invoices.chip_overdue": {"sv": "🔴  Förfallna", "en": "🔴  Overdue"},
+    "invoices.chip_today": {"sv": "📅  Idag & i morgon", "en": "📅  Today & tomorrow"},
+    "invoices.chip_week": {"sv": "🗓  Inom 7 dagar", "en": "🗓  Within 7 days"},
+    "invoices.pay_today_tip": {"sv": "Markera allt som förfaller idag eller i morgon", "en": "Select everything due today or tomorrow"},
+    "invoices.pay_today_none": {"sv": "Inget förfaller idag eller i morgon 🎉", "en": "Nothing is due today or tomorrow 🎉"},
+    "invoices.pay_today_found": {"sv": "⚡  {n} faktura(or) förfaller idag/i morgon – markerade, summa {amount}", "en": "⚡  {n} invoice(s) due today/tomorrow – selected, total {amount}"},
+    "invoices.att_betala_total": {"sv": "Att betala totalt: {amount} (obetalda)", "en": "Total to pay: {amount} (unpaid)"},
+    "invoices.selected_sum": {"sv": "Markerat: {n} st · {amount} · tidigaste förfall {due}", "en": "Selected: {n} · {amount} · earliest due {due}"},
+    "invoices.selected_sum_no_due": {"sv": "Markerat: {n} st · {amount}", "en": "Selected: {n} · {amount}"},
+    "invoices.copy_payinfo": {"sv": "💳  Kopiera betalinfo", "en": "💳  Copy payment info"},
+    "invoices.ctx_status": {"sv": "📊  Ändra status", "en": "📊  Change status"},
+    "invoices.ctx_undo_status": {"sv": "↩  Ångra statusändring", "en": "↩  Undo status change"},
+    "invoices.ctx_print": {"sv": "🖨  Skriv ut", "en": "🖨  Print"},
+    "invoices.ctx_open_original": {"sv": "📂  Öppna originalfaktura", "en": "📂  Open original invoice"},
+    "invoices.open_missing": {"sv": "📂 Faktura {nr} saknar originalfil — inget att öppna", "en": "📂 Invoice {nr} has no original file — nothing to open"},
+    "invoices.opened": {"sv": "📂 Öppnade originalet {file} i systemets visare", "en": "📂 Opened the original {file} in the system viewer"},
+    "invoices.pages_tooltip": {"sv": "Originalet har {n} sidor — totalen står ofta på sista sidan", "en": "The original has {n} pages — the total is often on the last page"},
+    "invoices.print_missing": {"sv": "🖨 Faktura {nr} saknar originalfil — inget att skriva ut", "en": "🖨 Invoice {nr} has no original file — nothing to print"},
+    "invoices.ctx_rescan": {"sv": "🔄  Skanna om faktura", "en": "🔄  Rescan invoice"},
+    "invoices.ctx_manual_match": {"sv": "🧩  Matcha mot mall …", "en": "🧩  Match to template …"},
+    "invoices.manual_match_title": {"sv": "Matcha mot mall manuellt", "en": "Match to template manually"},
+    "invoices.manual_match_intro": {"sv": "Välj vilken leverantör/mall faktura {nr} (nu: {supplier}, att betala {amount}) tillhör. Värdena nedan läses om ur originalet med den valda mallen — kontrollera dem innan du sparar; inget ändras förrän du bekräftar.", "en": "Choose which supplier/template invoice {nr} (currently: {supplier}, amount due {amount}) belongs to. The values below are re-read from the original with the chosen template — check them before saving; nothing changes until you confirm."},
+    "invoices.manual_match_pick": {"sv": "Leverantör/mall:", "en": "Supplier/template:"},
+    "invoices.manual_match_template_used": {"sv": "Mall som används: {template}", "en": "Template used: {template}"},
+    "invoices.manual_match_template_unconfirmed": {"sv": " ⚠ Mallen har inte bekräftats ännu — kontrollera värdena; din sparbekräftelse lär mallen.", "en": " ⚠ This template has not been confirmed yet — review the values; saving your confirmation trains it."},
+    "invoices.manual_match_template_none": {"sv": "Ingen mall för vald leverantör — generisk läsning, leverantören sätts av ditt val", "en": "No template for the chosen supplier — generic reading, the supplier is set by your choice"},
+    "invoices.manual_match_field_ocr": {"sv": "OCR", "en": "OCR"},
+    "invoices.manual_match_changes": {"sv": "← ändras", "en": "← changes"},
+    "invoices.manual_match_save": {"sv": "✔  Spara matchning", "en": "✔  Save match"},
+    "invoices.manual_match_no_text": {"sv": "Ingen text kunde läsas ur originalet till faktura {nr} — matchningen kan inte göras.", "en": "No text could be read from the original of invoice {nr} — the match cannot be made."},
+    "invoices.manual_match_no_options": {"sv": "Det finns inga leverantörer i registret och inga mallar att matcha mot ännu. Lägg till leverantören eller lär in en mall i Import-fliken först.", "en": "There are no suppliers in the register and no templates to match against yet. Add the supplier or teach a template in the Import tab first."},
+    "invoices.manual_match_updated": {"sv": "✔ Faktura {nr} matchad mot {supplier} — värdena uppdaterade ur originalet", "en": "✔ Invoice {nr} matched to {supplier} — values updated from the original"},
+    "invoices.manual_match_unchanged": {"sv": "✔ Faktura {nr} bekräftad mot {supplier} — inga fält behövde ändras", "en": "✔ Invoice {nr} confirmed against {supplier} — no fields needed changing"},
+    "invoices.manual_match_learned": {"sv": "🧠 Appen lärde sig mallen för {supplier} ur matchningen", "en": "🧠 The app learned the template for {supplier} from the match"},
+    "invoices.rescan_no_original": {"sv": "🔄 Faktura {nr} saknar originalfil — kan inte skannas om", "en": "🔄 Invoice {nr} has no original file — cannot rescan"},
+    "invoices.rescan_unchanged": {"sv": "🔄 Faktura {nr}: omskanningen läser samma värden som registrerat — inget ändrat", "en": "🔄 Invoice {nr}: the rescan reads the same values as registered — nothing changed"},
+    "invoices.rescan_uncertain": {"sv": "🔄 Faktura {nr} kunde inte tolkas säkert vid omskanning (saknas: {missing}) — inget ändrat", "en": "🔄 Invoice {nr} could not be read reliably on rescan (missing: {missing}) — nothing changed"},
+    "invoices.rescan_title": {"sv": "Skanna om faktura", "en": "Rescan invoice"},
+    "invoices.rescan_confirm": {"sv": "Omskanningen av faktura {nr} läser nu andra värden än de registrerade:\n\n{lines}\n\nUppdatera fakturan med de nya värdena?", "en": "Rescanning invoice {nr} now reads different values than those registered:\n\n{lines}\n\nUpdate the invoice with the new values?"},
+    "invoices.rescan_updated": {"sv": "🔄 Faktura {nr} uppdaterad efter omskanning", "en": "🔄 Invoice {nr} updated after rescan"},
+    "invoices.rescan_cancelled": {"sv": "Omskanningen avbruten — inget ändrat", "en": "Rescan cancelled — nothing changed"},
+    "invoices.rescan_failed": {"sv": "🔄 Omskanningen av faktura {nr} misslyckades — inget ändrat", "en": "🔄 Rescanning invoice {nr} failed — nothing changed"},
+    "invoices.rescan_number_taken": {"sv": "🔄 Omskanningen läser fakturanummer {new}, men det numret finns redan hos leverantören — inget ändrat", "en": "🔄 The rescan reads invoice number {new}, but that number already exists for the supplier — nothing changed"},
+    "invoices.rescan_field_number": {"sv": "Fakturanr", "en": "Invoice no."},
+    "invoices.rescan_field_date": {"sv": "Datum", "en": "Date"},
+    "invoices.rescan_field_due": {"sv": "Förfallodatum", "en": "Due date"},
+    "invoices.rescan_field_total": {"sv": "Att betala", "en": "Amount due"},
+    "invoices.payinfo_copied": {"sv": "💳  Betalinfo för {nr} kopierad till urklipp", "en": "💳  Payment info for {nr} copied to the clipboard"},
+    "invoices.undo_tip": {"sv": "Ångra senaste statusändringen (Ctrl+Z)", "en": "Undo the last status change (Ctrl+Z)"},
+    "invoices.undo_done": {"sv": "↩  Ångrade statusändring för {n} faktura(or)", "en": "↩  Undid status change for {n} invoice(s)"},
+    "invoices.undo_empty": {"sv": "Inget att ångra", "en": "Nothing to undo"},
+    "invoices.export_all": {"sv": "📄  Exportera ALLA till PDF", "en": "📄  Export ALL to PDF"},
+    "invoices.export_selected": {"sv": "📄  Exportera markerade till PDF", "en": "📄  Export selected to PDF"},
+    "invoices.export_selected_n": {"sv": "📄  Exportera markerade till PDF  ({n}) · {amount}", "en": "📄  Export selected to PDF  ({n}) · {amount}"},
+    "invoices.export_selected_tip": {"sv": "Exportera valda fakturor. Välj ovan om original ska bifogas med alla sidor, bara första sidan eller inte alls. Efter lyckad export markeras fakturorna som betalda och flyttas till Historik.", "en": "Export the selected invoices. Choose above whether to append all original pages, only the first page, or no originals. After a successful export, invoices are marked paid and moved to History."},
+    "invoices.export_originals_mode": {"sv": "Original:", "en": "Originals:"},
+    "invoices.export_originals_all_pages": {"sv": "Bifoga alla sidor", "en": "Attach all pages"},
+    "invoices.export_originals_first_page": {"sv": "Bara första sidan", "en": "First page only"},
+    "invoices.export_originals_none": {"sv": "Utan original", "en": "No originals"},
+    "invoices.export_originals_tip": {"sv": "Välj om originalfakturor ska läggas efter betal-PDF:en. För flersidiga PDF-original kan bara sida 1 tas med. Valet sparas.", "en": "Choose whether source invoices are appended after the payment PDF. For multi-page PDF originals, you can append only page 1. This choice is saved."},
+    "invoices.marked_label": {"sv": "Markerade:", "en": "Selected:"},
+    "invoices.export_check_tip": {"sv": "Kryssa i för att ta med fakturan i exporten", "en": "Tick to include this invoice in the export"},
+    "invoices.export_selected_title": {"sv": "Exportera markerade fakturor", "en": "Export selected invoices"},
+    "invoices.export_sel_none": {"sv": "Markera rader i tabellen (Ctrl/Shift-klick) för att välja vilka som exporteras — eller exportera alla.", "en": "Select rows in the table (Ctrl/Shift-click) to choose what gets exported — or export all."},
+    "invoices.export_sel_info": {"sv": "Valda för export: {n} st · netto {amount} · max 10 per fil", "en": "Chosen for export: {n} · net {amount} · max 10 per file"},
+    "invoices.mark_shown": {"sv": "☑  Markera visade", "en": "☑  Select shown"},
+    "invoices.clear_marked": {"sv": "🧹  Rensa markering", "en": "🧹  Clear selection"},
+    "invoices.history": {"sv": "📚  Exporthistorik", "en": "📚  Export history"},
+    "invoices.open_export_folder": {"sv": "📂  Öppna exportmapp", "en": "📂  Open export folder"},
+    "invoices.card_invoices": {"sv": "Fakturor  +", "en": "Invoices  +"},
+    "invoices.card_credits": {"sv": "Krediter  −", "en": "Credits  −"},
+    "invoices.card_total": {"sv": "ATT BETALA", "en": "TO PAY"},
+    "invoices.all_types": {"sv": "Alla typer", "en": "All types"},
+    "invoices.active_only": {"sv": "Aktiva (ej arkiv)", "en": "Active (not archived)"},
+    "invoices.all_statuses": {"sv": "Alla statusar", "en": "All statuses"},
+    "invoices.all_suppliers": {"sv": "Alla leverantörer", "en": "All suppliers"},
+    "invoices.columns": {"sv": "Typ|Leverantör|Fakturanr|OCR|Datum|Förfaller|Betaldatum|Belopp|Valuta|Status|Kategori|Referens|Notering|Sidor", "en": "Type|Supplier|Invoice no.|OCR|Date|Due|Payment date|Amount|Currency|Status|Category|Reference|Note|Pages"},
+
+    # ── Import (skannade fakturor) ───────────────────────────────────
+    "scan.title": {"sv": "📥  Importera skannade fakturor", "en": "📥  Import scanned invoices"},
+    "scan.info": {"sv": "Läs in PDF eller bild (skannad faktura), kontrollera vad som tolkades och bekräfta.\nKompletta fakturor registreras när du klickar Skapa fakturor — eller direkt när du själv löser en osäker leverantörsmatchning. Appens summor räknas som vanligt.", "en": "Load a PDF or image (scanned invoice), check what was read and confirm.\nComplete invoices are registered when you click Create invoices — or immediately when you resolve an uncertain supplier match yourself. Totals are calculated as usual."},
+    "scan.step1": {"sv": "1.  Välj fakturafiler", "en": "1.  Choose invoice files"},
+    "scan.pick": {"sv": "📂  Välj filer …", "en": "📂  Choose files …"},
+    "scan.clear": {"sv": "🗑  Rensa lista", "en": "🗑  Clear list"},
+    "scan.no_files": {"sv": "Inga filer valda", "en": "No files chosen"},
+    "scan.scan": {"sv": "🔍  Läs in och tolka", "en": "🔍  Read and interpret"},
+    "scan.step2": {"sv": "2.  … eller klistra in fakturatext (fallback)", "en": "2.  … or paste invoice text (fallback)"},
+    "scan.parse": {"sv": "🧠  Tolka texten", "en": "🧠  Interpret the text"},
+    "scan.auto_open": {"sv": "Öppna fakturadialogen direkt", "en": "Open the invoice dialog directly"},
+    "scan.step3": {"sv": "3.  Tolkade fakturor  (dubbelklicka för att rätta)", "en": "3.  Interpreted invoices  (double-click to correct)"},
+    "scan.create": {"sv": "✅  Skapa fakturor (markerade)", "en": "✅  Create invoices (selected)"},
+    "scan.open_dialog": {"sv": "✏️  Öppna i fakturadialogen", "en": "✏️  Open in invoice dialog"},
+    "scan.remove_row": {"sv": "🗑  Ta bort rad", "en": "🗑  Remove row"},
+
+    # ── Datumväljare / exportdatum ───────────────────────────────────
+    "date.today_btn": {"sv": "Idag", "en": "Today"},
+    "date.tomorrow_btn": {"sv": "Imorgon", "en": "Tomorrow"},
+    "date.month_end_btn": {"sv": "Månadsslut", "en": "End of month"},
+    "date.rel_today": {"sv": "idag", "en": "today"},
+    "date.rel_tomorrow": {"sv": "imorgon", "en": "tomorrow"},
+    "date.rel_yesterday": {"sv": "igår", "en": "yesterday"},
+    "date.rel_in_days": {"sv": "om {n} dagar", "en": "in {n} days"},
+    "date.rel_days_ago": {"sv": "för {n} dagar sedan", "en": "{n} days ago"},
+    "export.date_window_title": {"sv": "Betalningsdatum för export", "en": "Payment date for export"},
+    "export.date_title": {"sv": "📄  Ange betalningsdatum för export", "en": "📄  Choose the payment date for this export"},
+    "export.date_count": {"sv": "Antal fakturor:  {n}", "en": "Invoices:  {n}"},
+    "export.date_suppliers": {"sv": "Leverantörer:     {names}", "en": "Suppliers:     {names}"},
+    "export.date_and_more": {"sv": "  och {n} till …", "en": "  and {n} more …"},
+    "export.date_info": {"sv": "Betalningsdatumet gäller ALLA fakturor i denna export.\nDet nollställs automatiskt efter exporten.\nNästa export → du tillfrågas igen.", "en": "The payment date applies to ALL invoices in this export.\nIt is reset automatically after the export.\nNext export → you will be asked again."},
+    "export.payment_date": {"sv": "Betalningsdatum:", "en": "Payment date:"},
+    "export.export_with_date": {"sv": "✔  Exportera med detta datum", "en": "✔  Export with this date"},
+    "export.cancel_export": {"sv": "✖  Avbryt export", "en": "✖  Cancel export"},
+    "export.choose_for": {"sv": "Ange betalningsdatum för {n} fakturor:", "en": "Choose the payment date for {n} invoices:"},
+    "export.export_btn": {"sv": "✔  Exportera", "en": "✔  Export"},
+
+    # ── Donation ─────────────────────────────────────────────────────
+    "donate.title": {"sv": "💖 Stöd Fakturabunten", "en": "💖 Support InvoiceBundle"},
+    "donate.window_title": {"sv": "Fakturabunten — Stöd projektet", "en": "InvoiceBundle — Support the project"},
+    "donate.body_html": {
+        "sv": "<p><b>Fakturabunten är gratis och utan reklam.</b> Om programmet hjälper dig i vardagen är en donation ett frivilligt tack som hjälper mig att fortsätta utveckla och underhålla det.</p><ul><li>Ingen reklam, ingen inloggning, inga prenumerationer.</li><li>Donationer går direkt till utveckling och underhåll.</li><li>Appen fungerar exakt lika bra utan donation.</li></ul><p style='color:#8a8a9e;font-size:11px'>Betalningen sker hos PayPal, Ko-fi eller Swish. Fakturabunten ser inga betalningsuppgifter.</p>",
+        "en": "<p><b>InvoiceBundle is free and ad-free.</b> If the app helps you in everyday life, a donation is a voluntary thank-you that helps me keep developing and maintaining it.</p><ul><li>No ads, no sign-up, no subscriptions.</li><li>Donations go directly to development and maintenance.</li><li>The app works exactly the same without a donation.</li></ul><p style='color:#8a8a9e;font-size:11px'>Payment takes place at PayPal, Ko-fi or Swish. InvoiceBundle never sees any payment details.</p>",
+    },
+    "donate.paypal": {"sv": "💙 Donera via PayPal", "en": "💙 Donate with PayPal"},
+    "donate.kofi": {"sv": "☕ Bjud på en kaffe (Ko-fi)", "en": "☕ Buy me a coffee (Ko-fi)"},
+    "donate.swish_scan": {"sv": "📱  Skanna med Swish-appen", "en": "📱  Scan with the Swish app"},
+    "donate.swish_number": {"sv": "Swish: {number}", "en": "Swish: {number}"},
+    "donate.swish": {"sv": "📱 Kopiera Swish-nummer", "en": "📱 Copy Swish number"},
+    "donate.swish_copied": {"sv": "💙  Swish-nummer kopierat: {number}", "en": "💙  Swish number copied: {number}"},
+    "donate.open_failed": {"sv": "Kunde inte öppna länken — adressen finns i knappens verktygstips.", "en": "Could not open the link — the address is in the button tooltip."},
+
+    # ── Om-dialogen ──────────────────────────────────────────────────
+    "about.title": {"sv": "Om {app}", "en": "About {app}"},
+    "about.donate_btn": {"sv": "💖  Stöd projektet", "en": "💖  Support the project"},
+    "about.close": {"sv": "✖  Stäng", "en": "✖  Close"},
+
+    "about.body_html": {
+        "sv": "<h2 style='color:#58a6ff'>{app}</h2><p><b>Version {version}</b> · Modern lokal fakturahantering för Windows, Linux och macOS.</p><p><b>© {year} Rickard Längkvist</b></p><hr><h3>Vad programmet gör</h3><p>Registrerar leverantörsfakturor och kreditfakturor, summerar Fakturor (+) / Krediter (−) / <b>ATT BETALA</b>, håller koll på förfallodatum och exporterar betallistor till PDF — helt lokalt på din dator, utan prenumeration.</p><h3>Hur det funkar</h3><ol><li>Välj leverantör i rullistan (favoriter ★ överst).</li><li>Registrera faktura: fakturanummer + belopp. ＋ = faktura, − = kreditfaktura.</li><li>Exportera ALLA aktiva till PDF — betalningsdatum frågas alltid innan export och nollställs efteråt.</li><li>Exporthistorik: återställ arkiverade fakturor, öppna PDF eller mapp.</li></ol><h3>Stöd utvecklingen 💖</h3><p>💙 Swish: <b>{swish}</b> (knappen kopierar numret)<br>🅿️ PayPal: {paypal}<br>☕ Ko-fi: {kofi}</p><hr><p style='color:#888;font-size:11px;'>Plattform: {platform} · Python {python} · Autostart: {autostart}</p>",
+        "en": "<h2 style='color:#58a6ff'>{app}</h2><p><b>Version {version}</b> · Modern local invoice handling for Windows, Linux and macOS.</p><p><b>© {year} Rickard Längkvist</b></p><hr><h3>What the app does</h3><p>Registers supplier invoices and credit notes, totals Invoices (+) / Credits (−) / <b>TO PAY</b>, keeps track of due dates and exports payment lists to PDF — entirely locally on your computer, no subscription.</p><h3>How it works</h3><ol><li>Choose a supplier in the list (favourites ★ first).</li><li>Register an invoice: invoice number + amount. ＋ = invoice, − = credit note.</li><li>Export ALL active invoices to PDF — the payment date is always asked before export and reset afterwards.</li><li>Export history: restore archived invoices, open the PDF or folder.</li></ol><h3>Support development 💖</h3><p>💙 Swish: <b>{swish}</b> (the button copies the number)<br>🅿️ PayPal: {paypal}<br>☕ Ko-fi: {kofi}</p><hr><p style='color:#888;font-size:11px;'>Platform: {platform} · Python {python} · Autostart: {autostart}</p>",
+    },
+
+    # ── Fakturadialogen ──────────────────────────────────────────────
+    "invdialog.title_new": {"sv": "➕  Registrera faktura", "en": "➕  Register invoice"},
+    "invdialog.title_edit": {"sv": "✏️  Redigera faktura", "en": "✏️  Edit invoice"},
+    "invdialog.supplier": {"sv": "🏢  Leverantör", "en": "🏢  Supplier"},
+    "invdialog.none_chosen": {"sv": "(ingen vald)", "en": "(none selected)"},
+    "invdialog.choose_supplier_ph": {"sv": "— välj eller skriv leverantör —", "en": "— choose or type a supplier —"},
+    "invdialog.session_banner": {"sv": "📅  Session-förfallodatum: {date}  (används som default för nya fakturor)", "en": "📅  Session due date: {date}  (default for new invoices)"},
+    "invdialog.primary": {"sv": "🧾  Fakturainformation  ✱", "en": "🧾  Invoice information  ✱"},
+    "invdialog.invoice_number": {"sv": "Fakturanummer  ✱ :", "en": "Invoice number  ✱ :"},
+    "invdialog.amount": {"sv": "Belopp  ✱ :", "en": "Amount  ✱ :"},
+    "invdialog.sign_tip": {"sv": "＋  Faktura – beloppet läggs till ATT BETALA\n−  Kredit – beloppet dras av från ATT BETALA", "en": "＋  Invoice – added to TO PAY\n−  Credit – deducted from TO PAY"},
+    "invdialog.type_invoice": {"sv": "🧾  FAKTURA – läggs till ATT BETALA", "en": "🧾  INVOICE – added to TO PAY"},
+    "invdialog.type_credit": {"sv": "📋  KREDITFAKTURA – dras av från ATT BETALA", "en": "📋  CREDIT NOTE – deducted from TO PAY"},
+    "invdialog.other": {"sv": "📋  Övriga uppgifter  (valfritt)", "en": "📋  Other details  (optional)"},
+    "invdialog.ocr": {"sv": "OCR-nummer (valfritt):", "en": "OCR number (optional):"},
+    "invdialog.reference": {"sv": "Referens :", "en": "Reference :"},
+    "invdialog.category": {"sv": "Kategori :", "en": "Category :"},
+    "invdialog.category_ph": {"sv": "ex. IT, Kontorsmaterial, Hyra", "en": "e.g. IT, Office supplies, Rent"},
+    "invdialog.ref_ph": {"sv": "Er referens / PO-nummer", "en": "Your reference / PO number"},
+    "invdialog.invoice_date": {"sv": "Fakturadatum :", "en": "Invoice date :"},
+    "invdialog.due_date": {"sv": "Förfallodatum :", "en": "Due date :"},
+    "invdialog.payment_date": {"sv": "Betalningsdatum :", "en": "Payment date :"},
+    "invdialog.currency": {"sv": "Valuta :", "en": "Currency :"},
+    "invdialog.status": {"sv": "Status :", "en": "Status :"},
+    "invdialog.note": {"sv": "Anteckning :", "en": "Note :"},
+    "invdialog.note_ph": {"sv": "Fritext anteckning …", "en": "Free-text note …"},
+    "invdialog.no_date": {"sv": "(ej angivet)", "en": "(not set)"},
+    "invdialog.ocr_warning": {"sv": "OCR-numret är frivilligt.", "en": "The OCR number is optional."},
+    "invdialog.ocr_check_warning": {"sv": "⚠️  OCR-numrets kontrollsiffra stämmer inte – dubbelkolla siffrorna.", "en": "⚠️  The OCR check digit does not match – double-check the digits."},
+    "invdialog.ocr_check_title": {"sv": "Kontrollsiffran stämmer inte", "en": "Check digit mismatch"},
+    "invdialog.ocr_check_body": {"sv": "OCR-numret {ocr} klarar inte kontrollsiffertestet.\nTroligen är en siffra felskriven – då hittar banken inte fakturan.\n\nSpara ändå?", "en": "The OCR number {ocr} fails the check digit test.\nA digit is probably wrong – the bank would not find the invoice.\n\nSave anyway?"},
+    "invdialog.dup_warning": {"sv": "⚠️  Fakturanummer {nr} finns redan för {supplier}.", "en": "⚠️  Invoice number {nr} already exists for {supplier}."},
+    "payinfo.title": {"sv": "Fakturabetalning", "en": "Invoice payment"},
+    "payinfo.supplier": {"sv": "Leverantör", "en": "Supplier"},
+    "payinfo.bankgiro": {"sv": "Bankgiro", "en": "Bankgiro"},
+    "payinfo.plusgiro": {"sv": "Plusgiro", "en": "Plusgiro"},
+    "payinfo.iban": {"sv": "IBAN", "en": "IBAN"},
+    "payinfo.invoice_number": {"sv": "Fakturanr", "en": "Invoice no."},
+    "payinfo.ocr": {"sv": "OCR", "en": "OCR"},
+    "payinfo.reference": {"sv": "Referens", "en": "Reference"},
+    "payinfo.due": {"sv": "Förfallodatum", "en": "Due date"},
+    "payinfo.amount": {"sv": "Belopp", "en": "Amount"},
+    "invdialog.save_changes": {"sv": "💾  Spara ändringar", "en": "💾  Save changes"},
+    "invdialog.register": {"sv": "➕  Registrera", "en": "➕  Register"},
+    "invdialog.terms": {"sv": "Betalvillkor: {n} dagar", "en": "Payment terms: {n} days"},
+    "invdialog.orgnr": {"sv": "Org.nr", "en": "Org. no."},
+    "invdialog.bankgiro": {"sv": "Bankgiro", "en": "BG"},
+    "invdialog.plusgiro": {"sv": "Plusgiro", "en": "PG"},
+
+    "invdialog.validation": {"sv": "Validering", "en": "Validation"},
+    "invdialog.amount_required": {"sv": "Ange ett belopp större än 0.\n\nVälj ＋ för faktura eller − för kreditfaktura.", "en": "Enter an amount greater than 0.\n\nChoose ＋ for invoice or − for credit note."},
+    "invdialog.overdue_title": {"sv": "Förfallodatum passerat", "en": "Due date passed"},
+    "invdialog.overdue_body": {"sv": "Förfallodatum har passerat.\n\nVill du ändra status till 'Förfallen'?", "en": "The due date has passed.\n\nChange the status to 'Overdue'?"},
+
+    # ── Fakturavyn (summor, info, meddelanden) ────────────────────────
+    "invoices.rows": {"sv": "Poster: {n}  ({f}f/{k}k)", "en": "Entries: {n}  ({f} inv/{k} cr)"},
+    "invoices.unpaid": {"sv": "Obetalt: {amount}", "en": "Unpaid: {amount}"},
+    "invoices.overdue": {"sv": "Förfallet: {amount}", "en": "Overdue: {amount}"},
+    "invoices.history_count": {"sv": "({n} exporter)", "en": "({n} exports)"},
+    "invoices.none_chosen": {"sv": "(ingen vald)", "en": "(none selected)"},
+    "invoices.no_supplier_title": {"sv": "🏢  Ingen leverantör vald", "en": "🏢  No supplier selected"},
+    "invoices.no_supplier_body": {"sv": "Välj en leverantör i listan först — eller skapa en ny.", "en": "Choose a supplier in the list first — or create a new one."},
+    "invoices.delete_title": {"sv": "Ta bort faktura", "en": "Delete invoice"},
+    "invoices.delete_body": {"sv": "Ta bort fakturan?\nKan inte ångras.", "en": "Delete this invoice?\nThis cannot be undone."},
+    "invoices.export_title": {"sv": "Komplett fakturalista", "en": "Complete invoice list"},
+
+    "invoices.rows_of": {"sv": "Poster: {shown} av {total}  ({f}f/{k}k)", "en": "Entries: {shown} of {total}  ({f} inv/{k} cr)"},
+    "invoices.export_all_n": {"sv": "📄  Exportera ALLA till PDF  ({n})", "en": "📄  Export ALL to PDF  ({n})"},
+    "invoices.export_none": {"sv": "📄  Inga fakturor att exportera", "en": "📄  No invoices to export"},
+    "invoices.favorite": {"sv": "★ Favorit", "en": "★ Favourite"},
+
+    # ── Leverantörsdialogen (återstående fält) ────────────────────────
+    "supplierdlg.bg": {"sv": "Bankgiro (BG):", "en": "Bankgiro (BG):"},
+    "supplierdlg.pg": {"sv": "Plusgiro (PG):", "en": "Plusgiro (PG):"},
+    "supplierdlg.aliases": {"sv": "Alternativa namn:", "en": "Alternative names:"},
+    "supplierdlg.aliases_ph": {"sv": "Faktura- eller handelsnamn, ett per rad", "en": "Invoice or trade names, one per line"},
+    "supplierdlg.iban": {"sv": "IBAN:", "en": "IBAN:"},
+    "supplierdlg.bic": {"sv": "BIC / SWIFT:", "en": "BIC / SWIFT:"},
+    "supplierdlg.terms": {"sv": "Betalvillkor:", "en": "Payment terms:"},
+    "supplierdlg.contact": {"sv": "Kontaktperson:", "en": "Contact person:"},
+    "supplierdlg.email": {"sv": "E-post:", "en": "E-mail:"},
+    "supplierdlg.phone": {"sv": "Telefon:", "en": "Phone:"},
+    "supplierdlg.address": {"sv": "Adress:", "en": "Address:"},
+    "supplierdlg.note": {"sv": "Anteckning:", "en": "Note:"},
+    "supplierdlg.note_ph": {"sv": "Fritext anteckning …", "en": "Free-text note …"},
+    "supplier.unknown_title": {"sv": "Okänd leverantör", "en": "Unknown supplier"},
+    "supplier.unknown_body": {"sv": "Leverantören '{name}' finns inte.\nLägga till nu?", "en": "The supplier '{name}' does not exist.\nAdd it now?"},
+
+    # ── Kortkommandon (Inställnings-fliken) ───────────────────────────
+    "shortcut.ny_leverantor": {"sv": "Ny leverantör", "en": "New supplier"},
+    "shortcut.ny_faktura": {"sv": "Ny faktura", "en": "New invoice"},
+    "shortcut.skapa_backup": {"sv": "Skapa backup", "en": "Create backup"},
+    "shortcut.exportera_pdf": {"sv": "Exportera alla aktiva till PDF", "en": "Export all active to PDF"},
+    "shortcut.uppdatera": {"sv": "Uppdatera alla vyer", "en": "Refresh all views"},
+    "shortcut.avsluta": {"sv": "Avsluta programmet helt", "en": "Quit completely"},
+    "shortcut.tab_dashboard": {"sv": "Hoppa till Dashboard", "en": "Go to Dashboard"},
+    "shortcut.tab_fakturor": {"sv": "Hoppa till Fakturor", "en": "Go to Invoices"},
+    "shortcut.tab_leverantorer": {"sv": "Hoppa till Leverantörer", "en": "Go to Suppliers"},
+    "shortcut.tab_betalningar": {"sv": "Hoppa till Betalningar", "en": "Go to Payments"},
+    "shortcut.tab_import": {"sv": "Hoppa till Import", "en": "Go to Import"},
+    "shortcut.tab_rapporter": {"sv": "Hoppa till Rapporter", "en": "Go to Reports"},
+    "shortcut.tab_installningar": {"sv": "Hoppa till Inställningar", "en": "Go to Settings"},
+    "shortcut.tab_logg": {"sv": "Hoppa till Logg", "en": "Go to Log"},
+
+    # ── Huvudfönstrets dialoger ───────────────────────────────────────
+    "main.quit_title": {"sv": "Avsluta programmet", "en": "Quit the app"},
+    "main.quit_body": {"sv": "Stäng {app} helt?\n\nAlla data har sparats automatiskt.", "en": "Close {app} completely?\n\nAll data has been saved automatically."},
+    "main.backup_created": {"sv": "✅  Backup skapad:\n{path}", "en": "✅  Backup created:\n{path}"},
+    "main.backup_failed": {"sv": "❌  Backup misslyckades.", "en": "❌  Backup failed."},
+    "main.no_supplier_title": {"sv": "🏢  Ingen leverantör", "en": "🏢  No supplier"},
+    "main.no_supplier_body": {"sv": "Du måste skapa en leverantör\ninnan du kan registrera en faktura.\n\nVill du lägga till en leverantör nu?", "en": "You must create a supplier\nbefore you can register an invoice.\n\nAdd a supplier now?"},
+    "main.view_missing": {"sv": "Leverantörsvyn saknas.", "en": "The suppliers view is missing."},
+    "main.invoice_view_missing": {"sv": "Fakturavyn saknas.", "en": "The invoices view is missing."},
+
+    "main.reading": {"sv": "🔄  Läser data/ …", "en": "🔄  Reading data/ …"},
+    "main.opening": {"sv": "📁  Öppnar: {path}", "en": "📁  Opening: {path}"},
+    "main.shortcuts_restored": {"sv": "↩️  Standardkortkommandon återställda", "en": "↩️  Default shortcuts restored"},
+    "main.plugin_status_na": {"sv": "Status ej tillgänglig: {error}", "en": "Status unavailable: {error}"},
+    "main.autostart": {"sv": "Autostart", "en": "Autostart"},
+    "main.autostart_failed": {"sv": "Kunde inte registrera autostart hos operativsystemet.\nInställningen är sparad och försöket görs om vid nästa start.", "en": "Could not register autostart with the operating system.\nThe setting is saved and will be retried at next start."},
+    "main.autostart_error": {"sv": "Kunde inte ändra:\n{error}", "en": "Could not change:\n{error}"},
+    "main.autostart_on": {"sv": "Autostart är på.\n\nVid inloggning väntar programmet om disken inte är redo,\nstartar gömd, och sätter arbetsmappen till appmappen.", "en": "Autostart is on.\n\nAt login the app waits if the disk is not ready,\nstarts hidden, and sets the working folder to the app folder."},
+    "main.autostart_off": {"sv": "Autostart är av.\nProgrammet startar inte längre vid inloggning.", "en": "Autostart is off.\nThe app no longer starts at login."},
+    "main.autostart_status": {"sv": "🚀  Autostart {state}", "en": "🚀  Autostart {state}"},
+    "main.autostart_on_direct": {"sv": "Autostart är på (direktstart, utan VBS).\n\nVid inloggning:\n• OS startar Python direkt — ingen startfil behövs\n• startar gömd i systemfältet, utan konsolfönster\n• arbetsmapp = appmappen, aldrig System32\n\nArbetsmapp: {workdir}\nKommando: {command}", "en": "Autostart is on (direct start, no VBS).\n\nAt login:\n• the OS starts Python directly — no launcher file needed\n• starts hidden in the system tray, without a console window\n• working folder = the app folder, never System32\n\nWorking folder: {workdir}\nCommand: {command}"},
+    "autostart.method": {"sv": "Autostart-metod", "en": "Autostart method"},
+    "autostart.method_tip": {"sv": "Hur appen startas vid inloggning.\nDirekt = utan VBS/startfil (rekommenderas).\nStartfil = väntar på att disken blir redo (portabel USB).", "en": "How the app starts at login.\nDirect = no VBS/launcher file (recommended).\nLauncher file = waits for the disk to become ready (portable USB)."},
+    "autostart.method_auto": {"sv": "Automatiskt (direkt, utan VBS)", "en": "Automatic (direct, no VBS)"},
+    "autostart.method_direct": {"sv": "Direkt — utan VBS/startfil", "en": "Direct — no VBS/launcher file"},
+    "autostart.method_launcher": {"sv": "Startfil i appmappen (väntar på disk)", "en": "Launcher file in app folder (waits for disk)"},
+    "autostart.method_set": {"sv": "🚀  Autostart-metod: {method}", "en": "🚀  Autostart method: {method}"},
+    "autostart.method_failed": {"sv": "Kunde inte byta autostart-metod hos operativsystemet.", "en": "Could not change the autostart method with the operating system."},
+    "main.autostart_on_full": {"sv": "Autostart är på.\n\nVid inloggning:\n• väntar upp till 90 sekunder om disken inte är redo (t.ex. om E: inte hunnit monteras)\n• startar gömd i systemfältet, utan konsolfönster\n• arbetsmapp = appmappen, aldrig System32\n\nArbetsmapp: {workdir}\nStartfil: {launcher}", "en": "Autostart is on.\n\nAt login:\n• waits up to 90 seconds if the disk is not ready (e.g. if E: has not mounted yet)\n• starts hidden in the system tray, without a console window\n• working folder = the app folder, never System32\n\nWorking folder: {workdir}\nLauncher: {launcher}"},
+    "main.on_check": {"sv": "på ✔", "en": "on ✔"},
+    "main.off": {"sv": "av", "en": "off"},
+    "main.close_tray_status": {"sv": "🙈  Stäng till tray: {state}", "en": "🙈  Close to tray: {state}"},
+    "main.minimize_tray_status": {"sv": "🙈  Minimera till tray: {state}", "en": "🙈  Minimize to tray: {state}"},
+    "main.on": {"sv": "PÅ", "en": "ON"},
+    "main.off_state": {"sv": "AV", "en": "OFF"},
+    "donate.paypal_tip": {"sv": "Öppnar PayPal i webbläsaren", "en": "Opens PayPal in the browser"},
+    "donate.kofi_tip": {"sv": "Öppnar Ko-fi i webbläsaren", "en": "Opens Ko-fi in the browser"},
+    "donate.about_tip": {"sv": "Öppnar about.md med komplett info", "en": "Opens about.md with complete info"},
+
+    # ── Skanningsimport (återstående) ─────────────────────────────────
+    "scan.columns": {"sv": "Fil|Leverantör|Fakturanr|Datum|Förfaller|OCR|Belopp|Metod|Status", "en": "File|Supplier|Invoice no.|Date|Due|OCR|Amount|Method|Status"},
+    "scan.sum": {"sv": "{n} rad(er)  ·  summa {amount} kr", "en": "{n} row(s)  ·  total {amount} SEK"},
+    "scan.ready": {"sv": "redo", "en": "ready"},
+    "scan.missing": {"sv": "saknas: {fields}", "en": "missing: {fields}"},
+    "scan.possible_dup_title": {"sv": "Möjliga dubbletter", "en": "Possible duplicates"},
+    "scan.possible_dup_body": {"sv": "<p>Dessa rader liknar fakturor som redan finns. Jämför uppgifterna innan du fortsätter:</p>{lines}<p><b>Registrera dem ändå?</b> Inget tas bort automatiskt — väljer du Nej lämnas dubblettraderna kvar orörda.</p>", "en": "<p>These rows look like invoices that already exist. Compare the details before continuing:</p>{lines}<p><b>Register them anyway?</b> Nothing is removed automatically — choose No to leave the duplicate rows untouched.</p>"},
+    "scan.possible_dup_line": {"sv": "{file}: faktura {nr} liknar {supplier} faktura {existing} ({reason})", "en": "{file}: invoice {nr} looks like {supplier} invoice {existing} ({reason})"},
+    "scan.possible_dup_imported": {"sv": "Tolkad faktura", "en": "Scanned invoice"},
+    "scan.possible_dup_existing": {"sv": "Redan registrerad", "en": "Already registered"},
+    "scan.possible_dup_earlier": {"sv": "Tidigare i denna import", "en": "Earlier in this import"},
+    "scan.possible_dup_field_supplier": {"sv": "Leverantör", "en": "Supplier"},
+    "scan.possible_dup_field_number": {"sv": "Fakturanummer", "en": "Invoice number"},
+    "scan.possible_dup_field_date": {"sv": "Fakturadatum", "en": "Invoice date"},
+    "scan.possible_dup_field_due": {"sv": "Förfallodatum", "en": "Due date"},
+    "scan.possible_dup_field_amount": {"sv": "Belopp", "en": "Amount"},
+    "scan.possible_dup_field_ocr": {"sv": "OCR (valfritt)", "en": "OCR (optional)"},
+    "scan.possible_dup_field_status": {"sv": "Status", "en": "Status"},
+    "scan.possible_dup_field_file": {"sv": "Originalfil", "en": "Original file"},
+    "scan.possible_dup_more": {"sv": "Ytterligare {n} möjlig(a) dubblett(er) ingår inte i jämförelsen.", "en": "{n} more possible duplicate(s) are not included in this comparison."},
+    "scan.possible_dup_skipped": {"sv": "{n} möjlig(a) dubblett(er) hoppades över — raderna ligger kvar i tabellen.", "en": "{n} possible duplicate(s) skipped — the rows remain in the table."},
+    "scan.match_ask_title": {"sv": "Vilken leverantör/mall gäller?", "en": "Which supplier/template applies?"},
+    "scan.match_ask_body": {"sv": "Appen är inte säker på vilken leverantör eller mall fakturan {file} (fakturanr {nr}, att betala {amount} kr) tillhör och gissar inte.\n\nVälj rätt alternativ nedan — fakturan registreras inte förrän du valt.", "en": "The app is not sure which supplier or template invoice {file} (invoice no. {nr}, total {amount}) belongs to and will not guess.\n\nChoose the correct option below — the invoice is not registered until you choose."},
+    "scan.extraction_checks_passed": {"sv": "✓ Grundkontroller OK — verifiera ändå mot originalet", "en": "✓ Basic checks pass — still verify against the original"},
+    "scan.extraction_review": {"sv": "⚠ Granska extraherade uppgifter mot originalet", "en": "⚠ Review extracted details against the original"},
+    "scan.match_evidence_title": {"sv": "Matchningsunderlag:", "en": "Match evidence:"},
+    "scan.match_evidence_disclaimer": {"sv": "Ledtrådar är inte en bekräftelse. Kontrollera originalfakturan och välj själv; appen lär sig inget förrän matchningen bekräftas.", "en": "Evidence is not confirmation. Check the original invoice and choose; the app learns nothing until the match is confirmed."},
+    "scan.match_evidence_none": {"sv": "Inget särskilt matchningsunderlag sparades för det här alternativet.", "en": "No specific match evidence was recorded for this option."},
+    "scan.match_evidence_full_name": {"sv": "Leverantörsnamn i fakturatexten", "en": "Supplier name in invoice text"},
+    "scan.match_evidence_name_words": {"sv": "Flera namnord i fakturatexten", "en": "Multiple supplier-name words in invoice text"},
+    "scan.match_evidence_first_name_only": {"sv": "Endast ett namnord hittades (svag ledtråd)", "en": "Only one name word was found (weak evidence)"},
+    "scan.match_evidence_alias": {"sv": "Registrerat alias i fakturatexten", "en": "Registered alias in invoice text"},
+    "scan.match_evidence_org": {"sv": "Organisationsnummer matchar registret", "en": "Organization number matches the register"},
+    "scan.match_evidence_bankgiro": {"sv": "Bankgiro matchar registret", "en": "Bankgiro matches the register"},
+    "scan.match_evidence_plusgiro": {"sv": "Plusgiro matchar registret", "en": "Plusgiro matches the register"},
+    "scan.match_evidence_iban": {"sv": "IBAN matchar registret", "en": "IBAN matches the register"},
+    "scan.match_evidence_logo": {"sv": "Möjlig logotypträff på sida {page} (visuellt avstånd {distance}; lägre är närmare)", "en": "Possible logo match on page {page} (visual distance {distance}; lower is closer)"},
+    "scan.match_evidence_logo_generic": {"sv": "Möjlig träff med en riktig logotyp från originalfakturan", "en": "Possible match from a real logo on the original invoice"},
+    "scan.match_evidence_folder": {"sv": "Leverantör från kopplad bevakningsmapp", "en": "Supplier from the linked watch folder"},
+    "scan.match_template_preview": {"sv": "Kontrollera vad den obekräftade mallen läste från {file}:\nFakturanr: {nr} · datum: {date} · förfallo: {due} · OCR: {ocr} · att betala: {amount} kr.", "en": "Check what the unconfirmed template read from {file}:\nInvoice no.: {nr} · date: {date} · due: {due} · OCR: {ocr} · total: {amount} SEK."},
+    "scan.match_ask_supplier_label": {"sv": "Leverantör:", "en": "Supplier:"},
+    "scan.match_ask_template_label": {"sv": "Leverantör/mall:", "en": "Supplier/template:"},
+    "scan.match_ask_placeholder": {"sv": "— välj —", "en": "— choose —"},
+    "scan.match_use": {"sv": "✔  Använd vald", "en": "✔  Use selected"},
+    "scan.match_mark_logo": {"sv": "📷  Markera logotyp på originalfakturan …", "en": "📷  Mark logo on the original invoice …"},
+    "scan.match_logo_pick_supplier": {"sv": "Välj först rätt leverantör/mall ovan. Logotypen sparas till det valet.", "en": "First choose the correct supplier/template above. The logo will be saved for that choice."},
+    "scan.match_logo_dialog_title": {"sv": "Markera logotyp för {supplier}", "en": "Mark logo for {supplier}"},
+    "scan.match_logo_saved": {"sv": "✓ Logotypen sparades för {supplier}. Gå tillbaka och klicka på Använd vald för att bekräfta fakturan.", "en": "✓ The logo was saved for {supplier}. Return and click Use selected to confirm the invoice."},
+    "scan.match_logo_save_failed": {"sv": "Logotypmarkeringen kunde inte sparas. Matchningen är inte bekräftad.", "en": "The logo marking could not be saved. The match is not confirmed."},
+    "scan.match_no_options": {"sv": "Det finns inga kandidatleverantörer eller mallar att välja mellan. Raden lämnas orörd och registreras inte.", "en": "There are no candidate suppliers or templates to choose from. The row is left untouched and is not registered."},
+    "scan.manual_match": {"sv": "🧩  Matcha mot leverantör …", "en": "🧩  Match to supplier …"},
+    "scan.manual_match_title": {"sv": "Matcha fakturan manuellt", "en": "Match the invoice manually"},
+    "scan.manual_match_body": {"sv": "Den automatiska matchningen lyckades inte för {file} (fakturanr {nr}, att betala {amount} kr). Välj själv vilken leverantör fakturan tillhör — leverantörens mall läses in i radens fält om en sådan finns, annars behåller raden sina avlästa värden. När de obligatoriska uppgifterna finns registreras fakturan direkt efter matchningen och visas i Fakturor; saknas något ligger raden kvar här.", "en": "Automatic matching failed for {file} (invoice no. {nr}, total {amount}). Choose which supplier the invoice belongs to — the supplier's template is read into the row if available, otherwise the parsed values are kept. Once required fields are present, the invoice is registered immediately after matching and shown in Invoices; if anything is missing, the row stays here."},
+    "scan.manual_matched": {"sv": "✔ {file} matchad mot {supplier}", "en": "✔ {file} matched to {supplier}"},
+    "scan.manual_match_registered": {"sv": "✅ {file} matchad mot {supplier} och registrerad i Fakturor.", "en": "✅ {file} matched to {supplier} and registered in Invoices."},
+    "scan.manual_match_pending": {"sv": "Matchningen är klar, men obligatoriska uppgifter saknas ({fields}). Fakturan ligger kvar här tills du kompletterar dem.", "en": "The match is confirmed, but required information is missing ({fields}). The invoice stays here until you complete it."},
+    "scan.auto_registered": {"sv": "{n} matchad(e) faktura(or) registrerad(e) i Fakturor.", "en": "{n} matched invoice(s) registered in Invoices."},
+    "scan.parked_pending_table": {"sv": "{n} faktura(or) ligger kvar i Tolkade fakturor för komplettering.", "en": "{n} invoice(s) remain in Interpreted invoices for completion."},
+    "scan.manual_no_suppliers": {"sv": "Det finns inga leverantörer i registret ännu. Lägg till leverantören i fliken Leverantörer först — sedan kan fakturan matchas mot den här.", "en": "There are no suppliers in the register yet. Add the supplier in the Suppliers tab first — then this invoice can be matched to it."},
+    "scan.match_pick_logo": {"sv": "Logotypträffar från originalfakturan — klicka för att välja:", "en": "Logo matches from the original invoice — click to choose:"},
+    "scan.match_logo_distance_tip": {"sv": "Visuellt avstånd: {distance} (lägre tal betyder större likhet).", "en": "Visual distance: {distance} (lower means more similar)."},
+    "scan.parked_added_table": {"sv": "⚠ {n} osäkra fakturor lades i Import-tabellen — matcha dem där (högerklick → Matcha mot leverantör).", "en": "⚠ {n} uncertain invoices were put in the Import table — match them there (right-click → Match to supplier)."},
+    "scan.match_reason_multipage": {"sv": "Fakturan har flera sidor. Delsummor på tidiga sidor kan se ut som totalen — därför bekräftar du matchningen och slutsumman själv.", "en": "The invoice has several pages. Subtotals on early pages can look like the total — so you confirm the match and the final total yourself."},
+    "scan.match_multipage_note": {"sv": "📄 Fakturan har {n} sidor — kontrollera att beloppet nedan är SLUTSUMMAN på sista sidan, inte en delsumma. Rätta det här om appen läst fel.", "en": "📄 The invoice has {n} pages — check that the amount below is the FINAL TOTAL on the last page, not a subtotal. Correct it here if the app read it wrong."},
+    "scan.match_amount_label": {"sv": "Att betala (kr) — slutsumman på sista sidan:", "en": "Amount due — the final total on the last page:"},
+    "scan.learning_progress": {"sv": "🧠 Appen lär sig: {n} flersidig(a) faktura/fakturor för {supplier} bekräftade av dig.", "en": "🧠 The app is learning: {n} multi-page invoice(s) for {supplier} confirmed by you."},
+    "scan.learning_count": {"sv": "🧠 Inlärning för {supplier}: {n} manuella matchningar bekräftade; appen fortsätter samla säkra kännetecken.", "en": "🧠 Learning for {supplier}: {n} manual matches confirmed; the app keeps collecting reliable identifiers."},
+    "scan.template_confirmation_count": {"sv": "🧩 Mall bekräftad {n} ggr", "en": "🧩 Template confirmed {n} time(s)"},
+    "scan.learning_reread": {"sv": "🔄 Efter matchningen lästes {n} andra Import-rader om; {ready} kompletta och säkra gick vidare till registrering. Osäkra/ofullständiga rader ligger kvar i Import.", "en": "🔄 After the match, {n} other Import rows were re-read; {ready} complete and certain rows were sent to registration. Uncertain/incomplete rows remain in Import."},
+    "scan.learned_template": {"sv": "🧠 Appen lärde sig mallen för {supplier} ur din matchning.", "en": "🧠 The app learned the template for {supplier} from your match."},
+    "scan.learned_auto_supplier": {"sv": "🧠 Nu känner appen igen {supplier} själv — kommande fakturor kopplas dit automatiskt på org.nr/bankgiro du bekräftat.", "en": "🧠 The app now recognises {supplier} by itself — future invoices are connected there automatically via the org no./bankgiro you have confirmed."},
+    "scan.learned_auto_logo": {"sv": "🧠 Appen har också lärt sig {supplier}s logotyp — en ensam stark logotypträff kan nu koppla fakturan automatiskt.", "en": "🧠 The app has also learned {supplier}'s logo — one strong, unique logo match can now connect the invoice automatically."},
+    "scan.match_reason_learned": {"sv": "Flera leverantörer appen lärt sig passar på fakturans kännetecken. Du avgör vilken som stämmer.", "en": "Several suppliers the app has learned fit this invoice's identifiers. You decide which one is correct."},
+    "scan.match_reason_weak": {"sv": "Bara en svag träff hittades (t.ex. ett ensamt namnord). Det räcker inte för att appen ska välja själv.", "en": "Only a weak match was found (e.g. a single name word). That is not enough for the app to choose by itself."},
+    "scan.match_reason_ambiguous": {"sv": "Flera alternativ passar lika bra. Appen väljer inte mellan dem på egen hand.", "en": "Several options fit equally well. The app will not choose between them on its own."},
+    "scan.match_reason_competing": {"sv": "Olika tecken på fakturan pekar på olika leverantörer/mallar. Du avgör vilken som stämmer.", "en": "Different signs on the invoice point to different suppliers/templates. You decide which one is correct."},
+    "scan.match_reason_supplier_logo": {"sv": "Den markerade logotypen ger en möjlig leverantörsträff. Bekräfta själv vilket alternativ som stämmer.", "en": "The marked logo suggests a supplier. Confirm which option is correct."},
+    "scan.match_reason_logo_conflict": {"sv": "Fakturatexten och logotypen pekar på olika leverantörer. Välj själv; appen gissar inte.", "en": "The invoice text and logo point to different suppliers. Choose yourself; the app will not guess."},
+    "scan.match_reason_template": {"sv": "Flera mallar eller format skulle kunna läsa fakturan. Appen använder ingen av dem förrän du valt.", "en": "Several templates or formats could read the invoice. The app uses none of them until you choose."},
+    "scan.match_reason_template_unconfirmed": {"sv": "Den sparade mallen har ännu inte bekräftats på någon faktura. Kontrollera värdena nedan och välj själv — först efter din bekräftelse får mallen användas för automatisk registrering.", "en": "This saved template has not yet been confirmed on an invoice. Check the values below and choose yourself — the template can be used for automatic registration only after your confirmation."},
+    "scan.match_reason_generic": {"sv": "Matchningen är osäker. Kontrollera fakturan och välj rätt alternativ.", "en": "The match is uncertain. Check the invoice and choose the correct option."},
+    "scan.match_uncertain_status": {"sv": "⚠ osäker leverantör/mall — välj själv", "en": "⚠ uncertain supplier/template — choose yourself"},
+    "scan.match_secure_tip": {"sv": "✔ säker matchning — leverantören/mallen är säkert identifierad", "en": "✔ confident match — the supplier/template is identified with confidence"},
+    "scan.match_unresolved": {"sv": "Följande rader har fortfarande osäker leverantörs-/mallmatchning och registrerades inte:\n\n{files}\n\nVälj leverantör/mall för dem först (appen gissar aldrig).", "en": "The following rows still have an uncertain supplier/template match and were not registered:\n\n{files}\n\nChoose a supplier/template for them first (the app never guesses)."},
+    "scan.pages_status": {"sv": "📄 {n} sidor", "en": "📄 {n} pages"},
+
+    "scan.no_text": {"sv": "ingen text hittad", "en": "no text found"},
+    "scan.text_sources": {"sv": "Textkällor: {sources}", "en": "Text sources: {sources}"},
+    "scan.no_text_modules": {"sv": "Ingen PDF/OCR-modul hittad — klistra in fakturatexten i ruta 2 (fungerar alltid)", "en": "No PDF/OCR module found — paste invoice text into box 2 (always works)"},
+    "scan.ocr_engine_missing": {"sv": "OCR saknas — installera Tesseract för bild-PDF:er", "en": "OCR unavailable — install Tesseract for image-only PDFs"},
+    "scan.ocr_unavailable_status": {"sv": "OCR saknas — installera Tesseract; originalet ligger kvar för granskning", "en": "OCR unavailable — install Tesseract; the original remains for review"},
+    "scan.ocr_unavailable_short": {"sv": "OCR saknas — originalet oförändrat", "en": "OCR unavailable — original unchanged"},
+    "scan.ocr_failed_status": {"sv": "OCR misslyckades — originalet ligger kvar för granskning", "en": "OCR failed — the original remains for review"},
+    "scan.ocr_failed_short": {"sv": "OCR misslyckades — originalet oförändrat", "en": "OCR failed — original unchanged"},
+    "scan.ocr_review_title": {"sv": "OCR kunde inte läsa alla sidor", "en": "OCR could not read every page"},
+    "scan.ocr_review_body": {"sv": "Kontrollera originalfakturan och alla fält innan registrering. Om du inte kan verifiera uppgifterna, välj Nej så ligger fakturan kvar i Import.\n{files}\n\nVill du ändå registrera de markerade fakturorna?", "en": "Check the original invoice and every field before registering. If you cannot verify the details, choose No and the invoice will stay in Import.\n{files}\n\nRegister the selected invoices anyway?"},
+    "scan.payment_field_bg": {"sv": "Bankgiro", "en": "Bankgiro"},
+    "scan.payment_field_pg": {"sv": "Plusgiro", "en": "Plusgiro"},
+    "scan.payment_field_iban": {"sv": "IBAN", "en": "IBAN"},
+    "scan.payment_field_other": {"sv": "betalningskonto", "en": "payment account"},
+    "scan.payment_details_warning_short": {"sv": "⚠ Betalningsuppgifter avviker ({fields})", "en": "⚠ Payment details differ ({fields})"},
+    "scan.payment_review_title": {"sv": "Kontrollera fakturans mottagarkonto", "en": "Verify the invoice payment account"},
+    "scan.payment_review_line": {"sv": "{file} — {supplier}, {field}: fakturan {invoice}; sparat {registered}", "en": "{file} — {supplier}, {field}: invoice {invoice}; saved {registered}"},
+    "scan.payment_review_body": {"sv": "Fakturans betalningsuppgifter avviker från leverantörens sparade uppgifter. Kontrollera mottagarens namn och kontonummer mot originalet via en betrodd kanal. Om du inte själv kan verifiera dem, välj Nej så lämnas fakturan kvar i Import. Leverantörens sparade uppgifter ändras aldrig automatiskt.\n\n{lines}\n\nVill du ändå registrera fakturan/fakturorna?", "en": "The invoice payment details differ from the supplier's saved details. Verify the payee name and account number against the original using a trusted channel. If you cannot verify them yourself, choose No and the invoice will remain in Import. The supplier's saved details are never changed automatically.\n\n{lines}\n\nRegister the invoice(s) anyway?"},
+    "scan.ocr_review_after_match": {"sv": "Leverantören valdes, men OCR-varningen kräver att originalet och fälten kontrolleras innan registrering.", "en": "Supplier selected, but the OCR warning requires checking the original and fields before registration."},
+    "scan.file_read_error": {"sv": "⚠ Kunde inte läsa filen — originalet lämnades orört; se Logg-fliken", "en": "⚠ Could not read the file — original left untouched; see the Log tab"},
+    "scan.file_read_error_title": {"sv": "Filen kunde inte läsas", "en": "File could not be read"},
+    "scan.error_rows_unreadable": {"sv": "Felläsningsrader kan inte registreras. Originalen är orörda. Kontrollera filen och felloggen (Logg-fliken):\n{files}", "en": "Unreadable rows cannot be registered. The originals are untouched. Check the file and error log (Log tab):\n{files}"},
+    "scan.file_invalid": {"sv": "⚠ Filen saknas eller är inte en PDF/bild som stöds", "en": "⚠ File is missing or is not a supported PDF/image"},
+    "scan.file_error_count": {"sv": "⚠ {n} fil(er) kunde inte läsas — originalen är orörda; se Logg-fliken", "en": "⚠ {n} file(s) could not be read — originals are untouched; see the Log tab"},
+    "scan.watch_file_error_added": {"sv": "⚠ {file} kunde inte läsas. Felraden visas i Import tills en lyckad omläsning.", "en": "⚠ {file} could not be read. Its error row stays in Import until a successful re-read."},
+    "scan.watch_file_recovered": {"sv": "✔ {file} kunde läsas igen; den gamla felraden togs bort.", "en": "✔ {file} was read successfully; its old error row was removed."},
+
+    # ── Bevakade mappar (auto-import) ─────────────────────────────────
+    "watch.title": {"sv": "📁  Bevakade mappar — automatisk import", "en": "📁  Watched folders — automatic import"},
+    "watch.archive_year_title": {"sv": "Fakturadatum saknas eller är ogiltigt", "en": "Invoice date is missing or invalid"},
+    "watch.archive_year_prompt": {"sv": "Ange fakturans år för årsarkivering. Avbryt lämnar originalet kvar där det ligger.", "en": "Enter the invoice year for archiving. Cancel leaves the original where it is."},
+    "watch.info": {"sv": "En mapp per leverantör (t.ex. Pilkington, Direktglas). Nya fakturafiler tolkas och registreras automatiskt; ofullständiga parkeras här för granskning. Samma fil importeras aldrig två gånger.", "en": "One folder per supplier (e.g. Pilkington, Direktglas). New invoice files are parsed and registered automatically; incomplete ones are parked here for review. The same file is never imported twice."},
+    "watch.add_folder": {"sv": "➕  Lägg till mapp …", "en": "➕  Add folder …"},
+    "watch.remove_folder": {"sv": "🗑  Ta bort markerad", "en": "🗑  Remove selected"},
+    "watch.auto_create": {"sv": "Registrera kompletta fakturor automatiskt", "en": "Register complete invoices automatically"},
+    "watch.no_folders": {"sv": "(inga bevakade mappar ännu)", "en": "(no watched folders yet)"},
+    "watch.folder_entry": {"sv": "{supplier}  →  {path}", "en": "{supplier}  →  {path}"},
+    "watch.folder_no_supplier": {"sv": "(leverantör känns igen automatiskt)", "en": "(supplier recognised automatically)"},
+    "watch.parked": {"sv": "⏸  {n} fil(er) väntar på granskning", "en": "⏸  {n} file(s) awaiting review"},
+    "watch.review": {"sv": "Granska i tabellen", "en": "Review in table"},
+    "watch.scan_now": {"sv": "🔍 Skanna mapparna nu", "en": "🔍 Scan folders now"},
+    "watch.control_scan": {"sv": "🛡  Kontrollskanna (även inlästa)", "en": "🛡  Check-scan (incl. loaded)"},
+    "watch.control_done": {"sv": "Kontrollskanning klar: {imported} nya registrerade, {duplicate} dubblett(er), {parked} parkerade, {already} redan inlästa stämde mot registret, {changed} avviker mot nytolkningen, {errors} läsfel (originalen lämnades orörda). Inget ändrades automatiskt — avvikelserna står i Logg-fliken och rättas per faktura via Fakturor → högerklick → 'Skanna om faktura'.", "en": "Check-scan done: {imported} newly registered, {duplicate} duplicate(s), {parked} parked, {already} already-loaded matched the registry, {changed} differ from the re-read, {errors} read error(s) (originals left untouched). Nothing was changed automatically — differences are in the Log tab and fixed per invoice via Invoices → right-click → 'Rescan invoice'."},
+    "watch.register_failed": {"sv": "⚠ Kunde inte registrera {file} — filen prövas igen vid nästa skanning. Se Logg-fliken (SCAN_WATCH).", "en": "⚠ Could not register {file} — the file will be retried at the next scan. See the Log tab (SCAN_WATCH)."},
+    "watch.scan_done": {"sv": "Skanning klar: {imported} nya fakturor registrerade, {duplicate} dubblett(er) — fanns redan i registret, {parked} parkerade för granskning, {already} redan bearbetade sedan tidigare, {errors} läsfel. Registrerade original sorteras till en undermapp efter fakturans år; parkerade och olästa filer lämnas kvar. Nya fakturor finns i Fakturor-fliken.", "en": "Scan done: {imported} new invoice(s) registered, {duplicate} duplicate(s) already in the register, {parked} parked for review, {already} already processed, {errors} read error(s). Registered originals are sorted into a subfolder by invoice year; parked and unread files stay in place. New invoices are in the Invoices tab."},
+    "watch.scan_errors_status": {"sv": "⚠ {n} läsfel — originalfiler orörda; se Logg-fliken", "en": "⚠ {n} read error(s) — originals untouched; see the Log tab"},
+    "watch.scan_none": {"sv": "Inga bevakade mappar inlagda — lägg till en mapp med leverantör först.", "en": "No watched folders added — add a folder with a supplier first."},
+    "watch.parked_dialog_title": {"sv": "Fakturor kunde inte tolkas", "en": "Invoices could not be read"},
+    "watch.parked_dialog": {"sv": "{n} fil(er) i bevakade mappar kunde inte tolkas automatiskt och har parkerats för granskning:\n\n{files}\n\nÖppna Import-fliken och tryck på 'Granska i tabellen' för att granska och registrera dem manuellt.", "en": "{n} file(s) in watched folders could not be read automatically and have been parked for review:\n\n{files}\n\nOpen the Import tab and click 'Review in table' to review and register them manually."},
+    "watch.payment_details_parked": {"sv": "Bankgiro, Plusgiro eller IBAN avviker från leverantörens sparade uppgifter — fakturan ligger kvar i Import tills du granskar den", "en": "Bankgiro, Plusgiro or IBAN differs from the supplier's saved details — the invoice stays in Import until you review it"},
+    "watch.parked_learn_offer": {"sv": "Appen känner inte igen formatet på {file} (leverantör: {supplier}).\n\nVill du skapa en mall för {supplier} nu, direkt här i appen? Fakturans bild öppnas och du markerar var fakturanummer, belopp, datum och förfallodatum står. När mallen är sparad prövar appen de parkerade filerna igen av sig själv.", "en": "The app does not recognise the format of {file} (supplier: {supplier}).\n\nWould you like to create a template for {supplier} now, right here in the app? The invoice image opens and you mark where the invoice number, amount, date and due date are. Once the template is saved, the app retries the parked files by itself."},
+    "watch.parked_dialog_more": {"sv": "… och {n} till", "en": "… and {n} more"},
+    "watch.learn": {"sv": "🎓 Lär appen från mappen…", "en": "🎓 Teach the app from the folder…"},
+    "watch.learn_title": {"sv": "Lär appen läsa fakturorna", "en": "Teach the app to read the invoices"},
+    "watch.learn_offer": {"sv": "Vill du lära appen läsa fakturor från {supplier}?\n\nAlla leverantörer har egen layout, så mappen blir inte automatisk förrän du visat appen hur {supplier} ser ut. Du får se en av filerna i mappen och markerar vad som är fakturanummer, belopp, förfallodatum m.m. Det sparas som en mall i invoice_templates.json — sedan läser appen resten själv.", "en": "Would you like to teach the app to read invoices from {supplier}?\n\nEvery supplier has its own layout, so the folder does not become automatic until you have shown the app what {supplier} looks like. You see one of the files in the folder and mark which is the invoice number, amount, due date, etc. It is saved as a template in invoice_templates.json — then the app reads the rest itself."},
+    "watch.learn_need_folder": {"sv": "Markera en bevakad mapp i listan först", "en": "Select a watched folder in the list first"},
+    "watch.learn_no_files": {"sv": "Inga PDF:er eller bilder i mappen ännu — lägg en exempelfaktura där först", "en": "No PDFs or images in the folder yet — put a sample invoice there first"},
+    "watch.learn_builtin": {"sv": "{supplier} har redan ett inbyggt, verifierat format i appen — inlärning behövs inte. Fakturor i mappen registreras automatiskt.", "en": "{supplier} already has a built-in, verified format in the app — no teaching needed. Invoices in the folder are registered automatically."},
+    "watch.learn_no_text": {"sv": "Kunde inte läsa någon text ur {file}", "en": "Could not read any text from {file}"},
+    "watch.learn_pick": {"sv": "Välj en faktura att visa appen:", "en": "Choose an invoice to show the app:"},
+    "watch.imported": {"sv": "📥  Auto-import: {file} registrerad", "en": "📥  Auto-import: {file} registered"},
+    "watch.dialog_title": {"sv": "Bevaka mapp för leverantör", "en": "Watch folder for supplier"},
+    "watch.supplier": {"sv": "Leverantör:", "en": "Supplier:"},
+    "watch.folder": {"sv": "Mapp:", "en": "Folder:"},
+    "watch.browse": {"sv": "Bläddra …", "en": "Browse …"},
+    "watch.add": {"sv": "➕  Bevaka mappen", "en": "➕  Watch folder"},
+    "watch.need_folder": {"sv": "Välj en befintlig mapp först.", "en": "Choose an existing folder first."},
+    "invoices.attachments_note": {"sv": "  📎 {n} original bifogade", "en": "  📎 {n} originals attached"},
+    "invoices.attachments_missing": {"sv": "⚠ {n} original kunde inte bifogas (saknas på disk — flyttade eller raderade)", "en": "⚠ {n} originals could not be attached (missing on disk — moved or deleted)"},
+
+    # ── Uppdatering i appen ───────────────────────────────────────────
+    "menu.update": {"sv": "🔄  Sök ny version …", "en": "🔄  Check for updates …"},
+    "update.title": {"sv": "Sök ny version", "en": "Check for updates"},
+    "update.checking": {"sv": "Söker efter ny version …", "en": "Checking for a new version …"},
+    "update.current": {"sv": "Du har redan den senaste versionen (v{version}).", "en": "You already have the latest version (v{version})."},
+    "update.available": {"sv": "🎉  Ny version finns: {tag}  (installerad: {current})", "en": "🎉  A new version is available: {tag}  (installed: {current})"},
+    "update.published": {"sv": "Släppt: {date}", "en": "Released: {date}"},
+    "update.install": {"sv": "⬇️  Hämta och installera", "en": "⬇️  Download and install"},
+    "update.downloading": {"sv": "Hämtar uppdateringen … {percent}%", "en": "Downloading the update … {percent}%"},
+    "update.installing_files": {"sv": "Installerar … fil {done} av {total}", "en": "Installing … file {done} of {total}"},
+    "update.applying": {"sv": "Installerar …", "en": "Installing …"},
+    "update.safe_note": {"sv": "✓ Bara programfilerna byts. Dina fakturor och data (data/, ui/data/), settings.json, loggar och exporter rörs aldrig. En backup sparas i bak/.", "en": "✓ Only program files are replaced. Your invoices and data (data/, ui/data/), settings.json, logs and exports are never touched. A backup is saved in bak/."},
+    "update.done": {"sv": "✅  Uppdateringen är installerad ({n} filer utbytta). Starta om appen för att köra den nya versionen.", "en": "✅  The update is installed ({n} files replaced). Restart the app to run the new version."},
+    "update.restart": {"sv": "🔁  Starta om nu", "en": "🔁  Restart now"},
+    "update.close": {"sv": "Stäng", "en": "Close"},
+    "update.failed": {"sv": "Kunde inte slutföra uppdateringen.\n{error}", "en": "The update could not be completed.\n{error}"},
+    "update.notes": {"sv": "Versionsnoteringar:", "en": "Release notes:"},
+    "update.installed_build": {"sv": "Installerad build: {build}", "en": "Installed build: {build}"},
+    "update.auto_menu": {"sv": "🔄  Sök uppdateringar automatiskt vid start", "en": "🔄  Check for updates automatically at startup"},
+    "update.found_title": {"sv": "Ny version finns", "en": "Update available"},
+    "update.found_text": {"sv": "En ny version av Fakturabunten finns att hämta ({tag}).\nInstallera den nu? Dina data rörs aldrig — bara programfilerna byts.", "en": "A new version of InvoiceBundle is available ({tag}).\nInstall it now? Your data is never touched — only program files are replaced."},
+    "update.install_now": {"sv": "⬇️  Installera nu", "en": "⬇️  Install now"},
+    "update.later": {"sv": "Senare", "en": "Later"},
+    "update.restore": {"sv": "↩  Återställ senaste backup …", "en": "↩  Restore latest backup …"},
+    "update.restore_confirm": {"sv": "Återställ programfilerna från backupen {name}?\nFakturor och data påverkas inte.", "en": "Restore the program files from backup {name}?\nInvoices and data are not affected."},
+    "update.restored": {"sv": "↩  Backup återställd ({n} filer). Starta om appen.", "en": "↩  Backup restored ({n} files). Restart the app."},
+    "update.unknown_build": {"sv": "okänd (äldre kopia utan build-info)", "en": "unknown (older copy without build info)"},
+
+    # ── Slå ihop markerade fakturor ───────────────────────────────────
+    "combine.button": {"sv": "🧮  Slå ihop markerade", "en": "🧮  Combine selected"},
+    "combine.tip": {"sv": "Lägg ihop markerade fakturor: totalsumma + förfallodatum från den som förfaller först", "en": "Add up the selected invoices: total + the due date of the earliest one"},
+    "combine.title": {"sv": "Sammanslagning — {n} fakturor", "en": "Combined — {n} invoices"},
+    "combine.status": {"sv": "🧮  Markerade: {n} st · {amount} · tidigast förfall {due}", "en": "🧮  Selected: {n} · {amount} · earliest due {due}"},
+    "combine.status_no_due": {"sv": "🧮  Markerade: {n} st · {amount}", "en": "🧮  Selected: {n} · {amount}"},
+    "combine.invoices_line": {"sv": "Fakturor ({n}):", "en": "Invoices ({n}):"},
+    "combine.credits_line": {"sv": "Krediter ({n}):", "en": "Credits ({n}):"},
+    "combine.total": {"sv": "ATT BETALA:", "en": "TOTAL TO PAY:"},
+    "combine.earliest": {"sv": "📅  Förfaller först: {date}  ({supplier} · {nr})", "en": "📅  Earliest due: {date}  ({supplier} · {nr})"},
+    "combine.earliest_none": {"sv": "📅  Ingen av de markerade har ett förfallodatum", "en": "📅  None of the selected invoices has a due date"},
+    "combine.missing_due": {"sv": "⚠  {n} av fakturorna saknar förfallodatum", "en": "⚠  {n} of the invoices have no due date"},
+    "combine.due_today": {"sv": "förfaller idag!", "en": "due today!"},
+    "combine.due_in": {"sv": "om {d} dagar", "en": "in {d} days"},
+    "combine.due_overdue": {"sv": "förfallen sedan {d} dagar!", "en": "overdue by {d} days!"},
+    "combine.copy": {"sv": "📋  Kopiera sammanfattning", "en": "📋  Copy summary"},
+    "combine.copied": {"sv": "Sammanfattningen kopierad till urklipp", "en": "Summary copied to clipboard"},
+    "combine.export_sel": {"sv": "📄  Exportera dessa till betal-PDF …", "en": "📄  Export these to payment PDF …"},
+    "combine.close": {"sv": "Stäng", "en": "Close"},
+    "combine.export_title": {"sv": "Exportera markerade fakturor", "en": "Export selected invoices"},
+    "combine.need_two": {"sv": "Markera minst två fakturor i listan först.", "en": "Select at least two invoices in the list first."},
+
+    # ── Automatisk batch-export ───────────────────────────────────────
+    "auto_batch.menu": {"sv": "🤖  Autoexport: 10 fakturor/leverantör eller förfall inom 5 dagar", "en": "🤖  Auto-export: 10 invoices/supplier or due within 5 days"},
+    "auto_batch.pdf_title": {"sv": "Autoexport – {supplier}", "en": "Auto-export – {supplier}"},
+    "auto_batch.done": {"sv": "🤖  Autoexport: {n} fakturor från {supplier} exporterades och sattes som Betald", "en": "🤖  Auto-export: {n} invoices from {supplier} exported and marked Paid"},
+    "auto_batch.printed": {"sv": "  ·  🖨 utskriven med original", "en": "  ·  🖨 printed with originals"},
+    "auto_batch.failed": {"sv": "🤖  Autoexport för {supplier} misslyckades: {error}", "en": "🤖  Auto-export for {supplier} failed: {error}"},
+
+    # ── Dashboard ─────────────────────────────────────────────────────
+    "dashboard.title": {"sv": "🏠  Dashboard", "en": "🏠  Dashboard"},
+    "dashboard.open_invoices": {"sv": "🧾  Öppna Fakturor", "en": "🧾  Open Invoices"},
+    "dashboard.to_pay": {"sv": "ATT BETALA", "en": "TO PAY"},
+    "dashboard.to_pay_sub": {"sv": "{n} obetalda fakturor", "en": "{n} unpaid invoices"},
+    "dashboard.overdue": {"sv": "FÖRFALLET", "en": "OVERDUE"},
+    "dashboard.overdue_sub": {"sv": "{n} fakturor passerade", "en": "{n} invoices past due"},
+    "dashboard.due_week": {"sv": "FÖRFALLER 7 DAGAR", "en": "DUE IN 7 DAYS"},
+    "dashboard.due_week_sub": {"sv": "{n} fakturor på väg", "en": "{n} invoices coming up"},
+    "dashboard.suppliers": {"sv": "LEVERANTÖRER", "en": "SUPPLIERS"},
+    "dashboard.suppliers_sub": {"sv": "{n} fakturor totalt", "en": "{n} invoices in total"},
+    "dashboard.upcoming": {"sv": "Förfaller snart", "en": "Due soon"},
+    "dashboard.col_due": {"sv": "Förfaller", "en": "Due"},
+    "dashboard.col_supplier": {"sv": "Leverantör", "en": "Supplier"},
+    "dashboard.col_invoice": {"sv": "Fakturanr", "en": "Invoice no."},
+    "dashboard.col_amount": {"sv": "Belopp", "en": "Amount"},
+    "dashboard.currency": {"sv": "kr", "en": "SEK"},
+    "dashboard.hint": {"sv": "Dubbelklicka eller använd knappen för att öppna Fakturor.", "en": "Double-click or use the button to open Invoices."},
+    "main.to_pay_bar": {"sv": "Att betala: {amount}  ({n} obetalda)", "en": "To pay: {amount}  ({n} unpaid)"},
+    "tray.tooltip_due": {"sv": "{app} · Att betala {amount} ({n} obetalda)", "en": "{app} · To pay {amount} ({n} unpaid)"},
+    "scan.ocr_warn": {"sv": "⚠ OCR-kontrollsiffra", "en": "⚠ OCR check digit"},
+    "scan.math_warn": {"sv": "⚠ räknekontrollen avviker", "en": "⚠ totals do not add up"},
+    "scan.date_due_before": {"sv": "⚠ förfaller före fakturadatum", "en": "⚠ due before invoice date"},
+    "scan.date_term_long": {"sv": "⚠ ovanligt lång betalfrist", "en": "⚠ unusually long payment term"},
+    "scan.date_future": {"sv": "⚠ fakturadatum långt framåt", "en": "⚠ invoice date far in the future"},
+    "scan.print": {"sv": "🖨 Skriv ut", "en": "🖨 Print"},
+    "scan.print_missing": {"sv": "Kan inte skriva ut — originalfilen saknas ({file})", "en": "Cannot print — the original file is missing ({file})"},
+    "scan.printed": {"sv": "🖨 {file} skickad till skrivaren ({n} sida/sidor)", "en": "🖨 {file} sent to the printer ({n} page(s))"},
+    "scan.print_failed": {"sv": "Utskriften misslyckades: {error}", "en": "Printing failed: {error}"},
+    "scan.open_original": {"sv": "📂 Öppna original", "en": "📂 Open original"},
+    "scan.open_missing": {"sv": "Kan inte öppna — originalfilen saknas ({file})", "en": "Cannot open — the original file is missing ({file})"},
+    "scan.opened": {"sv": "📂 Öppnade {file} i systemets visare", "en": "📂 Opened {file} in the system viewer"},
+    "scan.open_failed": {"sv": "Kunde inte öppna {file} — ingen visare svarade", "en": "Could not open {file} — no viewer responded"},
+    "dashboard.credits_stale": {"sv": "⚠️  {n} kreditfaktura(or) på {amount} har legat okvittade i över 30 dagar – kontrollera så ATT BETALA stämmer.", "en": "⚠️  {n} credit invoice(s) totalling {amount} have been unnetted for over 30 days – check that TO PAY adds up."},
+    "dashboard.all_clear": {"sv": "🎉  Inget förfaller den närmaste veckan — allt är under kontroll.", "en": "🎉  Nothing due in the next week — everything is under control."},
+
+    # ── Loggfliken (felsökning) ───────────────────────────────────────
+    "log.title": {"sv": "🪵  Systemlogg — hitta fel på sekunder", "en": "🪵  System log — find errors in seconds"},
+    "log.level": {"sv": "Nivå:", "en": "Level:"},
+    "log.search_ph": {"sv": "Sök i loggen (meddelande, logger, action) …", "en": "Search the log (message, logger, action) …"},
+    "log.only_errors": {"sv": "Endast fel", "en": "Errors only"},
+    "log.only_session": {"sv": "Denna session", "en": "This session"},
+    "log.auto_scroll": {"sv": "Auto-scroll", "en": "Auto-scroll"},
+    "log.col_time": {"sv": "Tid", "en": "Time"},
+    "log.col_level": {"sv": "Nivå", "en": "Level"},
+    "log.col_logger": {"sv": "Logger", "en": "Logger"},
+    "log.col_action": {"sv": "Action", "en": "Action"},
+    "log.col_message": {"sv": "Meddelande", "en": "Message"},
+    "log.banner_errors": {"sv": "⚠  {n} fel i loggen — senaste: {last}", "en": "⚠  {n} errors in the log — latest: {last}"},
+    "log.goto_error": {"sv": "Visa senaste felet", "en": "Show latest error"},
+    "log.refresh": {"sv": "🔄  Uppdatera", "en": "🔄  Refresh"},
+    "log.pause": {"sv": "⏸  Pausa live", "en": "⏸  Pause live"},
+    "log.resume": {"sv": "▶  Återuppta", "en": "▶  Resume"},
+    "log.mark": {"sv": "🔖  Markera här", "en": "🔖  Mark here"},
+    "log.marker_set": {"sv": "✔  Markering satt!", "en": "✔  Marker set!"},
+    "log.marker_text": {"sv": "Användarmarkering — återskapa felet nu, kopiera sedan loggen efter markeringen", "en": "User marker — reproduce the error now, then copy the log after the marker"},
+    "log.copy_marked": {"sv": "📋  Kopiera efter markering", "en": "📋  Copy after marker"},
+    "log.copy_diag": {"sv": "📋  Kopiera felsökningspaket", "en": "📋  Copy diagnostics"},
+    "log.open_dir": {"sv": "📁  Öppna loggmapp", "en": "📁  Open log folder"},
+    "log.collect_errors": {"sv": "🧰  Samla alla fel", "en": "🧰  Collect all errors"},
+    "log.collect_done": {"sv": "🧰  {total} fel samlade ({added} nya) i logs/felsamling.log — alla fel på ett ställe för snabb felsökning", "en": "🧰  {total} errors collected ({added} new) in logs/felsamling.log — every error in one place for quick troubleshooting"},
+    "log.export_shown": {"sv": "💾  Exportera visade", "en": "💾  Export shown"},
+    "log.export_title": {"sv": "Exportera logg", "en": "Export log"},
+    "log.reset_filters": {"sv": "🧹  Nollställ filter", "en": "🧹  Reset filters"},
+    "log.copy_row": {"sv": "📋  Kopiera rad", "en": "📋  Copy row"},
+    "log.copied": {"sv": "✔  Kopierat!", "en": "✔  Copied!"},
+    "log.info_line": {"sv": "Visar {shown} av {total} rader  ·  {errors} fel  ·  {warnings} varningar  ·  loggfil {size} KB", "en": "Showing {shown} of {total} rows  ·  {errors} errors  ·  {warnings} warnings  ·  log file {size} KB"},
+
+    # ── Leverantörsmallar för tolkning ────────────────────────────────
+    "scan.select_row": {"sv": "Markera en rad i tabellen först.", "en": "Select a row in the table first."},
+    "scan.template_btn": {"sv": "🧩  Mall för rad …", "en": "🧩  Template for row …"},
+    "scan.templates_btn": {"sv": "🧩  Mallar ({n})", "en": "🧩  Templates ({n})"},
+    "scan.template_used": {"sv": "redo 🧩", "en": "ready 🧩"},
+    "tmpl.title": {"sv": "🧩  Fakturamall — {supplier}", "en": "🧩  Invoice template — {supplier}"},
+    "tmpl.supplier": {"sv": "Leverantör:", "en": "Supplier:"},
+    "tmpl.match_bg": {"sv": "Matcha via BG i fakturan", "en": "Match from invoice bankgiro"},
+    "tmpl.bg_not_found": {"sv": "Hittade inget bankgiro i fakturatexten.", "en": "No bankgiro was found in the invoice text."},
+    "tmpl.bg_unregistered": {"sv": "Fakturan visar BG {bankgiro}, men det matchar ingen leverantör i registret.", "en": "The invoice shows BG {bankgiro}, but it matches no registered supplier."},
+    "tmpl.bg_choose": {"sv": "Flera leverantörer matchar fakturans BG. Välj själv:", "en": "Several suppliers match the invoice's bankgiro. Choose one:"},
+    "tmpl.bg_match_found": {"sv": "BG {bankgiro} matchar {supplier}. Kontrollera och spara leverantörsvalet.", "en": "BG {bankgiro} matches {supplier}. Check and save the supplier selection."},
+    "tmpl.match_logo": {"sv": "Matcha via logotyp", "en": "Match by logo"},
+    "tmpl.logo_no_match": {"sv": "Logotypen kunde inte matchas mot någon sparad leverantörsmall. Ange leverantörsnamnet eller markera en tydligare logotyp.", "en": "The logo did not match a saved supplier template. Enter the supplier name or mark a clearer logo."},
+    "tmpl.logo_confirm": {"sv": "Den markerade logotypen liknar {supplier}s sparade logotyp. Vill du välja den leverantören?", "en": "The marked logo resembles the saved logo for {supplier}. Do you want to choose this supplier?"},
+    "tmpl.logo_conflict_confirm": {"sv": "Fakturan är nu inställd på {current}, men logotypen liknar {supplier}. Vill du ändra leverantör till {supplier}?", "en": "The current supplier is {current}, but the logo resembles {supplier}. Do you want to change the supplier to {supplier}?"},
+    "tmpl.logo_help": {"sv": "Klicka här och dra sedan en ruta runt leverantörens riktiga logotyp i faktura-PDF:en. En träff föreslås bara; du bekräftar själv leverantören.", "en": "Click here, then draw a box around the supplier's real logo in the invoice PDF. A match is only suggested; you confirm the supplier yourself."},
+    "tmpl.suggest_logo": {"sv": "Föreslå logoområden", "en": "Suggest logo areas"},
+    "tmpl.logo_suggest_help": {"sv": "Hitta möjliga bild-/vektorytor i PDF:en. Du granskar varje förslag och sparar själv; inget väljs eller lärs in automatiskt.", "en": "Find possible image/vector areas in the PDF. Review each suggestion and save it yourself; nothing is selected or learned automatically."},
+    "tmpl.logo_candidates_prompt": {"sv": "Välj ett område att förhandsvisa på PDF-sidan. Förslagen är ledtrådar, inte en automatisk logotypträff.", "en": "Choose an area to preview on the PDF page. Suggestions are hints, not an automatic logo match."},
+    "tmpl.logo_candidates_none": {"sv": "Inga logoområden hittades i PDF:en. Markera logotypen manuellt i originalet.", "en": "No logo areas were found in the PDF. Mark the logo manually on the original."},
+    "tmpl.logo_candidate_choice": {"sv": "{n}. Sida {page} · {source} · {place} · prioritet {score}", "en": "{n}. Page {page} · {source} · {place} · priority {score}"},
+    "tmpl.logo_source_image": {"sv": "inbäddad bild", "en": "embedded image"},
+    "tmpl.logo_source_vector": {"sv": "vektorgrafik", "en": "vector artwork"},
+    "tmpl.logo_source_header": {"sv": "förslag i sidhuvud", "en": "header-area hint"},
+    "tmpl.logo_source_unknown": {"sv": "PDF-område", "en": "PDF area"},
+    "tmpl.logo_place_top_left": {"sv": "övre vänster", "en": "upper left"},
+    "tmpl.logo_place_top_right": {"sv": "övre höger", "en": "upper right"},
+    "tmpl.logo_place_left": {"sv": "vänster sida", "en": "left side"},
+    "tmpl.logo_place_right": {"sv": "höger sida", "en": "right side"},
+    "tmpl.logo_place_unknown": {"sv": "placering okänd", "en": "unknown location"},
+    "tmpl.logo_candidate_selected": {"sv": "Förslag på sida {page} markerat — kontrollera rutan och spara för att lägga till det.", "en": "Suggestion on page {page} selected — check the box and save to add it."},
+    "tmpl.logo_candidate_selected_hint": {"sv": "Område markerat på sida {page}. Kontrollera att det är leverantörens riktiga logotyp; spara för att lägga till varianten.", "en": "Area highlighted on page {page}. Verify that it is the supplier's real logo; save to add the variant."},
+    "tmpl.logo_not_selected": {"sv": "Leverantörsvalet ändrades inte. Välj själv rätt leverantör om logotypen är osäker.", "en": "The supplier selection was not changed. Choose the correct supplier yourself if the logo match is uncertain."},
+    "tmpl.logo_choose": {"sv": "Flera sparade leverantörslogotyper liknar markeringen. Välj rätt leverantör:", "en": "Several saved supplier logos resemble the selection. Choose the correct supplier:"},
+    "tmpl.logo_matched": {"sv": "Logotypmatchning bekräftad för {supplier} (avstånd {distance}). Kontrollera och spara.", "en": "Logo match confirmed for {supplier} (distance {distance}). Check and save."},
+    "tmpl.intro": {"sv": "Markera ett värde i fakturatexten (t.ex. beloppet) och klicka sedan på 🎯 vid rätt fält — etiketten före värdet hämtas automatiskt. Justera etiketten vid behov, testa mallen och spara. Nästa faktura från samma leverantör tolkas då med mallen.", "en": "Select a value in the invoice text (e.g. the amount) and click 🎯 next to the right field — the label before the value is filled in automatically. Adjust the label if needed, test the template and save. The next invoice from the same supplier will then be read with the template."},
+    "tmpl.use_selection": {"sv": "🎯 Använd markerad text", "en": "🎯 Use selected text"},
+    "tmpl.label_ph": {"sv": "Etikett på fakturan, t.ex. Att betala", "en": "Label on the invoice, e.g. Total due"},
+    "tmpl.found": {"sv": "→ {value}", "en": "→ {value}"},
+    "tmpl.not_found": {"sv": "→ (hittades inte)", "en": "→ (not found)"},
+    "tmpl.test": {"sv": "🧪  Testa mallen", "en": "🧪  Test template"},
+    "tmpl.suggest_fields": {"sv": "✨ Föreslå etiketter", "en": "✨ Suggest labels"},
+    "tmpl.suggest_fields_tip": {"sv": "Fyller i tydliga etikettförslag från fakturatexten. Kontrollera alltid värdena mot originalet innan du sparar.", "en": "Fills in clear label suggestions from the invoice text. Always check values against the original before saving."},
+    "tmpl.suggest_fields_none": {"sv": "Hittade inga entydiga etiketter. Markera fälten manuellt på fakturabilden.", "en": "No unambiguous labels were found. Mark the fields manually on the invoice image."},
+    "tmpl.alias_template_ambiguous_title": {"sv": "Flera mallar för leverantören", "en": "Multiple supplier templates"},
+    "tmpl.alias_template_ambiguous_body": {"sv": "Leverantören matchar flera sparade mallar ({names}). Redigera eller ta bort dubbletten i Mallar innan du fortsätter — ingen mall har valts automatiskt.", "en": "The supplier matches multiple saved templates ({names}). Edit or remove the duplicate in Templates before continuing — no template was selected automatically."},
+    "tmpl.suggest_fields_applied": {"sv": "Förslag (kontrollera mot originalet innan du sparar): {fields}", "en": "Suggestions (check against the original before saving): {fields}"},
+    "tmpl.suggest_skip": {"sv": "Hoppa över detta fält", "en": "Skip this field"},
+    "tmpl.suggest_choose_title": {"sv": "Välj etikettförslag", "en": "Choose a label suggestion"},
+    "tmpl.suggest_choose_body": {"sv": "Flera olika värden hittades för {field}. Välj rätt etikett och värde genom att kontrollera mot fakturabilden, eller hoppa över.", "en": "Different values were found for {field}. Choose the correct label and value by checking the invoice image, or skip."},
+    "tmpl.below_label": {"sv": "raden under", "en": "below label"},
+    "tmpl.save": {"sv": "💾  Spara mall", "en": "💾  Save template"},
+    "tmpl.need_supplier": {"sv": "Ange leverantörens namn först.", "en": "Enter the supplier name first."},
+    "tmpl.need_label": {"sv": "Fyll i minst en etikett.", "en": "Fill in at least one label."},
+    "tmpl.verify_title": {"sv": "Säkerhetskontroll av mallen", "en": "Template safety check"},
+    "tmpl.verify_intro": {"sv": "Så här läser den nya mallen de väntande fakturorna för {supplier}. Kontrollera värdena mot fakturorna — stämmer de ska mallen användas automatiskt på kommande fakturor.", "en": "This is how the new template reads the pending invoices for {supplier}. Check the values against the invoices — if they are right, the template will be used automatically on future invoices."},
+    "tmpl.verify_counts": {"sv": "{ok} av {n} fakturor läses komplett.", "en": "{ok} of {n} invoices read completely."},
+    "tmpl.verify_line": {"sv": "{file}: nr {nr}, {amount}, fakturadatum {date}, förfallo {due}, OCR {ocr}", "en": "{file}: no. {nr}, {amount}, invoice date {date}, due {due}, OCR {ocr}"},
+    "tmpl.verify_missing": {"sv": "{file}: saknar {missing}", "en": "{file}: missing {missing}"},
+    "tmpl.verify_none": {"sv": "⚠ Mallen känns ännu inte igen på fakturorna — den läser inga kompletta värden. Kontrollera att rutorna täcker rätt ställen, eller justera markeringarna.", "en": "⚠ The template is not recognised on the invoices yet — it reads no complete values. Check that the boxes cover the right places, or adjust the markings."},
+    "tmpl.verify_ok": {"sv": "✓ Ser rätt ut — använd mallen", "en": "✓ Looks right — use the template"},
+    "tmpl.verify_adjust": {"sv": "✎ Justera markeringar", "en": "✎ Adjust markings"},
+    "tmpl.verify_later": {"sv": "Kontrollera senare", "en": "Check later"},
+    "tmpl.remembered": {"sv": "🧩  Mall för {supplier} sparad och bekräftad — appen minns den och kan använda den automatiskt på kommande fakturor", "en": "🧩  Template for {supplier} saved and confirmed — the app remembers it and can use it automatically on future invoices"},
+    "tmpl.saved_unconfirmed": {"sv": "🧩  Mall för {supplier} sparad men inte bekräftad — fakturor ligger kvar för kontroll och registreras inte automatiskt.", "en": "🧩  Template for {supplier} is saved but unconfirmed — invoices stay available for review and are not registered automatically."},
+    "tmpl.save_failed": {"sv": "Mallen för {supplier} kunde inte sparas. Ingen automatisk registrering startas.", "en": "The template for {supplier} could not be saved. Automatic registration will not start."},
+    "tmpl.saved": {"sv": "🧩  Mall sparad för {supplier} — raden tolkas om", "en": "🧩  Template saved for {supplier} — re-reading the row"},
+    "tmpl.reread_others": {"sv": "Läste dessutom om {n} andra tolkade fakturor med samma mall.", "en": "Also re-read {n} other interpreted invoices with the same template."},
+    "tmpl.repair_title": {"sv": "Malldrift upptäckt", "en": "Template drift detected"},
+    "tmpl.repair_body": {"sv": "Mallen för {supplier} träffar inte längre alla fält på de parkerade fakturorna. Utifrån fakturornas egen text föreslår appen nya etiketter:\n\n{changes}\n\nUppdatera mallen och läs om raderna med den?", "en": "The template for {supplier} no longer reads every field on the parked invoices. From the invoices' own text the app suggests new labels:\n\n{changes}\n\nUpdate the template and re-read the rows with it?"},
+    "tmpl.repaired": {"sv": "Mallen för {supplier} uppdaterad – {n} rad(er) lästes om.", "en": "Template for {supplier} updated – re-read {n} row(s)."},
+    "tmpl.zoom_in": {"sv": "Zooma in", "en": "Zoom in"},
+    "tmpl.zoom_out": {"sv": "Zooma ut", "en": "Zoom out"},
+    "tmpl.zoom_fit": {"sv": "Anpassa", "en": "Fit"},
+    "tmpl.zoom_hint": {"sv": "🔍 Zooma med mushjulet eller +/− för att se raderna — panorera genom att dra med höger musknapp.", "en": "🔍 Zoom with the mouse wheel or +/− to read the rows — pan by dragging with the right mouse button."},
+    "tmpl.no_selection": {"sv": "Markera först ett värde i texten.", "en": "Select a value in the text first."},
+    "tmpl.manager_title": {"sv": "🧩  Sparade fakturamallar", "en": "🧩  Saved invoice templates"},
+    "tmpl.manager_empty": {"sv": "Inga mallar ännu. Öppna en tolkad rad och välj 'Mall för rad …'.", "en": "No templates yet. Open a parsed row and choose 'Template for row …'."},
+    "tmpl.manager_entry": {"sv": "{supplier} — {n} fält: {fields}", "en": "{supplier} — {n} fields: {fields}"},
+    "tmpl.delete": {"sv": "🗑  Ta bort vald mall", "en": "🗑  Delete selected template"},
+    "tmpl.edit": {"sv": "✏️  Redigera vald mall", "en": "✏️  Edit selected template"},
+    "tmpl.new": {"sv": "➕  Ny mall …", "en": "➕  New template …"},
+    "tmpl.manager_need_example": {"sv": "Skanna in eller markera först en faktura i Import-listan — en ny mall lärs in från fakturans bild, så appen behöver ett exempel att markera på.", "en": "First scan in or select an invoice in the Import list — a new template is taught from the invoice image, so the app needs an example to mark on."},
+    "tmpl.intro_image": {"sv": "Välj ett fält och dra en ruta runt värdet på fakturabilden. Du kan välja leverantör via BG eller markera den riktiga logotypen i PDF:en. För enbart logotypigenkänning räcker det att markera logotypen. Osäkra logoträffar måste bekräftas av dig. Appen kommer ihåg platserna och läser framtida fakturor där.", "en": "Select a field and draw a box around its value on the invoice image. You can match the supplier by bankgiro or mark the real logo in the PDF. For logo recognition alone, marking the logo is enough. Uncertain logo matches must be confirmed by you. The app remembers the marked regions for future invoices."},
+    "tmpl.logo_only_intro": {"sv": "Markera logotypen manuellt eller granska ett föreslaget område i originalets PDF. Övriga mallfält ändras inte. Spara kopplar bara bildsignaturen till vald leverantör — fakturan bekräftas först när du klickar Använd vald.", "en": "Mark the logo manually or review a suggested area on the original PDF. Other template fields will not be changed. Saving only associates the image signature with the selected supplier — the invoice is confirmed only when you click Use selected."},
+    "tmpl.fields_header": {"sv": "Fält att markera:", "en": "Fields to mark:"},
+    "tmpl.mark": {"sv": "✎ Markera", "en": "✎ Mark"},
+    "tmpl.marked": {"sv": "✓ Markerad", "en": "✓ Marked"},
+    "tmpl.logo_not_marked": {"sv": "Logotyp ej markerad", "en": "Logo not marked"},
+    "tmpl.logo_marked": {"sv": "Riktig logotyp markerad", "en": "Real logo marked"},
+    "tmpl.logo_unusable": {"sv": "Markeringen saknar tydliga bilddetaljer — välj en tydlig logotypyta.", "en": "The selection has no clear visual detail — mark a clearer logo area."},
+    "tmpl.logo_marked_hint": {"sv": "Logotypen är markerad för vald leverantör. Spara för att koppla den till leverantören.", "en": "The logo is marked for the selected supplier. Save to associate it with that supplier."},
+    "tmpl.logo_variants_saved": {"sv": "Sparade logotypvarianter: {n}", "en": "Saved logo variants: {n}"},
+    "tmpl.logo_variant_saved": {"sv": "Logotypmarkeringen är sparad. Mallens logotyper: {n}.", "en": "The logo marking is saved. Logos in this template: {n}."},
+    "tmpl.add_logo_variant": {"sv": "➕ Lägg till logotypvariant", "en": "➕ Add logo variant"},
+    "tmpl.logo_label_count": {"sv": "logotyp ({n})", "en": "logo ({n})"},
+    "tmpl.clear_marks": {"sv": "Rensa markeringar", "en": "Clear markings"},
+    "tmpl.page": {"sv": "Sida {n} av {total}", "en": "Page {n} of {total}"},
+    "tmpl.page_note": {"sv": "sida {n}", "en": "page {n}"},
+    "tmpl.need_field": {"sv": "Markera minst ett fält eller en tydlig logotyp på bilden.", "en": "Mark at least one field or a clear logo on the image."},
+    "tmpl.need_logo": {"sv": "Markera en tydlig ruta runt leverantörens riktiga logotyp innan du sparar.", "en": "Mark a clear box around the supplier's real logo before saving."},
+    "tmpl.need_image": {"sv": "Fakturans bild kunde inte visas — mallen kan bara läras in från en fil som går att visa (PDF/bild).", "en": "The invoice image could not be shown — a template can only be taught from a file that can be displayed (PDF/image)."},
+    "tmpl.no_image": {"sv": "(fakturabilden kan inte visas för den här filen)", "en": "(the invoice image cannot be displayed for this file)"},
+    "watch.learn_no_image": {"sv": "Filen {file} kunde inte visas som bild — välj en annan exempelfaktura i mappen.", "en": "The file {file} could not be shown as an image — choose another sample invoice in the folder."},
+    "tmpl.field_invoice_number": {"sv": "Fakturanummer", "en": "Invoice number"},
+    "tmpl.field_total_amount": {"sv": "Belopp (att betala)", "en": "Amount (total due)"},
+    "tmpl.field_date": {"sv": "Fakturadatum", "en": "Invoice date"},
+    "tmpl.field_due_date": {"sv": "Förfallodatum", "en": "Due date"},
+    "tmpl.field_ocr": {"sv": "OCR-nummer (valfritt)", "en": "OCR number (optional)"},
+    "tmpl.field_supplier_logo": {"sv": "Leverantörens logotyp (i fakturan)", "en": "Supplier's logo (in invoice)"},
+
+    # ── PDF-export ────────────────────────────────────────────────────
+    "pdf.complete_list": {"sv": "Komplett fakturalista", "en": "Complete invoice list"},
+    "pdf.page": {"sv": "Sida {n} av {total}", "en": "Page {n} of {total}"},
+    "pdf.invoices_plus": {"sv": "Fakturor  (+):", "en": "Invoices  (+):"},
+    "pdf.credits_minus": {"sv": "Krediter  (-):", "en": "Credits  (-):"},
+    "pdf.to_pay": {"sv": "ATT BETALA:", "en": "TO PAY:"},
+    "pdf.invoices_count": {"sv": "Fakturor: {n}", "en": "Invoices: {n}"},
+    "pdf.credits_count": {"sv": "Krediter: {n}", "en": "Credits: {n}"},
+    "pdf.payment_date": {"sv": "Betalningsdatum", "en": "Payment date"},
+    "pdf.no_invoices": {"sv": "Inga fakturor att exportera.", "en": "No invoices to export."},
+
+    # ── Tray ─────────────────────────────────────────────────────────
+    "tray.show": {"sv": "🖥  Visa fönster", "en": "🖥  Show window"},
+    "tray.theme": {"sv": "🎨  Tema", "en": "🎨  Theme"},
+    "tray.backup": {"sv": "💾  Backup nu", "en": "💾  Backup now"},
+    "tray.exports": {"sv": "📁  Öppna exporter", "en": "📁  Open exports"},
+    "tray.app_folder": {"sv": "📂  Öppna appmappen", "en": "📂  Open app folder"},
+    "tray.minimize": {"sv": "🙈  Minimera", "en": "🙈  Minimize"},
+    "tray.quit": {"sv": "❌  Avsluta helt", "en": "❌  Quit completely"},
+    "tray.tooltip": {"sv": "{app}\nEnkelklicka för att öppna", "en": "{app}\nSingle-click to open"},
+}
+
+
+# Kanoniska värden som LAGRAS i datafilerna (alltid svenska, så att
+# filter/statuslogik aldrig bryts av ett språkbyte) → visningstext.
+STATUS_LABELS: dict[str, dict[str, str]] = {
+    "Obetald":         {"sv": "Obetald",         "en": "Unpaid"},
+    "Planerad":        {"sv": "Planerad",        "en": "Planned"},
+    "Betalfil skapad": {"sv": "Betalfil skapad", "en": "Payment file created"},
+    "Betald":          {"sv": "Betald",          "en": "Paid"},
+    "Förfallen":       {"sv": "Förfallen",       "en": "Overdue"},
+    "Makulerad":       {"sv": "Makulerad",       "en": "Cancelled"},
+    "Arkiverad":       {"sv": "Arkiverad",       "en": "Archived"},
+}
+
+TYPE_LABELS: dict[str, dict[str, str]] = {
+    "Faktura":       {"sv": "Faktura",       "en": "Invoice"},
+    "Kreditfaktura": {"sv": "Kreditfaktura", "en": "Credit note"},
+    "Kredit":        {"sv": "Kredit",        "en": "Credit"},
+}
+
+
+#: Fält som skanningsparsern rapporterar som saknade (svenska internt).
+SCAN_MISSING_LABELS: dict[str, dict[str, str]] = {
+    "belopp":         {"sv": "belopp",         "en": "amount"},
+    "fakturanummer":  {"sv": "fakturanummer",  "en": "invoice number"},
+    "leverantör":     {"sv": "leverantör",     "en": "supplier"},
+    "datum":          {"sv": "datum",          "en": "date"},
+    "förfallodatum":  {"sv": "förfallodatum",  "en": "due date"},
+}
+
+
+def tr_missing(fields: list) -> str:
+    """Visningstext för parserns saknade-fält-lista."""
+    out = []
+    for f in fields:
+        entry = SCAN_MISSING_LABELS.get(str(f))
+        out.append(
+            (entry.get(_current) or entry["sv"]) if entry else str(f)
+        )
+    return ", ".join(out)
+
+
+def tr_status(status: str) -> str:
+    """Visningstext för en lagrad (svensk) status, på aktuellt språk."""
+    entry = STATUS_LABELS.get(str(status))
+    if entry is None:
+        return str(status)
+    return entry.get(_current) or entry["sv"]
+
+
+def tr_type(invoice_type: str) -> str:
+    """Visningstext för en lagrad (svensk) fakturatyp."""
+    entry = TYPE_LABELS.get(str(invoice_type))
+    if entry is None:
+        return str(invoice_type)
+    return entry.get(_current) or entry["sv"]
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  API
+# ═════════════════════════════════════════════════════════════════════
+
+def normalize_language(lang: str | None) -> str:
+    """'en-US' / 'EN' / 's' → ett språk i LANGUAGES (standard 'sv')."""
+    if not lang:
+        return "sv"
+    code = str(lang).strip().lower().replace("_", "-").split("-")[0]
+    if code in ("en", "eng", "english"):
+        return "en"
+    return "sv"
+
+
+def language() -> str:
+    """Aktuellt språk ('sv' eller 'en')."""
+    return _current
+
+
+def set_language(lang: str | None, *, notify: bool = True) -> str:
+    """Sätter aktuellt språk och meddelar lyssnare. Returnerar det satta."""
+    global _current
+    code = normalize_language(lang)
+    changed = code != _current
+    _current = code
+    if notify and changed:
+        for cb in list(_listeners):
+            try:
+                cb(code)
+            except Exception:  # en trasig lyssnare får inte stoppa bytet
+                logger.exception("i18n-lyssnare kraschade")
+    return _current
+
+
+def on_language_changed(callback: Callable[[str], None]) -> None:
+    """Registrerar en callback som körs vid språkbyte."""
+    if callback not in _listeners:
+        _listeners.append(callback)
+
+
+def tr(key: str, **fmt: object) -> str:
+    """
+    Översatt text för ``key`` på aktuellt språk.
+
+    Extra kwargs formateras in ({name} osv). Saknad nyckel →
+    svenska om den finns, annars själva nyckeln (och en loggrad,
+    så det syns i loggen i stället för tyst i GUI:t).
+    """
+    entry = _STRINGS.get(key)
+    if entry is None:
+        logger.debug("i18n: okänd nyckel %r", key)
+        text = key
+    else:
+        text = entry.get(_current) or entry.get("sv") or key
+    if fmt:
+        try:
+            return text.format(**fmt)
+        except (KeyError, IndexError, ValueError):
+            return text
+    return text
+
+
+def tr_list(key: str) -> list[str]:
+    """Som tr() men för '|'-separerade listor (tabellrubriker)."""
+    return [part.strip() for part in tr(key).split("|")]

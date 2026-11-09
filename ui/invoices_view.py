@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 """
-FakturaRäknaren — Invoices View
+Fakturabunten — Invoices View
 =====================================
-Fil    : FakturaRäknaren_/ui/invoices_view.py
+Fil    : Fakturabunten_/ui/invoices_view.py
 Författare : Rickard Längkvist
 År     : Dynamiskt (auto)
 
@@ -54,19 +54,25 @@ Copyright © dynamiskt år Rickard Längkvist
 
 import datetime
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
 from PySide6.QtWidgets import (
+    QApplication,
+    QTextEdit,
+    QPlainTextEdit,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
+    QScrollArea,
     QLabel,
     QFrame,
     QLineEdit,
     QComboBox,
-    QTableWidget,
-    QTableWidgetItem,
+    QPushButton,
+    QTableView,
     QHeaderView,
     QAbstractItemView,
     QAbstractScrollArea,
@@ -76,8 +82,15 @@ from PySide6.QtWidgets import (
     QDialog,
     QSizePolicy,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QSize
-from PySide6.QtGui import QFont, QColor, QWheelEvent, QBrush, QPixmap
+from PySide6.QtCore import (
+    Qt, QTimer, Signal, QSize, QItemSelectionModel, QSortFilterProxyModel,
+)
+
+try:
+    from ui.i18n import tr, tr_list, tr_status, tr_type
+except ImportError:  # fristående körning av filen
+    from i18n import tr, tr_list, tr_status, tr_type  # type: ignore[no-redef]
+from PySide6.QtGui import QColor, QKeySequence, QShortcut, QWheelEvent
 
 # ═════════════════════════════════════════════════════════════════════
 #  IMPORTER FRÅN HELPERS
@@ -89,24 +102,26 @@ try:
         HIDDEN_STATUSES,
         STATUS_COLORS,
         COLUMNS,
-        COL_LABELS,
-        COL_KEYS,
         COL_WIDTHS,
-        COL_ALIGN,
-        CURRENCIES,
         ExportHistoryManager,
         ExportHistoryDialog,
         InvoiceDialog,
+        due_within,
+        due_window_filter,
+        payment_info_text,
+        is_dark_theme,
         make_btn,
-        make_cell,
         make_font,
         h_line,
         fit_table_columns,
         fmt_amount,
+        combine_invoices,
         build_export_path,
+        chunk_export_rows,
         get_export_base,
         open_file,
         open_folder,
+        attachment_page_count,
         get_session_due_date_str,
         COPYRIGHT_YEAR,
     )
@@ -116,27 +131,69 @@ except ImportError:
         HIDDEN_STATUSES,
         STATUS_COLORS,
         COLUMNS,
-        COL_LABELS,
-        COL_KEYS,
         COL_WIDTHS,
-        COL_ALIGN,
-        CURRENCIES,
         ExportHistoryManager,
         ExportHistoryDialog,
         InvoiceDialog,
+        due_within,
+        due_window_filter,
+        payment_info_text,
         make_btn,
-        make_cell,
         make_font,
         h_line,
         fit_table_columns,
         fmt_amount,
+        combine_invoices,
         build_export_path,
+        chunk_export_rows,
         get_export_base,
         open_file,
         open_folder,
+        attachment_page_count,
         get_session_due_date_str,
         COPYRIGHT_YEAR,
     )
+
+try:
+    from ui.design import (
+        CONTROL_RADIUS_PX, FOCUS_RING_PX, ICON_HEADER_PX,
+        PANEL_RADIUS_PX, TABLE_CELL_PADDING_COMPACT_PX,
+        TABLE_CELL_PADDING_COMFORTABLE_PX, TABLE_ROW_HEIGHT_COMPACT,
+        TABLE_ROW_HEIGHT_COMFORTABLE, app_icon_pixmap,
+    )
+except Exception:  # pragma: no cover - fristående körning
+    try:
+        from design import (  # type: ignore[no-redef]
+            CONTROL_RADIUS_PX, FOCUS_RING_PX, ICON_HEADER_PX,
+            PANEL_RADIUS_PX, TABLE_CELL_PADDING_COMPACT_PX,
+            TABLE_CELL_PADDING_COMFORTABLE_PX, TABLE_ROW_HEIGHT_COMPACT,
+            TABLE_ROW_HEIGHT_COMFORTABLE, app_icon_pixmap,
+        )
+    except Exception:
+        ICON_HEADER_PX = 28  # type: ignore[no-redef]
+        CONTROL_RADIUS_PX = 7  # type: ignore[no-redef]
+        PANEL_RADIUS_PX = 10  # type: ignore[no-redef]
+        FOCUS_RING_PX = 2  # type: ignore[no-redef]
+        TABLE_ROW_HEIGHT_COMPACT = 32  # type: ignore[no-redef]
+        TABLE_ROW_HEIGHT_COMFORTABLE = 42  # type: ignore[no-redef]
+        TABLE_CELL_PADDING_COMPACT_PX = 4  # type: ignore[no-redef]
+        TABLE_CELL_PADDING_COMFORTABLE_PX = 7  # type: ignore[no-redef]
+
+        def app_icon_pixmap(size: int = 28):  # type: ignore[no-redef]
+            from PySide6.QtGui import QPixmap as _QP
+            return _QP()
+
+try:
+    from ui.invoice_table_model import InvoiceTableModel, SORT_ROLE
+except ImportError:  # pragma: no cover - standalone import
+    from invoice_table_model import (  # type: ignore[no-redef]
+        InvoiceTableModel, SORT_ROLE,
+    )
+
+try:
+    from ui.typography import set_table_default_row_height
+except ImportError:  # pragma: no cover - standalone import
+    from typography import set_table_default_row_height  # type: ignore[no-redef]
 
 log = logging.getLogger("InvoicesView")
 
@@ -260,8 +317,19 @@ class InvoicesView(QWidget):
         super().__init__(parent)
         self._app = app
         self._all_data: list[dict] = []
+        # Exportmarkering per faktura-id: radmarkeringen i tabellen
+        # ÄR exportvalet, men mängden bor här så markeringen
+        # överlever filterbyte och refresh (återappliceras per id).
+        self._marked_export_ids: set[str] = set()
+        self._page_count_cache: dict[tuple, int] = {}
+        self._displayed_ids: list[str] = []
+        self._populating_table = False
+        self._undo_stack: list[list[tuple[str, str, str]]] = []
+        self._chip_mode: str = ""  # snabbfilter: "" / overdue / today / week
         self._current_theme: dict = {}
         self._favorite_names: set[str] = set()
+        self._row_density = self._load_row_density()
+        self._original_export_mode = self._load_original_export_mode()
         self._initialised = False
 
         # Debounce-timer för sökning / filter (220 ms)
@@ -282,6 +350,44 @@ class InvoicesView(QWidget):
 
         # Bygg UI + initial data
         self._build_ui()
+
+        # Ångra senaste statusändringen med Ctrl+Z
+        self._sc_undo = QShortcut(QKeySequence.StandardKey.Undo, self)
+        self._sc_undo.setContext(
+            Qt.ShortcutContext.WidgetWithChildrenShortcut
+        )
+        self._sc_undo.activated.connect(self._undo_last_status)
+
+        # Delete-tangenten tar bort markerad faktura (enstaka).
+        # Fokusskydd i _on_delete_key: står man i ett textfält
+        # (sök/dialog) ska Delete radera text som vanligt.
+        self._sc_delete = QShortcut(
+            QKeySequence.StandardKey.Delete, self
+        )
+        self._sc_delete.setContext(
+            Qt.ShortcutContext.WidgetWithChildrenShortcut
+        )
+        self._sc_delete.activated.connect(self._on_delete_key)
+
+        # Snabb åtkomst till återkommande moment; tabellens egna piltangenter
+        # fortsätter sköta radnavigeringen.
+        self._sc_find = QShortcut(QKeySequence("Ctrl+F"), self)
+        self._sc_add = QShortcut(QKeySequence("Ctrl+N"), self)
+        self._sc_edit = QShortcut(QKeySequence("Ctrl+E"), self)
+        self._sc_export = QShortcut(QKeySequence("Ctrl+Shift+E"), self)
+        for shortcut in (
+            self._sc_find, self._sc_add, self._sc_edit, self._sc_export,
+        ):
+            shortcut.setContext(
+                Qt.ShortcutContext.WidgetWithChildrenShortcut
+            )
+        self._sc_find.activated.connect(self._focus_search)
+        self._sc_add.activated.connect(self._add_invoice)
+        self._sc_edit.activated.connect(self._edit_invoice)
+        self._sc_export.activated.connect(self._export_selected_pdf)
+        self._search.setToolTip(tr("invoices.search_shortcut_tip"))
+        self._table.setToolTip(tr("invoices.table_keyboard_tip"))
+
         self._do_refresh()
 
         # Lyssna på dataändringar (säker koppling)
@@ -314,20 +420,14 @@ class InvoicesView(QWidget):
         self.setMinimumWidth(0)
 
         # ── Header ─────────────────────────────────────────────────────
-        self._header_label = QLabel("🧾  Registrerade leverantörsfakturor")
+        self._header_label = QLabel(tr("invoices.title"))
         self._header_label.setFont(make_font(17, True))
         head = QHBoxLayout()
         head.setSpacing(8)
-        _icon = Path(__file__).resolve().parent.parent / "app_icon.png"
-        if _icon.is_file():
+        _pix = app_icon_pixmap(ICON_HEADER_PX)
+        if not _pix.isNull():
             mark = QLabel()
-            mark.setPixmap(
-                QPixmap(str(_icon)).scaled(
-                    28, 28,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+            mark.setPixmap(_pix)
             mark.setStyleSheet("background:transparent;")
             head.addWidget(mark)
         head.addWidget(self._header_label)
@@ -342,7 +442,8 @@ class InvoicesView(QWidget):
         supplier_layout.setContentsMargins(10, 8, 10, 8)
         supplier_layout.setSpacing(10)
 
-        lbl_sup = QLabel("🏢  Välj leverantör:")
+        lbl_sup = QLabel(tr("invoices.choose_supplier"))
+        self._lbl_sup = lbl_sup
         lbl_sup.setFont(make_font(12, True))
         lbl_sup.setStyleSheet("background:transparent;")
 
@@ -350,8 +451,11 @@ class InvoicesView(QWidget):
         self._sup_selector.setMinimumHeight(40)
         self._sup_selector.setMinimumWidth(160)
         self._sup_selector.setFont(make_font(13, True))
+        self._sup_selector.setToolTip(
+            tr("invoices.supplier_selector_tip")
+        )
         self._sup_selector.setEditable(True)
-        self._sup_selector.setPlaceholderText("— välj leverantör —")
+        self._sup_selector.setPlaceholderText(tr("invoices.choose_ph"))
         self._sup_selector.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
@@ -371,14 +475,60 @@ class InvoicesView(QWidget):
         supplier_layout.addStretch()
         root.addWidget(supplier_frame)
 
-        # ── Sök + filter ───────────────────────────────────────────────
-        row_search = QHBoxLayout()
-        row_search.setSpacing(8)
+        # ── Huvudindelning: knappar/kontroller till VÄNSTER och
+        # fakturatabellen tydlig till HÖGER. Sidokolumnen har fast
+        # bredd och egen rullning, så inget täcks eller kläms ihop
+        # när fönstret är smalt — tabellen får all återstående
+        # bredd och anpassar sig efter fönstret.
+        body = QHBoxLayout()
+        body.setSpacing(8)
+        root.addLayout(body, stretch=1)
+
+        side_wrap = QWidget()
+        side_wrap.setObjectName("SideControls")
+        # Innehållet i rullområdet måste hålla sig inom spaltens
+        # bredd — annars växer panelerna förbi spalten och knappar
+        # hamnar under tabellen.
+        side_wrap.setMinimumWidth(276)
+        side_wrap.setMaximumWidth(364)
+        side = QVBoxLayout(side_wrap)
+        side.setContentsMargins(0, 0, 0, 0)
+        side.setSpacing(6)
+        side_scroll = QScrollArea()
+        side_scroll.setObjectName("SideScroll")
+        side_scroll.setWidgetResizable(True)
+        side_scroll.setWidget(side_wrap)
+        side_scroll.setMinimumWidth(284)
+        side_scroll.setMaximumWidth(372)
+        side_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        side_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._side_scroll = side_scroll
+        self._side_layout = side
+        body.addWidget(side_scroll)
+
+        right_wrap = QWidget()
+        right_layout = QVBoxLayout(right_wrap)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
+        self._right_pane = right_wrap
+        self._right_layout = right_layout
+        body.addWidget(right_wrap, stretch=1)
+
+        # ── Sök + filter (egen panel: FilterBar) ───────────────────────
+        filter_frame = QFrame()
+        filter_frame.setObjectName("FilterBar")
+        filter_layout = QVBoxLayout(filter_frame)
+        filter_layout.setContentsMargins(10, 6, 10, 6)
+        filter_layout.setSpacing(6)
+        # Sidokolumn: sök och filter staplas vertikalt i full
+        # bredd — i en smal spalt kläms de annars ihop på en rad.
+        row_search = QVBoxLayout()
+        row_search.setSpacing(6)
 
         self._search = QLineEdit()
-        self._search.setPlaceholderText(
-            "🔍  Sök fakturanummer, leverantör, OCR, referens …"
-        )
+        self._search.setPlaceholderText(tr("invoices.search_ph"))
         self._search.setMinimumHeight(38)
         self._search.setFont(make_font(12))
         self._search.setClearButtonEnabled(True)
@@ -390,8 +540,9 @@ class InvoicesView(QWidget):
         self._filter_type.setMinimumHeight(38)
         self._filter_type.setMinimumWidth(0)
         self._filter_type.setFont(make_font(12))
-        self._filter_type.addItem("Alla typer")
-        self._filter_type.addItems(["Faktura", "Kreditfaktura"])
+        self._filter_type.addItem(tr("invoices.all_types"), "")
+        self._filter_type.addItem(tr_type("Faktura"), "Faktura")
+        self._filter_type.addItem(tr_type("Kreditfaktura"), "Kreditfaktura")
         self._filter_type.currentTextChanged.connect(
             lambda *_: self._search_timer.start()
         )
@@ -400,9 +551,10 @@ class InvoicesView(QWidget):
         self._filter_status.setMinimumHeight(38)
         self._filter_status.setMinimumWidth(0)
         self._filter_status.setFont(make_font(12))
-        self._filter_status.addItem("Aktiva (ej arkiv)")
-        self._filter_status.addItem("Alla statusar")
-        self._filter_status.addItems(INVOICE_STATUSES)
+        self._filter_status.addItem(tr("invoices.active_only"), "__active__")
+        self._filter_status.addItem(tr("invoices.all_statuses"), "__all__")
+        for _st in INVOICE_STATUSES:
+            self._filter_status.addItem(tr_status(_st), _st)
         self._filter_status.currentTextChanged.connect(
             lambda *_: self._search_timer.start()
         )
@@ -411,7 +563,7 @@ class InvoicesView(QWidget):
         self._filter_supplier.setMinimumHeight(38)
         self._filter_supplier.setMinimumWidth(0)
         self._filter_supplier.setFont(make_font(12))
-        self._filter_supplier.addItem("Alla leverantörer")
+        self._filter_supplier.addItem(tr("invoices.all_suppliers"), "")
         self._filter_supplier.currentTextChanged.connect(
             lambda *_: self._search_timer.start()
         )
@@ -420,63 +572,167 @@ class InvoicesView(QWidget):
         row_search.addWidget(self._filter_type)
         row_search.addWidget(self._filter_status)
         row_search.addWidget(self._filter_supplier)
-        root.addLayout(row_search)
+        filter_layout.addLayout(row_search)
 
-        # ── CRUD-knappar ───────────────────────────────────────────────
-        row_actions = QHBoxLayout()
-        row_actions.setSpacing(8)
+        # ── Snabbfilter-chips: förfallofönster ──────────────────────
+        row_chips = QVBoxLayout()
+        row_chips.setSpacing(6)
+        self._chip_btns: dict[str, Any] = {}
+        for mode, key in (
+            ("overdue", "invoices.chip_overdue"),
+            ("today", "invoices.chip_today"),
+            ("week", "invoices.chip_week"),
+        ):
+            chip = make_btn(tr(key), tr(key))
+            chip.setCheckable(True)
+            chip.clicked.connect(
+                lambda _checked=False, m=mode: self._on_chip(m)
+            )
+            self._chip_btns[mode] = chip
+            row_chips.addWidget(chip)
+        row_chips.addStretch()
+        filter_layout.addLayout(row_chips)
+        side.addWidget(filter_frame)
+
+        # ── CRUD-knappar (egen panel: ActionsBar) ──────────────────────
+        actions_frame = QFrame()
+        actions_frame.setObjectName("ActionsBar")
+        # Knapprutnät 2 × N i sidokolumnen: varje knapp får plats
+        # i full bredd i stället för att klämmas på en lång rad.
+        row_actions = QGridLayout(actions_frame)
+        row_actions.setContentsMargins(10, 6, 10, 6)
+        row_actions.setSpacing(6)
+        row_actions.setColumnStretch(0, 1)
+        row_actions.setColumnStretch(1, 1)
 
         self._btn_add = make_btn(
-            "➕  Registrera faktura",
+            tr("invoices.add"),
             "Registrera faktura för vald leverantör",
             accent=True,
         )
         self._btn_add.clicked.connect(self._add_invoice)
 
         self._btn_edit = make_btn(
-            "✏️  Redigera", "Redigera markerad faktura"
+            tr("invoices.edit"), "Redigera markerad faktura"
         )
         self._btn_edit.clicked.connect(self._edit_invoice)
         self._btn_edit.setEnabled(False)
 
         self._btn_delete = make_btn(
-            "🗑  Ta bort", "Ta bort markerad faktura", danger=True
+            tr("invoices.delete"), tr("invoices.delete_tip"), danger=True
         )
         self._btn_delete.clicked.connect(self._delete_invoice)
         self._btn_delete.setEnabled(False)
 
+        self._btn_delete_all = make_btn(
+            tr("invoices.delete_all"),
+            tr("invoices.delete_all_tip"),
+            danger=True,
+        )
+        self._btn_delete_all.clicked.connect(self._delete_all_invoices)
+        self._btn_delete_all.setEnabled(False)
+
         self._btn_duplicate = make_btn(
-            "📋  Duplicera", "Duplicera markerad faktura"
+            tr("invoices.duplicate"), "Duplicera markerad faktura"
         )
         self._btn_duplicate.clicked.connect(self._duplicate_invoice)
         self._btn_duplicate.setEnabled(False)
 
         self._btn_mark_paid = make_btn(
-            "✅  Markera betald",
+            tr("invoices.mark_paid"),
             "Markera markerade fakturor som betalda",
             success=True,
         )
         self._btn_mark_paid.clicked.connect(self._mark_selected_paid)
         self._btn_mark_paid.setEnabled(False)
 
-        row_actions.addWidget(self._btn_add)
-        row_actions.addWidget(self._btn_edit)
-        row_actions.addWidget(self._btn_delete)
-        row_actions.addWidget(self._btn_duplicate)
-        row_actions.addWidget(self._btn_mark_paid)
-        row_actions.addStretch()
+        self._btn_combine = make_btn(
+            tr("combine.button"),
+            tr("combine.tip"),
+            info=True,
+        )
+        self._btn_combine.clicked.connect(self._show_combine_dialog)
+        self._btn_combine.setEnabled(False)
+
+        row_actions.addWidget(self._btn_add, 0, 0)
+        row_actions.addWidget(self._btn_edit, 0, 1)
+        row_actions.addWidget(self._btn_delete, 1, 0)
+        row_actions.addWidget(self._btn_duplicate, 1, 1)
+        row_actions.addWidget(self._btn_mark_paid, 2, 0)
+        row_actions.addWidget(self._btn_combine, 2, 1)
+
+        self._btn_pay_today = make_btn(
+            tr("invoices.pay_today"),
+            tr("invoices.pay_today_tip"),
+            success=True,
+        )
+        self._btn_pay_today.clicked.connect(self._pay_today)
+        row_actions.addWidget(self._btn_pay_today, 3, 0, 1, 2)
 
         self._btn_refresh = make_btn("🔄", "Uppdatera vyn", width=50)
         self._btn_refresh.clicked.connect(self._do_refresh)
-        row_actions.addWidget(self._btn_refresh)
-        root.addLayout(row_actions)
+        row_actions.addWidget(self._btn_refresh, 4, 0)
 
-        # ── Export-rad ─────────────────────────────────────────────────
-        row_export = QHBoxLayout()
-        row_export.setSpacing(10)
+        self._btn_undo = make_btn(
+            "↩", tr("invoices.undo_tip"), width=50
+        )
+        self._btn_undo.clicked.connect(self._undo_last_status)
+        row_actions.addWidget(self._btn_undo, 4, 1)
+        row_actions.addWidget(self._btn_delete_all, 5, 0, 1, 2)
+        side.addWidget(actions_frame)
+
+        # ── Export (egen panel: ExportBar) ─────────────────────────────
+        export_frame = QFrame()
+        export_frame.setObjectName("ExportBar")
+        export_layout = QVBoxLayout(export_frame)
+        export_layout.setContentsMargins(10, 6, 10, 6)
+        export_layout.setSpacing(6)
+        row_original_options = QHBoxLayout()
+        row_original_options.setSpacing(6)
+        self._lbl_original_export = QLabel(
+            tr("invoices.export_originals_mode")
+        )
+        self._combo_original_export = QComboBox()
+        for mode, key in (
+            ("all_pages", "invoices.export_originals_all_pages"),
+            ("first_page", "invoices.export_originals_first_page"),
+            ("none", "invoices.export_originals_none"),
+        ):
+            self._combo_original_export.addItem(tr(key), mode)
+        self._combo_original_export.setAccessibleName(
+            tr("invoices.export_originals_mode")
+        )
+        self._combo_original_export.setToolTip(
+            tr("invoices.export_originals_tip")
+        )
+        self._combo_original_export.setCurrentIndex(
+            max(0, self._combo_original_export.findData(
+                self._original_export_mode
+            ))
+        )
+        self._combo_original_export.currentIndexChanged.connect(
+            self._on_export_original_mode_changed
+        )
+        row_original_options.addWidget(self._lbl_original_export)
+        row_original_options.addWidget(
+            self._combo_original_export, stretch=1
+        )
+        export_layout.addLayout(row_original_options)
+        row_export = QVBoxLayout()
+        row_export.setSpacing(6)
+
+        self._btn_export_selected = make_btn(
+            tr("invoices.export_selected"),
+            tr("invoices.export_selected_tip"),
+            success=True,
+        )
+        self._btn_export_selected.clicked.connect(
+            self._export_selected_pdf
+        )
+        self._btn_export_selected.setEnabled(False)
 
         self._btn_export_all = make_btn(
-            "📄  Exportera ALLA till PDF",
+            tr("invoices.export_all"),
             "Exportera alla aktiva fakturor till PDF-fil\n"
             "Du tillfrågas om betalningsdatum innan export.",
             info=True,
@@ -484,13 +740,13 @@ class InvoicesView(QWidget):
         self._btn_export_all.clicked.connect(self._export_all_pdf)
 
         self._btn_history = make_btn(
-            "📚  Exporthistorik",
+            tr("invoices.history"),
             "Visa tidigare exporter och återställ vid behov",
         )
         self._btn_history.clicked.connect(self._show_history)
 
         self._btn_open_export = make_btn(
-            "📂  Öppna exportmapp",
+            tr("invoices.open_export_folder"),
             "Öppna exports/-mappen i filhanteraren",
         )
         self._btn_open_export.clicked.connect(
@@ -503,19 +759,80 @@ class InvoicesView(QWidget):
             "color:#888;background:transparent;"
         )
 
+        row_export.addWidget(self._btn_export_selected)
         row_export.addWidget(self._btn_export_all)
         row_export.addWidget(self._btn_history)
         row_export.addWidget(self._btn_open_export)
         row_export.addWidget(self._lbl_history_count)
         row_export.addStretch()
-        root.addLayout(row_export)
+        export_layout.addLayout(row_export)
 
-        # ── Summering: tre beloppskort ─────────────────────────────────
+        # Markerbar: radmarkeringen ÄR exportvalet. Markeringen
+        # bor per faktura-id och överlever filterbyte/refresh;
+        # här syns alltid hur många som är valda och nettot.
+        row_select = QVBoxLayout()
+        row_select.setSpacing(6)
+        self._lbl_export_selection = QLabel(
+            tr("invoices.export_sel_none")
+        )
+        self._lbl_export_selection.setFont(make_font(11, True))
+        self._lbl_export_selection.setStyleSheet(
+            "background:transparent;"
+        )
+        self._btn_mark_shown = make_btn(
+            tr("invoices.mark_shown"),
+            "Markera alla rader som visas just nu för export",
+        )
+        self._btn_mark_shown.clicked.connect(self._mark_all_shown)
+        self._btn_clear_marked = make_btn(
+            tr("invoices.clear_marked"),
+            "Rensa exportmarkeringen helt",
+        )
+        self._btn_clear_marked.clicked.connect(
+            self._clear_export_selection
+        )
+        self._btn_clear_marked.setEnabled(False)
+        row_select.addWidget(self._lbl_export_selection)
+        row_select.addStretch()
+        row_select.addWidget(self._btn_mark_shown)
+        row_select.addWidget(self._btn_clear_marked)
+        export_layout.addLayout(row_select)
+
+        # Summering för BARA de markerade — samma tre tal som
+        # beloppskorten nedan, fast för exportvalet (kryssrutorna).
+        row_marked = QVBoxLayout()
+        row_marked.setSpacing(2)
+        self._lbl_marked_cap = QLabel(tr("invoices.marked_label"))
+        self._lbl_marked_cap.setFont(make_font(11, True))
+        self._lbl_marked_cap.setStyleSheet("background:transparent;")
+        self._lbl_marked_inv = QLabel("")
+        self._lbl_marked_cred = QLabel("")
+        self._lbl_marked_net = QLabel("")
+        for _lbl in (
+            self._lbl_marked_inv,
+            self._lbl_marked_cred,
+            self._lbl_marked_net,
+        ):
+            _lbl.setFont(make_font(11, True))
+            _lbl.setStyleSheet("background:transparent;")
+        row_marked.addWidget(self._lbl_marked_cap)
+        row_marked.addWidget(self._lbl_marked_inv)
+        row_marked.addWidget(self._lbl_marked_cred)
+        row_marked.addWidget(self._lbl_marked_net)
+        row_marked.addStretch()
+        export_layout.addLayout(row_marked)
+        side.addWidget(export_frame)
+        side.addStretch()
+
+        # ── Summering: tre beloppskort (ovanför tabellen, höger) ───────
         summary_frame = QFrame()
         summary_frame.setObjectName("SummaryStrip")
-        summary_layout = QHBoxLayout(summary_frame)
+        summary_layout = QVBoxLayout(summary_frame)
         summary_layout.setContentsMargins(0, 2, 0, 2)
-        summary_layout.setSpacing(10)
+        summary_layout.setSpacing(4)
+        cards_row = QHBoxLayout()
+        cards_row.setSpacing(10)
+        summary_layout.addLayout(cards_row)
 
         def _money_card(name: str, caption: str, value: QLabel) -> QFrame:
             card = QFrame()
@@ -525,6 +842,7 @@ class InvoicesView(QWidget):
             lay.setSpacing(0)
             cap = QLabel(caption)
             cap.setObjectName("MoneyCaption")
+            self._money_caps[name] = cap
             cap.setFont(make_font(11, True))
             value.setFont(make_font(16, True))
             value.setObjectName("MoneyValue")
@@ -532,21 +850,25 @@ class InvoicesView(QWidget):
             lay.addWidget(value)
             return card
 
+        self._money_caps: dict[str, QLabel] = {}
         self._lbl_invoices = QLabel("0,00 SEK")
         self._lbl_credits = QLabel("0,00 SEK")
         self._lbl_att_betala = QLabel("0,00 SEK")
-        summary_layout.addWidget(
-            _money_card("MoneyCard", "Fakturor  +", self._lbl_invoices), 1
+        cards_row.addWidget(
+            _money_card("MoneyCard", tr("invoices.card_invoices"), self._lbl_invoices), 1
         )
-        summary_layout.addWidget(
-            _money_card("MoneyCardCredit", "Krediter  −", self._lbl_credits), 1
+        cards_row.addWidget(
+            _money_card("MoneyCardCredit", tr("invoices.card_credits"), self._lbl_credits), 1
         )
-        summary_layout.addWidget(
-            _money_card("MoneyCardTotal", "ATT BETALA", self._lbl_att_betala), 1
+        cards_row.addWidget(
+            _money_card("MoneyCardTotal", tr("invoices.card_total"), self._lbl_att_betala), 1
         )
+        self._cap_invoices = self._money_caps.get("MoneyCard")
+        self._cap_credits = self._money_caps.get("MoneyCardCredit")
+        self._cap_total = self._money_caps.get("MoneyCardTotal")
 
-        meta = QVBoxLayout()
-        meta.setSpacing(2)
+        meta = QHBoxLayout()
+        meta.setSpacing(14)
         self._lbl_count = QLabel("Poster: 0")
         self._lbl_unpaid = QLabel("Obetalt: 0,00 SEK")
         self._lbl_overdue = QLabel("Förfallet: 0,00 SEK")
@@ -555,13 +877,59 @@ class InvoicesView(QWidget):
             lbl.setStyleSheet("background:transparent;")
             meta.addWidget(lbl)
         meta.addStretch()
+        self._density_label = QLabel(tr("invoices.table_density"))
+        self._density_label.setObjectName("invoiceDensityLabel")
+        self._density_selector = QComboBox()
+        self._density_selector.setObjectName("invoiceDensitySelector")
+        self._density_selector.addItem(
+            tr("invoices.density_comfortable"), "comfortable"
+        )
+        self._density_selector.addItem(
+            tr("invoices.density_compact"), "compact"
+        )
+        self._density_selector.setAccessibleName(
+            tr("invoices.table_density_accessible")
+        )
+        self._density_selector.setToolTip(
+            tr("invoices.table_density_tip")
+        )
+        density_index = self._density_selector.findData(self._row_density)
+        self._density_selector.setCurrentIndex(
+            density_index if density_index >= 0 else 0
+        )
+        self._density_selector.currentIndexChanged.connect(
+            self._on_row_density_changed
+        )
+        meta.addWidget(self._density_label)
+        meta.addWidget(self._density_selector)
         summary_layout.addLayout(meta)
-        root.addWidget(summary_frame)
+        self._right_layout.addWidget(summary_frame)
+
+        # Beständig rad: markeringens summa (eller totalen att betala).
+        # Ersätter den kortlivade statusradstexten så summan av det
+        # man markerat alltid syns medan man arbetar.
+        self._lbl_selection = QLabel("")
+        self._lbl_selection.setFont(make_font(12, True))
+        self._lbl_selection.setStyleSheet("background:transparent;")
+        self._right_layout.addWidget(self._lbl_selection)
 
         # ── Tabell ─────────────────────────────────────────────────────
-        self._table = QTableWidget()
-        self._table.setColumnCount(len(COLUMNS))
-        self._table.setHorizontalHeaderLabels(COL_LABELS)
+        # InvoiceTableModel äger endast presentationen av de synliga
+        # raderna; QSortFilterProxyModel sköter sorteringen utan att
+        # ändra eller kopiera fakturaregistret.
+        self._invoice_model = InvoiceTableModel(
+            page_counter=self._pages_for,
+            status_row_bg=STATUS_ROW_BG,
+            dark=self._is_dark(),
+            parent=self,
+        )
+        self._invoice_proxy = QSortFilterProxyModel(self)
+        self._invoice_proxy.setSourceModel(self._invoice_model)
+        self._invoice_proxy.setSortRole(SORT_ROLE)
+        self._invoice_proxy.setDynamicSortFilter(True)
+
+        self._table = QTableView()
+        self._table.setModel(self._invoice_proxy)
         self._table.setSortingEnabled(True)
         self._table.setAlternatingRowColors(True)
         self._table.setSelectionBehavior(
@@ -578,7 +946,7 @@ class InvoicesView(QWidget):
         self._table.setTextElideMode(Qt.TextElideMode.ElideRight)
         self._table.setMinimumWidth(0)
         self._table.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
         self._table.setSizeAdjustPolicy(
             QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
@@ -588,8 +956,11 @@ class InvoicesView(QWidget):
             Qt.ContextMenuPolicy.CustomContextMenu
         )
         self._table.customContextMenuRequested.connect(self._context_menu)
-        self._table.itemSelectionChanged.connect(
+        self._table.selectionModel().selectionChanged.connect(
             self._on_selection_changed
+        )
+        self._invoice_model.exportMarkChanged.connect(
+            self._on_export_mark_changed
         )
         self._table.doubleClicked.connect(self._edit_invoice)
         self._table.setSizePolicy(
@@ -601,31 +972,50 @@ class InvoicesView(QWidget):
         hh.setStretchLastSection(False)
         hh.setMinimumSectionSize(36)
         hh.setTextElideMode(Qt.TextElideMode.ElideRight)
-        full = {
-            "Fakturanr": "Fakturanummer",
-            "Förfaller": "Förfallodatum",
-            "Betaldatum": "Betalningsdatum",
-            "Notering": "Anteckning",
-        }
-        for i, label in enumerate(COL_LABELS):
-            item = self._table.horizontalHeaderItem(i)
-            if item is not None:
-                item.setToolTip(full.get(label, label))
+        self._apply_row_density()
         QTimer.singleShot(0, self._fit_columns)
-        self._table.verticalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents
-        )
 
         # Mushjul-scroll direkt på tabellen
         self._table.wheelEvent = self._table_wheel  # type: ignore
 
-        root.addWidget(self._table, stretch=1)
+        self._right_layout.addWidget(self._table, stretch=1)
+
+        # ── Fast exportrad längst ner (alltid synlig) ──────────────────
+        # Spegel av exportpanelen: valt antal + netto + knappen, så
+        # man aldrig behöver skrolla upp i en lång lista för att se
+        # vad som kommer att exporteras.
+        sticky_frame = QFrame()
+        sticky_frame.setObjectName("ExportStickyBar")
+        sticky_layout = QHBoxLayout(sticky_frame)
+        sticky_layout.setContentsMargins(10, 6, 10, 6)
+        sticky_layout.setSpacing(10)
+        self._lbl_sticky_selection = QLabel(
+            tr("invoices.export_sel_none")
+        )
+        self._lbl_sticky_selection.setFont(make_font(12, True))
+        self._lbl_sticky_selection.setStyleSheet(
+            "background:transparent;"
+        )
+        self._btn_export_selected_sticky = make_btn(
+            tr("invoices.export_selected"),
+            "Exportera bara de ikryssade fakturorna till PDF — "
+            "samma knapp som i exportpanelen ovan.",
+            success=True,
+        )
+        self._btn_export_selected_sticky.clicked.connect(
+            self._export_selected_pdf
+        )
+        self._btn_export_selected_sticky.setEnabled(False)
+        sticky_layout.addWidget(self._lbl_sticky_selection)
+        sticky_layout.addStretch()
+        sticky_layout.addWidget(self._btn_export_selected_sticky)
+        root.addWidget(sticky_frame)
 
         # ── Footer ─────────────────────────────────────────────────────
         root.addWidget(h_line())
         self._footer = QLabel(
             f"© {COPYRIGHT_YEAR} Rickard Längkvist"
-            f"  —  FakturaRäknaren"
+            f"  —  Fakturabunten"
         )
         self._footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._footer.setFont(make_font(9))
@@ -633,6 +1023,11 @@ class InvoicesView(QWidget):
             "background:transparent;color:#718096;"
         )
         root.addWidget(self._footer)
+
+    def _focus_search(self) -> None:
+        """Ctrl+F: hoppa till sökfältet och markera befintlig text."""
+        self._search.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self._search.selectAll()
 
     def _table_wheel(self, event: QWheelEvent) -> None:
         """Mushjul-scroll i tabellen."""
@@ -651,11 +1046,22 @@ class InvoicesView(QWidget):
     def _do_refresh(self) -> None:
         """Hämtar data, uppdaterar väljare, filter, tabell och summering."""
         try:
-            raw = self._app.get_invoices()
+            # Fakturor-fliken visar BARA huvudregistret — det
+            # exporterade/betalda bor i data/betalda/ och syns i
+            # Historik-fliken i stället (aldrig i ATT BETALA).
+            if hasattr(self._app, "get_active_invoices"):
+                raw = self._app.get_active_invoices()
+            else:
+                raw = self._app.get_invoices()
             self._all_data = list(raw) if raw else []
         except Exception as exc:
             log.error("refresh error: %s", exc)
             self._all_data = []
+
+        # Exportmarkeringen lever bara så länge posten finns kvar
+        # i huvudregistret (exporterade/borttagna id:n städas bort).
+        _valid = {str(r.get("id", "")) for r in self._all_data}
+        self._marked_export_ids &= _valid
 
         self._refresh_supplier_selector()
         self._update_filter_supplier_combo()
@@ -665,27 +1071,208 @@ class InvoicesView(QWidget):
         self._update_summary(filtered)
         self._update_export_buttons()
 
+    def _archive_exported(
+        self, chunk: list[dict], payment_date: str = ""
+    ) -> int:
+        """Efter en LYCKAD delfil: posterna markeras Betald med
+        exportens betalningsdatum och flyttas till leverantörens
+        fil i data/betalda/ (Historik) — därifrån ser importens
+        dubblettskydd dem, så de aldrig registreras igen.
+        Faller tillbaka på app-fasaden om motormetoden saknas.
+        Aldrig ett exportfel."""
+        ids = [str(i.get("id", "")) for i in chunk if i.get("id")]
+        if not ids:
+            return 0
+        engine = getattr(self._app, "invoices", None)
+        if engine is not None and hasattr(
+            engine, "mark_exported_paid"
+        ):
+            try:
+                return int(
+                    engine.mark_exported_paid(ids, payment_date)
+                )
+            except Exception as exc:
+                log.warning("EXPORT mark_exported_paid: %s", exc)
+        count = 0
+        for rid in ids:
+            try:
+                self._app.update_invoice(
+                    rid,
+                    {
+                        "status": "Betald",
+                        "payment_date": payment_date,
+                    },
+                )
+                count += 1
+            except Exception:
+                pass
+        return count
+
     def _get_exportable(self) -> list[dict]:
-        """Alla fakturor som är aktiva (ej arkiverade/makulerade)."""
+        """
+        Underlaget till "Exportera alla": obetalda och aktiva.
+
+        Betald/Arkiverad/Makulerad är ALLTID uteslutna — markerar
+        man en faktura som betald försvinner den alltså ur
+        exporten och kan inte betalas dubbelt av misstag.
+        (Exportknappens antal använder samma urval.)
+        """
         return [
             r
             for r in self._all_data
-            if r.get("status") not in HIDDEN_STATUSES
+            if r.get("status") not in NON_UNPAID_STATUSES
         ]
 
+    def _get_selected_exportable(self) -> list[dict]:
+        """Markerade för export: exportmarkeringen (per id, även
+        rader som ett filter just nu döljer) ∩ exporterbara.
+        Betald/Arkiverad/Makulerad ingår alltså aldrig, precis
+        som i "Exportera alla"."""
+        return [
+            r
+            for r in self._get_exportable()
+            if str(r.get("id", "")) in self._marked_export_ids
+        ]
+
+    def _apply_table_selection(self) -> None:
+        """Speglar exportmarkeringarna per faktura-id i tabellmodellen."""
+        self._populating_table = True
+        try:
+            self._invoice_model.set_marked_export_ids(
+                self._marked_export_ids
+            )
+        finally:
+            self._populating_table = False
+        self._update_export_buttons()
+        self._update_buttons()
+
+    def _on_export_mark_changed(self, rid: str, checked: bool) -> None:
+        """Tar emot kryssrutans exportval från QAbstractTableModel."""
+        if getattr(self, "_populating_table", False) or not rid:
+            return
+        if checked:
+            self._marked_export_ids.add(str(rid))
+        else:
+            self._marked_export_ids.discard(str(rid))
+        self._update_export_buttons()
+
+    def _mark_all_shown(self) -> None:
+        """Markerar alla rader som visas just nu för export."""
+        self._marked_export_ids |= {
+            i for i in self._displayed_ids if i
+        }
+        self._apply_table_selection()
+
+    def _clear_export_selection(self) -> None:
+        """Rensar exportmarkeringen helt."""
+        self._marked_export_ids = set()
+        self._apply_table_selection()
+
+    def _include_originals(self) -> bool:
+        """Whether this user's export preference includes source invoices."""
+        return self._original_export_mode != "none"
+
+    def _original_first_page_only(self) -> bool:
+        """Whether PDF originals should be limited to their first page."""
+        return self._original_export_mode == "first_page"
+
     def _update_export_buttons(self) -> None:
-        """Uppdaterar exportknapp + historikräknare."""
+        """Uppdaterar exportknappar (alla/markerade), markerings-
+        raden och historikräknaren."""
         exportable = self._get_exportable()
         n = len(exportable)
         self._btn_export_all.setEnabled(n > 0)
         self._btn_export_all.setText(
-            f"📄  Exportera ALLA till PDF  ({n})"
+            tr("invoices.export_all_n", n=n)
             if n > 0
-            else "📄  Inga fakturor att exportera"
+            else tr("invoices.export_none")
         )
+        selected = self._get_selected_exportable()
+        if hasattr(self, "_btn_export_selected"):
+            m = len(selected)
+            self._btn_export_selected.setEnabled(m > 0)
+            if m > 0:
+                net = round(
+                    sum(
+                        _to_float(r.get("total_amount"))
+                        for r in selected
+                    ),
+                    2,
+                )
+                self._btn_export_selected.setText(
+                    tr(
+                        "invoices.export_selected_n",
+                        n=m,
+                        amount=fmt_amount(net),
+                    )
+                )
+            else:
+                self._btn_export_selected.setText(
+                    tr("invoices.export_selected")
+                )
+        if hasattr(self, "_lbl_export_selection"):
+            if selected:
+                net = round(
+                    sum(
+                        _to_float(r.get("total_amount"))
+                        for r in selected
+                    ),
+                    2,
+                )
+                self._lbl_export_selection.setText(
+                    tr(
+                        "invoices.export_sel_info",
+                        n=len(selected),
+                        amount=fmt_amount(net),
+                    )
+                )
+            else:
+                self._lbl_export_selection.setText(
+                    tr("invoices.export_sel_none")
+                )
+        if hasattr(self, "_btn_clear_marked"):
+            self._btn_clear_marked.setEnabled(
+                bool(self._marked_export_ids)
+            )
+        # Summering för bara de markerade (exportpanelen) +
+        # spegling till fasta exportraden längst ner.
+        if hasattr(self, "_lbl_marked_inv"):
+            _amounts = [
+                _to_float(r.get("total_amount")) for r in selected
+            ]
+            _inv_sum = round(
+                sum(v for v in _amounts if v > 0), 2
+            )
+            _cred_sum = round(
+                sum(v for v in _amounts if v < 0), 2
+            )
+            self._lbl_marked_inv.setText(
+                f"{tr('invoices.card_invoices')}  "
+                f"{fmt_amount(_inv_sum)}"
+            )
+            self._lbl_marked_cred.setText(
+                f"{tr('invoices.card_credits')}  "
+                f"{fmt_amount(_cred_sum)}"
+            )
+            self._lbl_marked_net.setText(
+                f"{tr('invoices.card_total')}  "
+                f"{fmt_amount(round(_inv_sum + _cred_sum, 2))}"
+            )
+        if hasattr(self, "_lbl_sticky_selection"):
+            self._lbl_sticky_selection.setText(
+                self._lbl_export_selection.text()
+                if hasattr(self, "_lbl_export_selection") else ""
+            )
+        if hasattr(self, "_btn_export_selected_sticky"):
+            self._btn_export_selected_sticky.setEnabled(
+                self._btn_export_selected.isEnabled()
+            )
+            self._btn_export_selected_sticky.setText(
+                self._btn_export_selected.text()
+            )
         hist_count = self._export_history.count()
         self._lbl_history_count.setText(
-            f"({hist_count} export{'er' if hist_count != 1 else ''})"
+            tr("invoices.history_count", n=hist_count)
         )
 
     # ══════════════════════════════════════════════════════════════════
@@ -695,20 +1282,22 @@ class InvoicesView(QWidget):
     def _apply_filters(self) -> list[dict]:
         """Applicerar sök + typ/status/leverantörs-filter."""
         query = self._search.text().strip().lower()
-        type_f = self._filter_type.currentText()
-        status_f = self._filter_status.currentText()
-        sup_f = self._filter_supplier.currentText()
+        type_f = self._filter_type.currentData() or ""
+        status_f = self._filter_status.currentData() or ""
+        sup_f = self._filter_supplier.currentData()
+        if sup_f is None:
+            sup_f = self._filter_supplier.currentText()
 
         data = list(self._all_data)
 
-        # Status-filter
-        if status_f == "Aktiva (ej arkiv)":
+        # Status-filter (kanoniska värden via itemData)
+        if status_f == "__active__":
             data = [
                 r
                 for r in data
                 if r.get("status") not in HIDDEN_STATUSES
             ]
-        elif status_f and status_f != "Alla statusar":
+        elif status_f and status_f != "__all__":
             data = [r for r in data if r.get("status") == status_f]
 
         # Fritextsökning
@@ -738,64 +1327,138 @@ class InvoicesView(QWidget):
                 and _to_float(r.get("total_amount")) >= 0
             ]
 
-        # Leverantörs-filter
-        if sup_f and sup_f != "Alla leverantörer":
-            data = [r for r in data if r.get("supplier") == sup_f]
+        # Dropdownen högst upp väljer både leverantör för nya fakturor
+        # och leverantörsgruppen som visas i listan. Under filtren finns
+        # ett extra leverantörsfilter; båda får kombineras.
+        selector_supplier = self._supplier_selector_filter()
+        if selector_supplier:
+            wanted = selector_supplier.casefold()
+            data = [
+                r for r in data
+                if str(r.get("supplier", "") or "").strip().casefold()
+                == wanted
+            ]
+
+        # Leverantörs-filter ("" = alla; annars leverantörens namn)
+        if sup_f:
+            wanted = str(sup_f).strip().casefold()
+            data = [
+                r for r in data
+                if str(r.get("supplier", "") or "").strip().casefold()
+                == wanted
+            ]
+
+        # Snabbfilter (chips): förfallofönster ovanpå övriga filter
+        mode = getattr(self, "_chip_mode", "")
+        if mode:
+            data = due_window_filter(data, mode, datetime.date.today())
 
         return data
+
+    # ══════════════════════════════════════════════════════════════════
+    #  SNABBFILTER-CHIPS
+    # ══════════════════════════════════════════════════════════════════
+
+    def _on_chip(self, mode: str) -> None:
+        """Växlar snabbfilter — samma chip igen stänger av filtret."""
+        self._chip_mode = "" if self._chip_mode == mode else mode
+        self._sync_chip_styles()
+        self._do_refresh()
+
+    def _sync_chip_styles(self) -> None:
+        """Aktivt chip i guld (syns i både ljust och mörkt tema)."""
+        for mode, btn in getattr(self, "_chip_btns", {}).items():
+            active = mode == self._chip_mode
+            btn.setChecked(active)
+            btn.setStyleSheet(
+                "background:#d4a017;color:#111111;font-weight:800;"
+                if active
+                else ""
+            )
 
     # ══════════════════════════════════════════════════════════════════
     #  LEVERANTÖRSVÄLJARE
     # ══════════════════════════════════════════════════════════════════
 
     def _refresh_supplier_selector(self) -> None:
-        """
-        Uppdaterar leverantörs-dropdownen (bevarar aktuellt val).
-
-        Favoriter (favorite=True i leverantörsregistret) hamnar
-        ALLTID överst i listan.
-        """
-        current = self._sup_selector.currentText()
+        """Uppdaterar leverantörer med antal aktiva fakturor per namn."""
+        current = self._selected_supplier
         try:
             suppliers = self._app.get_suppliers()
         except Exception:
             suppliers = []
+        counts: dict[str, int] = {}
+        for invoice in self._all_data:
+            name = str(invoice.get("supplier", "") or "").strip()
+            if name:
+                key = name.casefold()
+                counts[key] = counts.get(key, 0) + 1
+
         favorites = sorted(
-            s.get("name", "")
-            for s in suppliers
-            if s.get("name") and s.get("favorite")
+            (str(s.get("name", "")).strip()
+             for s in suppliers
+             if s.get("name") and s.get("favorite")),
+            key=str.casefold,
         )
         others = sorted(
-            s.get("name", "")
-            for s in suppliers
-            if s.get("name") and not s.get("favorite")
+            (str(s.get("name", "")).strip()
+             for s in suppliers
+             if s.get("name") and not s.get("favorite")),
+            key=str.casefold,
         )
         self._favorite_names = set(favorites)
         names = favorites + others
 
         self._sup_selector.blockSignals(True)
         self._sup_selector.clear()
-        self._sup_selector.addItem("")
-        self._sup_selector.addItems(names)
+        self._sup_selector.addItem("", "")
+        for name in names:
+            count = counts.get(name.casefold(), 0)
+            self._sup_selector.addItem(
+                tr("invoices.supplier_with_count", name=name, n=count),
+                name,
+            )
+            index = self._sup_selector.count() - 1
+            self._sup_selector.setItemData(
+                index,
+                tr("invoices.supplier_active_count_tip", n=count),
+                Qt.ItemDataRole.ToolTipRole,
+            )
 
         completer = QCompleter(names, self)
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         completer.setFilterMode(Qt.MatchFlag.MatchContains)
         self._sup_selector.setCompleter(completer)
 
-        idx = self._sup_selector.findText(current)
-        self._sup_selector.setCurrentIndex(max(idx, 0))
+        idx = next(
+            (i for i in range(self._sup_selector.count())
+             if str(self._sup_selector.itemData(i) or "").strip().casefold()
+             == current.strip().casefold()),
+            -1,
+        )
+        if idx >= 0:
+            self._sup_selector.setCurrentIndex(idx)
+        else:
+            # The selector stays editable for new supplier names. Preserve
+            # partial/free-form text, but do not treat it as a filter.
+            self._sup_selector.setCurrentIndex(0)
+            if current:
+                self._sup_selector.setCurrentText(current)
         self._sup_selector.blockSignals(False)
 
-        self._on_supplier_selector_changed(
-            self._sup_selector.currentText()
-        )
+        self._update_supplier_info(self._selected_supplier)
 
-    def _on_supplier_selector_changed(self, name: str) -> None:
+    def _on_supplier_selector_changed(self, _name: str) -> None:
+        """Visar kanoniskt namn och filtrerar fakturalistan vid val."""
+        self._update_supplier_info(self._selected_supplier)
+        if self._initialised:
+            self._search_timer.start()
+
+    def _update_supplier_info(self, name: str) -> None:
         """Visar leverantörsinfo (org.nr, BG/PG/IBAN) bredvid väljaren."""
-        name = name.strip()
+        name = str(name or "").strip()
         if not name:
-            self._lbl_supplier_info.setText("(ingen vald)")
+            self._lbl_supplier_info.setText(tr("invoices.none_chosen"))
             return
 
         try:
@@ -804,14 +1467,14 @@ class InvoicesView(QWidget):
                 (
                     s
                     for s in suppliers
-                    if s.get("name", "").strip() == name
+                    if str(s.get("name", "") or "").strip() == name
                 ),
                 None,
             )
             if sup:
                 parts: list[str] = []
                 if sup.get("favorite"):
-                    parts.append("★ Favorit")
+                    parts.append(tr("invoices.favorite"))
                 if sup.get("org_number"):
                     parts.append(sup["org_number"])
                 if sup.get("bg"):
@@ -830,8 +1493,39 @@ class InvoicesView(QWidget):
 
     @property
     def _selected_supplier(self) -> str:
-        """Aktuellt valt leverantörsnamn."""
-        return self._sup_selector.currentText().strip()
+        """Kanoniskt namn endast när dropdownens rad faktiskt är vald."""
+        current_text = self._sup_selector.currentText().strip()
+        index = self._sup_selector.currentIndex()
+        if (
+            index >= 0
+            and current_text.casefold()
+            == self._sup_selector.itemText(index).strip().casefold()
+        ):
+            value = self._sup_selector.itemData(index)
+            if value is not None:
+                return str(value).strip()
+        # I redigeringsläge kan currentIndex fortfarande peka på den
+        # tidigare raden medan användaren skriver. Friformstexten måste
+        # då förbli ofiltrerad tills den matchar ett registrerat namn.
+        return current_text
+
+    def _supplier_selector_filter(self) -> str:
+        """Returnerar bara ett faktiskt registerval som tabellfilter.
+
+        Dropdownen är redigerbar för nya leverantörsnamn. En ofärdig
+        friformstext ska inte tömma fakturalistan medan användaren skriver.
+        """
+        selected = self._selected_supplier.casefold()
+        if not selected:
+            return ""
+        for index in range(self._sup_selector.count()):
+            option = str(
+                self._sup_selector.itemData(index)
+                or self._sup_selector.itemText(index)
+            ).strip()
+            if option and option.casefold() == selected:
+                return option
+        return ""
 
     def _update_filter_supplier_combo(self) -> None:
         """Uppdaterar leverantörs-filtret (bevarar aktuellt val)."""
@@ -845,7 +1539,7 @@ class InvoicesView(QWidget):
         )
         self._filter_supplier.blockSignals(True)
         self._filter_supplier.clear()
-        self._filter_supplier.addItem("Alla leverantörer")
+        self._filter_supplier.addItem(tr("invoices.all_suppliers"), "")
         self._filter_supplier.addItems(names)
         idx = self._filter_supplier.findText(current)
         if idx >= 0:
@@ -857,61 +1551,50 @@ class InvoicesView(QWidget):
     # ══════════════════════════════════════════════════════════════════
 
     def _populate_table(self, data: list[dict]) -> None:
-        """Ritar tabellen med statusfärger och kredit-markering."""
-        self._table.setSortingEnabled(False)
-        self._table.setRowCount(len(data))
-        dark = self._is_dark()
-
-        for row, inv in enumerate(data):
-            for col, key in enumerate(COL_KEYS):
-                raw = inv.get(key, "")
-                align = COL_ALIGN[col]
-
-                if key == "total_amount":
-                    val = _to_float(raw)
-                    text = fmt_amount(val, "").strip()
-                elif key == "invoice_type":
-                    text = str(raw) if raw else "Faktura"
-                else:
-                    text = str(raw) if raw not in ("", None) else ""
-
-                fg = ""
-                if key == "status":
-                    pair = STATUS_COLORS.get(text, ("", ""))
-                    fg = pair[0] if dark else pair[1]
-                elif key == "invoice_type" and text == "Kreditfaktura":
-                    fg = "#64b5f6" if dark else "#1565c0"
-                elif key == "total_amount" and _to_float(raw) < 0:
-                    fg = "#64b5f6" if dark else "#1565c0"
-
-                item = make_cell(
-                    text,
-                    align,
-                    bold=True,
-                    fg=fg,
-                    numeric=key == "total_amount",
-                )
-                item.setData(Qt.ItemDataRole.UserRole, inv.get("id", ""))
-                if text:
-                    item.setToolTip(text)
-                self._table.setItem(row, col, item)
-
-            # Radfärgkodning på HELA raden enligt status
-            pair = STATUS_ROW_BG.get(str(inv.get("status", "")))
-            if pair:
-                row_bg = QColor(pair[0] if dark else pair[1])
-                for col in range(len(COL_KEYS)):
-                    cell = self._table.item(row, col)
-                    if cell is not None:
-                        cell.setBackground(row_bg)
-
-        self._table.setSortingEnabled(True)
-        self._table.resizeRowsToContents()
+        """Uppdaterar InvoiceTableModel med synliga fakturor."""
+        self._populating_table = True
+        self._displayed_ids = [
+            str(row.get("id", "")) for row in data if row.get("id")
+        ]
+        self._invoice_model.set_dark(self._is_dark())
+        self._invoice_model.set_rows(data)
+        self._invoice_model.set_marked_export_ids(
+            self._marked_export_ids
+        )
         self._fit_columns()
-        self._update_buttons()
+        self._populating_table = False
+        # Exportmarkeringen är per id och ska överleva filterbyte,
+        # sortering och datamodellens återställning.
+        self._apply_table_selection()
 
     def _fit_columns(self) -> None:
-        fit_table_columns(self._table, COL_WIDTHS)
+        column_count = self._table.model().columnCount()
+        if column_count == len(COL_WIDTHS) + 1:
+            preferred = [44] + COL_WIDTHS
+            vp = max(
+                self._table.viewport().width(), self._table.width()
+            )
+            if vp >= sum(preferred):
+                fit_table_columns(self._table, preferred)
+                # fit_table_columns lägger eventuell överskottsbredd
+                # på första kolumnen — kryssrutan ska stanna på
+                # 44 px, så överskottet flyttas till Leverantör
+                # (kolumn 2).
+                check_w = self._table.columnWidth(0)
+                if check_w > 44:
+                    self._table.setColumnWidth(
+                        2,
+                        self._table.columnWidth(2) + (check_w - 44),
+                    )
+                self._table.setColumnWidth(0, 44)
+            else:
+                # Smal viewport: BEHÅLL läsbara föredragna bredder
+                # och låt horisontella rullisten ta resten — då
+                # kläms/kapar tabellen aldrig kolumnerna oläsliga.
+                for i, w in enumerate(preferred):
+                    self._table.setColumnWidth(i, w)
+        else:
+            fit_table_columns(self._table, COL_WIDTHS)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -955,23 +1638,38 @@ class InvoicesView(QWidget):
         )
         n_cre = len(rows) - n_inv
 
-        count_label = f"Poster: {len(rows)}"
         if len(rows) != len(self._all_data):
-            count_label += f" av {len(self._all_data)}"
-        count_label += f"  ({n_inv}f/{n_cre}k)"
+            count_label = tr(
+                "invoices.rows_of", shown=len(rows),
+                total=len(self._all_data), f=n_inv, k=n_cre,
+            )
+        else:
+            count_label = tr(
+                "invoices.rows", n=len(rows), f=n_inv, k=n_cre
+            )
 
         self._lbl_count.setText(count_label)
         self._lbl_invoices.setText(fmt_amount(total_invoices))
         self._lbl_credits.setText(fmt_amount(total_credits))
         self._lbl_att_betala.setText(fmt_amount(att_betala))
-        self._lbl_unpaid.setText(f"Obetalt: {fmt_amount(unpaid)}")
-        self._lbl_overdue.setText(f"Förfallet: {fmt_amount(overdue)}")
+        self._lbl_unpaid.setText(
+            tr("invoices.unpaid", amount=fmt_amount(unpaid))
+        )
+        self._lbl_overdue.setText(
+            tr("invoices.overdue", amount=fmt_amount(overdue))
+        )
+        self._refresh_selection_label()
 
     # ══════════════════════════════════════════════════════════════════
     #  MARKERING
     # ══════════════════════════════════════════════════════════════════
 
-    def _on_selection_changed(self) -> None:
+    def _on_selection_changed(self, *_args: Any) -> None:
+        # Radmarkeringen styr Redigera/Ta bort/Slå ihop/Markera
+        # betald — exportvalet bor i kryssrutorna (kolumn 0) och
+        # rörs INTE av radklick, så man kan titta på en enskild
+        # faktura utan att tappa det man kryssat för export.
+        self._update_export_buttons()
         self._update_buttons()
         inv = self._selected_invoice()
         if inv:
@@ -979,36 +1677,74 @@ class InvoicesView(QWidget):
 
     def _update_buttons(self) -> None:
         single = self._selected_id() is not None
-        multi = len(self._selected_ids()) > 0
+        ids = self._selected_ids()
+        multi = len(ids) > 0
         self._btn_edit.setEnabled(single)
-        self._btn_delete.setEnabled(single)
+        self._btn_delete.setEnabled(multi)
+        self._btn_delete.setText(
+            tr("invoices.delete_selected_n", n=len(ids))
+            if len(ids) > 1 else tr("invoices.delete")
+        )
+        if hasattr(self, "_btn_delete_all"):
+            self._btn_delete_all.setEnabled(bool(self._all_data))
         self._btn_duplicate.setEnabled(single)
         self._btn_mark_paid.setEnabled(multi)
+        self._btn_combine.setEnabled(len(ids) >= 2)
+        if len(ids) >= 2:
+            summary = combine_invoices(self._selected_invoices())
+            if summary["earliest_due"]:
+                self._status(
+                    tr(
+                        "combine.status",
+                        n=summary["count"],
+                        amount=fmt_amount(summary["net"]),
+                        due=summary["earliest_due"],
+                    ),
+                    timeout=6000,
+                )
+            else:
+                self._status(
+                    tr(
+                        "combine.status_no_due",
+                        n=summary["count"],
+                        amount=fmt_amount(summary["net"]),
+                    ),
+                    timeout=6000,
+                )
+        self._refresh_selection_label()
 
     def _selected_id(self) -> str | None:
-        items = self._table.selectedItems()
-        if not items:
+        indexes = self._table.selectionModel().selectedRows(0)
+        if not indexes:
             return None
-        uid = items[0].data(Qt.ItemDataRole.UserRole)
-        return uid if uid else None
+        uid = indexes[0].data(Qt.ItemDataRole.UserRole)
+        return str(uid) if uid else None
 
     def _selected_ids(self) -> list[str]:
         """Unika id:n för alla markerade rader (ordningsbevarande)."""
         seen: set[str] = set()
         ids: list[str] = []
-        for item in self._table.selectedItems():
-            rid = item.data(Qt.ItemDataRole.UserRole)
-            if rid and rid not in seen:
-                seen.add(rid)
-                ids.append(rid)
+        for index in self._table.selectionModel().selectedRows(0):
+            rid = index.data(Qt.ItemDataRole.UserRole)
+            if rid and str(rid) not in seen:
+                seen.add(str(rid))
+                ids.append(str(rid))
         return ids
+
+    def _selected_invoices(self) -> list[dict]:
+        """Alla markerade fakturor (i markeringsordning)."""
+        by_id = {str(r.get("id", "")): r for r in self._all_data}
+        return [
+            by_id[i] for i in self._selected_ids() if i in by_id
+        ]
 
     def _selected_invoice(self) -> dict | None:
         sid = self._selected_id()
         if not sid:
             return None
         return next(
-            (r for r in self._all_data if r.get("id") == sid), None
+            (r for r in self._all_data if str(r.get("id", "")) == sid),
+            None,
         )
 
     # ══════════════════════════════════════════════════════════════════
@@ -1029,6 +1765,134 @@ class InvoicesView(QWidget):
             log.debug("_supplier_names_list: %s", exc)
         return []
 
+    def _get_setting(self, key: str, default: Any = None) -> Any:
+        getter = getattr(self._app, "get_setting", None)
+        if callable(getter):
+            try:
+                value = getter(key, default)
+                if value is not None:
+                    return value
+            except TypeError:
+                try:
+                    value = getter(key)
+                    if value is not None:
+                        return value
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        try:
+            return self._app.settings.get(key, default)
+        except Exception:
+            return default
+
+    def _load_original_export_mode(self) -> str:
+        include = bool(self._get_setting(
+            "export_include_originals", True
+        ))
+        first_page = bool(self._get_setting(
+            "export_original_first_page_only", False
+        ))
+        if not include:
+            return "none"
+        return "first_page" if first_page else "all_pages"
+
+    def _save_setting(self, key: str, value: Any) -> None:
+        setter = getattr(self._app, "set_setting", None)
+        if callable(setter):
+            try:
+                setter(key, value)
+                return
+            except Exception as exc:
+                log.debug("save setting %s: %s", key, exc)
+        settings = getattr(self._app, "settings", None)
+        try:
+            setter = getattr(settings, "set", None)
+            if callable(setter):
+                setter(key, value)
+            elif isinstance(settings, dict):
+                settings[key] = value
+        except Exception as exc:
+            log.debug("save setting %s: %s", key, exc)
+
+    def _on_export_original_mode_changed(self, index: int) -> None:
+        combo = getattr(self, "_combo_original_export", None)
+        if combo is None or index < 0:
+            return
+        mode = str(combo.itemData(index) or "")
+        if mode not in {"all_pages", "first_page", "none"}:
+            return
+        self._original_export_mode = mode
+        include = mode != "none"
+        first_page = mode == "first_page"
+        self._save_setting("export_include_originals", include)
+        self._save_setting(
+            "export_original_first_page_only", first_page
+        )
+
+    def _load_row_density(self) -> str:
+        """Läser tabellens täthet utan att kräva en viss settings-fasad."""
+        key = "invoice_table_density"
+        value = None
+        try:
+            getter = getattr(self._app, "get_setting", None)
+            if callable(getter):
+                value = getter(key)
+        except Exception:
+            pass
+        if value is None:
+            try:
+                value = self._app.settings.get(key)
+            except Exception:
+                value = None
+        return "compact" if str(value or "").casefold() == "compact" \
+            else "comfortable"
+
+    def _save_row_density(self, density: str) -> None:
+        key = "invoice_table_density"
+        try:
+            setter = getattr(self._app, "set_setting", None)
+            if callable(setter):
+                setter(key, density)
+                return
+        except Exception as exc:
+            log.debug("save invoice density: %s", exc)
+        settings = getattr(self._app, "settings", None)
+        try:
+            setter = getattr(settings, "set", None)
+            if callable(setter):
+                setter(key, density)
+            elif isinstance(settings, dict):
+                settings[key] = density
+        except Exception as exc:
+            log.debug("save invoice density: %s", exc)
+
+    def _on_row_density_changed(self, index: int) -> None:
+        density = str(self._density_selector.itemData(index) or "")
+        if density not in {"compact", "comfortable"}:
+            return
+        if density == self._row_density:
+            self._apply_row_density()
+            return
+        self._row_density = density
+        self._apply_row_density()
+        self._save_row_density(density)
+        if self._current_theme:
+            self.apply_theme(self._current_theme)
+
+    def _apply_row_density(self) -> None:
+        table = getattr(self, "_table", None)
+        if table is None:
+            return
+        header = table.verticalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        set_table_default_row_height(
+            table,
+            TABLE_ROW_HEIGHT_COMPACT
+            if self._row_density == "compact"
+            else TABLE_ROW_HEIGHT_COMFORTABLE,
+        )
+
     def _default_currency(self) -> str:
         """Standardvaluta från settings."""
         try:
@@ -1040,12 +1904,127 @@ class InvoicesView(QWidget):
                 return "SEK"
 
     def _is_dark(self) -> bool:
-        """True om aktuellt tema är mörkt."""
-        bg = self._current_theme.get("bg", "#0d1117")
-        light_bgs = (
-            "#ffffff", "#f5f7fa", "#f8f9fa", "#f6f8fa", "#eaeef2",
-        )
-        return bg.lower() not in light_bgs
+        """True om aktuellt tema är mörkt (temanamn → luminans)."""
+        return is_dark_theme(self._current_theme)
+
+    def retranslate(self) -> None:
+        """Uppdaterar vyns texter efter språkbyte (utan omstart)."""
+        self._header_label.setText(tr("invoices.title"))
+        self._lbl_sup.setText(tr("invoices.choose_supplier"))
+        self._sup_selector.setPlaceholderText(tr("invoices.choose_ph"))
+        self._sup_selector.setToolTip(tr("invoices.supplier_selector_tip"))
+        self._search.setPlaceholderText(tr("invoices.search_ph"))
+        self._search.setToolTip(tr("invoices.search_shortcut_tip"))
+        self._table.setToolTip(tr("invoices.table_keyboard_tip"))
+        self._btn_add.setText(tr("invoices.add"))
+        self._btn_edit.setText(tr("invoices.edit"))
+        self._btn_delete.setText(tr("invoices.delete"))
+        self._btn_duplicate.setText(tr("invoices.duplicate"))
+        self._btn_mark_paid.setText(tr("invoices.mark_paid"))
+        self._btn_pay_today.setText(tr("invoices.pay_today"))
+        self._btn_pay_today.setToolTip(tr("invoices.pay_today_tip"))
+        for _mode, _btn in getattr(self, "_chip_btns", {}).items():
+            _btn.setText(tr(f"invoices.chip_{_mode}"))
+            _btn.setToolTip(tr(f"invoices.chip_{_mode}"))
+        self._btn_combine.setText(tr("combine.button"))
+        self._btn_combine.setToolTip(tr("combine.tip"))
+        if hasattr(self, "_btn_export_selected"):
+            self._btn_export_selected.setText(
+                tr("invoices.export_selected")
+            )
+        if hasattr(self, "_btn_mark_shown"):
+            self._btn_mark_shown.setText(tr("invoices.mark_shown"))
+        if hasattr(self, "_btn_clear_marked"):
+            self._btn_clear_marked.setText(
+                tr("invoices.clear_marked")
+            )
+        if hasattr(self, "_btn_delete_all"):
+            self._btn_delete_all.setText(tr("invoices.delete_all"))
+            self._btn_delete_all.setToolTip(
+                tr("invoices.delete_all_tip")
+            )
+        if hasattr(self, "_btn_delete"):
+            self._btn_delete.setToolTip(tr("invoices.delete_tip"))
+        self._btn_export_all.setText(tr("invoices.export_all"))
+        self._btn_history.setText(tr("invoices.history"))
+        self._btn_open_export.setText(tr("invoices.open_export_folder"))
+        for attr, key in (
+            ("_cap_invoices", "invoices.card_invoices"),
+            ("_cap_credits", "invoices.card_credits"),
+            ("_cap_total", "invoices.card_total"),
+        ):
+            cap = getattr(self, attr, None)
+            if cap is not None:
+                cap.setText(tr(key))
+        # Filterrullistor: visningstext från kanoniskt itemData-värde
+        for i in range(self._filter_type.count()):
+            data = self._filter_type.itemData(i)
+            self._filter_type.setItemText(
+                i, tr("invoices.all_types") if not data else tr_type(data)
+            )
+        for i in range(self._filter_status.count()):
+            data = self._filter_status.itemData(i)
+            if data == "__active__":
+                txt = tr("invoices.active_only")
+            elif data == "__all__":
+                txt = tr("invoices.all_statuses")
+            else:
+                txt = tr_status(data or "")
+            self._filter_status.setItemText(i, txt)
+        if self._filter_supplier.count() >= 1:
+            self._filter_supplier.setItemText(
+                0, tr("invoices.all_suppliers")
+            )
+        self._update_summary(self._apply_filters())
+        self._update_export_buttons()
+        if hasattr(self, "_lbl_marked_cap"):
+            self._lbl_marked_cap.setText(tr("invoices.marked_label"))
+        if hasattr(self, "_btn_export_selected_sticky"):
+            self._btn_export_selected_sticky.setText(
+                tr("invoices.export_selected")
+            )
+        if hasattr(self, "_density_label"):
+            self._density_label.setText(tr("invoices.table_density"))
+            self._density_selector.setItemText(
+                self._density_selector.findData("comfortable"),
+                tr("invoices.density_comfortable"),
+            )
+            self._density_selector.setItemText(
+                self._density_selector.findData("compact"),
+                tr("invoices.density_compact"),
+            )
+            self._density_selector.setAccessibleName(
+                tr("invoices.table_density_accessible")
+            )
+            self._density_selector.setToolTip(
+                tr("invoices.table_density_tip")
+            )
+        if hasattr(self, "_lbl_original_export"):
+            self._lbl_original_export.setText(
+                tr("invoices.export_originals_mode")
+            )
+            for mode, key in (
+                ("all_pages", "invoices.export_originals_all_pages"),
+                ("first_page", "invoices.export_originals_first_page"),
+                ("none", "invoices.export_originals_none"),
+            ):
+                idx = self._combo_original_export.findData(mode)
+                if idx >= 0:
+                    self._combo_original_export.setItemText(idx, tr(key))
+            self._combo_original_export.setAccessibleName(
+                tr("invoices.export_originals_mode")
+            )
+            self._combo_original_export.setToolTip(
+                tr("invoices.export_originals_tip")
+            )
+            self._btn_export_selected.setToolTip(
+                tr("invoices.export_selected_tip")
+            )
+        headers = tr_list("invoices.columns")
+        if len(headers) == len(COLUMNS):
+            self._invoice_model.set_headers(headers)
+            self._refresh_supplier_selector()
+        self._update_buttons()
 
     def _status(self, msg: str, timeout: int = 5000) -> None:
         """Visar ett meddelande i huvudfönstrets statusrad."""
@@ -1137,6 +2116,7 @@ class InvoicesView(QWidget):
         total_invoices: float,
         total_credits: float,
         att_betala: float,
+        default_date: str = "",
     ) -> tuple[str, bool]:
         """
         Frågar efter betalningsdatum för DENNA export-batch.
@@ -1151,8 +2131,11 @@ class InvoicesView(QWidget):
         Använder ask_export_payment_date() från pdf_export_helpers.
         Faller tillbaka till en inbyggd dialog om modulen saknas.
         """
-        # session_due_date som förslag
-        session_due_str = get_session_due_date_str(self._app)
+        # Förslag: explicit standard (t.ex. tidigaste förfallodatum
+        # vid sammanslagning) vinner över sessionens datum.
+        session_due_str = (
+            default_date or get_session_due_date_str(self._app)
+        )
         currency = self._default_currency()
 
         suppliers = sorted(
@@ -1202,21 +2185,23 @@ class InvoicesView(QWidget):
         try:
             from PySide6.QtWidgets import (
                 QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-                QPushButton, QDateEdit, QFrame,
+                QPushButton, QFrame,
             )
             from PySide6.QtCore import QDate
 
+            from ui.date_picker import (
+                NiceDateEdit, date_preview_label, quick_pick_row,
+            )
+
             dlg = QDialog(self)
-            dlg.setWindowTitle("Betalningsdatum för export")
-            dlg.setMinimumWidth(360)
+            dlg.setWindowTitle(tr("export.date_window_title"))
+            dlg.setMinimumWidth(430)
             dlg.setModal(True)
 
             root = QVBoxLayout(dlg)
             root.setSpacing(12)
             root.setContentsMargins(20, 16, 20, 16)
-            root.addWidget(
-                QLabel(f"Ange betalningsdatum för {n} fakturor:")
-            )
+            root.addWidget(QLabel(tr("export.choose_for", n=n)))
             root.addWidget(
                 QLabel(
                     f"ATT BETALA: {fmt_amount(att_betala, currency)}"
@@ -1229,14 +2214,11 @@ class InvoicesView(QWidget):
             root.addWidget(sep)
 
             date_row = QHBoxLayout()
-            lbl_d = QLabel("Betalningsdatum:")
+            lbl_d = QLabel(tr("export.payment_date"))
             lbl_d.setFont(make_font(11, True))
             date_row.addWidget(lbl_d)
 
-            date_edit = QDateEdit()
-            date_edit.setCalendarPopup(True)
-            date_edit.setDisplayFormat("yyyy-MM-dd")
-            date_edit.setMinimumHeight(36)
+            date_edit = NiceDateEdit()
 
             default_date = QDate.currentDate()
             if session_due_str:
@@ -1250,13 +2232,16 @@ class InvoicesView(QWidget):
                     pass
             date_edit.setDate(default_date)
             date_row.addWidget(date_edit)
+            date_row.addStretch()
             root.addLayout(date_row)
+            root.addWidget(quick_pick_row(date_edit, dlg))
+            root.addWidget(date_preview_label(date_edit, dlg))
 
             btn_row = QHBoxLayout()
-            btn_ok = QPushButton("✔  Exportera")
+            btn_ok = QPushButton(tr("export.export_btn"))
             btn_ok.setDefault(True)
             btn_ok.clicked.connect(dlg.accept)
-            btn_cancel = QPushButton("✖  Avbryt")
+            btn_cancel = QPushButton(f"✖  {tr('common.cancel')}")
             btn_cancel.clicked.connect(dlg.reject)
             btn_row.addWidget(btn_ok)
             btn_row.addWidget(btn_cancel)
@@ -1281,7 +2266,7 @@ class InvoicesView(QWidget):
     # ══════════════════════════════════════════════════════════════════
 
     def _add_invoice(self) -> None:
-        """Registrera ny faktura. Kräver vald leverantör."""
+        """Registrera ny faktura; välj leverantör här om topplistan är tom."""
         names = self._supplier_names_list()
 
         # Leverantörsregister tomt → hänvisa till leverantörsfliken
@@ -1300,17 +2285,8 @@ class InvoicesView(QWidget):
                 self._switch_to_suppliers_tab()
             return
 
-        # Leverantör måste väljas innan faktura kan registreras
-        if not self._selected_supplier:
-            QMessageBox.information(
-                self,
-                "Välj leverantör",
-                "Välj en leverantör i rutan ovanför\n"
-                "innan du kan registrera en faktura.",
-            )
-            self._sup_selector.setFocus()
-            return
-
+        # Ett toppval förifyller dialogen, men det är inget förvillkor.
+        # Vid tom topp-lista visas en leverantörsväljare i dialogen.
         dlg = InvoiceDialog(
             parent=self,
             supplier_name=self._selected_supplier,
@@ -1415,31 +2391,147 @@ class InvoicesView(QWidget):
         self._do_refresh()
         self._status(f"✅  '{data['invoice_number']}' uppdaterad")
 
-    def _delete_invoice(self) -> None:
-        inv = self._selected_invoice()
-        if not inv:
+    def _on_delete_key(self) -> None:
+        """Delete-tangenten: ta bort markerad faktura eller radgrupp.
+
+        Fokusskydd: står fokus i ett textfält (sökfält, dialogfält)
+        ska Delete radera text som vanligt — aldrig en faktura.
+        """
+        fw = QApplication.focusWidget()
+        if isinstance(fw, (QLineEdit, QTextEdit, QPlainTextEdit)):
             return
-        nr = inv.get("invoice_number", "")
+        if fw is not None and hasattr(fw, "lineEdit"):
+            try:
+                if fw.lineEdit() is not None:
+                    return  # redigerbar combobox — textläge
+            except Exception:
+                pass
+        # Fallback-typnamn (träffar även subklasser som en enkel
+        # isinstance på basklasserna ibland missar hos Qt-binärer)
+        cls = type(fw).__name__ if fw is not None else ""
+        if cls in (
+            "QLineEdit", "QTextEdit", "QPlainTextEdit", "QComboBox",
+            "QSpinBox", "QDoubleSpinBox", "QDateEdit", "QDateTimeEdit",
+        ):
+            return
+        # Om någon dialog (t.ex. ur ett parallellt flöde) äger fokus
+        # ska Delete aldrig nå fram till fakturalistan bakom.
+        if fw is not None:
+            try:
+                if fw.window() is not self.window():
+                    return
+            except Exception:
+                pass
+        self._delete_invoice()
+
+    def _delete_invoice(self) -> None:
+        """Tar bort markerade rader efter tydlig, avböjningssäker fråga."""
+        ids = self._selected_ids()
+        if not ids:
+            return
+        by_id = {str(row.get("id", "")): row for row in self._all_data}
+        rows = [by_id[rid] for rid in ids if rid in by_id]
+        if not rows:
+            return
+
+        if len(rows) == 1:
+            number = str(rows[0].get("invoice_number", "") or "—")
+            title = tr("invoices.delete")
+            body = tr("invoices.delete_confirm_single", nr=number)
+        else:
+            total = sum(_to_float(row.get("total_amount")) for row in rows)
+            title = tr("invoices.delete_selected_title", n=len(rows))
+            body = tr(
+                "invoices.delete_confirm_multiple",
+                n=len(rows), amount=fmt_amount(total),
+            )
         reply = QMessageBox.question(
-            self,
-            "Ta bort faktura",
-            f"Är du säker på att du vill ta bort\n"
-            f"faktura '{nr}'?\n\nDetta kan inte ångras.",
+            self, title, body,
             QMessageBox.StandardButton.Yes
             | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        try:
-            self._app.delete_invoice(inv["id"])
-        except Exception as exc:
-            QMessageBox.critical(
-                self, "Fel", f"Kunde inte ta bort:\n{exc}"
-            )
-            return
+
+        removed: list[str] = []
+        failed: list[str] = []
+        for row in rows:
+            rid = str(row.get("id", "") or "")
+            try:
+                self._app.delete_invoice(rid)
+                removed.append(rid)
+            except Exception as exc:
+                log.error("delete_invoice %s: %s", rid, exc)
+                failed.append(str(row.get("invoice_number", rid) or rid))
+        self._marked_export_ids.difference_update(removed)
         self._do_refresh()
-        self._status(f"🗑  '{nr}' borttagen")
+        if failed:
+            QMessageBox.warning(
+                self,
+                tr("invoices.delete_partial_title"),
+                tr(
+                    "invoices.delete_partial_body",
+                    removed=len(removed), failed=", ".join(failed),
+                ),
+            )
+        elif len(rows) == 1:
+            self._status(
+                tr("invoices.deleted_one", nr=(
+                    rows[0].get("invoice_number", "") or ""
+                ))
+            )
+        else:
+            self._status(tr("invoices.deleted_many", n=len(removed)))
+
+    def _delete_all_invoices(self) -> None:
+        """Rensa ALLA aktiva fakturor ur registret (knappen).
+
+        Riktig borttagning via delete_invoice för varje post —
+        INGEN markeras betald/exporterad och INGENTING flyttas
+        till Historik/betalda-filerna. Originalfilerna på disk
+        rörs aldrig. Historik (redan betalda) rörs inte heller.
+        """
+        rows = [r for r in self._all_data if r.get("id")]
+        if not rows:
+            return
+        total = sum(_to_float(r.get("total_amount")) for r in rows)
+        reply = QMessageBox.question(
+            self,
+            "Rensa alla fakturor",
+            f"Ta bort ALLA {len(rows)} aktiva fakturor ur "
+            f"registret?\n"
+            f"(sammanlagt {fmt_amount(total)}, alla leverantörer)\n\n"
+            f"Borttaget = borta för gott: fakturorna markeras INTE\n"
+            f"som betalda/exporterade och hamnar INTE i Historik.\n"
+            f"Originalfilerna på disk rörs inte.\n\n"
+            f"Detta kan inte ångras.",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        removed = 0
+        failed = 0
+        for r in rows:
+            try:
+                if self._app.delete_invoice(r["id"]):
+                    removed += 1
+                else:
+                    failed += 1
+            except Exception as exc:
+                log.warning("delete_all %s: %s", r.get("id"), exc)
+                failed += 1
+        self._marked_export_ids.clear()
+        self._do_refresh()
+        msg = (
+            f"🧹  {removed} fakturor borttagna ur registret "
+            f"(ej betalda/exporterade)"
+        )
+        if failed:
+            msg += f" — ⚠ {failed} kunde inte tas bort"
+        self._status(msg)
 
     def _duplicate_invoice(self) -> None:
         inv = self._selected_invoice()
@@ -1475,6 +2567,148 @@ class InvoicesView(QWidget):
     #  CRUD — MARKERA BETALD / STATUS
     # ══════════════════════════════════════════════════════════════════
 
+    # ── Slå ihop markerade ────────────────────────────────────────────
+    @staticmethod
+    def _due_relative(due_str: str) -> str:
+        """'om 5 dagar' / 'förfaller idag!' / 'förfallen sedan 2 dagar!'."""
+        import datetime as _dt
+
+        try:
+            due = _dt.date.fromisoformat(str(due_str)[:10])
+        except (ValueError, TypeError):
+            return ""
+        delta = (due - _dt.date.today()).days
+        if delta == 0:
+            return tr("combine.due_today")
+        if delta > 0:
+            return tr("combine.due_in", d=delta)
+        return tr("combine.due_overdue", d=-delta)
+
+    def _show_combine_dialog(self) -> None:
+        """Visar ihopslagna markerade: summa + tidigaste förfallodatum,
+        med kopia- och exportknappar (exporten förifyller tidigaste
+        förfallodatumet som betalningsdatum)."""
+        from PySide6.QtWidgets import (
+            QDialog, QHBoxLayout, QLabel, QPlainTextEdit,
+            QPushButton, QVBoxLayout,
+        )
+
+        rows = self._selected_invoices()
+        if len(rows) < 2:
+            QMessageBox.information(
+                self, tr("combine.button"), tr("combine.need_two")
+            )
+            return
+        summary = combine_invoices(rows)
+        earliest = summary["earliest_due"]
+
+        def _inv_line(r: dict) -> str:
+            due = str(r.get("due_date", "") or "—")
+            return (
+                f"{due}   {r.get('supplier', '')} · "
+                f"{r.get('invoice_number', '')} · "
+                f"{fmt_amount(_to_float(r.get('total_amount')))}"
+            )
+
+        ordered = sorted(
+            rows,
+            key=lambda r: (not r.get("due_date"),
+                           str(r.get("due_date", ""))),
+        )
+        lines = [_inv_line(r) for r in ordered]
+        earliest_row = summary["earliest_invoice"] or {}
+        if earliest:
+            earliest_text = tr(
+                "combine.earliest",
+                date=earliest,
+                supplier=earliest_row.get("supplier", ""),
+                nr=earliest_row.get("invoice_number", ""),
+            ) + f"  ·  {self._due_relative(earliest)}"
+        else:
+            earliest_text = tr("combine.earliest_none")
+
+        copy_text = "\n".join(
+            [
+                tr("combine.title", n=summary["count"]),
+                f"{tr('combine.invoices_line', n=summary['n_invoices'])} "
+                f"{fmt_amount(summary['total_invoices'])}",
+                f"{tr('combine.credits_line', n=summary['n_credits'])} "
+                f"{fmt_amount(summary['total_credits'])}",
+                f"{tr('combine.total')} {fmt_amount(summary['net'])}",
+                earliest_text,
+                "",
+                *lines,
+            ]
+        )
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr("combine.title", n=summary["count"]))
+        dlg.setMinimumWidth(560)
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(8)
+
+        lbl_total = QLabel(
+            f"{tr('combine.total')}  {fmt_amount(summary['net'])}"
+        )
+        lbl_total.setFont(make_font(16, bold=True))
+        lbl_total.setStyleSheet("color:#d4a017;")
+        lay.addWidget(lbl_total)
+
+        lbl_detail = QLabel(
+            f"{tr('combine.invoices_line', n=summary['n_invoices'])} "
+            f"{fmt_amount(summary['total_invoices'])}    ·    "
+            f"{tr('combine.credits_line', n=summary['n_credits'])} "
+            f"{fmt_amount(summary['total_credits'])}"
+        )
+        lay.addWidget(lbl_detail)
+
+        lbl_earliest = QLabel(earliest_text)
+        lbl_earliest.setFont(make_font(12, bold=True))
+        lay.addWidget(lbl_earliest)
+
+        if summary["missing_due"]:
+            lbl_warn = QLabel(
+                tr("combine.missing_due", n=summary["missing_due"])
+            )
+            lbl_warn.setStyleSheet("color:#e8a13a;")
+            lay.addWidget(lbl_warn)
+
+        txt = QPlainTextEdit()
+        txt.setReadOnly(True)
+        txt.setPlainText("\n".join(lines))
+        txt.setMaximumHeight(220)
+        lay.addWidget(txt)
+
+        row_btns = QHBoxLayout()
+        btn_copy = QPushButton(tr("combine.copy"))
+
+        def _copy() -> None:
+            QApplication.clipboard().setText(copy_text)
+            self._status(tr("combine.copied"))
+
+        btn_copy.clicked.connect(_copy)
+        btn_export = QPushButton(tr("combine.export_sel"))
+        btn_export.setProperty("accent", True)
+
+        def _export() -> None:
+            dlg.accept()
+            self._export_invoices(
+                rows,
+                confirm_title=tr("combine.export_title"),
+                default_payment_date=earliest,
+                confirm=False,
+            )
+
+        btn_export.clicked.connect(_export)
+        btn_close = QPushButton(tr("combine.close"))
+        btn_close.clicked.connect(dlg.reject)
+        row_btns.addWidget(btn_copy)
+        row_btns.addWidget(btn_export)
+        row_btns.addStretch(1)
+        row_btns.addWidget(btn_close)
+        lay.addLayout(row_btns)
+        dlg.exec()
+
     def _mark_selected_paid(self) -> None:
         ids = self._selected_ids()
         if not ids:
@@ -1489,6 +2723,7 @@ class InvoicesView(QWidget):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
+        self._record_undo(ids)
         count = self._safe_mark_paid(ids)
         self._do_refresh()
         self._status(
@@ -1497,12 +2732,933 @@ class InvoicesView(QWidget):
 
     def _set_status_selected(self, status: str) -> None:
         """Sätter status på alla markerade fakturor."""
-        for rid in self._selected_ids():
+        ids = self._selected_ids()
+        self._record_undo(ids)
+        for rid in ids:
             try:
                 self._app.update_invoice(rid, {"status": status})
             except Exception as exc:
                 log.error("_set_status_selected %s: %s", rid, exc)
         self._do_refresh()
+
+    # ══════════════════════════════════════════════════════════════════
+    #  BETALA IDAG / KOPIERA BETALINFO / ÅNGRA
+    # ══════════════════════════════════════════════════════════════════
+
+    def _refresh_selection_label(self) -> None:
+        """Beständig summarad: markerat netto, annars totalen att betala."""
+        lbl = getattr(self, "_lbl_selection", None)
+        if lbl is None:
+            return
+        ids = self._selected_ids()
+        if ids:
+            picked = self._selected_invoices()
+            summary = combine_invoices(picked)
+            if summary["earliest_due"]:
+                lbl.setText(
+                    tr(
+                        "invoices.selected_sum",
+                        n=summary["count"],
+                        amount=fmt_amount(summary["net"]),
+                        due=summary["earliest_due"],
+                    )
+                )
+            else:
+                lbl.setText(
+                    tr(
+                        "invoices.selected_sum_no_due",
+                        n=summary["count"],
+                        amount=fmt_amount(summary["net"]),
+                    )
+                )
+        else:
+            unpaid = sum(
+                _to_float(r.get("total_amount"))
+                for r in self._all_data
+                if str(r.get("status", "")) not in NON_UNPAID_STATUSES
+            )
+            lbl.setText(
+                tr(
+                    "invoices.att_betala_total",
+                    amount=fmt_amount(round(unpaid, 2)),
+                )
+            )
+
+    def _pay_today(self) -> None:
+        """Ett klick: markerar allt som förfaller idag eller i morgon."""
+        targets = due_within(
+            self._all_data, datetime.date.today(), horizon_days=1
+        )
+        ids = {str(i.get("id")) for i in targets if i.get("id")}
+        if not ids:
+            self._status(tr("invoices.pay_today_none"), timeout=6000)
+            return
+        # Visa alla träffar: nollställ sök/filter först
+        try:
+            self._search.setText("")
+            self._filter_type.setCurrentIndex(0)
+            idx = self._filter_status.findData("__active__")
+            if idx >= 0:
+                self._filter_status.setCurrentIndex(idx)
+            self._filter_supplier.setCurrentIndex(0)
+        except Exception as exc:
+            log.debug("_pay_today filterreset: %s", exc)
+        self._do_refresh()
+
+        # Sedan kryssas träffarna in i exportvalet (förslag 2);
+        # radmarkeringen nedan bara visar vilka det rör sig om.
+        self._marked_export_ids |= ids
+        self._apply_table_selection()
+
+        selection = self._table.selectionModel()
+        table_model = self._table.model()
+        flags = (
+            QItemSelectionModel.SelectionFlag.Select
+            | QItemSelectionModel.SelectionFlag.Rows
+        )
+        selection.clearSelection()
+        for row in range(table_model.rowCount()):
+            index = table_model.index(row, 0)
+            if str(index.data(Qt.ItemDataRole.UserRole) or "") in ids:
+                selection.select(index, flags)
+
+        picked = self._selected_invoices()
+        net = combine_invoices(picked)["net"] if picked else 0.0
+        self._status(
+            tr(
+                "invoices.pay_today_found",
+                n=len(picked),
+                amount=fmt_amount(net),
+            ),
+            timeout=8000,
+        )
+        if len(picked) >= 2:
+            self._show_combine_dialog()
+
+    def _pages_for(self, inv: dict) -> int:
+        """Sidantal för fakturans original (cachad per filversion)."""
+        path = str(inv.get("attachment", "") or "")
+        if not path:
+            return 0
+        try:
+            st = Path(path).stat()
+            cache_key = (path, st.st_mtime_ns, st.st_size)
+        except OSError:
+            return 0
+        cached = self._page_count_cache.get(cache_key)
+        if cached is None:
+            cached = attachment_page_count(path)
+            self._page_count_cache[cache_key] = cached
+        return cached
+
+    def _open_original_invoice(self) -> None:
+        """Öppnar markerad fakturas original via högerklicksmenyn.
+
+        Samma attachment-sökväg som exporten bifogar och Skriv ut
+        använder. Saknas filen sägs det i statusraden — appen
+        gissar aldrig fram en annan fil.
+        """
+        inv = self._selected_invoice()
+        if not inv:
+            return
+        path = str(inv.get("attachment", "") or "")
+        nr = str(inv.get("invoice_number", "") or "")
+        if not path or not Path(path).exists():
+            self._status(tr("invoices.open_missing", nr=nr))
+            return
+        open_file(path)
+        self._status(
+            tr("invoices.opened", file=Path(path).name)
+        )
+        log.info("INVOICE_OPEN: öppnade original %s", path)
+
+    def _print_invoice(self) -> None:
+        """Skriver ut markerad fakturas original (alla sidor).
+
+        Originalets sökväg ligger i fakturans attachment-fält
+        (samma fil som exporten bifogar) och skrivs ut orörd
+        via systemets skrivardialog — samma utskriftsväg som
+        Import-granskningens Skriv ut. Saknas originalet sägs
+        det i statusraden i stället för att något gissas fram.
+        """
+        inv = self._selected_invoice()
+        if not inv:
+            return
+        path = str(inv.get("attachment", "") or "")
+        nr = str(inv.get("invoice_number", "") or "")
+        name = Path(path).name if path else nr
+        if not path or not Path(path).exists():
+            self._status(tr("invoices.print_missing", nr=nr))
+            return
+        try:
+            from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+
+            try:
+                from ui.scan_import_view import print_invoice_document
+            except ImportError:
+                from scan_import_view import (  # type: ignore[no-redef]
+                    print_invoice_document,
+                )
+        except Exception as exc:
+            self._status(tr("scan.print_failed", error=str(exc)))
+            return
+        try:
+            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+            dlg = QPrintDialog(printer, self)
+            if not dlg.exec():
+                return
+            n = print_invoice_document(path, printer)
+            if n:
+                self._status(tr("scan.printed", file=name, n=n))
+                log.info(
+                    "INVOICE_PRINT: %s utskriven (%d sida/sidor)",
+                    name, n,
+                )
+            else:
+                self._status(
+                    tr(
+                        "scan.print_failed",
+                        error="inga sidor kunde renderas",
+                    )
+                )
+        except Exception as exc:
+            log.warning("print invoice: %s", exc)
+            self._status(tr("scan.print_failed", error=str(exc)))
+
+    def _scan_data_dir(self) -> Path:
+        """Datakatalogen där tolkningsmallarna och inlärnings-
+        minnet bor (samma som Import-fliken använder)."""
+        raw = ""
+        try:
+            raw = str(self._app.settings.get("db_path", "data"))
+        except Exception:
+            raw = str(self._app.get_setting("db_path", "data"))
+        data_dir = Path(raw or "data")
+        if not data_dir.is_absolute():
+            data_dir = (
+                Path(__file__).resolve().parent.parent / data_dir
+            )
+        return data_dir
+
+    def _load_scan_templates(self, si: Any) -> dict:
+        """Användarens inlärda mallar (samma fil som Import-fliken
+        använder) — så omskanningen tolkar med dagens mallar."""
+        try:
+            return si.load_templates(
+                self._scan_data_dir() / "invoice_templates.json"
+            )
+        except Exception as exc:
+            log.debug("rescan templates: %s", exc)
+            return {}
+
+    def _rescan_invoice(self) -> None:
+        """Skannar om markerad fakturas original med dagens
+        tolkning och erbjuder att rätta fakturan.
+
+        Originalet tolkas på nytt (mallar + säkerhetsregler
+        precis som vid inläsning). Avviker nytolkningen från
+        det registrerade visas gammalt → nytt per fält och
+        fakturan uppdateras först när användaren bekräftar;
+        stämmer allt — eller tolkningen är osäker — ändras
+        ingenting."""
+        inv = self._selected_invoice()
+        if not inv:
+            return
+        path = str(inv.get("attachment", "") or "")
+        nr = str(inv.get("invoice_number", "") or "")
+        if not path or not Path(path).exists():
+            self._status(tr("invoices.rescan_no_original", nr=nr))
+            return
+        try:
+            try:
+                from ui.scan_import_view import _scan_module
+            except ImportError:
+                from scan_import_view import _scan_module  # type: ignore[no-redef]
+            si = _scan_module()
+            text, _method = si.extract_text(Path(path))
+            try:
+                suppliers = list(self._app.get_suppliers() or [])
+            except Exception:
+                suppliers = []
+            parsed = si.parse_invoice_file(
+                path, text or "", suppliers,
+                templates=self._load_scan_templates(si),
+            )
+        except Exception as exc:
+            log.warning("rescan invoice %s: %s", nr, exc)
+            self._status(tr("invoices.rescan_failed", nr=nr))
+            return
+        if not parsed.get("template") or parsed.get("missing"):
+            missing = ", ".join(parsed.get("missing") or []) or "—"
+            log.info(
+                "SCAN_RESCAN: faktura %s kunde inte tolkas säkert "
+                "(mall=%s, saknar=%s) — inget ändrat",
+                nr, parsed.get("template") or "—", missing,
+            )
+            self._status(
+                tr("invoices.rescan_uncertain", nr=nr, missing=missing)
+            )
+            return
+        try:
+            from ui.watch_folders import invoice_control_changes
+        except ImportError:
+            from watch_folders import invoice_control_changes  # type: ignore[no-redef]
+        changes = invoice_control_changes(inv, parsed)
+        if not changes:
+            log.info(
+                "SCAN_RESCAN: faktura %s stämmer med originalet "
+                "— inget ändrat", nr,
+            )
+            self._status(tr("invoices.rescan_unchanged", nr=nr))
+            return
+        new_nr = changes.get("invoice_number", (None, None))[1]
+        if new_nr:
+            others = [
+                r for r in self._all_data
+                if r.get("id") != inv.get("id")
+                and str(r.get("supplier", "")).strip().lower()
+                == str(inv.get("supplier", "")).strip().lower()
+                and str(r.get("invoice_number", "")).strip().lower()
+                == str(new_nr).strip().lower()
+            ]
+            if others:
+                self._status(
+                    tr("invoices.rescan_number_taken", nr=nr, new=new_nr)
+                )
+                return
+        labels = {
+            "invoice_number": tr("invoices.rescan_field_number"),
+            "date": tr("invoices.rescan_field_date"),
+            "due_date": tr("invoices.rescan_field_due"),
+            "total_amount": tr("invoices.rescan_field_total"),
+        }
+
+        def _fmt(field: str, value: Any) -> str:
+            if field == "total_amount":
+                try:
+                    return fmt_amount(float(value))
+                except (TypeError, ValueError):
+                    return str(value)
+            return str(value or "—")
+
+        lines = "\n".join(
+            f"• {labels.get(field, field)}: "
+            f"{_fmt(field, old)} → {_fmt(field, new)}"
+            for field, (old, new) in changes.items()
+        )
+        reply = QMessageBox.question(
+            self,
+            tr("invoices.rescan_title"),
+            tr("invoices.rescan_confirm", nr=nr, lines=lines),
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self._status(tr("invoices.rescan_cancelled", nr=nr))
+            return
+        updates = {field: new for field, (_old, new) in changes.items()}
+        try:
+            self._app.update_invoice(inv["id"], updates)
+        except Exception as exc:
+            log.warning("rescan update %s: %s", nr, exc)
+            self._status(tr("invoices.rescan_failed", nr=nr))
+            return
+        log.info(
+            "SCAN_RESCAN: faktura %s uppdaterad efter omskanning "
+            "av %s: %s",
+            nr, Path(path).name,
+            ", ".join(
+                f"{f}: {o} → {n}" for f, (o, n) in changes.items()
+            ),
+        )
+        self._do_refresh()
+        self._status(tr("invoices.rescan_updated", nr=nr), timeout=8000)
+
+    def _manual_template_match(self) -> None:
+        """Högerklick: matcha fakturan mot en mall användaren väljer.
+
+        "Skanna om faktura" väljer tolkningen själv — här väljer
+        ANVÄNDAREN vilken leverantör/mall som gäller (för fakturor
+        den automatiska matchningen missade). Originalet läses om
+        med den valda mallen, ändringarna visas gammalt → nytt för
+        kontroll, beloppet kan rättas i dialogen, och inget sparas
+        förrän användaren bekräftar. Matchningen lär appen på
+        samma sätt som Import-matchningarna (inlärningsminne +
+        verifierad mall), så nästa faktura från leverantören
+        matchas bättre.
+        """
+        inv = self._selected_invoice()
+        if not inv:
+            return
+        path = str(inv.get("attachment", "") or "")
+        nr = str(inv.get("invoice_number", "") or "")
+        if not path or not Path(path).exists():
+            self._status(tr("invoices.rescan_no_original", nr=nr))
+            return
+        try:
+            try:
+                from ui.scan_import_view import _scan_module
+            except ImportError:
+                from scan_import_view import _scan_module  # type: ignore[no-redef]
+            si = _scan_module()
+            text, _method = si.extract_text(Path(path))
+        except Exception as exc:
+            log.warning("manual match %s: %s", nr, exc)
+            self._status(tr("invoices.rescan_failed", nr=nr))
+            return
+        if not text or not text.strip():
+            self._status(tr("invoices.manual_match_no_text", nr=nr))
+            return
+        try:
+            suppliers = list(self._app.get_suppliers() or [])
+        except Exception:
+            suppliers = []
+        templates = self._load_scan_templates(si)
+        try:
+            pages = si.page_image_count(Path(path))
+        except Exception:
+            pages = 0
+
+        options: list[str] = []
+        seen_opts: set[str] = set()
+
+        def _add(name: Any) -> None:
+            name = str(name or "").strip()
+            if name and name.lower() not in seen_opts:
+                seen_opts.add(name.lower())
+                options.append(name)
+
+        for s in suppliers:
+            _add(s.get("name", "") if isinstance(s, dict) else "")
+        for name in templates.keys():
+            _add(str(name))
+        for fmt in getattr(si, "BUILTIN_FORMATS", []) or []:
+            _add(str(fmt.get("name", "") or ""))
+        if not options:
+            QMessageBox.information(
+                self, tr("invoices.manual_match_title"),
+                tr("invoices.manual_match_no_options"),
+            )
+            return
+
+        _nm = getattr(si, "_names_match", None)
+
+        def _names_match(a: str, b: str) -> bool:
+            if callable(_nm):
+                try:
+                    return bool(_nm(a, b))
+                except Exception:
+                    pass
+            return str(a).strip().lower() == str(b).strip().lower()
+
+        def _template_for(name: str):
+            """Mallen för ett valt namn — egen mall först, annars
+            det inbyggda formatets etikettskarta. None = ingen mall."""
+            tmpl = si.find_template(templates, name, suppliers)
+            if tmpl is not None:
+                return tmpl
+            for fmt in getattr(si, "BUILTIN_FORMATS", []) or []:
+                names = [fmt.get("name", "")] + list(
+                    fmt.get("aliases", []) or []
+                )
+                if any(
+                    n and _names_match(name, str(n)) for n in names
+                ):
+                    return {"fields": dict(fmt.get("fields", {}) or {})}
+            return None
+
+        def _read(name: str) -> tuple[Any, dict, list[str]]:
+            """Läser om fakturans fält med vald mall; generisk
+            läsning fyller fält mallen inte träffar."""
+            tmpl = _template_for(name)
+            found: dict[str, Any] = {}
+            if tmpl:
+                try:
+                    found = dict(si.apply_template(text, tmpl) or {})
+                except Exception as exc:
+                    log.debug("manual match apply: %s", exc)
+                    found = {}
+                try:
+                    fields = tmpl.get("fields", {}) or {}
+                    if any(
+                        isinstance(spec, dict) and spec.get("region")
+                        for spec in fields.values()
+                    ):
+                        found.update(
+                            si.template_values_from_regions(
+                                tmpl,
+                                si.extract_region_texts(path, tmpl),
+                            )
+                        )
+                except Exception as exc:
+                    log.debug("manual match regions: %s", exc)
+            try:
+                base = si.parse_invoice_text(
+                    text, suppliers, templates={}
+                )
+            except Exception:
+                base = {}
+            after: dict[str, Any] = {}
+            for field in ("invoice_number", "date", "due_date", "ocr"):
+                value = found.get(field)
+                if value in (None, ""):
+                    value = base.get(field, "")
+                after[field] = str(value or "")
+            total = found.get("total_amount")
+            if total in (None, "", 0, 0.0):
+                total = base.get("total_amount", 0)
+            try:
+                after["total_amount"] = float(total or 0)
+            except (TypeError, ValueError):
+                after["total_amount"] = 0.0
+            return tmpl, after, list(found)
+
+        def _parse_sv_amount(raw: str) -> float:
+            """'13 480,00 SEK' → 13480.0 (tål valuta + tusental)."""
+            t = re.sub(r"[^0-9,.\-]", "", str(raw or ""))
+            if "," in t and "." in t:
+                if t.rfind(",") > t.rfind("."):
+                    t = t.replace(".", "").replace(",", ".")
+                else:
+                    t = t.replace(",", "")
+            elif "," in t:
+                t = t.replace(",", ".")
+            try:
+                return float(t)
+            except ValueError:
+                return 0.0
+
+        cur_supplier = str(inv.get("supplier", "") or "")
+        try:
+            cur_amount = fmt_amount(float(inv.get("total_amount") or 0))
+        except (TypeError, ValueError):
+            cur_amount = str(inv.get("total_amount", "") or "—")
+        field_labels = {
+            "invoice_number": tr("invoices.rescan_field_number"),
+            "date": tr("invoices.rescan_field_date"),
+            "due_date": tr("invoices.rescan_field_due"),
+            "total_amount": tr("invoices.rescan_field_total"),
+            "ocr": tr("invoices.manual_match_field_ocr"),
+        }
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr("invoices.manual_match_title"))
+        layout = QVBoxLayout(dlg)
+        intro = QLabel(tr(
+            "invoices.manual_match_intro",
+            nr=nr or "—", supplier=cur_supplier or "—",
+            amount=cur_amount,
+        ))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        layout.addWidget(QLabel(tr("invoices.manual_match_pick")))
+        combo = QComboBox(dlg)
+        combo.addItems(options)
+        start = next(
+            (i for i, n in enumerate(options)
+             if _names_match(n, cur_supplier)),
+            -1,
+        )
+        combo.setCurrentIndex(start)
+        combo.setPlaceholderText(tr("scan.match_ask_placeholder"))
+        layout.addWidget(combo)
+        if pages >= 2:
+            note = QLabel(tr("scan.match_multipage_note", n=pages))
+            note.setWordWrap(True)
+            layout.addWidget(note)
+        tmpl_lbl = QLabel(dlg)
+        layout.addWidget(tmpl_lbl)
+        preview = QLabel(dlg)
+        preview.setWordWrap(True)
+        layout.addWidget(preview)
+        layout.addWidget(QLabel(tr("scan.match_amount_label")))
+        amount_edit = QLineEdit(dlg)
+        layout.addWidget(amount_edit)
+        buttons = QHBoxLayout()
+        btn_cancel = QPushButton(tr("common.cancel"))
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_save = QPushButton(tr("invoices.manual_match_save"))
+        btn_save.setDefault(True)
+        buttons.addStretch()
+        buttons.addWidget(btn_cancel)
+        buttons.addWidget(btn_save)
+        layout.addLayout(buttons)
+
+        state: dict[str, Any] = {
+            "after": {}, "template": None, "template_fields": [],
+        }
+        try:
+            template_learning = si.load_match_learning(
+                self._scan_data_dir() / "match_memory.json"
+            )
+        except Exception:
+            template_learning = {}
+
+        def _refresh_preview() -> None:
+            name = combo.currentText().strip()
+            if combo.currentIndex() < 0 or not name:
+                tmpl_lbl.setText("")
+                preview.setText("")
+                amount_edit.setText("")
+                state["after"] = {}
+                state["template"] = None
+                state["template_fields"] = []
+                return
+            tmpl, after, template_fields = _read(name)
+            state["after"] = after
+            state["template"] = tmpl
+            state["template_fields"] = template_fields
+            template_label = (
+                tr("invoices.manual_match_template_used", template=name)
+                if tmpl else tr("invoices.manual_match_template_none")
+            )
+            if tmpl:
+                template_entry = si.template_confirmation_entry(
+                    template_learning, name, tmpl
+                )
+                try:
+                    template_count = int(
+                        template_entry.get("confirmed", 0) or 0
+                    )
+                except (TypeError, ValueError):
+                    template_count = 0
+                if template_count:
+                    template_label += " · " + tr(
+                        "scan.template_confirmation_count",
+                        n=template_count,
+                    )
+                else:
+                    template_label += tr(
+                        "invoices.manual_match_template_unconfirmed"
+                    )
+            tmpl_lbl.setText(template_label)
+            lines = []
+            for field in (
+                "invoice_number", "date", "due_date", "ocr",
+                "total_amount",
+            ):
+                if field == "total_amount":
+                    old_s = cur_amount
+                    new_s = (
+                        fmt_amount(after["total_amount"])
+                        if after.get("total_amount") else "—"
+                    )
+                else:
+                    old_s = str(inv.get(field, "") or "—")
+                    new_s = str(after.get(field) or "—")
+                mark = (
+                    "  " + tr("invoices.manual_match_changes")
+                    if new_s != old_s else ""
+                )
+                lines.append(
+                    f"{field_labels[field]}: {old_s} → {new_s}{mark}"
+                )
+            preview.setText("\n".join(lines))
+            amount_edit.setText(
+                fmt_amount(after["total_amount"])
+                if after.get("total_amount") else ""
+            )
+
+        def _accept() -> None:
+            if combo.currentIndex() >= 0:
+                dlg.accept()
+
+        btn_save.clicked.connect(_accept)
+        combo.currentIndexChanged.connect(
+            lambda _i: _refresh_preview()
+        )
+        _refresh_preview()
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = combo.currentText().strip()
+        if not chosen:
+            return
+        after = dict(state.get("after") or {})
+        resolved = next(
+            (
+                str(s.get("name", "")).strip()
+                for s in suppliers
+                if isinstance(s, dict)
+                and str(s.get("name", "")).strip()
+                and _names_match(str(s.get("name", "")), chosen)
+            ),
+            chosen,
+        )
+        new_nr = str(after.get("invoice_number", "") or "").strip()
+        if new_nr and new_nr.lower() != nr.lower():
+            others = [
+                r for r in self._all_data
+                if r.get("id") != inv.get("id")
+                and str(r.get("supplier", "")).strip().lower()
+                == resolved.strip().lower()
+                and str(r.get("invoice_number", "")).strip().lower()
+                == new_nr.lower()
+            ]
+            if others:
+                self._status(tr(
+                    "invoices.rescan_number_taken", nr=nr, new=new_nr
+                ))
+                return
+        updates: dict[str, Any] = {}
+        if resolved and not _names_match(resolved, cur_supplier):
+            updates["supplier"] = resolved
+        for field in ("invoice_number", "date", "due_date", "ocr"):
+            new = str(after.get(field, "") or "").strip()
+            if new and new != str(inv.get(field, "") or "").strip():
+                updates[field] = new
+        edited_total = _parse_sv_amount(amount_edit.text())
+        final_total = edited_total
+        if edited_total > 0:
+            try:
+                old_total = float(inv.get("total_amount") or 0)
+            except (TypeError, ValueError):
+                old_total = 0.0
+            if abs(edited_total - old_total) > 0.005:
+                updates["total_amount"] = edited_total
+        elif after.get("total_amount"):
+            final_total = float(after["total_amount"])
+        final_nr = str(updates.get("invoice_number") or new_nr or nr)
+        if updates:
+            try:
+                self._app.update_invoice(inv["id"], updates)
+            except Exception as exc:
+                log.warning("manual match update %s: %s", nr, exc)
+                self._status(tr("invoices.rescan_failed", nr=nr))
+                return
+            self._do_refresh()
+        confirmed_values = dict(after or {})
+        confirmed_values["invoice_number"] = final_nr
+        confirmed_values["total_amount"] = final_total
+        learned = self._learn_manual_match(
+            si, resolved, text, final_nr, final_total, pages, path,
+            template=state.get("template"),
+            template_fields=state.get("template_fields", []),
+            template_name=combo.currentText().strip(),
+            confirmed_values=confirmed_values,
+        )
+        log.info(
+            "SCAN_MATCH: faktura %s matchad manuellt mot %s "
+            "(ändringar: %s)",
+            nr, resolved,
+            ", ".join(updates) or "inga",
+        )
+        msg = (
+            tr("invoices.manual_match_updated", nr=nr or final_nr,
+               supplier=resolved)
+            if updates else
+            tr("invoices.manual_match_unchanged", nr=nr or final_nr,
+               supplier=resolved)
+        )
+        if learned:
+            msg += "  ·  " + learned
+        self._status(msg, timeout=8000)
+
+    def _learn_manual_match(
+        self, si: Any, supplier: str, text: str,
+        invoice_number: str, total: float, pages: int,
+        path: str = "", template: dict | None = None,
+        template_fields: list[str] | None = None,
+        template_name: str = "",
+        confirmed_values: dict | None = None,
+    ) -> str:
+        """Inlärning ur en manuell matchning i Fakturor-fliken —
+        samma regler som i Import: bekräftelsen räknas i
+        inlärningsminnet, och saknar leverantören både egen mall
+        och inbyggt format härleds en VERIFIERAD mall ur de
+        bekräftade värdena och sparas bland mallarna.
+        Returnerar en statusnotis (eller "")."""
+        try:
+            data_dir = self._scan_data_dir()
+            learning_path = data_dir / "match_memory.json"
+            learning = si.load_match_learning(learning_path)
+            templates = self._load_scan_templates(si)
+            try:
+                suppliers = list(self._app.get_suppliers() or [])
+            except Exception:
+                suppliers = []
+            template_name = str(template_name or supplier).strip()
+            confirmed = dict(confirmed_values or {})
+            confirmed["invoice_number"] = str(invoice_number or "")
+            confirmed["total_amount"] = total
+            matched_template = (
+                template if isinstance(template, dict)
+                else si.find_template(templates, template_name, suppliers)
+            )
+            notes: list[str] = []
+            if (
+                not matched_template
+                and not si.find_template(templates, supplier, suppliers)
+                and not si.has_builtin_format(supplier)
+            ):
+                candidate = si.derive_template_from_confirmation(
+                    text, invoice_number, total
+                )
+                if candidate:
+                    templates[supplier] = candidate
+                    if si.save_templates(
+                        data_dir / "invoice_templates.json", templates
+                    ):
+                        matched_template = candidate
+                        template_name = supplier
+                        notes.append(tr(
+                            "invoices.manual_match_learned",
+                            supplier=supplier,
+                        ))
+            found: dict = {}
+            if matched_template:
+                try:
+                    found = si.template_values(
+                        path or None, text, matched_template
+                    )
+                except Exception:
+                    found = {}
+            if template_fields:
+                allowed_fields = {str(field) for field in template_fields}
+                found = {
+                    field: value for field, value in found.items()
+                    if field in allowed_fields
+                }
+            accepted_fields = si.confirmed_template_fields(
+                matched_template, found, confirmed
+            ) if matched_template else []
+            confirmation_id = si.match_confirmation_id(
+                supplier, invoice_number, path=path,
+                invoice_date=str(confirmed.get("date", "") or ""),
+            )
+            entry_before = si.learning_entry(learning, supplier)
+            try:
+                confirmations_before = int(
+                    entry_before.get("confirmed", 0) or 0
+                )
+            except (TypeError, ValueError):
+                confirmations_before = 0
+            logo_signature = si.confirmed_supplier_logo_signature(
+                path, supplier, templates, suppliers=suppliers
+            )
+            logo_count_before = int(
+                (entry_before.get("logos", {}) or {}).get(
+                    logo_signature, 0
+                ) or 0
+            ) if logo_signature else 0
+            entry = si.record_match_confirmation(
+                learning, supplier,
+                multipage=int(pages or 0) >= 2, text=text,
+                logo_signature=logo_signature,
+                confirmation_id=confirmation_id, source_path=path,
+                template_name=template_name,
+                template=matched_template,
+                template_fields=accepted_fields,
+            )
+            si.save_match_learning(learning_path, learning)
+            confirmed_count = int(entry.get("confirmed", 0) or 0)
+            notes.append(tr(
+                "scan.learning_count", supplier=supplier,
+                n=confirmed_count,
+            ))
+            if (
+                confirmations_before < si.LEARNED_SUPPLIER_CONFIRMATIONS
+                <= confirmed_count
+            ):
+                notes.append(tr(
+                    "scan.learned_auto_supplier", supplier=supplier
+                ))
+            logo_count = int(
+                (entry.get("logos", {}) or {}).get(logo_signature, 0) or 0
+            ) if logo_signature else 0
+            if (
+                confirmed_count >= si.LEARNED_SUPPLIER_CONFIRMATIONS
+                and logo_count >= si.LEARNED_IDENTIFIER_CONFIRMATIONS
+                and not (
+                    confirmations_before >= si.LEARNED_SUPPLIER_CONFIRMATIONS
+                    and logo_count_before >= si.LEARNED_IDENTIFIER_CONFIRMATIONS
+                )
+            ):
+                notes.append(tr(
+                    "scan.learned_auto_logo", supplier=supplier
+                ))
+            if matched_template:
+                template_entry = si.template_confirmation_entry(
+                    learning, supplier, matched_template
+                )
+                try:
+                    template_count = int(
+                        template_entry.get("confirmed", 0) or 0
+                    )
+                except (TypeError, ValueError):
+                    template_count = 0
+                if template_count:
+                    notes.append(tr(
+                        "scan.template_confirmation_count",
+                        n=template_count,
+                    ))
+            return " ".join(notes)
+        except Exception as exc:
+            log.warning("learn manual match: %s", exc)
+        return ""
+
+    def _copy_payment_info(self) -> None:
+        """Kopierar BG/PG/IBAN + OCR + belopp för markerad faktura."""
+        inv = self._selected_invoice()
+        if not inv:
+            return
+        sup = None
+        try:
+            target = str(inv.get("supplier", "")).strip().casefold()
+            for rec in self._app.get_suppliers():
+                if str(rec.get("name", "")).strip().casefold() == target:
+                    sup = rec
+                    break
+        except Exception as exc:
+            log.debug("_copy_payment_info leverantör: %s", exc)
+        QApplication.clipboard().setText(payment_info_text(inv, sup))
+        self._status(
+            tr(
+                "invoices.payinfo_copied",
+                nr=inv.get("invoice_number", ""),
+            ),
+            timeout=6000,
+        )
+
+    def _record_undo(self, ids: list[str]) -> None:
+        """Sparar nuvarande status/betalningsdatum före en ändring."""
+        by_id = {str(r.get("id")): r for r in self._all_data}
+        batch: list[tuple[str, str, str]] = []
+        for rid in ids:
+            rec = by_id.get(str(rid))
+            if rec is not None:
+                batch.append(
+                    (
+                        str(rid),
+                        str(rec.get("status", "")),
+                        str(rec.get("payment_date", "") or ""),
+                    )
+                )
+        if batch:
+            self._undo_stack.append(batch)
+            del self._undo_stack[:-20]  # max 20 ångringar bakåt
+
+    def _undo_last_status(self) -> None:
+        """Ångrar senaste statusändringen (markera betald m.m.)."""
+        if not self._undo_stack:
+            self._status(tr("invoices.undo_empty"))
+            return
+        batch = self._undo_stack.pop()
+        count = 0
+        for rid, old_status, old_payment_date in batch:
+            try:
+                self._app.update_invoice(
+                    rid,
+                    {
+                        "status": old_status,
+                        "payment_date": old_payment_date,
+                    },
+                )
+                count += 1
+            except Exception as exc:
+                log.error("_undo_last_status %s: %s", rid, exc)
+        self._do_refresh()
+        self._status(tr("invoices.undo_done", n=count))
 
     # ══════════════════════════════════════════════════════════════════
     #  EXPORTERA ALLA TILL PDF — med betalningsdatum per export
@@ -1522,7 +3678,30 @@ class InvoicesView(QWidget):
         7. Öppna PDF-filen.
         8. Nollställ betalningsdatum (implicit — nästa export frågar igen).
         """
-        exportable = self._get_exportable()
+        self._export_invoices(self._get_exportable())
+
+    def _export_selected_pdf(self) -> None:
+        """Exporterar BARA de markerade fakturorna till PDF.
+
+        Samma flöde och regler som "Exportera alla": bekräftelse,
+        betalningsdatum, max 10 fakturor per fil (-delXavN),
+        original som standard, krediter nettas — och efter lyckad
+        export markeras posterna Betald i Historik/data/betalda.
+        Inget markerat (eller bara betalda markerade) → ingen
+        export och inget ändras."""
+        self._export_invoices(
+            self._get_selected_exportable(),
+            confirm_title=tr("invoices.export_selected_title"),
+        )
+
+    def _export_invoices(
+        self,
+        exportable: list[dict],
+        *,
+        confirm_title: str = "Exportera alla fakturor",
+        default_payment_date: str = "",
+        confirm: bool = True,
+    ) -> None:
         if not exportable:
             QMessageBox.information(
                 self, "Export", "Inga aktiva fakturor att exportera."
@@ -1553,9 +3732,10 @@ class InvoicesView(QWidget):
         )
 
         # ── Bekräftelsedialog ──────────────────────────────────────────
-        reply = QMessageBox.question(
-            self,
-            "Exportera alla fakturor",
+        reply = (
+            QMessageBox.question(
+                self,
+                confirm_title,
             f"Exportera {len(exportable)} poster till PDF?\n\n"
             f"  Fakturor ({n_inv}):   {fmt_amount(total_invoices)}\n"
             f"  Krediter ({n_cre}):   {fmt_amount(total_credits)}\n"
@@ -1563,10 +3743,13 @@ class InvoicesView(QWidget):
             f"  ATT BETALA:       {fmt_amount(att_betala)}\n\n"
             f"Leverantörer: {', '.join(suppliers)}\n\n"
             f"Du tillfrågas om betalningsdatum i nästa steg.\n"
-            f"Fakturorna arkiveras efter export.",
+            f"Fakturorna markeras som Betald efter export och "
+            f"flyttas till Historik.",
             QMessageBox.StandardButton.Yes
             | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirm else QMessageBox.StandardButton.Yes
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
@@ -1580,6 +3763,7 @@ class InvoicesView(QWidget):
             total_invoices=total_invoices,
             total_credits=total_credits,
             att_betala=att_betala,
+            default_date=default_payment_date,
         )
         if not confirmed:
             log.info(
@@ -1596,10 +3780,6 @@ class InvoicesView(QWidget):
             fmt_amount(att_betala),
         )
 
-        # ── Bygg filsökväg: exports/<Leverantör>/<YYYY-MM-DD>/ ─────────
-        target_dir, filename = build_export_path(suppliers)
-        full_path = target_dir / filename
-
         # ── Hämta PDF-exportern ────────────────────────────────────────
         exporter = getattr(self._app, "pdf_exporter", None)
         if exporter is None:
@@ -1611,82 +3791,179 @@ class InvoicesView(QWidget):
             )
             return
 
-        # ── Exportera till PDF ─────────────────────────────────────────
-        try:
-            result = exporter.export_invoice_list(
-                exportable,
-                filename=str(full_path),
-                title="Komplett fakturalista",
-                check_duplicates=False,
-                mark_exported=True,
-                force_export=True,
-                payment_date=payment_date,
-                ask_payment_date=False,   # dialog redan visad ovan
-            )
-        except Exception as exc:
-            QMessageBox.critical(
-                self, "Export-fel", f"PDF-export misslyckades:\n{exc}"
-            )
-            return
+        # ── Exportera i filer om MAX 10 fakturarader ───────────────────
+        # Varje faktura är en egen rad i PDF:en; fler än 10 rader
+        # delas i flera filer (…-del1avN.pdf, …-del2avN.pdf, …)
+        # med originalen fördelade på sina egna fakturor. Samma
+        # betalningsdatum gäller alla delfiler i exporten, och
+        # historik + arkivering sker per fil. Misslyckas en delfil
+        # stannar exporten där — resten förblir oexporterat.
+        # Exporten flyttar inte originalfiler igen: bevakade original
+        # ligger redan under sin fakturaårs-mapp efter lyckad import.
+        # Valet nedan styr bara om/sidor ur originalet kopieras in i PDF;
+        # exporten flyttar enbart registerposten till Betald/historik.
 
-        if not result.get("success"):
-            if result.get("cancelled"):
-                self._status("Export avbruten.")
-                return
-            QMessageBox.warning(
-                self,
-                "Export misslyckades",
-                "\n".join(result.get("errors", ["Okänt fel"])),
-            )
-            return
-
-        actual_path = result.get("file_path", str(full_path))
-        export_pd = result.get("payment_date", payment_date)
-
-        # ── Spara i exporthistorik (inkl betalningsdatum) ──────────────
-        self._export_history.record_export(
-            invoices=exportable,
-            file_path=actual_path,
-            total_inv=total_invoices,
-            total_cred=total_credits,
-            att_betala=att_betala,
-            suppliers=suppliers,
-            payment_date=export_pd,   # betalningsdatum sparas
-        )
-
-        # ── Arkivera alla exporterade fakturor ─────────────────────────
+        chunks = chunk_export_rows(exportable)
+        made_files: list[str] = []
+        total_included_att = 0
+        n_missing_att = 0
         archived = 0
-        for inv in exportable:
-            try:
-                self._app.update_invoice(
-                    inv["id"], {"status": "Arkiverad"}
+        export_pd = payment_date
+        failed_note = ""
+        aborted = False
+        for idx, chunk in enumerate(chunks):
+            chunk_suppliers = sorted(
+                {
+                    str(i.get("supplier", "")).strip()
+                    for i in chunk if i.get("supplier")
+                }
+            )
+            target_dir, filename = build_export_path(chunk_suppliers)
+            if len(chunks) > 1:
+                filename = (
+                    f"{Path(filename).stem}"
+                    f"-del{idx + 1}av{len(chunks)}.pdf"
                 )
-                archived += 1
-            except Exception:
-                pass
+            full_path = target_dir / filename
+            try:
+                result = exporter.export_invoice_list(
+                    chunk,
+                    filename=str(full_path),
+                    title=tr("invoices.export_title"),
+                    check_duplicates=False,
+                    mark_exported=True,
+                    force_export=True,
+                    payment_date=payment_date,
+                    ask_payment_date=False,   # dialog redan visad ovan
+                    include_originals=self._include_originals(),
+                    original_first_page_only=(
+                        self._original_first_page_only()
+                    ),
+                )
+            except Exception as exc:
+                failed_note = str(exc)
+                break
+            if not result.get("success"):
+                if result.get("cancelled"):
+                    aborted = True
+                else:
+                    failed_note = "\n".join(
+                        result.get("errors", ["Okänt fel"])
+                    )
+                break
+
+            actual_path = result.get("file_path", str(full_path))
+            made_files.append(actual_path)
+            export_pd = result.get("payment_date", payment_date)
+            total_included_att += int(
+                result.get("attachments_included", 0) or 0
+            )
+            n_missing_att += int(
+                result.get("attachments_missing", 0) or 0
+            )
+
+            # Summor för just DENNA fil (historiken är per fil)
+            c_inv = 0.0
+            c_cred = 0.0
+            for i in chunk:
+                val = _to_float(i.get("total_amount"))
+                if val > 0:
+                    c_inv += val
+                elif val < 0:
+                    c_cred += val
+            self._export_history.record_export(
+                invoices=chunk,
+                file_path=actual_path,
+                total_inv=round(c_inv, 2),
+                total_cred=round(c_cred, 2),
+                att_betala=round(c_inv + c_cred, 2),
+                suppliers=chunk_suppliers,
+                payment_date=export_pd,   # betalningsdatum sparas
+            )
+
+            # Arkivera just den här filens fakturor → de flyttas
+            # till leverantörens fil i data/betalda/ (Historik)
+            archived += self._archive_exported(chunk, export_pd)
+
+        if not made_files:
+            if aborted:
+                self._status("Export avbruten.")
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Export misslyckades",
+                    failed_note or "Okänt fel",
+                )
+            return
 
         self._do_refresh()
+        attach_note = ""
+        if total_included_att:
+            attach_note = tr(
+                "invoices.attachments_note",
+                n=total_included_att,
+            )
+        if n_missing_att:
+            attach_note += (
+                "  " + tr("invoices.attachments_missing", n=n_missing_att)
+            )
+        if n_missing_att:
+            attach_note += (
+                "  " + tr("invoices.attachments_missing", n=n_missing_att)
+            )
+        files_note = (
+            f" i {len(made_files)} filer (max 10/fil)"
+            if len(made_files) > 1 else ""
+        )
         self._status(
-            f"📄  {archived} poster exporterade"
+            f"📄  {archived} poster exporterade och markerade "
+            f"Betald{files_note}"
             f" → {fmt_amount(att_betala)}"
             + (f"  (betaldatum: {export_pd})" if export_pd else "")
+            + attach_note
         )
 
         # ── Resultatdialog: Öppna filen / Öppna mappen / Stäng ─────────
         payment_line = (
             f"  Betalningsdatum: {export_pd}\n" if export_pd else ""
         )
+        missing_line = ""
+        if n_missing_att:
+            missing_line = (
+                "\n\n  "
+                + tr("invoices.attachments_missing", n=n_missing_att)
+            )
+        files_line = (
+            f"Fil: {made_files[0]}"
+            if len(made_files) == 1
+            else "Filer (max 10 fakturor/fil):\n" + "\n".join(
+                f"  • {f}" for f in made_files
+            )
+        )
+        partial_line = (
+            f"\n\n⚠  Exporten avbröts ({failed_note}) — "
+            "övriga poster är INTE exporterade eller "
+            "betald-markerade."
+            if failed_note else ""
+        )
         box = QMessageBox(self)
         box.setWindowTitle("Export klar")
-        box.setIcon(QMessageBox.Icon.Information)
+        box.setIcon(
+            QMessageBox.Icon.Warning
+            if (n_missing_att or partial_line)
+            else QMessageBox.Icon.Information
+        )
         box.setText(
-            f"✅  {archived} poster exporterade och arkiverade.\n\n"
+            f"✅  {archived} poster exporterade och markerade "
+            f"som Betald.\n\n"
             f"  Fakturor  (+)    {fmt_amount(total_invoices)}\n"
             f"  Krediter  (−)    {fmt_amount(total_credits)}\n"
             f"  {'─' * 38}\n"
             f"  ATT BETALA       {fmt_amount(att_betala)}\n"
             f"{payment_line}\n"
-            f"Fil: {actual_path}"
+            f"{files_line}"
+            f"{missing_line}"
+            f"{partial_line}"
         )
         btn_open_file = box.addButton(
             "📄  Öppna filen", QMessageBox.ButtonRole.AcceptRole
@@ -1699,16 +3976,17 @@ class InvoicesView(QWidget):
 
         clicked = box.clickedButton()
         if clicked is btn_open_file:
-            open_file(actual_path)
+            open_file(made_files[0])
         elif clicked is btn_open_folder:
-            open_folder(Path(actual_path).parent)
+            open_folder(Path(made_files[0]).parent)
 
         # Betalningsdatum nollställs implicit — variabeln payment_date
         # existerar bara i denna funktion. Nästa export frågar igen.
         log.info(
-            "Export klar: %d fakturor arkiverade, "
-            "betalningsdatum '%s' nollställt",
+            "Export klar: %d fakturor markerade Betald i %d "
+            "fil(er), betalningsdatum '%s' nollställt",
             archived,
+            len(made_files),
             export_pd,
         )
 
@@ -1758,34 +4036,67 @@ class InvoicesView(QWidget):
         Markerar raden under muspekaren om den inte redan ingår i
         markeringen (befintlig multi-markering bevaras).
         """
-        item = self._table.itemAt(pos)
-        if item is None:
+        index = self._table.indexAt(pos)
+        if not index.isValid():
             return
-        rid = item.data(Qt.ItemDataRole.UserRole)
+        rid = str(index.data(Qt.ItemDataRole.UserRole) or "")
         if not rid:
             return
         if rid not in self._selected_ids():
-            self._table.selectRow(item.row())
+            self._table.selectRow(index.row())
 
         menu = QMenu(self)
-        menu.addAction("✏️  Redigera", self._edit_invoice)
-        menu.addAction("📋  Duplicera", self._duplicate_invoice)
+        menu.addAction(tr("invoices.edit"), self._edit_invoice)
+        menu.addAction(tr("invoices.duplicate"), self._duplicate_invoice)
+        menu.addAction(
+            tr("invoices.copy_payinfo"), self._copy_payment_info
+        )
+        menu.addAction(tr("invoices.ctx_print"), self._print_invoice)
+        menu.addAction(
+            tr("invoices.ctx_open_original"), self._open_original_invoice
+        )
+        menu.addAction(tr("invoices.ctx_rescan"), self._rescan_invoice)
+        menu.addAction(
+            tr("invoices.ctx_manual_match"),
+            self._manual_template_match,
+        )
         menu.addSeparator()
 
-        status_menu = menu.addMenu("📊  Ändra status")
+        status_menu = menu.addMenu(tr("invoices.ctx_status"))
         for s in INVOICE_STATUSES:
-            act = status_menu.addAction(s)
+            act = status_menu.addAction(tr_status(s))
             act.triggered.connect(
                 lambda checked=False, st=s: self._set_status_selected(st)
             )
         menu.addSeparator()
 
         menu.addAction(
-            "✅  Markera betald", self._mark_selected_paid
+            tr("invoices.mark_paid"), self._mark_selected_paid
+        )
+        menu.addAction(
+            tr("invoices.export_selected"),
+            lambda checked=False, r=rid: self._export_with_row(r),
+        )
+        menu.addAction(
+            tr("invoices.ctx_undo_status"), self._undo_last_status
         )
         menu.addSeparator()
-        menu.addAction("🗑  Ta bort", self._delete_invoice)
+        selected_count = len(self._selected_ids())
+        delete_label = (
+            tr("invoices.delete_selected_n", n=selected_count)
+            if selected_count > 1 else tr("invoices.delete")
+        )
+        menu.addAction(delete_label, self._delete_invoice)
         menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    def _export_with_row(self, rid: str) -> None:
+        """Högerklicksexport: kryssa i raden under musen, lägg
+        sedan allt ikryssat i exporten (som knappen)."""
+        rid = str(rid or "")
+        if rid:
+            self._marked_export_ids.add(rid)
+            self._apply_table_selection()
+        self._export_selected_pdf()
 
     # ══════════════════════════════════════════════════════════════════
     #  TEMA
@@ -1802,6 +4113,7 @@ class InvoicesView(QWidget):
         self._current_theme = theme
         t = theme
         dark = self._is_dark()
+        self._invoice_model.set_dark(dark)
 
         text_color = t.get(
             "text_strong", "#f0f6fc" if dark else "#1c2128"
@@ -1830,13 +4142,28 @@ class InvoicesView(QWidget):
         if supplier:
             supplier.setStyleSheet(
                 f"QFrame#SupplierBar{{background-color:{card};"
-                f"border-radius:10px;border:1.5px solid {accent};}}"
+                f"border-radius:{PANEL_RADIUS_PX}px;"
+                f"border:1.5px solid {accent};}}"
             )
         strip = self.findChild(QFrame, "SummaryStrip")
         if strip:
             strip.setStyleSheet(
                 "QFrame#SummaryStrip{background:transparent;border:none;}"
             )
+        # Grupperingspanelerna (filter / åtgärder / export) —
+        # exportpanelen får guldkant så den aldrig missas.
+        for _name in ("FilterBar", "ActionsBar", "ExportBar",
+                      "ExportStickyBar"):
+            _frame = self.findChild(QFrame, _name)
+            if _frame:
+                _edge = gold if _name in (
+                    "ExportBar", "ExportStickyBar"
+                ) else border_c
+                _frame.setStyleSheet(
+                    f"QFrame#{_name}{{background-color:{card};"
+                    f"border-radius:{PANEL_RADIUS_PX}px;"
+                    f"border:1.5px solid {_edge};}}"
+                )
         for obj_name, bg in (
             ("MoneyCard", card),
             ("MoneyCardCredit", card),
@@ -1868,10 +4195,10 @@ class InvoicesView(QWidget):
             f"background-color:{input_bg};"
             f"color:{text_color};"
             f"border:1.5px solid {input_border};"
-            f"border-radius:7px;padding:5px 10px;"
+            f"border-radius:{CONTROL_RADIUS_PX}px;padding:5px 10px;"
             f"font-size:13px;font-weight:700;"
         )
-        focus_border = f"border-color:{accent};"
+        focus_border = f"border:{FOCUS_RING_PX}px solid {accent};"
 
         self._sup_selector.setStyleSheet(
             f"QComboBox{{{input_style}min-height:38px;font-size:14px;}}"
@@ -1880,6 +4207,20 @@ class InvoicesView(QWidget):
         self._search.setStyleSheet(
             f"QLineEdit{{{input_style}}}"
             f"QLineEdit:focus{{{focus_border}}}"
+        )
+        self._density_label.setStyleSheet(
+            f"color:{muted_color};background:transparent;font-weight:700;"
+        )
+        self._lbl_original_export.setStyleSheet(
+            f"color:{muted_color};background:transparent;font-weight:700;"
+        )
+        self._density_selector.setStyleSheet(
+            f"QComboBox{{{input_style}min-height:32px;}}"
+            f"QComboBox:focus{{{focus_border}}}"
+        )
+        self._combo_original_export.setStyleSheet(
+            f"QComboBox{{{input_style}min-height:32px;}}"
+            f"QComboBox:focus{{{focus_border}}}"
         )
         for combo in (
             self._filter_type,
@@ -1902,8 +4243,13 @@ class InvoicesView(QWidget):
             "scrollbar_handle", "#30363d" if dark else "#d0d7de"
         )
 
+        row_padding = (
+            TABLE_CELL_PADDING_COMPACT_PX
+            if self._row_density == "compact"
+            else TABLE_CELL_PADDING_COMFORTABLE_PX
+        )
         self._table.setStyleSheet(f"""
-            QTableWidget {{
+            QTableView {{
                 background-color           : {row_normal};
                 color                      : {text_color};
                 font-weight                : 700;
@@ -1913,8 +4259,13 @@ class InvoicesView(QWidget):
                 selection-background-color : {accent};
                 selection-color            : #ffffff;
                 border                     : 1px solid {border_c};
-                border-radius              : 6px;
-                outline                    : none;
+                border-radius              : {CONTROL_RADIUS_PX}px;
+            }}
+            QTableView:focus {{
+                border : {FOCUS_RING_PX}px solid {accent};
+            }}
+            QTableView::item:focus {{
+                border : 1px solid {accent};
             }}
             QHeaderView::section {{
                 background-color : {header_bg};
@@ -1926,8 +4277,10 @@ class InvoicesView(QWidget):
                 border-right     : 1px solid {border_c};
                 border-bottom    : 1px solid {border_c};
             }}
-            QTableWidget::item {{ padding: 5px 8px; }}
-            QTableWidget::item:selected {{
+            QTableView::item {{
+                padding : {row_padding}px 8px;
+            }}
+            QTableView::item:selected {{
                 background-color : {accent};
                 color            : #ffffff;
             }}
@@ -1955,10 +4308,12 @@ class InvoicesView(QWidget):
             btn_bg = t.get("button_bg", "#21262d")
             btn_hover = t.get("button_hover", "#30363d")
             btn_text = t.get("button_text", "#f0f6fc")
+            disabled_text = t.get("text_disabled", "#9aa4b2")
         else:
             btn_bg = t.get("button_bg", "#6e7781")
             btn_hover = t.get("button_hover", "#57606a")
             btn_text = t.get("button_text", "#ffffff")
+            disabled_text = t.get("text_disabled", "#57606a")
 
         btn_configs = [
             (self._btn_add,         accent,    accent_hover, "#ffffff"),
@@ -1978,7 +4333,7 @@ class InvoicesView(QWidget):
                     color            : {fg};
                     font-weight      : 700;
                     font-size        : 12px;
-                    border-radius    : 7px;
+                    border-radius    : {CONTROL_RADIUS_PX}px;
                     border           : 1px solid {border_c};
                     padding          : 7px 16px;
                     min-height       : 36px;
@@ -1987,13 +4342,16 @@ class InvoicesView(QWidget):
                     background-color : {hover};
                     border-color     : {accent};
                 }}
+                QPushButton:focus {{
+                    border : {FOCUS_RING_PX}px solid {accent};
+                }}
                 QPushButton:pressed {{
                     background-color : {accent};
                     color            : #ffffff;
                 }}
                 QPushButton:disabled {{
                     background-color : {border_c};
-                    color            : #666666;
+                    color            : {disabled_text};
                     border-color     : {border_c};
                 }}
             """)

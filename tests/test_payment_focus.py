@@ -1,0 +1,551 @@
+# -*- coding: utf-8 -*-
+"""
+Tester: fokuspaketet — appen ska bara räkna ihop fakturor
+som ska betalas, så snabbt och säkert som möjligt.
+
+Täcker: OCR-kontrollsiffra (Luhn), dubblettkoll i realtid,
+betalinfotext till urklipp, "Betala idag"-urvalet, beständig
+summarad, ångra statusändring (Ctrl+Z) och Dashboard-flaggan
+för gamla okvittade krediter.
+"""
+from __future__ import annotations
+
+import datetime
+import os
+import sys
+from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+for _d in (str(PROJECT_DIR), str(PROJECT_DIR / "ui"),
+           str(PROJECT_DIR / "plugins")):
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
+
+import pytest  # noqa: E402
+
+from ui import i18n  # noqa: E402
+from ui.dashboard_view import summarize  # noqa: E402
+from ui.invoices_helpers import (  # noqa: E402
+    due_within,
+    find_invoice_duplicate,
+    ocr_luhn_status,
+    payment_info_text,
+)
+
+
+@pytest.fixture(autouse=True)
+def _sv():
+    i18n.set_language("sv", notify=False)
+    yield
+    i18n.set_language("sv", notify=False)
+
+
+def _qapp():
+    from PySide6.QtWidgets import QApplication
+    return QApplication.instance() or QApplication([])
+
+
+# ── OCR-kontrollsiffra (Luhn) ────────────────────────────────────────
+
+def test_ocr_luhn_known_numbers():
+    # Klassiskt Luhn-exempel (Wikipedia) + en svensk-lik OCR.
+    assert ocr_luhn_status("79927398713") == "ok"
+    assert ocr_luhn_status("79927398710") == "bad_check"
+    assert ocr_luhn_status("24465149") in ("ok", "bad_check")  # ingen krasch
+
+
+def test_ocr_luhn_constructed_and_tampered():
+    payload = "9911001"
+    full = next(
+        payload + str(d) for d in range(10)
+        if ocr_luhn_status(payload + str(d)) == "ok"
+    )
+    assert len(full) == 8
+    tampered = full[:-1] + str((int(full[-1]) + 1) % 10)
+    assert ocr_luhn_status(tampered) == "bad_check"
+
+
+def test_ocr_luhn_uncheckable_inputs():
+    assert ocr_luhn_status("") == "empty"
+    assert ocr_luhn_status(None) == "empty"
+    assert ocr_luhn_status("1") == "invalid_format"
+    assert ocr_luhn_status("REF-123") == "invalid_format"  # referens, ej OCR
+
+
+def test_invoice_validation_allows_missing_optional_ocr():
+    from ui.core.calculator import validate_invoice
+
+    warnings = validate_invoice({
+        "supplier": "Pilkington",
+        "invoice_number": "F-100",
+        "due_date": "2099-12-31",
+        "total_amount": 100.0,
+        "ocr": "",
+    })
+    assert not any("ocr" in warning.casefold() for warning in warnings)
+
+
+# ── Dubblettkoll ─────────────────────────────────────────────────────
+
+ROWS = [
+    {"id": "9", "supplier": "Pilkington", "invoice_number": "9901"},
+    {"id": "10", "supplier": "Direktglas AB", "invoice_number": "DG-1"},
+]
+
+
+def test_find_invoice_duplicate_case_insensitive():
+    hit = find_invoice_duplicate(ROWS, " 9901 ", "pilkington")
+    assert hit is not None and hit["id"] == "9"
+    assert find_invoice_duplicate(ROWS, "9902", "Pilkington") is None
+    assert find_invoice_duplicate(ROWS, "9901", "Direktglas AB") is None
+
+
+def test_find_invoice_duplicate_excludes_self_when_editing():
+    assert find_invoice_duplicate(
+        ROWS, "9901", "Pilkington", exclude_id="9"
+    ) is None
+    assert find_invoice_duplicate(
+        ROWS, "9901", "Pilkington", exclude_id="10"
+    ) is not None
+
+
+# ── Betalinfo till urklipp ───────────────────────────────────────────
+
+def test_payment_info_text_bankgiro_ocr_amount():
+    inv = {"supplier": "Pilkington", "invoice_number": "9901",
+           "ocr": "99110015", "due_date": "2026-09-11",
+           "total_amount": 1250.0}
+    sup = {"name": "Pilkington", "bg": "5050-1055", "pg": ""}
+    text = payment_info_text(inv, sup).replace("\u2009", " ")
+    assert "Bankgiro: 5050-1055" in text
+    assert "OCR: 99110015" in text
+    assert "1 250,00 SEK" in text
+    assert "Plusgiro" not in text
+
+
+def test_payment_info_text_reference_fallback():
+    inv = {"supplier": "Direktglas AB", "invoice_number": "DG-9",
+           "ocr": "", "reference": "Kund 114", "total_amount": -500.0}
+    text = payment_info_text(inv, None)
+    assert "Referens: Kund 114" in text
+    assert "OCR:" not in text
+
+
+# ── Betala idag-urvalet ──────────────────────────────────────────────
+
+def test_due_within_includes_overdue_today_tomorrow():
+    today = datetime.date(2026, 9, 8)
+
+    def inv(rid, due, status="Obetald", amount=100.0):
+        return {"id": rid, "due_date": due, "status": status,
+                "total_amount": amount}
+
+    rows = [
+        inv("a", "2026-09-01"),                    # förfallen → med
+        inv("b", "2026-09-08"),                    # idag → med
+        inv("c", "2026-09-09"),                    # i morgon → med
+        inv("d", "2026-09-10"),                    # +2 dagar → ute
+        inv("e", "2026-09-08", status="Betald"),   # betald → ute
+        inv("f", "2026-09-05", amount=-500.0),     # kredit → med
+        inv("g", ""),                              # utan datum → ute
+    ]
+    hits = due_within(rows, today, horizon_days=1)
+    assert [i["id"] for i in hits] == ["a", "f", "b", "c"]  # sorterat
+
+
+# ── Dashboard: gamla okvittade krediter ──────────────────────────────
+
+def test_summarize_flags_stale_credits_only():
+    today = datetime.date(2026, 9, 8)
+    rows = [
+        {"id": "1", "supplier": "Pilkington", "invoice_type": "Kreditfaktura",
+         "invoice_number": "K-1", "due_date": "2026-07-01",
+         "total_amount": -500.0, "status": "Obetald"},       # gammal → flagga
+        {"id": "2", "supplier": "Pilkington", "invoice_type": "Kreditfaktura",
+         "invoice_number": "K-2", "due_date": "2026-09-05",
+         "total_amount": -300.0, "status": "Obetald"},       # färsk → ej
+        {"id": "3", "supplier": "Pilkington", "invoice_type": "Kreditfaktura",
+         "invoice_number": "K-3", "due_date": "2026-06-01",
+         "total_amount": -900.0, "status": "Betald"},        # betald → ej
+        {"id": "4", "supplier": "Pilkington", "invoice_type": "Faktura",
+         "invoice_number": "F-4", "due_date": "2026-06-01",
+         "total_amount": 2000.0, "status": "Obetald"},       # vanlig → ej
+    ]
+    stats = summarize(rows, today)
+    assert [i["id"] for i in stats["stale_credits"]] == ["1"]
+    assert stats["stale_credits_sum"] == 500.0
+
+
+# ── Vyn: Betala idag + ångra + dialogvarningar ───────────────────────
+
+class _Store:
+    def on_change(self, _cb):
+        pass
+
+
+def _fake_app(tmp_path, invoices, suppliers=None):
+    class FakeApp:
+        settings = {"db_path": str(tmp_path)}
+        invoices_store = _Store()
+        suppliers_store = _Store()
+        session_due_date = None
+        session_due_date_str = ""
+        pdf_exporter = None
+
+        def get_invoices(self):
+            return [dict(i) for i in invoices]
+
+        def get_suppliers(self):
+            return suppliers or [
+                {"id": "s1", "name": "Pilkington", "bg": "5050-1055"}
+            ]
+
+        def get_setting(self, key, default=None):
+            return default
+
+        def set_setting(self, key, value):
+            pass
+
+        def update_invoice(self, rid, data):
+            for inv in invoices:
+                if inv["id"] == rid:
+                    inv.update(data)
+                    return inv
+            return None
+
+    return FakeApp()
+
+
+def _mk_invoice(rid, due, nr=None, amount=100.0, status="Obetald"):
+    return {"id": rid, "supplier": "Pilkington",
+            "invoice_number": nr or f"F-{rid}",
+            "invoice_type": "Faktura", "date": "2026-09-01",
+            "due_date": due, "total_amount": amount,
+            "ocr": "", "status": status}
+
+
+def test_pay_today_selects_due_only(tmp_path, monkeypatch):
+    _qapp()
+    from ui.invoices_view import InvoicesView
+
+    today = datetime.date.today()
+    iso = (today + datetime.timedelta(days=0)).isoformat()
+    tomorrow = (today + datetime.timedelta(days=1)).isoformat()
+    later = (today + datetime.timedelta(days=5)).isoformat()
+    overdue = (today - datetime.timedelta(days=3)).isoformat()
+    invs = [
+        _mk_invoice("1", iso), _mk_invoice("2", tomorrow),
+        _mk_invoice("3", later), _mk_invoice("4", overdue),
+        _mk_invoice("5", iso, status="Betald"),
+    ]
+    view = InvoicesView(_fake_app(tmp_path, invs))
+    opened = []
+    monkeypatch.setattr(
+        view, "_show_combine_dialog", lambda: opened.append(True)
+    )
+    view._pay_today()
+    picked = {i["id"] for i in view._selected_invoices()}
+    assert picked == {"1", "2", "4"}
+    assert opened == [True]  # ≥2 träffar → sammanställningen öppnas
+    # Den beständiga summaraden visar markeringen
+    assert "Markerat: 3 st" in view._lbl_selection.text()
+
+
+def test_undo_restores_status_and_payment_date(tmp_path):
+    _qapp()
+    from PySide6.QtCore import QItemSelectionModel
+
+    from ui.invoices_view import InvoicesView
+
+    invs = [_mk_invoice("1", "2026-09-11"), _mk_invoice("2", "2026-09-12"),
+            _mk_invoice("3", "2026-09-13")]
+    app = _fake_app(tmp_path, invs)
+    view = InvoicesView(app)
+    model = view._table.selectionModel()
+    for row in (0, 1):
+        idx = view._table.model().index(row, 0)
+        model.select(
+            idx,
+            QItemSelectionModel.SelectionFlag.Select
+            | QItemSelectionModel.SelectionFlag.Rows,
+        )
+    view._set_status_selected("Betald")
+    state = {i["id"]: i["status"] for i in invs}
+    assert state == {"1": "Betald", "2": "Betald", "3": "Obetald"}
+
+    view._undo_last_status()
+    state = {i["id"]: i["status"] for i in invs}
+    assert state == {"1": "Obetald", "2": "Obetald", "3": "Obetald"}
+    assert invs[0]["payment_date"] == ""
+
+    # Tom stack → ingen krasch, inget ändras
+    view._undo_last_status()
+    assert {i["id"]: i["status"] for i in invs}["1"] == "Obetald"
+
+
+def test_dialog_live_warnings_luhn_and_duplicate(tmp_path):
+    _qapp()
+    from PySide6.QtWidgets import QLabel
+    from ui.invoices_helpers import InvoiceDialog
+
+    app = _fake_app(
+        tmp_path,
+        [{"id": "9", "supplier": "Pilkington", "invoice_number": "9901",
+          "total_amount": 100.0, "status": "Obetald", "due_date": ""}],
+    )
+    dlg = InvoiceDialog(
+        parent=None, supplier_name="Pilkington",
+        supplier_names=["Pilkington"], app_core=app,
+    )
+    dlg.show()
+
+    labels = [label.text() for label in dlg.findChildren(QLabel)]
+    assert i18n.tr("invdialog.ocr") in labels
+    assert "valfritt" in i18n.tr("invdialog.ocr").casefold()
+    assert "valfritt" in i18n.tr("tmpl.field_ocr").casefold()
+    assert not any("OCR saknas" in text for text in labels)
+    assert not dlg._warn_ocr_check.isVisible()
+
+    dlg.f_ocr.setText("79927398710")   # fel kontrollsiffra
+    assert dlg._warn_ocr_check.isVisible()
+    dlg.f_ocr.setText("79927398713")   # rätt kontrollsiffra
+    assert not dlg._warn_ocr_check.isVisible()
+
+    dlg.f_inv_nr.setText("9901")       # finns redan för leverantören
+    assert dlg._warn_dup.isVisible()
+    dlg.f_inv_nr.setText("9902")
+    assert not dlg._warn_dup.isVisible()
+    dlg.close()
+
+
+def test_possible_duplicate_exact_normalized_number():
+    """Samma nummer i annan separatorform är en möjlig dubblett."""
+    from ui.invoices_helpers import find_possible_duplicate
+
+    rows = [{"id": "1", "supplier": "Pilkington",
+             "invoice_number": "2026-144", "total_amount": 100.0,
+             "date": "2026-09-01"}]
+    hit = find_possible_duplicate(rows, {
+        "supplier": "Pilkington", "invoice_number": "2026 144",
+        "total_amount": 100.0, "date": "2026-09-01",
+    })
+    assert hit is not None and hit["kind"] == "exact-number"
+
+
+def test_possible_duplicate_similar_number_same_amount_date():
+    """Inskannad igen med en siffra fel: nästan samma nummer +
+    samma belopp + samma datum → varning."""
+    from ui.invoices_helpers import find_possible_duplicate
+
+    rows = [{"id": "1", "supplier": "Pilkington",
+             "invoice_number": "9911", "total_amount": 1250.0,
+             "date": "2026-09-01"}]
+    hit = find_possible_duplicate(rows, {
+        "supplier": "Pilkington", "invoice_number": "9912",
+        "total_amount": 1250.0, "date": "2026-09-01",
+    })
+    assert hit is not None and hit["kind"] == "similar-number"
+
+
+def test_possible_duplicate_never_flags_recurring_or_others():
+    """Samma belopp/datum räcker aldrig ensamt (månadsfaktura),
+    och annan leverantör/annat belopp flaggas inte."""
+    from ui.invoices_helpers import find_possible_duplicate
+
+    rows = [{"id": "1", "supplier": "Pilkington",
+             "invoice_number": "9911", "total_amount": 1250.0,
+             "date": "2026-09-01"}]
+    assert find_possible_duplicate(rows, {
+        "supplier": "Pilkington", "invoice_number": "8811",
+        "total_amount": 1250.0, "date": "2026-09-01",
+    }) is None
+    assert find_possible_duplicate(rows, {
+        "supplier": "Pilkington", "invoice_number": "9912",
+        "total_amount": 999.0, "date": "2026-09-01",
+    }) is None
+    assert find_possible_duplicate(rows, {
+        "supplier": "Direktglas", "invoice_number": "9912",
+        "total_amount": 1250.0, "date": "2026-09-01",
+    }) is None
+
+
+def test_invoice_print_prints_original(tmp_path, monkeypatch):
+    """Fakturor-vyns Skriv ut (högerklicksmenyn): markerad
+    fakturas original (attachment-fältet) skrivs ut via
+    skrivardialogen och bekräftas i statusraden (skrivaren
+    är en PDF-fil här; dialogen är fejkad så inget fönster
+    öppnas)."""
+    _qapp()
+    import fitz
+    import PySide6.QtPrintSupport as printsupport
+
+    from ui.invoices_view import InvoicesView
+
+    pdf = tmp_path / "original.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 72), "Faktura F-1")
+    doc.save(pdf)
+    doc.close()
+
+    inv = _mk_invoice("1", "2026-09-11")
+    inv["attachment"] = str(pdf)
+    view = InvoicesView(_fake_app(tmp_path, [inv]))
+    captured: list[str] = []
+    monkeypatch.setattr(
+        view, "_status",
+        lambda msg, timeout=5000: captured.append(msg),
+    )
+    monkeypatch.setattr(view, "_selected_invoice", lambda: inv)
+
+    out = tmp_path / "utskrift.pdf"
+    real_printer = printsupport.QPrinter
+
+    def _pdf_printer(*_args, **_kwargs):
+        printer = real_printer(real_printer.PrinterMode.HighResolution)
+        printer.setOutputFormat(real_printer.OutputFormat.PdfFormat)
+        printer.setOutputFileName(str(out))
+        return printer
+
+    _pdf_printer.PrinterMode = real_printer.PrinterMode
+
+    class _Dlg:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def exec(self):
+            return 1
+
+    monkeypatch.setattr(printsupport, "QPrinter", _pdf_printer)
+    monkeypatch.setattr(printsupport, "QPrintDialog", _Dlg)
+    try:
+        view._print_invoice()
+        assert any(
+            "skickad till skrivaren" in m for m in captured
+        ), captured
+        assert out.exists() and out.stat().st_size > 1000
+    finally:
+        view.close()
+
+
+# ── Skanna om faktura (högerklicksmenyn) ─────────────────────────────
+
+def _stub_scan_module(monkeypatch, parsed):
+    import ui.scan_import_view as siv
+
+    class _SI:
+        @staticmethod
+        def extract_text(path):
+            return ("stubtext", "test")
+
+        @staticmethod
+        def parse_invoice_file(path, text, suppliers, templates=None):
+            return dict(parsed)
+
+        @staticmethod
+        def load_templates(path):
+            return {}
+
+    monkeypatch.setattr(siv, "_scan_module", lambda: _SI())
+
+
+def _rescan_setup(tmp_path, monkeypatch, *, amount, answer):
+    _qapp()
+    import ui.invoices_view as iv
+
+    from ui.invoices_view import InvoicesView
+
+    original = tmp_path / "original.pdf"
+    original.write_bytes(b"%PDF-fake")
+    inv = _mk_invoice("1", "2026-10-01", amount=amount)
+    inv["attachment"] = str(original)
+    app = _fake_app(tmp_path, [inv])
+    view = InvoicesView(app)
+    captured: list[str] = []
+    monkeypatch.setattr(
+        view, "_status",
+        lambda msg, timeout=5000: captured.append(msg),
+    )
+    monkeypatch.setattr(view, "_selected_invoice", lambda: inv)
+    monkeypatch.setattr(view, "_do_refresh", lambda: None)
+    asked: list[bool] = []
+
+    class _Msg:
+        StandardButton = iv.QMessageBox.StandardButton
+
+        @staticmethod
+        def question(*_args, **_kwargs):
+            asked.append(True)
+            return answer
+
+    monkeypatch.setattr(iv, "QMessageBox", _Msg)
+    return view, app, inv, captured, asked
+
+
+def _rescan_parsed(inv, total=10378.0):
+    return {
+        "supplier": "Pilkington",
+        "invoice_number": inv["invoice_number"],
+        "date": "2026-09-01", "due_date": "2026-10-01",
+        "total_amount": total, "template": "Pilkington", "missing": [],
+    }
+
+
+def test_invoice_rescan_applies_confirmed_changes(tmp_path, monkeypatch):
+    """Omskanning som läser ett nytt belopp: användaren ser
+    gammalt → nytt och fakturan uppdateras först vid Ja."""
+    from PySide6.QtWidgets import QMessageBox
+
+    view, app, inv, captured, asked = _rescan_setup(
+        tmp_path, monkeypatch, amount=70117.0,
+        answer=QMessageBox.StandardButton.Yes,
+    )
+    _stub_scan_module(monkeypatch, _rescan_parsed(inv))
+    try:
+        view._rescan_invoice()
+        assert asked
+        assert inv["total_amount"] == 10378.0
+        assert any(
+            "uppdaterad efter omskanning" in m for m in captured
+        ), captured
+    finally:
+        view.close()
+
+
+def test_invoice_rescan_declined_keeps_values(tmp_path, monkeypatch):
+    """Svarar användaren Nej på avvikelsen ändras ingenting."""
+    from PySide6.QtWidgets import QMessageBox
+
+    view, app, inv, captured, asked = _rescan_setup(
+        tmp_path, monkeypatch, amount=70117.0,
+        answer=QMessageBox.StandardButton.No,
+    )
+    _stub_scan_module(monkeypatch, _rescan_parsed(inv))
+    try:
+        view._rescan_invoice()
+        assert asked
+        assert inv["total_amount"] == 70117.0
+        assert any("avbruten" in m for m in captured), captured
+    finally:
+        view.close()
+
+
+def test_invoice_rescan_unchanged_asks_nothing(tmp_path, monkeypatch):
+    """Stämmer omskanningen med registret visas ingen fråga —
+    bara en bekräftelse i statusraden."""
+    from PySide6.QtWidgets import QMessageBox
+
+    view, app, inv, captured, asked = _rescan_setup(
+        tmp_path, monkeypatch, amount=10378.0,
+        answer=QMessageBox.StandardButton.Yes,
+    )
+    _stub_scan_module(monkeypatch, _rescan_parsed(inv))
+    try:
+        view._rescan_invoice()
+        assert not asked
+        assert inv["total_amount"] == 10378.0
+        assert any("samma värden" in m for m in captured), captured
+    finally:
+        view.close()

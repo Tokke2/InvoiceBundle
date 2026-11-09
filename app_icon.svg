@@ -1,24 +1,26 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#0E3444"/>
-      <stop offset="1" stop-color="#08121C"/>
-    </linearGradient>
-    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#F0C24A"/>
-      <stop offset="1" stop-color="#D4A017"/>
-    </linearGradient>
-  </defs>
-  <rect width="1024" height="1024" rx="226" fill="url(#bg)"/>
-  <rect x="200" y="200" width="624" height="130" rx="36" fill="#F8F4EC"/>
-  <rect x="248" y="236" width="312" height="22" rx="8" fill="#BCB2A2"/>
-  <rect x="248" y="274" width="182" height="18" rx="8" fill="#CEC6B8"/>
-  <rect x="268" y="368" width="488" height="130" rx="36" fill="#F8F4EC"/>
-  <rect x="308" y="404" width="252" height="22" rx="8" fill="#BCB2A2"/>
-  <rect x="308" y="442" width="162" height="18" rx="8" fill="#CEC6B8"/>
-  <rect x="336" y="536" width="352" height="130" rx="36" fill="#E2DACC"/>
-  <rect x="372" y="572" width="188" height="22" rx="8" fill="#C4BAA8"/>
-  <rect x="372" y="608" width="118" height="16" rx="8" fill="#C4BAA8"/>
-  <rect x="156" y="712" width="712" height="176" rx="40" fill="url(#gold)"/>
-  <text x="512" y="828" text-anchor="middle" font-family="DejaVu Sans, Segoe UI, sans-serif" font-size="108" font-weight="700" fill="#1C1406">kr</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Fakturabunten: en bunt fakturor med guldband och bock.
+       Reservikon (vektor) — huvudikonerna är app_icon.png/.ico. -->
+  <rect x="8" y="8" width="496" height="496" rx="96" fill="#16305a"/>
+  <!-- bakre ark -->
+  <g fill="#dfe9f7">
+    <rect x="96" y="128" width="216" height="272" rx="18" transform="rotate(-8 204 264)"/>
+    <rect x="128" y="112" width="216" height="272" rx="18" transform="rotate(-4 236 248)"/>
+  </g>
+  <!-- främre faktura -->
+  <g>
+    <path d="M176 104 h168 l56 56 v216 a24 24 0 0 1 -24 24 H176 a24 24 0 0 1 -24 -24 V128 a24 24 0 0 1 24 -24 z" fill="#ffffff"/>
+    <path d="M344 104 l56 56 h-56 z" fill="#b9cde8"/>
+    <g fill="#8fa9cc">
+      <rect x="188" y="196" width="176" height="20" rx="10"/>
+      <rect x="188" y="240" width="192" height="20" rx="10"/>
+      <rect x="188" y="284" width="192" height="20" rx="10"/>
+      <rect x="188" y="328" width="112" height="20" rx="10"/>
+    </g>
+  </g>
+  <!-- guldband runt bunten -->
+  <path d="M104 316 L424 276 L424 348 L104 388 Z" fill="#e8a91c"/>
+  <!-- bock-badge -->
+  <circle cx="384" cy="368" r="62" fill="#f2b705" stroke="#12315e" stroke-width="10"/>
+  <path d="M348 368 l26 26 l46 -50" fill="none" stroke="#ffffff" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

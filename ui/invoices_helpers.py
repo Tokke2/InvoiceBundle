@@ -49,6 +49,7 @@ import logging
 import math
 import os
 import platform
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -59,6 +60,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QTableWidget,
     QTableWidgetItem,
+    QTableView,
     QHeaderView,
     QPushButton,
     QLineEdit,
@@ -78,13 +80,44 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QCompleter,
     QApplication,
+    QStyledItemDelegate,
 )
 from PySide6.QtCore import Qt, QTimer, QDate, Signal, QUrl, QObject, QEvent
 from PySide6.QtGui import (
     QFont, QColor, QCursor, QBrush, QDesktopServices, QWheelEvent,
+    QPalette,
 )
 
+try:
+    from ui.typography import (
+        font_scale, make_tabular_font, set_item_font,
+    )
+except ImportError:
+    from typography import (  # type: ignore[no-redef]
+        font_scale, make_tabular_font, set_item_font,
+    )
+
 log = logging.getLogger("InvoicesHelpers")
+
+try:
+    from ui.design import fit_dialog_to_screen
+except Exception:
+    try:
+        from design import fit_dialog_to_screen  # type: ignore[no-redef]
+    except Exception:
+        fit_dialog_to_screen = None  # type: ignore[assignment]
+
+try:
+    from ui.i18n import tr, tr_status
+except Exception:  # pragma: no cover - fristående körning
+    try:
+        from i18n import tr, tr_status  # type: ignore[no-redef]
+    except Exception:
+        def tr(key: str, **_f: object) -> str:  # type: ignore[no-redef]
+            return key
+
+        def tr_status(v: str) -> str:  # type: ignore[no-redef]
+            return str(v)
 
 COPYRIGHT_YEAR: int = datetime.date.today().year
 
@@ -128,6 +161,30 @@ def open_file(path: str | Path) -> None:
                 subprocess.Popen(["xdg-open", str(p)])
         except Exception as exc:
             log.error("open_file fallback-fel: %s", exc)
+
+
+def print_file(path: str | Path) -> bool:
+    """Skriver ut en fil via OS:ets standardväg. True om det gick iväg.
+
+    Windows: print-verbet (standardprogrammets utskrift),
+    macOS/Linux: lpr/lp. Kastar aldrig — utskrift är ett tillägg,
+    aldrig ett krav för att exporten ska räknas som lyckad.
+    """
+    p = Path(path)
+    if not p.exists():
+        log.warning("print_file: filen hittades inte: %s", p)
+        return False
+    try:
+        if CURRENT_PLATFORM == "windows":
+            os.startfile(str(p), "print")  # type: ignore[attr-defined]
+        elif CURRENT_PLATFORM == "macos":
+            subprocess.Popen(["lpr", str(p)])
+        else:
+            subprocess.Popen(["lp", str(p)])
+        return True
+    except Exception as exc:
+        log.warning("print_file %s: %s", p, exc)
+        return False
 
 
 def open_folder(path: str | Path) -> None:
@@ -196,6 +253,360 @@ def fmt_amount(value: float, currency: str = "SEK") -> str:
     s = f"{abs(value):,.2f}".replace(",", "\u2009").replace(".", ",")
     suffix = f" {currency}" if currency else ""
     return f"{prefix}{s}{suffix}"
+
+
+def combine_invoices(rows: list[dict]) -> dict:
+    """
+    Slår ihop markerade fakturor till en sammanfattning.
+
+    Returnerar summor (fakturor +, krediter −, netto) samt det
+    TIDIGASTE förfallodatumet bland rader som har ett giltigt datum —
+    tanken: betalar man allt i ett svep gör man det senast när den
+    första fakturan förfaller. Ogiltiga/saknade datum räknas i
+    ``missing_due`` men stoppar aldrig sammanslagningen.
+    """
+    import datetime as _dt
+
+    total_invoices = 0.0
+    total_credits = 0.0
+    earliest: _dt.date | None = None
+    earliest_row: dict | None = None
+    missing_due = 0
+    suppliers: set[str] = set()
+
+    for row in rows or []:
+        val = _to_float(row.get("total_amount"))
+        if val >= 0:
+            total_invoices += val
+        else:
+            total_credits += val
+        sup = str(row.get("supplier", "")).strip()
+        if sup:
+            suppliers.add(sup)
+        raw_due = str(row.get("due_date", "") or "").strip()[:10]
+        parsed: _dt.date | None = None
+        if raw_due:
+            try:
+                parsed = _dt.date.fromisoformat(raw_due)
+            except ValueError:
+                parsed = None
+        if parsed is None:
+            missing_due += 1
+        elif earliest is None or parsed < earliest:
+            earliest = parsed
+            earliest_row = row
+
+    return {
+        "count": len(rows or []),
+        "n_invoices": sum(
+            1 for r in rows or [] if _to_float(r.get("total_amount")) >= 0
+        ),
+        "n_credits": sum(
+            1 for r in rows or [] if _to_float(r.get("total_amount")) < 0
+        ),
+        "total_invoices": round(total_invoices, 2),
+        "total_credits": round(total_credits, 2),
+        "net": round(total_invoices + total_credits, 2),
+        "earliest_due": earliest.isoformat() if earliest else "",
+        "earliest_invoice": earliest_row,
+        "missing_due": missing_due,
+        "suppliers": sorted(suppliers),
+    }
+
+
+#: Statusar som INTE ska betalas (samma regel som vyerna).
+_PAID_LIKE_STATUSES: tuple[str, ...] = ("Betald", "Makulerad", "Arkiverad")
+
+
+def ocr_luhn_status(ocr: Any) -> str:
+    """
+    Kontrollerar OCR-numrets kontrollsiffra (Luhn/mod-10).
+
+    Returnerar:
+      "empty"          – inget ifyllt
+      "invalid_format" – inte bara siffror (t.ex. en referens) → ingen
+                         kontroll möjlig, ingen varning visas
+      "ok"             – kontrollsiffran stämmer
+      "bad_check"      – siffror, men kontrollsiffran stämmer INTE
+                         (troligen en felskriven siffra)
+    """
+    text = str(ocr or "").replace(" ", "").strip()
+    if not text:
+        return "empty"
+    if not text.isdigit() or len(text) < 2:
+        return "invalid_format"
+    total = 0
+    for idx, ch in enumerate(reversed(text)):
+        d = ord(ch) - 48
+        if idx % 2 == 1:  # varannan siffra (från höger) dubblas
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return "ok" if total % 10 == 0 else "bad_check"
+
+
+def find_invoice_duplicate(
+    invoices: list[dict],
+    invoice_number: str,
+    supplier: str,
+    exclude_id: str = "",
+) -> dict | None:
+    """
+    Returnerar befintlig faktura med samma nummer+leverantör
+    (skiftläges- och mellanslags-okänsligt), annars None.
+    *exclude_id* används vid redigering så fakturan inte
+    matchar sig själv.
+    """
+    nr = str(invoice_number or "").strip().casefold()
+    sup = str(supplier or "").strip().casefold()
+    if not nr or not sup:
+        return None
+    for inv in invoices:
+        if exclude_id and str(inv.get("id", "")) == str(exclude_id):
+            continue
+        if (
+            str(inv.get("invoice_number", "")).strip().casefold() == nr
+            and str(inv.get("supplier", "")).strip().casefold() == sup
+        ):
+            return inv
+    return None
+
+
+def _invoice_number_key(value) -> str:
+    """Jämförelsenyckel för fakturanummer: gemener, inga
+    separatorer/mellanslag, OCR-lookalikes vikt (O→0, I/L→1,
+    S→5, B→8) när siffror förekommer. "2026-144", "2026144"
+    och "2026 144" är samma nyckel."""
+    raw = str(value or "").strip().casefold()
+    key = "".join(ch for ch in raw if ch.isalnum())
+    if any(ch.isdigit() for ch in key):
+        key = (key.replace("o", "0").replace("i", "1")
+               .replace("l", "1").replace("s", "5")
+               .replace("b", "8"))
+    return key
+
+
+def _levenshtein(a: str, b: str) -> int:
+    """Redigeringsavstånd (litet DP — numren är korta)."""
+    if a == b:
+        return 0
+    if not a or not b:
+        return max(len(a), len(b))
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        cur = [i]
+        for j, cb in enumerate(b, start=1):
+            cur.append(min(
+                prev[j] + 1, cur[j - 1] + 1,
+                prev[j - 1] + (0 if ca == cb else 1),
+            ))
+        prev = cur
+    return prev[-1]
+
+
+def invoice_numbers_similar(a, b) -> bool:
+    """Nästan samma fakturanummer? Samma nyckel, den ena en
+    del av den andra (borttappad siffra), eller redigerings-
+    avstånd ≤1 (≤2 för långa nummer). Minst 4 tecken krävs —
+    korta nummer liknar allt."""
+    ka, kb = _invoice_number_key(a), _invoice_number_key(b)
+    if not ka or not kb or min(len(ka), len(kb)) < 4:
+        return False
+    if ka == kb:
+        return True
+    if ka in kb or kb in ka:
+        return abs(len(ka) - len(kb)) <= 2
+    limit = 2 if max(len(ka), len(kb)) >= 8 else 1
+    return _levenshtein(ka, kb) <= limit
+
+
+def _supplier_key(value) -> str:
+    raw = str(value or "").strip().casefold()
+    return "".join(ch for ch in raw if ch.isalnum())
+
+
+def find_possible_duplicate(
+    invoices: list[dict],
+    candidate: dict,
+    exclude_id: str = "",
+) -> dict | None:
+    """
+    Möjlig dubblett av candidate i invoices → {invoice, kind,
+    reason} eller None. Två styrkor:
+
+    • "exact-number": samma leverantör + samma fakturanummer
+      efter normalisering (separatorer/skiftläge/OCR-lookalikes
+      får inte dölja en dubblett).
+    • "similar-number": samma leverantör + samma belopp +
+      samma faktura- eller förfallodatum + nästan samma nummer
+      (t.ex. en OCR-siffra fel vid inskanning igen).
+
+    Bara samma belopp/datum utan likt nummer flaggas ALDRIG —
+    månadsfakturor med samma belopp är inte dubbletter. Inget
+    tas bort och inget registreras av den här kontrollen; den
+    bara varnar så användaren får avgöra.
+    """
+    sup = _supplier_key(candidate.get("supplier", ""))
+    nr = str(candidate.get("invoice_number", "") or "")
+    if not sup or not _invoice_number_key(nr):
+        return None
+    amount = _to_float(candidate.get("total_amount"))
+    cand_dates = {
+        str(candidate.get("date", "") or "")[:10],
+        str(candidate.get("due_date", "") or "")[:10],
+    } - {""}
+    similar_hit: dict | None = None
+    for inv in invoices or []:
+        if exclude_id and str(inv.get("id", "")) == str(exclude_id):
+            continue
+        if _supplier_key(inv.get("supplier", "")) != sup:
+            continue
+        inv_nr = str(inv.get("invoice_number", "") or "")
+        if _invoice_number_key(inv_nr) == _invoice_number_key(nr):
+            return {
+                "invoice": inv, "kind": "exact-number",
+                "reason": "samma fakturanummer",
+            }
+        if similar_hit is None and amount > 0:
+            inv_dates = {
+                str(inv.get("date", "") or "")[:10],
+                str(inv.get("due_date", "") or "")[:10],
+            } - {""}
+            if (
+                abs(_to_float(inv.get("total_amount")) - amount) <= 0.01
+                and cand_dates & inv_dates
+                and invoice_numbers_similar(inv_nr, nr)
+            ):
+                similar_hit = {
+                    "invoice": inv, "kind": "similar-number",
+                    "reason": (
+                        "nästan samma fakturanummer, samma belopp "
+                        "och datum"
+                    ),
+                }
+    return similar_hit
+
+
+def payment_info_text(invoice: dict, supplier: dict | None) -> str:
+    """
+    Betalinfo för en faktura som färdig text till urklipp —
+    exakt det som knappas in i internetbanken.
+    """
+    sup = supplier or {}
+    lines = [tr("payinfo.title")]
+    name = str(invoice.get("supplier", "") or sup.get("name", "")).strip()
+    if name:
+        lines.append(f"{tr('payinfo.supplier')}: {name}")
+    for key, label_key in (
+        ("bg", "payinfo.bankgiro"),
+        ("pg", "payinfo.plusgiro"),
+        ("iban", "payinfo.iban"),
+    ):
+        val = str(sup.get(key, "") or "").strip()
+        if val:
+            lines.append(f"{tr(label_key)}: {val}")
+    nr = str(invoice.get("invoice_number", "") or "").strip()
+    if nr:
+        lines.append(f"{tr('payinfo.invoice_number')}: {nr}")
+    ocr = str(invoice.get("ocr", "") or "").strip()
+    ref = str(invoice.get("reference", "") or "").strip()
+    if ocr:
+        lines.append(f"{tr('payinfo.ocr')}: {ocr}")
+    elif ref:
+        lines.append(f"{tr('payinfo.reference')}: {ref}")
+    due = str(invoice.get("due_date", "") or "").strip()
+    if due:
+        lines.append(f"{tr('payinfo.due')}: {due[:10]}")
+    amount = _to_float(invoice.get("total_amount"))
+    lines.append(f"{tr('payinfo.amount')}: {fmt_amount(amount)}")
+    return "\n".join(lines)
+
+
+#: Snabbfilterlägen för förfallofönster i Fakturor-vyn.
+DUE_WINDOW_MODES: tuple[str, ...] = ("overdue", "today", "week")
+
+
+def due_window_filter(
+    rows: list[dict],
+    mode: str,
+    today: datetime.date,
+) -> list[dict]:
+    """
+    Snabbfilter på förfallodatum (bara obetalda rader):
+
+      "overdue" – förfallna (datum passerat eller status Förfallen)
+      "today"   – förfaller idag eller i morgon
+      "week"    – förfaller inom 7 dagar (idag inräknad)
+
+    Rader utan giltigt förfallodatum faller bort i alla lägen.
+    """
+    if mode not in DUE_WINDOW_MODES:
+        return list(rows)
+    out: list[dict] = []
+    for r in rows:
+        if str(r.get("status", "")) in _PAID_LIKE_STATUSES:
+            continue
+        try:
+            due = datetime.date.fromisoformat(
+                str(r.get("due_date", "") or "")[:10]
+            )
+        except ValueError:
+            continue
+        if mode == "overdue":
+            if due < today or str(r.get("status", "")) == "Förfallen":
+                out.append(r)
+        elif mode == "today":
+            if today <= due <= today + datetime.timedelta(days=1):
+                out.append(r)
+        else:  # week
+            if today <= due <= today + datetime.timedelta(days=7):
+                out.append(r)
+    return out
+
+
+def att_betala_summary(invoices: list[dict]) -> dict:
+    """
+    Kärnsiffran: vad ska betalas just nu.
+
+    {"total": nettosumma obetalda (krediter avdragna), "count": antal}
+    Samma regel som Dashboard och Fakturor: Betald/Makulerad/
+    Arkiverad räknas inte.
+    """
+    total = 0.0
+    count = 0
+    for inv in invoices:
+        if str(inv.get("status", "")) in _PAID_LIKE_STATUSES:
+            continue
+        total += _to_float(inv.get("total_amount"))
+        count += 1
+    return {"total": round(total, 2), "count": count}
+
+
+def due_within(
+    invoices: list[dict],
+    today: datetime.date,
+    horizon_days: int = 1,
+) -> list[dict]:
+    """
+    Obetalda fakturor som förfaller senast idag + *horizon_days*
+    (förfallna ingår), sorterade på förfallodatum. Krediter tas
+    med — de dras av i summeringen.
+    """
+    limit = today + datetime.timedelta(days=horizon_days)
+    hits: list[tuple[str, dict]] = []
+    for inv in invoices:
+        if str(inv.get("status", "")) in _PAID_LIKE_STATUSES:
+            continue
+        raw = str(inv.get("due_date", "") or "")[:10]
+        try:
+            due = datetime.date.fromisoformat(raw)
+        except ValueError:
+            continue
+        if due <= limit:
+            hits.append((raw, inv))
+    hits.sort(key=lambda t: t[0])
+    return [inv for _raw, inv in hits]
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -344,9 +755,48 @@ def build_export_path(suppliers: list[str]) -> tuple[Path, str]:
     return target, filename
 
 
-# ═════════════════════════════════════════════════════════════════════
-#  SESSION-BETALNINGSDATUM
-# ═════════════════════════════════════════════════════════════════════
+#: Max antal fakturarader i EN exportfil (betal-PDF). Fler rader
+#: → flera filer (…-del1avN.pdf, …-del2avN.pdf, …). Varje faktura
+#: är alltid en egen rad i PDF:en — taket gäller per fil, det
+#: betyder aldrig att fakturor slås ihop till en gemensam rad.
+MAX_PER_EXPORT_FILE = 10
+
+
+def chunk_export_rows(
+    rows: list[dict], size: int = MAX_PER_EXPORT_FILE
+) -> list[list[dict]]:
+    """
+    Delar exportrader i filer om högst `size` stycken, i samma
+    ordning som betal-PDF:en sorterar (leverantör → förfallodatum
+    → fakturanummer). Uppdelningen blir därmed förutsägbar och
+    samma leverantörs rader hålls ihop så långt taket tillåter.
+    """
+    def _key(r: dict) -> tuple[str, str, str]:
+        return (
+            str(r.get("supplier", "") or "").strip().lower(),
+            str(r.get("due_date", "") or ""),
+            str(r.get("invoice_number", "") or ""),
+        )
+
+    ordered = sorted(rows or [], key=_key)
+    if size < 1:
+        size = MAX_PER_EXPORT_FILE
+    return [
+        ordered[i:i + size] for i in range(0, len(ordered), size)
+    ]
+
+
+def read_watch_folders(config_file) -> list[dict]:
+    """folders-listan ur watch_folders.json ([] vid alla fel)."""
+    try:
+        cfg = json.loads(
+            Path(config_file).read_text(encoding="utf-8")
+        )
+        folders = cfg.get("folders", [])
+        return [f for f in folders if isinstance(f, dict)]
+    except Exception:
+        return []
+
 
 
 def get_session_due_date_str(app_core: Any) -> str:
@@ -424,6 +874,7 @@ COLUMNS: list[tuple[str, str, int, Qt.AlignmentFlag]] = [
     ("Kategori",   "category",        72, Qt.AlignmentFlag.AlignLeft),
     ("Referens",   "reference",       72, Qt.AlignmentFlag.AlignLeft),
     ("Notering",   "note",            80, Qt.AlignmentFlag.AlignLeft),
+    ("Sidor",      "pages",           54, Qt.AlignmentFlag.AlignCenter),
 ]
 
 COL_LABELS: list[str] = [c[0] for c in COLUMNS]
@@ -549,19 +1000,56 @@ def install_keyboard_navigation(
     dialog._enter_next_filter = filt  # noqa: SLF001 – medvetet
 
 
-def fit_table_columns(table: QTableWidget, weights: list[int]) -> None:
+def attachment_page_count(path: Any) -> int:
+    """Antal sidor i ett original (0 = okänt/kan inte läsas).
+
+    PDF räknas via PyMuPDF eller pypdf om de finns; en bildfil
+    är alltid en sida. Används för Sidor-kolumnen i Fakturor —
+    flersidiga fakturor (2 sidor eller fler) ska synas direkt,
+    eftersom totalen ofta står på sista sidan.
+    """
+    p = Path(str(path or ""))
+    if not p.is_file():
+        return 0
+    suffix = p.suffix.lower()
+    if suffix in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"):
+        return 1
+    if suffix != ".pdf":
+        return 0
+    try:
+        import fitz  # PyMuPDF
+
+        with fitz.open(str(p)) as doc:
+            return len(doc)
+    except Exception:
+        pass
+    try:
+        from pypdf import PdfReader
+
+        return len(PdfReader(str(p)).pages)
+    except Exception:
+        return 0
+
+
+def fit_table_columns(table: QTableView, weights: list[int]) -> None:
     """
     Fördelar kolumnerna så de fyller tabellens synliga bredd.
 
-    Ingen horisontell scroll så länge fönstret är normalt brett.
-    Vikterna är de gamla fasta bredderna — de styr proportionerna.
+    Fungerar för både item-baserade tabeller och QTableView med en
+    QAbstractTableModel. Ingen horisontell scroll så länge fönstret är
+    normalt brett; vikterna styr kolumnernas proportioner.
     """
-    if not weights or table.columnCount() == 0:
+    try:
+        column_count = table.columnCount()
+    except AttributeError:
+        model = table.model()
+        column_count = model.columnCount() if model is not None else 0
+    if not weights or column_count == 0:
         return
     available = table.viewport().width()
     if available < 80:
         return
-    n = min(len(weights), table.columnCount())
+    n = min(len(weights), column_count)
     parts = [max(1, int(weights[i])) for i in range(n)]
     total = sum(parts) or 1
     min_px = 36
@@ -594,6 +1082,154 @@ def h_line() -> QFrame:
     f.setFrameShape(QFrame.Shape.HLine)
     f.setFrameShadow(QFrame.Shadow.Sunken)
     return f
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  RAD-DELEGATE  (synliga rader i tabeller — används av suppliers_view)
+#
+#  BAKGRUND: suppliers_view.py importerade attach_visible_rows(),
+#  ensure_row_height(), fg_on_row() och ROLE_*-konstanterna härifrån,
+#  men funktionerna fanns aldrig i filen → ImportError vid import →
+#  HELA leverantörsfliken dog tyst (MainWindow visade bara en död
+#  platshållare). Här är den saknade implementationen.
+# ═════════════════════════════════════════════════════════════════════
+
+#: Item-data-roller för radmålning (över UserRole så de aldrig
+#: krockar med post-id:t som vyerna lagrar i UserRole).
+ROLE_ROW_BG: int = int(Qt.ItemDataRole.UserRole) + 11      # jämn rad
+ROLE_ROW_BG_ODD: int = int(Qt.ItemDataRole.UserRole) + 12  # udda rad
+ROLE_ROW_FG: int = int(Qt.ItemDataRole.UserRole) + 13      # textfärg
+ROLE_STRIPE: int = int(Qt.ItemDataRole.UserRole) + 14      # vänsterkant
+
+
+def _luminance(color: str) -> float:
+    """Relativ luminans (0–1) för '#rrggbb'. 0.5 vid ogiltig färg."""
+    try:
+        h = str(color).lstrip("#")
+        if len(h) == 3:
+            h = "".join(ch * 2 for ch in h)
+        r, g, b = (int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+
+        def ch(v: float) -> float:
+            return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+        return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+    except Exception:
+        return 0.5
+
+
+def _contrast(a: str, b: str) -> float:
+    """WCAG-kontrastförhållande (1–21) mellan två hexfärger."""
+    la, lb = _luminance(a), _luminance(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def is_dark_theme(theme: dict | None) -> bool:
+    """
+    True om temat är mörkt.
+
+    Använder temats ``name`` ("dark"/"light") när det finns och
+    faller tillbaka på bakgrundens luminans. (Den gamla listan över
+    ljusa hexvärden kände inte igen nuvarande ljustema #f4f1ea,
+    så vyerna trodde att ljust läge var mörkt och målade fel.)
+    """
+    if not theme:
+        return True
+    name = str(theme.get("name", "")).lower()
+    if name in ("dark", "light"):
+        return name == "dark"
+    return _luminance(str(theme.get("bg", "#0c1218"))) < 0.5
+
+
+def fg_on_row(
+    row_bg: str, preferred: str, fallback: str, dark: bool,
+) -> str:
+    """
+    Väljer läsbar textfärg för en tabellrad.
+
+    ``preferred`` (t.ex. accentfärg i första kolumnen) används bara
+    om den håller minst 3:1 kontrast mot radbakgrunden — annars
+    ``fallback``. ``dark`` behålls i signaturen för anropens skull.
+    """
+    if preferred and _contrast(row_bg, preferred) >= 3.0:
+        return preferred
+    return fallback
+
+
+def ensure_row_height(table: QTableWidget, min_px: int = 40) -> None:
+    """Ser till att raderna lämnar plats för vald textstorlek."""
+    scaled_min = max(min_px, int(round(min_px * font_scale())))
+    for row in range(table.rowCount()):
+        if table.rowHeight(row) < scaled_min:
+            table.setRowHeight(row, scaled_min)
+
+
+class VisibleRowsDelegate(QStyledItemDelegate):
+    """
+    Målar tabellrader från ROLE_*-data på varje item:
+
+    • jämn/udda radbakgrund (ROLE_ROW_BG / ROLE_ROW_BG_ODD)
+    • textfärg (ROLE_ROW_FG), vit på markerad rad
+    • färgrand i vänsterkanten på kolumn 0 (ROLE_STRIPE) —
+      guld för favoriter, accentfärg annars
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._dark = True
+        self._select_bg = "#0b5cab"
+
+    def set_theme(self, *, dark: bool, select_bg: str) -> None:
+        self._dark = bool(dark)
+        if select_bg:
+            self._select_bg = select_bg
+
+    def paint(self, painter, option, index) -> None:  # noqa: N802
+        from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
+
+        selected = bool(option.state & QStyle.State.State_Selected)
+        row_bg = index.data(
+            ROLE_ROW_BG_ODD if index.row() % 2 else ROLE_ROW_BG
+        )
+        stripe = index.data(ROLE_STRIPE) if index.column() == 0 else None
+
+        painter.save()
+        if selected:
+            painter.fillRect(option.rect, QColor(self._select_bg))
+        elif row_bg:
+            painter.fillRect(option.rect, QColor(str(row_bg)))
+        if stripe:
+            r = option.rect
+            painter.fillRect(r.x(), r.y(), 4, r.height(), QColor(str(stripe)))
+        painter.restore()
+
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.backgroundBrush = QBrush(Qt.GlobalColor.transparent)
+        fg = "#ffffff" if selected else index.data(ROLE_ROW_FG)
+        if fg:
+            opt.palette.setColor(
+                QPalette.ColorRole.Text, QColor(str(fg))
+            )
+            opt.palette.setColor(
+                QPalette.ColorRole.HighlightedText, QColor("#ffffff")
+            )
+        widget = option.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        style.drawControl(
+            QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget
+        )
+
+
+def attach_visible_rows(table: QTableWidget) -> VisibleRowsDelegate:
+    """
+    Kopplar VisibleRowsDelegate till tabellen och returnerar den
+    (så vyn kan anropa ``delegate.set_theme(...)`` vid temabyte).
+    """
+    delegate = VisibleRowsDelegate(table)
+    table.setItemDelegate(delegate)
+    return delegate
 
 
 def make_btn(
@@ -649,11 +1285,13 @@ def make_cell(
     bold: bool = True,
     fg: str = "",
     numeric: bool = False,
+    tabular: bool = False,
 ) -> QTableWidgetItem:
     """
     Skapar en QTableWidgetItem med enhetlig stil.
 
     numeric=True → cellen sorteras numeriskt (för beloppskolumner).
+    tabular=True → siffror ligger i jämnbreda teckenpositioner.
     """
     if numeric:
         item = _NumericCell(str(text))
@@ -663,7 +1301,11 @@ def make_cell(
     item.setTextAlignment(
         int(align) | int(Qt.AlignmentFlag.AlignVCenter)
     )
-    item.setFont(make_font(12, bold=bold))
+    base_font = (
+        make_tabular_font(12, bold=bold)
+        if tabular else make_font(12, bold=bold)
+    )
+    set_item_font(item, base_font)
     if fg:
         item.setForeground(QBrush(QColor(fg)))
     return item
@@ -682,13 +1324,16 @@ def make_date_edit(
     today: bool = False, offset_days: int = 0
 ) -> QDateEdit:
     """
-    Skapar en QDateEdit med kalender-popup (yyyy-MM-dd).
+    Skapar ett datumfält med STOR kalender-popup (yyyy-MM-dd):
+    måndag först, veckonummer, helger röda, idag markerat (date_picker).
 
     Standardvärde: idag (+ offset_days dagar om angivet).
     """
-    w = QDateEdit()
-    w.setCalendarPopup(True)
-    w.setDisplayFormat("yyyy-MM-dd")
+    try:
+        from ui.date_picker import NiceDateEdit
+    except ImportError:
+        from date_picker import NiceDateEdit  # type: ignore[no-redef]
+    w = NiceDateEdit()
     w.setMinimumHeight(36)
     w.setFont(make_font(12))
     d = QDate.currentDate()
@@ -1509,15 +2154,17 @@ class InvoiceDialog(QDialog):
         self._supplier_rec: dict | None = None
 
         self.setWindowTitle(
-            "✏️  Redigera faktura"
+            tr("invdialog.title_edit")
             if self._is_edit
-            else "➕  Registrera faktura"
+            else tr("invdialog.title_new")
         )
-        self.setMinimumWidth(580)
-        self.setMinimumHeight(540)
         self.setSizeGripEnabled(True)
 
         self._build_dialog_ui()
+        if callable(fit_dialog_to_screen):
+            fit_dialog_to_screen(
+                self, 580, 620, minimum_width=460, minimum_height=430,
+            )
 
         if self._is_edit:
             self._populate()
@@ -1556,13 +2203,14 @@ class InvoiceDialog(QDialog):
         """
         if self._is_edit or self._app_core is None:
             return
-        sup = self._lookup_supplier(self._supplier_name)
+        supplier_name = self._get_supplier()
+        sup = self._lookup_supplier(supplier_name)
         self._supplier_rec = sup
         if sup is None:
             return
 
         if self._defaults is not None:
-            mem = self._defaults.get(self._supplier_name)
+            mem = self._defaults.get(supplier_name)
             if mem.get("ocr") and not self.f_ocr.text():
                 self.f_ocr.setText(str(mem["ocr"]))
             if mem.get("ref") and not self.f_ref.text():
@@ -1582,6 +2230,13 @@ class InvoiceDialog(QDialog):
                 "%d dagar (betalvillkor)", terms,
             )
 
+    def _on_dialog_supplier_changed(self, _text: str = "") -> None:
+        """Refresh supplier details and defaults when the dialog's selector changes."""
+        self._refresh_supplier_info()
+        self._refresh_dup_warning()
+        if not self._is_edit:
+            self._apply_smart_defaults()
+
     def _refresh_supplier_info(self) -> None:
         """Visar org.nr / bankgiro / betalvillkor under leverantören."""
         lbl = getattr(self, "_lbl_sup_info", None)
@@ -1595,8 +2250,9 @@ class InvoiceDialog(QDialog):
             return
         parts: list[str] = []
         for lab, key in (
-            ("Org.nr", "org_number"), ("Bankgiro", "bg"),
-            ("Plusgiro", "pg"), ("IBAN", "iban"),
+            (tr("invdialog.orgnr"), "org_number"),
+            (tr("invdialog.bankgiro"), "bg"),
+            (tr("invdialog.plusgiro"), "pg"), ("IBAN", "iban"),
         ):
             val = str(sup.get(key, "") or "").strip()
             if val:
@@ -1606,7 +2262,7 @@ class InvoiceDialog(QDialog):
         except (TypeError, ValueError):
             terms = 0
         if terms:
-            parts.append(f"Betalvillkor: {terms} dagar")
+            parts.append(tr("invdialog.terms", n=terms))
         if parts:
             lbl.setText("  ·  ".join(parts))
             lbl.setVisible(True)
@@ -1657,7 +2313,7 @@ class InvoiceDialog(QDialog):
         v.setContentsMargins(0, 0, 0, 0)
 
         # ── Leverantör ─────────────────────────────────────────────────
-        sup_box = QGroupBox("🏢  Leverantör")
+        sup_box = QGroupBox(tr("invdialog.supplier"))
         sup_box.setFont(make_font(11, True))
         sup_outer = QVBoxLayout(sup_box)
         sup_outer.setContentsMargins(12, 8, 12, 8)
@@ -1667,7 +2323,7 @@ class InvoiceDialog(QDialog):
         sup_outer.addLayout(sup_layout)
 
         self._lbl_supplier = QLabel(
-            self._supplier_name or "(ingen vald)"
+            self._supplier_name or tr("invdialog.none_chosen")
         )
         self._lbl_supplier.setFont(make_font(15, True))
         self._lbl_supplier.setStyleSheet(
@@ -1686,7 +2342,7 @@ class InvoiceDialog(QDialog):
         sup_outer.addWidget(self._lbl_sup_info)
 
         if self._is_edit:
-            # Redigering: leverantören kan bytas via kombobox
+            # Redigering: leverantören kan bytas via kombobox.
             self._combo_supplier = QComboBox()
             self._combo_supplier.setEditable(True)
             self._combo_supplier.setMinimumHeight(36)
@@ -1695,19 +2351,38 @@ class InvoiceDialog(QDialog):
             self._combo_supplier.setCurrentText(
                 self._existing.get("supplier", self._supplier_name)
             )
+            self._lbl_supplier.setVisible(False)
+        elif not self._supplier_name:
+            # Ingen leverantör vald i Fakturor-vyn? Välj den här i
+            # stället för att blockera manuell registrering.
+            self._combo_supplier = QComboBox()
+            self._combo_supplier.setEditable(True)
+            self._combo_supplier.setInsertPolicy(
+                QComboBox.InsertPolicy.NoInsert
+            )
+            self._combo_supplier.setMinimumHeight(36)
+            self._combo_supplier.setFont(make_font(12))
+            self._combo_supplier.addItem(
+                tr("invdialog.choose_supplier_ph"), ""
+            )
+            for name in self._supplier_names:
+                self._combo_supplier.addItem(name, name)
+            self._combo_supplier.setCurrentIndex(0)
             completer = QCompleter(self._supplier_names, self)
             completer.setCaseSensitivity(
                 Qt.CaseSensitivity.CaseInsensitive
             )
             completer.setFilterMode(Qt.MatchFlag.MatchContains)
             self._combo_supplier.setCompleter(completer)
-            self._combo_supplier.currentTextChanged.connect(
-                lambda _t: self._refresh_supplier_info()
-            )
-            sup_layout.addWidget(self._combo_supplier, stretch=1)
             self._lbl_supplier.setVisible(False)
         else:
             self._combo_supplier = None
+
+        if self._combo_supplier is not None:
+            self._combo_supplier.currentTextChanged.connect(
+                self._on_dialog_supplier_changed
+            )
+            sup_layout.addWidget(self._combo_supplier, stretch=1)
 
         v.addWidget(sup_box)
 
@@ -1715,8 +2390,7 @@ class InvoiceDialog(QDialog):
         due_str = get_session_due_date_str(self._app_core)
         if due_str and not self._is_edit:
             self._session_due_banner = QLabel(
-                f"📅  Session-förfallodatum: {due_str}"
-                f"  (används som default för nya fakturor)"
+                tr("invdialog.session_banner", date=due_str)
             )
             self._session_due_banner.setFont(make_font(10, True))
             self._session_due_banner.setStyleSheet(
@@ -1731,7 +2405,7 @@ class InvoiceDialog(QDialog):
             self._session_due_banner = None
 
         # ── Primära fält ───────────────────────────────────────────────
-        prim_box = QGroupBox("🧾  Fakturainformation  ✱")
+        prim_box = QGroupBox(tr("invdialog.primary"))
         prim_box.setFont(make_font(11, True))
         pf = QFormLayout(prim_box)
         pf.setSpacing(12)
@@ -1742,9 +2416,9 @@ class InvoiceDialog(QDialog):
 
         # Fakturanummer
         self.f_inv_nr = make_line_edit("ex. 2025-001 / INV-001")
-        self.f_inv_nr.setFont(make_font(14, True))
+        self.f_inv_nr.setFont(make_tabular_font(14, True))
         self.f_inv_nr.setMinimumHeight(44)
-        pf.addRow("Fakturanummer  ✱ :", self.f_inv_nr)
+        pf.addRow(tr("invdialog.invoice_number"), self.f_inv_nr)
 
         # Teckenväljare ＋/−
         self.f_sign = QComboBox()
@@ -1753,16 +2427,13 @@ class InvoiceDialog(QDialog):
         self.f_sign.setFont(make_font(20, True))
         self.f_sign.addItem("＋", +1)
         self.f_sign.addItem("−", -1)
-        self.f_sign.setToolTip(
-            "＋  Faktura – belopp läggs till ATT BETALA\n"
-            "−   Kredit – belopp dras av från ATT BETALA"
-        )
+        self.f_sign.setToolTip(tr("invdialog.sign_tip"))
         self.f_sign.currentIndexChanged.connect(self._on_sign_changed)
 
         # Belopp — AmountLineEdit: bättre textfält, svenskt format,
         # ALLTID helmarkerat tills man skriver något.
         self.f_total = AmountLineEdit(placeholder="0,00")
-        self.f_total.setFont(make_font(14, True))
+        self.f_total.setFont(make_tabular_font(14, True))
         self.f_total.setMinimumHeight(44)
         self.f_total.setToolTip(
             "Belopp i kronor.\n"
@@ -1790,7 +2461,7 @@ class InvoiceDialog(QDialog):
         amount_layout.addWidget(self.f_sign)
         amount_layout.addWidget(self.f_total, stretch=1)
         amount_layout.addWidget(kr_label)
-        pf.addRow("Belopp  ✱ :", amount_widget)
+        pf.addRow(tr("invdialog.amount"), amount_widget)
 
         # Typ-indikator (FAKTURA / KREDITFAKTURA)
         self._lbl_type = QLabel()
@@ -1801,7 +2472,7 @@ class InvoiceDialog(QDialog):
         v.addWidget(prim_box)
 
         # ── Sekundära fält ─────────────────────────────────────────────
-        sec_box = QGroupBox("📋  Övriga uppgifter  (valfritt)")
+        sec_box = QGroupBox(tr("invdialog.other"))
         sec_box.setFont(make_font(11))
         # EJ checkable: Qt inaktiverar annars alla fält i rutan när den
         # är okryssad (standard vid ny faktura). Fälten ska ALLTID vara
@@ -1814,10 +2485,9 @@ class InvoiceDialog(QDialog):
         )
 
         self.f_ocr = make_line_edit("OCR-nummer")
-        self.f_ref = make_line_edit("Er referens / PO-nummer")
-        self.f_category = make_line_edit(
-            "ex. IT, Kontorsmaterial, Hyra"
-        )
+        self.f_ocr.setFont(make_tabular_font(12))
+        self.f_ref = make_line_edit(tr("invdialog.ref_ph"))
+        self.f_category = make_line_edit(tr("invdialog.category_ph"))
         self.f_date = make_date_edit(today=True)
         # Förfallodatum: default sätts av _apply_session_due_date()
         self.f_due_date = make_date_edit(offset_days=30)
@@ -1827,7 +2497,7 @@ class InvoiceDialog(QDialog):
         self.f_payment_date = make_date_edit()
         self.f_payment_date.setMinimumDate(EMPTY_DATE)
         self.f_payment_date.setDate(EMPTY_DATE)
-        self.f_payment_date.setSpecialValueText(NO_DATE_TEXT)
+        self.f_payment_date.setSpecialValueText(tr("invdialog.no_date"))
 
         self.f_currency = QComboBox()
         self.f_currency.setMinimumHeight(34)
@@ -1838,25 +2508,27 @@ class InvoiceDialog(QDialog):
         self.f_status = QComboBox()
         self.f_status.setMinimumHeight(34)
         self.f_status.setFont(make_font(12))
-        self.f_status.addItems(INVOICE_STATUSES)
+        # Visning på aktuellt språk — kanonisk (svensk) status i data
+        for _st in INVOICE_STATUSES:
+            self.f_status.addItem(tr_status(_st), _st)
 
         self.f_note = QTextEdit()
-        self.f_note.setPlaceholderText("Fritext anteckning …")
+        self.f_note.setPlaceholderText(tr("invdialog.note_ph"))
         self.f_note.setMaximumHeight(80)
         self.f_note.setFont(make_font(12))
 
-        sf.addRow("OCR :", self.f_ocr)
-        sf.addRow("Referens :", self.f_ref)
-        sf.addRow("Kategori :", self.f_category)
+        sf.addRow(tr("invdialog.ocr"), self.f_ocr)
+        sf.addRow(tr("invdialog.reference"), self.f_ref)
+        sf.addRow(tr("invdialog.category"), self.f_category)
         sf.addRow(h_line())
-        sf.addRow("Fakturadatum :", self.f_date)
-        sf.addRow("Förfallodatum :", self.f_due_date)
-        sf.addRow("Betalningsdatum :", self.f_payment_date)
+        sf.addRow(tr("invdialog.invoice_date"), self.f_date)
+        sf.addRow(tr("invdialog.due_date"), self.f_due_date)
+        sf.addRow(tr("invdialog.payment_date"), self.f_payment_date)
         sf.addRow(h_line())
-        sf.addRow("Valuta :", self.f_currency)
-        sf.addRow("Status :", self.f_status)
+        sf.addRow(tr("invdialog.currency"), self.f_currency)
+        sf.addRow(tr("invdialog.status"), self.f_status)
         sf.addRow(h_line())
-        sf.addRow("Anteckning :", self.f_note)
+        sf.addRow(tr("invdialog.note"), self.f_note)
 
         v.addWidget(sec_box)
         v.addStretch()
@@ -1864,20 +2536,27 @@ class InvoiceDialog(QDialog):
         scroll.setWidget(inner)
         root.addWidget(scroll, stretch=1)
 
-        # ── OCR-varning ────────────────────────────────────────────────
-        self._warn_ocr = QLabel(
-            "⚠️  OCR saknas – kontrollera om det behövs."
-        )
-        self._warn_ocr.setStyleSheet(
+        # OCR-numret är valfritt; varna bara om ett angivet nummer
+        # har en ogiltig kontrollsiffra.
+        self._warn_ocr_check = QLabel(tr("invdialog.ocr_check_warning"))
+        self._warn_ocr_check.setStyleSheet(
             "color:#ff9800;font-weight:700;background:transparent;"
         )
-        self._warn_ocr.setVisible(False)
-        root.addWidget(self._warn_ocr)
+        self._warn_ocr_check.setVisible(False)
+        root.addWidget(self._warn_ocr_check)
+
+        self._warn_dup = QLabel("")
+        self._warn_dup.setStyleSheet(
+            "color:#ff9800;font-weight:700;background:transparent;"
+        )
+        self._warn_dup.setVisible(False)
+        root.addWidget(self._warn_dup)
 
         self.f_ocr.textChanged.connect(
-            lambda *_: self._warn_ocr.setVisible(
-                not self.f_ocr.text().strip()
-            )
+            lambda *_: self._refresh_ocr_warnings()
+        )
+        self.f_inv_nr.textChanged.connect(
+            lambda *_: self._refresh_dup_warning()
         )
 
         # ── Dialog-knappar ─────────────────────────────────────────────
@@ -1887,14 +2566,14 @@ class InvoiceDialog(QDialog):
         )
         save_btn = bb.button(QDialogButtonBox.StandardButton.Save)
         save_btn.setText(
-            "💾  Spara ändringar"
+            tr("invdialog.save_changes")
             if self._is_edit
-            else "➕  Registrera"
+            else tr("invdialog.register")
         )
         save_btn.setMinimumHeight(44)
         save_btn.setFont(make_font(13, True))
         cancel_btn = bb.button(QDialogButtonBox.StandardButton.Cancel)
-        cancel_btn.setText("✖  Avbryt")
+        cancel_btn.setText(f"✖  {tr('common.cancel')}")
         cancel_btn.setMinimumHeight(40)
         cancel_btn.setFont(make_font(12))
         bb.accepted.connect(self._validate_and_accept)
@@ -1923,21 +2602,55 @@ class InvoiceDialog(QDialog):
             on_last=self._validate_and_accept,
         )
 
+    # ── Live-varningar: OCR-kontrollsiffra + dubblett ────────────────
+
+    def _refresh_ocr_warnings(self) -> None:
+        """Varnar bara om ett ifyllt OCR-nummer har fel kontrollsiffra."""
+        text = self.f_ocr.text().strip()
+        self._warn_ocr_check.setVisible(
+            ocr_luhn_status(text) == "bad_check"
+        )
+
+    def _refresh_dup_warning(self) -> None:
+        """Varnar direkt om fakturanumret redan finns för leverantören."""
+        lbl = getattr(self, "_warn_dup", None)
+        if lbl is None:
+            return
+        nr = self.f_inv_nr.text().strip()
+        try:
+            supplier = self._get_supplier()
+        except Exception:
+            supplier = ""
+        dup = None
+        if nr and supplier and self._app_core is not None:
+            try:
+                dup = find_invoice_duplicate(
+                    list(self._app_core.get_invoices()),
+                    nr,
+                    supplier,
+                    exclude_id=str(self._existing.get("id", "")),
+                )
+            except Exception as exc:
+                log.debug("_refresh_dup_warning: %s", exc)
+        if dup:
+            lbl.setText(
+                tr("invdialog.dup_warning", nr=nr, supplier=supplier)
+            )
+            lbl.setVisible(True)
+        else:
+            lbl.setVisible(False)
+
     # ── Teckenindikator ──────────────────────────────────────────────────
 
     def _on_sign_changed(self, _: int = 0) -> None:
         """Uppdaterar typ-indikatorn (FAKTURA / KREDITFAKTURA)."""
         if self.f_sign.currentData() == -1:
-            self._lbl_type.setText(
-                "📋  KREDITFAKTURA – dras av från ATT BETALA"
-            )
+            self._lbl_type.setText(tr("invdialog.type_credit"))
             self._lbl_type.setStyleSheet(
                 "color:#2196f3;font-weight:700;background:transparent;"
             )
         else:
-            self._lbl_type.setText(
-                "🧾  FAKTURA – läggs till ATT BETALA"
-            )
+            self._lbl_type.setText(tr("invdialog.type_invoice"))
             self._lbl_type.setStyleSheet(
                 "color:#4caf50;font-weight:700;background:transparent;"
             )
@@ -1983,7 +2696,7 @@ class InvoiceDialog(QDialog):
         if idx >= 0:
             self.f_currency.setCurrentIndex(idx)
 
-        idx = self.f_status.findText(d.get("status", "Obetald"))
+        idx = self.f_status.findData(d.get("status", "Obetald"))
         if idx >= 0:
             self.f_status.setCurrentIndex(idx)
 
@@ -2011,29 +2724,45 @@ class InvoiceDialog(QDialog):
         if self.f_total.value() <= 0:
             QMessageBox.warning(
                 self,
-                "Validering",
-                "Ange ett belopp större än 0.\n\n"
-                "Välj ＋ för faktura eller − för kreditfaktura.",
+                tr("invdialog.validation"),
+                tr("invdialog.amount_required"),
             )
             self.f_total.setFocus()
             return
 
+        # OCR-kontrollsiffra (Luhn) – varna, men blockera inte helt
+        ocr_text = self.f_ocr.text().strip()
+        if ocr_luhn_status(ocr_text) == "bad_check":
+            reply = QMessageBox.question(
+                self,
+                tr("invdialog.ocr_check_title"),
+                tr("invdialog.ocr_check_body", ocr=ocr_text),
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                self.f_ocr.setFocus()
+                self.f_ocr.selectAll()
+                return
+
         # Förfallodatum passerat + Obetald → erbjud statusändring
         if (
             self.f_due_date.date() < QDate.currentDate()
-            and self.f_status.currentText() == "Obetald"
+            and (self.f_status.currentData() or "Obetald") == "Obetald"
         ):
             reply = QMessageBox.question(
                 self,
-                "Förfallodatum passerat",
-                "Förfallodatum har passerat.\n\n"
-                "Vill du ändra status till 'Förfallen'?",
+                tr("invdialog.overdue_title"),
+                tr("invdialog.overdue_body"),
                 QMessageBox.StandardButton.Yes
                 | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.Yes,
             )
             if reply == QMessageBox.StandardButton.Yes:
-                self.f_status.setCurrentText("Förfallen")
+                idx = self.f_status.findData("Förfallen")
+                if idx >= 0:
+                    self.f_status.setCurrentIndex(idx)
 
         # SMART IFYLLNING: kom ihåg OCR/referens/kategori för
         # leverantören till nästa registrering.
@@ -2048,9 +2777,16 @@ class InvoiceDialog(QDialog):
         self.accept()
 
     def _get_supplier(self) -> str:
-        """Aktuell leverantör (kombobox vid redigering, annars förvald)."""
-        if self._combo_supplier is not None:
-            return self._combo_supplier.currentText().strip()
+        """Aktuell leverantör (kombobox vid val/redigering, annars förvald)."""
+        combo = self._combo_supplier
+        if combo is not None:
+            text = combo.currentText().strip()
+            index = combo.currentIndex()
+            if index >= 0 and text.casefold() == combo.itemText(index).strip().casefold():
+                data = combo.itemData(index)
+                if data is not None:
+                    return str(data).strip()
+            return text
         return self._supplier_name.strip()
 
     # ── Resultat ─────────────────────────────────────────────────────────
@@ -2087,6 +2823,6 @@ class InvoiceDialog(QDialog):
             "amount_ex_vat": total,
             "vat_percent": 0,
             "currency": self.f_currency.currentText(),
-            "status": self.f_status.currentText(),
+            "status": self.f_status.currentData() or "Obetald",
             "note": self.f_note.toPlainText().strip(),
         }

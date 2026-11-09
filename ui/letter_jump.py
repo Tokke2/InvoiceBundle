@@ -6,6 +6,9 @@ Samma bokstav igen går till nästa. Inom 0,7 s byggs ett prefix
 (P sedan I → Pilkington).
 
 Gäller alla QComboBox och öppna QMenu. Skriver inte i textfält.
+Stängda QComboBox ignorerar dessutom mushjulet helt — att scrolla
+förbi ett dropdownfält får aldrig ändra dess värde av misstag.
+I en ÖPPEN dropdownlista scrollar hjulet listan som vanligt.
 
 Copyright © dynamiskt år Rickard Längkvist
 """
@@ -215,11 +218,52 @@ def handle_key(obj, event) -> bool:
     return jump_in_combo(combo, text)
 
 
+def _combo_popup_open(combo: QComboBox) -> bool:
+    """Är combons dropdownlista öppen just nu?"""
+    try:
+        view = combo.view()
+        if view is not None and view.isVisible():
+            return True
+    except Exception:
+        pass
+    app = QApplication.instance()
+    if app is not None:
+        try:
+            popup = app.activePopupWidget()
+            if popup is not None:
+                view = combo.view()
+                if view is not None and view.window() is popup:
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def handle_wheel(obj, event) -> bool:
+    """True om mushjulshändelsen ska sväljas (stängd QComboBox).
+
+    Scroll över ett STÄNGT dropdownfält får aldrig ändra det
+    valda värdet av misstag — händelsen stoppas här, globalt för
+    varenda QComboBox i appen. I en ÖPPEN dropdownlista släpps
+    hjulet igenom så listan scrollas som vanligt.
+    """
+    if event.type() != QEvent.Type.Wheel:
+        return False
+    combo = _combo_of(obj)
+    if combo is None:
+        return False
+    if _combo_popup_open(combo):
+        return False
+    return True
+
+
 class LetterJumpApplication(QApplication):
     """QApplication som ger bokstavshopp i alla rullistor och menyer."""
 
     def notify(self, receiver, event):  # noqa: N802
         try:
+            if handle_wheel(receiver, event):
+                return True
             if handle_key(receiver, event):
                 return True
         except Exception as exc:

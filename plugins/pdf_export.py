@@ -55,25 +55,13 @@ from typing import Any, Callable
 try:
     from plugins.pdf_export_helpers import (
         PDFExporter,
-        InvoiceNumberGuard,
-        PDF_ROUNDING_MODES,
-        fmt_amount,
-        to_ascii,
         get_platform,
-        now_iso,
-        round_by_mode,
         COPYRIGHT_YEAR,
     )
 except ImportError:
     from pdf_export_helpers import (  # type: ignore[no-redef]
         PDFExporter,
-        InvoiceNumberGuard,
-        PDF_ROUNDING_MODES,
-        fmt_amount,
-        to_ascii,
         get_platform,
-        now_iso,
-        round_by_mode,
         COPYRIGHT_YEAR,
     )
 
@@ -159,6 +147,9 @@ def quick_export(
     rounding_mode: str = "exact",
     payment_date: str = "",
     ask_payment_date: bool = True,
+    language: str = "sv",
+    include_originals: bool = True,
+    original_first_page_only: bool = False,
 ) -> dict[str, Any]:
     """
     One-call export med valfri leverantörslista, session-datum och
@@ -182,6 +173,9 @@ def quick_export(
         currency=currency,
         theme=theme,
         rounding_mode=rounding_mode,
+        language=language,
+        include_originals=include_originals,
+        original_first_page_only=original_first_page_only,
     )
     return exporter.export_invoice_list(
         invoices,
@@ -221,6 +215,12 @@ def register(app: Any) -> None:
         currency = app.settings.get("currency", "SEK")
         theme = app.settings.get("theme", "dark")
         rounding = app.settings.get("pdf_rounding", "exact")
+        include_originals = bool(
+            app.settings.get("export_include_originals", True)
+        )
+        original_first_page_only = bool(
+            app.settings.get("export_original_first_page_only", False)
+        )
     except Exception as exc:
         log.warning("[pdf_export] register: settings fallback (%s)", exc)
         data_dir = BASE_DIR / "ui" / "data"
@@ -230,6 +230,8 @@ def register(app: Any) -> None:
         currency = "SEK"
         theme = "dark"
         rounding = "exact"
+        include_originals = True
+        original_first_page_only = False
 
     # Supplier-lookup callback → live-data från app
     get_sup_fn: Callable[[], list[dict]] | None = None
@@ -245,7 +247,12 @@ def register(app: Any) -> None:
         theme=theme,
         get_suppliers_fn=get_sup_fn,
         rounding_mode=rounding,
+        language=str(app.get_setting("language", "sv")),
+        include_originals=include_originals,
+        original_first_page_only=original_first_page_only,
     )
+    # Live-språk: PDF:en följer appens språk även efter språkbyte
+    pdf._language_fn = lambda: str(app.get_setting("language", "sv"))
 
     app.pdf_exporter = pdf
     app.invoice_guard = pdf.guard
@@ -255,6 +262,10 @@ def register(app: Any) -> None:
         def _on_settings_changed(snap: dict) -> None:
             pdf.set_rounding_mode(snap.get("pdf_rounding", "exact"))
             pdf.set_theme(snap.get("theme", "dark"))
+            pdf.set_original_options(
+                snap.get("export_include_originals", True),
+                snap.get("export_original_first_page_only", False),
+            )
         app.settings.on_change(_on_settings_changed)
         log.debug("[pdf_export] settings-watcher kopplad")
 

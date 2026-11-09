@@ -1,0 +1,3080 @@
+# -*- coding: utf-8 -*-
+"""
+Tester: leverantörsmallar för fakturatolkning.
+
+Användaren lär tolkaren var värdena står på just den leverantörens
+layout (etikett före värde) — mallen vinner över generisk heuristik
+och sparas i data/invoice_templates.json.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+for _d in (str(PROJECT_DIR), str(PROJECT_DIR / "ui"),
+           str(PROJECT_DIR / "plugins")):
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
+
+import scan_import as si
+
+
+WEIRD_LAYOUT = """\
+NORDLYS ENERGI AB
+Kundnr: 8811
+Er ref hos oss: NL-2026-0771
+Utfärdad: 2026-09-01
+Betalas senast: 2026-10-01
+Pris exkl moms: 900,00
+Moms: 225,00
+SLUTSUMMA ATT BETALA: 1 125,00 SEK
+"""
+
+
+def test_extract_with_label_kinds():
+    text = WEIRD_LAYOUT
+    assert si.extract_with_label(text, "Er ref hos oss", "token") \
+        == "NL-2026-0771"
+    assert si.extract_with_label(text, "SLUTSUMMA ATT BETALA", "amount") \
+        == "1125.00"
+    assert si.extract_with_label(text, "Utfärdad", "date") == "2026-09-01"
+    assert si.extract_with_label(text, "Betalas senast", "date") \
+        == "2026-10-01"
+    assert si.extract_with_label(text, "Finns inte", "amount") == ""
+
+
+def test_template_beats_generic_heuristics():
+    templates = {
+        "Nordlys Energi AB": {"fields": {
+            "invoice_number": {"label": "Er ref hos oss"},
+            "total_amount": {"label": "SLUTSUMMA ATT BETALA"},
+            "date": {"label": "Utfärdad"},
+            "due_date": {"label": "Betalas senast"},
+        }},
+    }
+    parsed = si.parse_invoice_text(
+        WEIRD_LAYOUT, suppliers=[], templates=templates
+    )
+    # Mallens etiketter vinner — generiskt hade beloppet kunnat bli
+    # ett annat av summorna i dokumentet.
+    assert parsed["total_amount"] == 1125.0
+    assert parsed["invoice_number"] == "NL-2026-0771"
+    assert parsed["due_date"] == "2026-10-01"
+    # Leverantören känns igen via mallens namn fast registret är tomt
+    assert parsed["supplier"] == "Nordlys Energi AB"
+    assert parsed["template"] == "Nordlys Energi AB"
+    assert parsed["missing"] == []
+    assert set(parsed["template_fields"]) >= {
+        "invoice_number", "total_amount", "due_date",
+    }
+
+
+def test_templates_roundtrip_and_corrupt(tmp_path):
+    path = tmp_path / "invoice_templates.json"
+    data = {"A AB": {"fields": {"total_amount": {"label": "Att betala"}}}}
+    assert si.save_templates(path, data) is True
+    assert si.load_templates(path) == data
+    path.write_text("{trasigt", encoding="utf-8")
+    assert si.load_templates(path) == {}
+    assert si.find_template(data, "a ab") is not None
+    assert si.find_template(data, "Annan AB") is None
+
+
+def test_infer_label_from_selection_context():
+    from ui.scan_import_view import _infer_label
+
+    assert _infer_label("Fakturanr: ") == "Fakturanr"
+    assert _infer_label("Er ref hos oss: ") == "Er ref hos oss"
+    assert _infer_label("Rad ett\nAtt betala: ") == "Att betala"
+    assert _infer_label("") == ""
+
+
+def test_template_dialog_marks_regions_on_image(tmp_path):
+    """Bildmarkeringsdialogen: rutan som dras på fakturabilden
+    sparas som region + sida i mallen (andelar av sidan), och
+    en gammal etikettspec för ett omarkerat fält bevaras exakt
+    som den var."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from PIL import Image
+
+    from ui.scan_import_view import TemplateDialog
+
+    bild = tmp_path / "exempel.png"
+    Image.new("RGB", (600, 840), "white").save(bild)
+
+    existing = {
+        "fields": {
+            "due_date": {"label": "Förfallodatum"},
+        },
+        "supplier_logo": {
+            "page": 0, "region": [0.05, 0.05, 0.20, 0.20],
+            "dhash": "dhash128-v1:" + "1234abcd" * 4,
+        },
+    }
+    dlg = TemplateDialog(
+        None, "", supplier="Nordlys Energi AB",
+        existing=existing, path=bild,
+    )
+    try:
+        assert dlg._page_count == 1
+        # Användaren drar en ruta runt beloppet på bilden
+        # (samma signal som musdragningen ger).
+        dlg._on_region_drawn(
+            "total_amount", 0, (0.70, 0.80, 0.97, 0.85)
+        )
+        assert dlg._regions["total_amount"] == (
+            0, (0.70, 0.80, 0.97, 0.85)
+        )
+        dlg._save()
+        assert dlg.result_template is not None
+        assert dlg.result_template["supplier"] == "Nordlys Energi AB"
+        fields = dlg.result_template["fields"]
+        assert fields["total_amount"] == {
+            "region": [0.70, 0.80, 0.97, 0.85], "page": 0,
+        }
+        # Omarkerat etikettfält och sparad logotyp bevaras oförändrade.
+        assert fields["due_date"] == {"label": "Förfallodatum"}
+        assert dlg.result_template["supplier_logo"] == existing["supplier_logo"]
+    finally:
+        dlg.close()
+
+
+def test_template_dialog_can_save_a_logo_only_supplier_template(
+    tmp_path, monkeypatch,
+):
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from PIL import Image, ImageDraw
+
+    from ui.scan_import_view import TemplateDialog
+
+    image_path = tmp_path / "logo-example.png"
+    image = Image.new("RGB", (600, 840), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((60, 60, 230, 170), fill="#197357")
+    draw.ellipse((105, 80, 190, 155), fill="#e6c94c")
+    image.save(image_path)
+
+    old_signature = "dhash128-v1:" + "2468ace0" * 4
+    old_logo = {
+        "page": 0, "region": [0.01, 0.02, 0.2, 0.18],
+        "dhash": old_signature,
+    }
+    signature = "dhash128-v1:" + "13579bdf" * 4
+    monkeypatch.setattr(
+        si, "supplier_logo_signature", lambda *_args: signature,
+    )
+    dlg = TemplateDialog(
+        None, "", supplier="Alpha AB",
+        existing={"fields": {}, "supplier_logo": old_logo},
+        path=image_path, logo_only=True, suggest_logo_match=False,
+    )
+    try:
+        assert dlg._active == "supplier_logo"
+        assert all(
+            not button.isEnabled()
+            for button in dlg._mark_buttons.values()
+        )
+        region = (0.10, 0.08, 0.40, 0.22)
+        dlg._on_region_drawn("supplier_logo", 0, region)
+        dlg._save()
+        assert dlg.result_template is not None
+        assert dlg.result_template["supplier"] == "Alpha AB"
+        assert dlg.result_template["fields"] == {}
+        new_logo = {
+            "page": 0,
+            "region": [0.1, 0.08, 0.4, 0.22],
+            "dhash": signature,
+        }
+        assert dlg.result_template["supplier_logo"] == old_logo
+        assert dlg.result_template["supplier_logos"] == [old_logo, new_logo]
+    finally:
+        dlg.close()
+
+
+def test_template_dialog_fits_short_work_area_and_keeps_footer_visible():
+    from PySide6.QtWidgets import (
+        QApplication, QBoxLayout, QScrollArea, QPushButton,
+    )
+
+    app = QApplication.instance() or QApplication([])
+    from ui.scan_import_view import TemplateDialog
+
+    dialog = TemplateDialog(
+        None, "", supplier="Alpha AB",
+        suppliers=[{"name": "Alpha AB"}, {"name": "Beta AB"}],
+        templates={"Alpha AB": {}, "Beta AB": {}},
+    )
+    try:
+        screen = dialog.screen() or app.primaryScreen()
+        available = screen.availableGeometry()
+        assert dialog.width() <= available.width()
+        assert dialog.height() <= available.height()
+        body = dialog.findChild(
+            QScrollArea, "templateEditorScrollArea"
+        )
+        save = dialog.findChild(QPushButton, "templateSaveButton")
+        assert body is not None and body.widgetResizable()
+        assert save is not None
+
+        # Even when the user narrows the dialog, body content can scroll
+        # while Save remains in the fixed footer instead of being clipped.
+        dialog.setMinimumSize(500, 360)
+        dialog.setMaximumSize(500, 360)
+        dialog.resize(500, 360)
+        dialog._middle_layout.setDirection(
+            QBoxLayout.Direction.TopToBottom
+        )
+        dialog._layout_template_footer(compact=True)
+        dialog.show()
+        app.processEvents()
+        assert body.isVisible()
+        assert body.verticalScrollBar().maximum() > 0
+        assert save.isVisible()
+        assert save.geometry().bottom() <= dialog.rect().bottom()
+    finally:
+        dialog.close()
+
+
+def test_template_dialog_matches_unique_bankgiro():
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import TemplateDialog
+
+    dlg = TemplateDialog(
+        None, "Bankgiro 123-4567", supplier="",
+        suppliers=[{"name": "Alpha AB", "bankgiro": "1234567"}],
+    )
+    try:
+        dlg._match_supplier_by_bankgiro()
+        assert dlg._supplier_edit.text() == "Alpha AB"
+        assert "1234567" in dlg._lbl_hint.text()
+    finally:
+        dlg.close()
+
+
+def test_template_dialog_asks_when_bankgiro_has_competing_suppliers(
+    monkeypatch,
+):
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as scan_ui
+    from ui.scan_import_view import TemplateDialog
+
+    class FakeInputDialog:
+        @staticmethod
+        def getItem(_parent, _title, _label, choices, *_args):
+            return choices[1], True
+
+    monkeypatch.setattr(scan_ui, "QInputDialog", FakeInputDialog)
+    dlg = TemplateDialog(
+        None, "Bankgiro 1234567", supplier="",
+        suppliers=[
+            {"name": "Alpha AB", "bankgiro": "1234567"},
+            {"name": "Beta AB", "bg": "123-4567"},
+        ],
+    )
+    try:
+        dlg._match_supplier_by_bankgiro()
+        assert dlg._supplier_edit.text() == "Beta AB"
+    finally:
+        dlg.close()
+
+
+def test_template_dialog_logo_match_requires_and_accepts_confirmation(
+    monkeypatch,
+):
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as scan_ui
+    from ui.scan_import_view import TemplateDialog
+
+    signature = "dhash128-v1:" + "89abcdef" * 4
+    templates = {"Alpha AB": {"supplier_logo": {"dhash": signature}}}
+
+    class Parent(QWidget):
+        def _get_templates(self):
+            return templates
+
+    class FakeMessageBox:
+        class StandardButton:
+            Yes = 1
+
+        @staticmethod
+        def question(*_args):
+            return FakeMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(scan_ui, "QMessageBox", FakeMessageBox)
+    parent = Parent()
+    dlg = TemplateDialog(parent, "", supplier="Alpha AB")
+    try:
+        dlg._match_supplier_by_logo(signature)
+        assert dlg._supplier_edit.text() == "Alpha AB"
+        assert "Alpha AB" in dlg._lbl_hint.text()
+    finally:
+        dlg.close()
+        parent.close()
+
+
+def test_template_dialog_asks_user_when_logos_compete(monkeypatch):
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as scan_ui
+    from ui.scan_import_view import TemplateDialog
+
+    signature = "dhash128-v1:" + "89abcdef" * 4
+    templates = {
+        name: {"supplier_logo": {"dhash": signature}}
+        for name in ("Alpha AB", "Beta AB")
+    }
+
+    class Parent(QWidget):
+        def _get_templates(self):
+            return templates
+
+    class FakeInputDialog:
+        @staticmethod
+        def getItem(_parent, _title, _label, choices, *_args):
+            return choices[1], True
+
+    monkeypatch.setattr(scan_ui, "QInputDialog", FakeInputDialog)
+    parent = Parent()
+    dlg = TemplateDialog(parent, "", supplier="")
+    try:
+        dlg._match_supplier_by_logo(signature)
+        assert dlg._supplier_edit.text() == "Beta AB"
+    finally:
+        dlg.close()
+        parent.close()
+
+
+def test_template_manager_edit_preserves_saved_logo_metadata(
+    tmp_path, monkeypatch,
+):
+    from PySide6.QtWidgets import QApplication, QDialog
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as scan_ui
+    from ui.scan_import_view import ScanImportView
+
+    logo = {
+        "page": 0, "region": [0.12, 0.14, 0.38, 0.42],
+        "dhash": "dhash128-v1:" + "a1b2c3d4" * 4,
+    }
+    path = tmp_path / "invoice_templates.json"
+    original = {"Alpha AB": {
+        "fields": {"total_amount": {"label": "Att betala"}},
+        "supplier_logo": logo,
+    }}
+    si.save_templates(path, original)
+
+    class FakeCore:
+        def get_suppliers(self):
+            return []
+
+        def get_setting(self, key, default=None):
+            return default
+
+    class FakeDialog:
+        last_existing = None
+
+        def __init__(self, _parent, _text, *, supplier, existing, path=None):
+            FakeDialog.last_existing = existing
+            self.result_template = {
+                "supplier": supplier,
+                "fields": dict(existing["fields"]),
+                "supplier_logo": dict(existing["supplier_logo"]),
+            }
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(scan_ui, "TemplateDialog", FakeDialog)
+    view = ScanImportView(app=FakeCore(), templates_path=path)
+    try:
+        view._manager_edit_template("Alpha AB")
+        assert FakeDialog.last_existing["supplier_logo"] == logo
+        assert si.load_templates(path)["Alpha AB"]["supplier_logo"] == logo
+    finally:
+        view.close()
+
+
+def test_import_manual_match_keeps_learning_logo_after_threshold(
+    tmp_path, monkeypatch,
+):
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as scan_ui
+    from ui.scan_import_view import ScanImportView
+
+    signature = "dhash128-v1:" + "13579bdf" * 4
+    templates_file = tmp_path / "invoice_templates.json"
+    si.save_templates(templates_file, {"Alpha AB": {
+        "fields": {"total_amount": {"label": "Att betala"}},
+        "supplier_logo": {
+            "page": 0, "region": [0.1, 0.1, 0.4, 0.4],
+            "dhash": signature,
+        },
+    }})
+
+    class FakeCore:
+        def get_suppliers(self):
+            return []
+
+        def get_setting(self, key, default=None):
+            return default
+
+    monkeypatch.setattr(
+        si, "confirmed_supplier_logo_signature",
+        lambda path, supplier, templates, **kwargs: signature,
+    )
+    view = ScanImportView(
+        app=FakeCore(), templates_path=templates_file,
+    )
+    view._learning_cache = {
+        "Alpha AB": {"confirmed": 4, "logos": {signature: 1}},
+    }
+    try:
+        note = view._learn_from_match({
+            "_path": str(tmp_path / "invoice.pdf"),
+            "_text": "Fakturanr A-1\nAtt betala 250,00",
+            "pages": 1, "invoice_number": "A-1",
+            "total_amount": 250.0,
+        }, "Alpha AB")
+        learning = si.load_match_learning(
+            tmp_path / "match_memory.json"
+        )
+        assert learning["Alpha AB"]["confirmed"] == 5
+        assert learning["Alpha AB"]["logos"][signature] == 2
+        assert "logotyp" in note.lower() or "logo" in note.lower()
+    finally:
+        view.close()
+
+
+def test_scan_view_uses_templates_and_reparses(tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import ScanImportView
+
+    templates_file = tmp_path / "invoice_templates.json"
+    si.save_templates(templates_file, {
+        "Nordlys Energi AB": {"fields": {
+            "total_amount": {"label": "SLUTSUMMA ATT BETALA"},
+            "invoice_number": {"label": "Er ref hos oss"},
+        }},
+    })
+
+    class FakeCore:
+        def get_suppliers(self):
+            return []
+
+        def get_setting(self, key, default=None):
+            return default
+
+    view = ScanImportView(app=FakeCore(),
+                          templates_path=templates_file)
+    try:
+        assert "1" in view._btn_templates.text()
+        view._txt_paste.setPlainText(WEIRD_LAYOUT)
+        view._scan_pasted()
+        assert len(view._rows) == 1
+        row = view._rows[0]
+        assert row["template"] == "Nordlys Energi AB"
+        assert row["total_amount"] == 1125.0
+        assert row["invoice_number"] == "NL-2026-0771"
+        assert view._tbl.item(0, 8).text()  # statuscellen har 🧩
+        assert "🧩" in view._tbl.item(0, 8).text()
+    finally:
+        view.close()
+
+
+def _fake_core():
+    class FakeCore:
+        def get_suppliers(self):
+            return []
+
+        def get_setting(self, key, default=None):
+            return default
+
+    return FakeCore()
+
+
+def test_supported_invoice_files_sorted_and_filtered(tmp_path):
+    from ui.watch_folders import supported_invoice_files
+
+    d = tmp_path / "in"
+    d.mkdir()
+    (d / "b.pdf").write_bytes(b"%PDF")
+    (d / "A.PDF").write_bytes(b"%PDF")
+    (d / "c.png").write_bytes(b"PNG")
+    (d / "notering.txt").write_text("hej", encoding="utf-8")
+    (d / "undermapp").mkdir()
+    names = [p.name for p in supported_invoice_files(d)]
+    assert names == ["A.PDF", "b.pdf", "c.png"]
+    assert supported_invoice_files(tmp_path / "saknas") == []
+
+
+def test_teach_from_folder_saves_template(tmp_path, monkeypatch):
+    """Lär-flödet: en PDF ur mappen → manuell matchning → JSON."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as sv
+    from ui.scan_import_view import ScanImportView
+
+    folder = tmp_path / "NordlysIn"
+    folder.mkdir()
+    import fitz
+    doc = fitz.open()
+    doc.new_page(width=595, height=842)
+    doc.save(folder / "exempel.pdf")
+    doc.close()
+    templates_file = tmp_path / "invoice_templates.json"
+
+    view = ScanImportView(
+        app=_fake_core(), templates_path=templates_file
+    )
+    try:
+        entry = {"supplier": "Nordlys Energi AB", "path": str(folder)}
+        view._watch.set_folders([entry])
+
+        monkeypatch.setattr(
+            si, "extract_text", lambda path: (WEIRD_LAYOUT, "test")
+        )
+
+        seen = {}
+
+        class FakeTemplateDialog:
+            def __init__(self, parent, text, supplier="",
+                         existing=None, path=None):
+                seen["path"] = path
+                seen["supplier"] = supplier
+                self.result_template = {
+                    "supplier": "Nordlys Energi AB",
+                    "fields": {
+                        "invoice_number": {"label": "Er ref hos oss"},
+                        "due_date": {"label": "Betalas senast"},
+                    },
+                }
+
+            def exec(self):
+                return 1
+
+        monkeypatch.setattr(sv, "TemplateDialog", FakeTemplateDialog)
+        # Säkerhetskontrollen stubbas — den testas separat
+        monkeypatch.setattr(
+            ScanImportView, "_verify_template",
+            lambda self, supplier, template, files: "bekrafta",
+        )
+        rescanned = []
+        monkeypatch.setattr(
+            view._watch, "scan_folder",
+            lambda e: rescanned.append(e),
+        )
+
+        view._teach_from_folder(entry)
+
+        # Dialogen fick mappens egen fil att visa + mappens namn
+        assert str(seen["path"]).endswith(".pdf")
+        assert seen["supplier"] == "Nordlys Energi AB"
+        # Mallen ligger i minnet OCH i invoice_templates.json
+        templates = view._get_templates()
+        assert templates["Nordlys Energi AB"]["fields"]["due_date"] \
+            == {"label": "Betalas senast"}
+        saved = si.load_templates(templates_file)
+        assert "Nordlys Energi AB" in saved
+        # Mappen skannades om direkt med den nya mallen
+        assert any(
+            r.get("path") == str(folder) for r in rescanned
+        )
+        # ...och mallen tolkar nästa faktura från leverantören
+        parsed = si.parse_invoice_text(
+            WEIRD_LAYOUT, [], templates=templates
+        )
+        assert parsed["invoice_number"] == "NL-2026-0771"
+    finally:
+        view.close()
+
+
+def test_offer_teach_only_without_template(tmp_path, monkeypatch):
+    """Erbjudandet efter mapp-tillägg: bara när mall saknas."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as sv
+    from ui.scan_import_view import ScanImportView
+
+    folder = tmp_path / "NordlysIn"
+    folder.mkdir()
+    (folder / "en.pdf").write_bytes(b"%PDF")
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        entry = {"supplier": "Nordlys Energi AB", "path": str(folder)}
+
+        class FakeMessageBox:
+            asked = []
+
+            class StandardButton:
+                Yes = "Yes"
+                No = "No"
+
+            @staticmethod
+            def question(parent, title, text):
+                FakeMessageBox.asked.append(text)
+                return FakeMessageBox.StandardButton.Yes
+
+        monkeypatch.setattr(sv, "QMessageBox", FakeMessageBox)
+        taught = []
+        monkeypatch.setattr(
+            view, "_teach_from_folder", lambda e: taught.append(e)
+        )
+
+        # Ingen mall ännu → frågan ställs, Ja → lär-flödet startar
+        view._maybe_offer_teach(entry)
+        assert len(FakeMessageBox.asked) == 1
+        assert "Nordlys Energi AB" in FakeMessageBox.asked[0]
+        assert taught == [entry]
+
+        # Mall finns nu → ingen fråga, inget tjat
+        view._get_templates()["Nordlys Energi AB"] = {
+            "fields": {"invoice_number": {"label": "X"}}
+        }
+        view._maybe_offer_teach(entry)
+        assert len(FakeMessageBox.asked) == 1
+        assert taught == [entry]
+    finally:
+        view.close()
+
+
+def test_teach_button_without_folder_sets_status(tmp_path):
+    """Lär-knappen utan vald mapp: meddelande, ingen krasch."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import ScanImportView
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        assert not view._watch.folders
+        view._teach_from_folder_clicked()
+        assert view._lbl_status.text()  # status sattes
+    finally:
+        view.close()
+
+
+def test_review_parked_applies_learned_template(tmp_path):
+    """Parkerad FÖRE inlärning → granskningen visar mallens värden."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import ScanImportView
+
+    templates_file = tmp_path / "invoice_templates.json"
+    si.save_templates(templates_file, {
+        "Nordlys Energi AB": {"fields": {
+            "total_amount": {"label": "SLUTSUMMA ATT BETALA"},
+            "invoice_number": {"label": "Er ref hos oss"},
+            "due_date": {"label": "Betalas senast"},
+        }},
+    })
+
+    view = ScanImportView(
+        app=_fake_core(), templates_path=templates_file
+    )
+    try:
+        # Som det såg ut vid parkeringen: heuristiken räckte inte
+        parsed_then = {
+            "supplier": "Nordlys Energi AB",
+            "invoice_number": "", "ocr": "",
+            "date": "", "due_date": "",
+            "total_amount": 0.0,
+            "missing": ["belopp", "fakturanummer"],
+        }
+        view._watch._config["parked"] = [{
+            "hash": "h123", "path": str(tmp_path / "x.pdf"),
+            "file": "x.pdf", "reason": "no-template",
+            "text": WEIRD_LAYOUT, "parsed": parsed_then,
+            "method": "test",
+        }]
+        view._review_parked()
+
+        assert len(view._rows) == 1
+        row = view._rows[0]
+        assert row["invoice_number"] == "NL-2026-0771"
+        assert row["total_amount"] == 1125.0
+        assert row["due_date"] == "2026-10-01"
+        assert row["template"] == "Nordlys Energi AB"
+        assert row["status"] == "redo"
+        assert not view._watch.parked
+    finally:
+        view.close()
+
+
+def test_multipage_pdf_extract_covers_all_pages(tmp_path):
+    """Flersidig faktura: värdena på SISTA sidan måste hittas."""
+    from reportlab.pdfgen import canvas
+
+    pdf = tmp_path / "flersidig.pdf"
+    c = canvas.Canvas(str(pdf))
+    c.drawString(72, 750, "PILKINGTON GLAS AB")
+    c.drawString(72, 720, "Fakturanr: 9911")
+    c.showPage()
+    c.drawString(72, 750, "Specifikation sida 2")
+    c.drawString(72, 720, "Att betala: 5 000,00 SEK")
+    c.drawString(72, 700, "OCR: 99110012345")
+    c.save()
+
+    text, _method = si.extract_text(pdf)
+    assert "Specifikation sida 2" in text
+    parsed = si.parse_invoice_text(
+        text, [{"name": "Pilkington", "short_name": "Pilkington"}]
+    )
+    assert parsed["invoice_number"] == "9911"
+    assert parsed["total_amount"] == 5000.0
+
+
+def test_ocr_falls_back_to_swedish_language_data(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+
+    def image_to_string(_image, *, lang):
+        calls.append(lang)
+        if lang != "swe":
+            raise RuntimeError("language data unavailable")
+        return "Faktura"
+
+    monkeypatch.setattr(si, "HAS_TESS", True)
+    monkeypatch.setattr(si, "tesseract_available", lambda: True)
+    monkeypatch.setattr(
+        si, "pytesseract", SimpleNamespace(image_to_string=image_to_string)
+    )
+    text, method = si._ocr_image_text(object())
+    assert text == "Faktura"
+    assert method == "ocr-tesseract"
+    assert calls == ["swe+eng", "eng", "swe"]
+
+
+def test_pdf_page_extraction_ocr_fills_thin_page_without_modifying_source(
+    tmp_path, monkeypatch,
+):
+    from types import SimpleNamespace
+
+    pdf = tmp_path / "mixed.pdf"
+    original = b"immutable original PDF bytes"
+    pdf.write_bytes(original)
+    monkeypatch.setattr(
+        si, "_extract_pdf_page_text_sources",
+        lambda _path: [(
+            [
+                "PILKINGTON GLAS AB\nFakturanr 9911\nAtt betala 100,00",
+                "2",
+            ],
+            "textlager-pypdf",
+        )],
+    )
+    monkeypatch.setattr(si, "HAS_FITZ", True)
+    monkeypatch.setattr(si, "tesseract_available", lambda: True)
+
+    class _Page:
+        def __init__(self, number):
+            self.number = number
+
+    class _Doc:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __len__(self):
+            return 2
+
+        def __getitem__(self, index):
+            return _Page(index)
+
+    monkeypatch.setattr(
+        si, "fitz", SimpleNamespace(open=lambda _path: _Doc())
+    )
+    monkeypatch.setattr(
+        si, "_ocr_pdf_page",
+        lambda page: (
+            ("Att betala 5 000,00 på sida två", "ocr-tesseract")
+            if page.number == 1 else ("", "ocr-tesseract")
+        ),
+    )
+
+    text, method = si.extract_pdf_pages(pdf)
+    assert "Att betala 5 000,00 på sida två" in text
+    assert "ocr-tesseract" in method
+    assert pdf.read_bytes() == original
+
+
+def test_multipage_tiff_ocr_and_render_cover_every_frame(
+    tmp_path, monkeypatch,
+):
+    from PIL import Image
+
+    first = Image.new("RGB", (12, 12), (255, 0, 0))
+    second = Image.new("RGB", (12, 12), (0, 0, 255))
+    path = tmp_path / "two-page.tiff"
+    first.save(path, save_all=True, append_images=[second])
+    first.close()
+    second.close()
+    original = path.read_bytes()
+
+    monkeypatch.setattr(si, "HAS_TESS", True)
+    monkeypatch.setattr(si, "Image", Image, raising=False)
+    monkeypatch.setattr(si, "tesseract_available", lambda: True)
+    monkeypatch.setattr(
+        si, "_ocr_image_text",
+        lambda image, **_kwargs: (
+            "page one" if image.getpixel((0, 0))[0] else "page two",
+            "ocr-tesseract",
+        ),
+    )
+
+    text, method = si.extract_image_text(path)
+    assert text == "page one\npage two"
+    assert method == "ocr-tesseract"
+    assert si.page_image_count(path) == 2
+    parsed = si.parse_invoice_file(
+        path,
+        "PILKINGTON GLAS AB\nFakturanr: 9911\nAtt betala: 1 250,00",
+        [{"name": "Pilkington"}],
+    )
+    assert parsed["pages"] == 2
+    assert parsed["match_uncertain"] is True
+    second_page = si.render_page_image(path, 1)
+    assert second_page
+    with Image.open(__import__("io").BytesIO(second_page)) as rendered:
+        assert rendered.getpixel((0, 0)) == (0, 0, 255)
+    assert path.read_bytes() == original
+
+
+def test_pdf_reports_missing_ocr_when_sparse_page_cannot_be_read(
+    tmp_path, monkeypatch,
+):
+    pdf = tmp_path / "mixed.pdf"
+    pdf.write_bytes(b"original")
+    monkeypatch.setattr(
+        si, "_extract_pdf_page_text_sources",
+        lambda _path: [(
+            ["Fakturanr 9911 och text från sidan", "2"],
+            "textlager-pypdf",
+        )],
+    )
+    monkeypatch.setattr(si, "HAS_FITZ", False)
+    monkeypatch.setattr(si, "tesseract_available", lambda: False)
+
+    _text, method = si.extract_pdf_pages(pdf)
+    assert "ocr-saknas" in method
+    assert pdf.read_bytes() == b"original"
+
+    from ui.scan_import_view import ScanImportView
+    status = ScanImportView._display_status({
+        "status": "redo", "method": method, "missing": [],
+        "_path": "", "total_amount": 100.0,
+    })
+    assert "OCR" in status or "Tesseract" in status
+
+
+def test_ocr_degraded_parked_invoice_is_visible_in_import(tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import ScanImportView
+
+    class FakeCore:
+        def get_suppliers(self):
+            return [{"name": "Alpha AB"}]
+
+        def get_setting(self, key, default=None):
+            return default
+
+    view = ScanImportView(
+        app=FakeCore(), templates_path=tmp_path / "invoice_templates.json",
+    )
+    info = {
+        "hash": "a" * 64, "path": str(tmp_path / "invoice.pdf"),
+        "file": "invoice.pdf", "text": "invoice text",
+        "method": "textlager-pypdf+ocr-saknas",
+        "parsed": {
+            "supplier": "Alpha AB", "template": "Alpha AB",
+            "invoice_number": "A-1", "total_amount": 100.0,
+            "missing": [], "ocr_warning": "textlager-pypdf+ocr-saknas",
+        },
+    }
+    try:
+        rows = view._add_parked_rows_to_table([info])
+        assert len(rows) == 1
+        assert rows[0]["_parked_hash"] == info["hash"]
+        assert "OCR" in ScanImportView._display_status(rows[0])
+    finally:
+        view.close()
+
+
+def test_create_with_ocr_warning_requires_explicit_confirmation(
+    tmp_path, monkeypatch,
+):
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as scan_ui
+    from ui.scan_import_view import ScanImportView
+
+    class FakeCore:
+        def get_suppliers(self):
+            return [{"name": "Alpha AB"}]
+
+        def get_setting(self, key, default=None):
+            return default
+
+    view = ScanImportView(
+        app=FakeCore(), templates_path=tmp_path / "invoice_templates.json",
+    )
+    row = {
+        "file": "ocr-warning.pdf", "_path": str(tmp_path / "ocr-warning.pdf"),
+        "supplier": "Alpha AB", "invoice_number": "A-1",
+        "total_amount": 100.0, "missing": [],
+        "ocr_warning": "textlager-pypdf+ocr-saknas",
+    }
+    view._rows = [row]
+    view._selected_rows = lambda: [0]
+    prompts = []
+    saved = []
+    monkeypatch.setattr(
+        scan_ui.QMessageBox, "question",
+        lambda *args, **kwargs: (
+            prompts.append(args) or QMessageBox.StandardButton.No
+        ),
+    )
+    view._save_invoice = lambda *args, **kwargs: saved.append(args) or True
+    try:
+        view._create_invoices()
+        assert len(prompts) == 1
+        assert not saved
+        assert view._rows == [row]
+    finally:
+        view.close()
+
+
+def test_scan_error_row_is_never_auto_registered_or_template_learned(
+    tmp_path, monkeypatch,
+):
+    import ui.scan_import_view as scan_ui
+    from ui.scan_import_view import ScanImportView
+
+    row = {
+        "_scan_error": True, "status": "scan_error", "missing": [],
+        "supplier": "Alpha AB", "invoice_number": "A-1",
+        "total_amount": 100.0, "_path": str(tmp_path / "bad.pdf"),
+    }
+    view = ScanImportView.__new__(ScanImportView)
+    view._rows = [row]
+    assert view._auto_register_matched_rows([row]) == 0
+    assert view._ask_user_for_match(row) is False
+    # Failed rows are explicitly excluded from automatic mallskapande.
+    view._open_template_for_unmatched([row])
+
+    shown = []
+    monkeypatch.setattr(
+        scan_ui.QMessageBox, "warning",
+        lambda *args: shown.append(args),
+    )
+    view._selected_rows = lambda: [0]
+    view._create_invoices()
+    assert len(shown) == 1
+
+
+def test_manual_import_isolates_file_errors_and_passes_match_learning(
+    tmp_path, monkeypatch,
+):
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as scan_ui
+    from ui.scan_import_view import ScanImportView
+
+    broken = tmp_path / "broken.pdf"
+    good = tmp_path / "good.pdf"
+    broken_bytes, good_bytes = b"broken original", b"good original"
+    broken.write_bytes(broken_bytes)
+    good.write_bytes(good_bytes)
+
+    class FakeCore:
+        def get_suppliers(self):
+            return [{"name": "Alpha AB"}]
+
+        def get_setting(self, key, default=None):
+            return default
+
+    def extract(path):
+        if path.name == broken.name:
+            raise OSError("simulated text-extraction failure")
+        return "invoice text", "test"
+
+    seen = []
+
+    def parse(path, text, suppliers, **kwargs):
+        seen.append((path.name, kwargs.get("match_learning")))
+        return {
+            "supplier": "Alpha AB", "invoice_number": path.stem,
+            "total_amount": 100.0, "missing": [], "template": "Alpha AB",
+        }
+
+    monkeypatch.setattr(si, "extract_text", extract)
+    monkeypatch.setattr(si, "parse_invoice_file", parse)
+    view = ScanImportView(
+        app=FakeCore(), templates_path=tmp_path / "invoice_templates.json",
+    )
+    view._learning_cache = {"Alpha AB": {"confirmed": 5}}
+    view._ask_uncertain_rows = lambda _rows: 0
+    view._open_template_for_unmatched = lambda _rows: None
+    view._txt_paths.setPlainText(f"{broken}\n{good}")
+    try:
+        view._scan_files()
+        assert len(view._rows) == 2
+        assert view._rows[0]["_scan_error"] is True
+        assert view._rows[0]["status"] == "scan_error"
+        assert view._rows[1]["status"] == "redo"
+        assert view._lbl_status.text().find("1") >= 0
+        assert [name for name, _learning in seen] == [
+            "broken.pdf", "good.pdf",
+        ]
+        assert all(
+            learning == {"Alpha AB": {"confirmed": 5}}
+            for _name, learning in seen
+        )
+        assert broken.read_bytes() == broken_bytes
+        assert good.read_bytes() == good_bytes
+    finally:
+        view.close()
+
+
+def test_watched_read_error_stays_visible_until_recovered(
+    tmp_path,
+):
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import COLUMNS, ScanImportView
+
+    class FakeCore:
+        def get_suppliers(self):
+            return [{"name": "Alpha AB"}]
+
+        def get_setting(self, key, default=None):
+            return default
+
+    path = tmp_path / "unreadable.pdf"
+    error_row = {
+        "file": path.name, "supplier": "", "invoice_number": "",
+        "date": "", "due_date": "", "ocr": "",
+        "total_amount": 0.0,
+        "missing": ["belopp", "fakturanummer", "leverantör"],
+        "status": "scan_error", "method": "läsfel (hasha)",
+        "_path": str(path), "_text": "", "_scan_error": True,
+        "error_detail": "simulated file access error",
+    }
+    info = {
+        "hash": "error-hash", "path": str(path), "file": path.name,
+        "reason": "read-error", "method": error_row["method"],
+        "parsed": error_row, "error": error_row["error_detail"],
+    }
+    view = ScanImportView(
+        app=FakeCore(), templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        # A previously uncertain Import row must be upgraded to a visible
+        # read-error row instead of being hidden by hash deduplication.
+        existing_uncertain = dict(error_row)
+        existing_uncertain.pop("_scan_error")
+        existing_uncertain["match_uncertain"] = True
+        existing_uncertain["status"] = "saknas: belopp"
+        view._rows.append(existing_uncertain)
+        view._on_watch_file_error(info)
+        assert len(view._rows) == 1
+        assert view._rows[0] is existing_uncertain
+        row = view._rows[0]
+        assert row["_scan_error"] is True
+        assert row["status"] == "scan_error"
+        status_column = next(
+            i for i, column in enumerate(COLUMNS)
+            if column[1] == "status"
+        )
+        assert view._tbl.item(0, status_column).text() == \
+            view._display_status(row)
+        assert view._auto_register_matched_rows([row]) == 0
+        # Repeated 30-second poll reports the error but does not duplicate it.
+        view._on_watch_file_error(info)
+        assert len(view._rows) == 1
+
+        # Identical bytes at a different path are still separate files and
+        # must each remain visible until that specific path is readable.
+        second_path = tmp_path / "same-content.pdf"
+        second_row = dict(error_row)
+        second_row["file"] = second_path.name
+        second_row["_path"] = str(second_path)
+        second_info = dict(info)
+        second_info["file"] = second_path.name
+        second_info["path"] = str(second_path)
+        second_info["parsed"] = second_row
+        view._on_watch_file_error(second_info)
+        assert len(view._rows) == 2
+        assert view._auto_register_matched_rows(view._rows) == 0
+
+        view._on_watch_file_recovered(str(path))
+        assert len(view._rows) == 1
+        assert view._rows[0]["_path"] == str(second_path)
+        view._on_watch_file_recovered(str(second_path))
+        assert view._rows == []
+    finally:
+        view.close()
+
+
+def test_parse_credit_note_gets_negative_total():
+    """Kreditfaktura vid inskanning → NEGATIVT belopp.
+
+    Annars skulle krediten ÖKA att betala i stället för att
+    minska klumpen — registret sätter Kredittotal via tecknet.
+    """
+    text = (
+        "PILKINGTON GLAS AB\n"
+        "Kreditfaktura\n"
+        "Fakturanr: K-77\n"
+        "Att betala: -1 250,00\n"
+    )
+    parsed = si.parse_invoice_text(
+        text, [{"name": "Pilkington", "short_name": "Pilkington"}]
+    )
+    assert parsed["total_amount"] == -1250.0
+    assert "belopp" not in parsed["missing"]
+
+
+def test_parse_normal_invoice_stays_positive_and_credit_detector():
+    text = (
+        "PILKINGTON GLAS AB\nFaktura\nFakturanr: 8811\n"
+        "Betalningsvillkor: 30 dagar netto\n"
+        "Att betala: 1 250,00\n"
+    )
+    parsed = si.parse_invoice_text(
+        text, [{"name": "Pilkington", "short_name": "Pilkington"}]
+    )
+    assert parsed["total_amount"] == 1250.0
+    assert si.is_credit_note("KREDITNOTA nr 5")
+    assert si.is_credit_note("Credit Note")
+    assert not si.is_credit_note(text)
+
+
+# ── Punkt som tusentalsavskiljare (NSG/Pilkington-format) ────────
+
+PILKINGTON_TEXT = """\
+0846825945|46817|BILRUTAN SVERIGE / TADEGA AB|ORMESTAGATAN 1A|702 83
+FAKTURA
+Pilkington Automotive Sweden AB / AGR
+Bankgiro 572-3457
+Nummer 2075214774
+Datum (tax point) 2026.10.15
+PILKINGTON NSG Group Flat Glass Business
+Vårt kundnr 46817
+Betalningsvillkor T.o.m. 14.11.2026 utan avdrag
+Vårt ordernummer: 481489812 - 2026.10.15
+Pris SEK 4.999,00 Kundrabatt -30% Belopp 3.499,30
+SUMMA BILRUTOR 3.499,30
+BELOPP EXKL MOMS 3.499,30 MOMS BELOPP 874,83
+TOTALT FAKTURABELOPP 4.374,00
+"""
+
+
+def test_norm_amount_dot_thousands_swedish():
+    # Svenskt: punkt = tusental, komma = decimal. Att blanda ihop
+    # det med US-format gav 3.5 av 3.499,30 — sista skiljetecknet
+    # är alltid decimaltecknet.
+    assert si._norm_amount("3.499,30") == 3499.30
+    assert si._norm_amount("4.374,00") == 4374.00
+    assert si._norm_amount("3.499.250,75") == 3499250.75
+    # US-formatet ska fortsätta fungera
+    assert si._norm_amount("1,234.56") == 1234.56
+    assert si._norm_amount("1 250,00") == 1250.00
+    assert si._norm_amount("900,00") == 900.00
+
+
+def test_parse_date_year_first_with_dots():
+    assert si._parse_date("2026.10.15") == "2026-10-15"
+    assert si._parse_date("2026/10/15") == "2026-10-15"
+    assert si._parse_date("2026-10-15") == "2026-10-15"
+    # Dag-först-formaten orörda
+    assert si._parse_date("14.11.2026") == "2026-11-14"
+    assert si._parse_date("20261015") == "2026-10-15"
+
+
+def test_pilkington_layout_generic_parks_template_nails_it():
+    suppliers = [{"name": "Pilkington", "short_name": "Pilkington"}]
+
+    # Pilkingtons format är inbyggt efter manuell verifiering
+    # mot riktiga exempelfakturor — bankgirot (572-3457) på
+    # fakturan identifierar det: allt läses utan egen mall.
+    raw = si.parse_invoice_text(PILKINGTON_TEXT, suppliers)
+    assert raw["supplier"] == "Pilkington"
+    assert raw["invoice_number"] == "2075214774"
+    assert raw["total_amount"] == 4374.00
+    assert "fakturanummer" not in raw["missing"]
+    assert raw["template"]
+
+    # Efter EN manuell matchning (mall) sitter allt, inklusive
+    # punkt-formaten för belopp och datum.
+    templates = {"Pilkington": {"fields": {
+        "invoice_number": {"label": "Nummer"},
+        "total_amount": {"label": "TOTALT FAKTURABELOPP"},
+        "date": {"label": "Datum (tax point)"},
+        "due_date": {"label": "T.o.m."},
+    }}}
+    parsed = si.parse_invoice_text(
+        PILKINGTON_TEXT, suppliers, templates=templates
+    )
+    assert parsed["invoice_number"] == "2075214774"
+    assert parsed["total_amount"] == 4374.00
+    assert parsed["date"] == "2026-10-15"
+    assert parsed["due_date"] == "2026-11-14"
+    assert parsed["missing"] == []
+    assert parsed["template"] == "Pilkington"
+
+
+# ── Saint-Gobain Autover: två sidor + kreditnota ─────────────────
+
+SAINT_GOBAIN_INVOICE = """\
+SAINT-GOBAIN Faktura
+Saint-Gobain Autover Sverige AB
+Nummer 9750271120
+Datum 13.03.2020
+Kundnummer: 468118
+Förfallodatum: 2020-04-12
+0010 8302501100 3390A M/GD 1 PC 4.481,00 -55,0% 2.016,45
+0016 9201137400 T2098 1 PC 120,00 120,00
+Nummer/Datum 9750271120 / 13.03.2020
+Sida: 2 / 2
+Summa Glas 4 12.031,20
+Summa Övrigt 2 308,80
+Varuvärde 12.340,00
+Moms (SEK) 3.085,00
+Att Betala (SEK) 15.425,00
+Bankgiro: 942-2817 Organisationsnummer: 556274-6114
+"""
+
+SAINT_GOBAIN_CREDIT = """\
+SAINT-GOBAIN Kreditnota
+Saint-Gobain Autover Sverige AB
+Nummer 9750269328
+Datum 21.02.2020
+Referens faktura/Datum: 9750268598 / 14.02.2020
+Kundnummer: 467996
+Förfallodatum: 22.03.2020
+0020 7505800301 2920E M/GEL 1 PC Retur 3.775,00 2.642,50
+Faktura nr. 9750268598 from 14.02.2020
+Summa Glas 1 2.642,50
+Summa Övrigt 0
+Varuvärde 2.642,50
+Moms (SEK) 660,63
+Utj. 0,13-
+Er Tillgodo (SEK) 3.303,00
+Bankgiro: 942-2817 Organisationsnummer: 556274-6114
+"""
+
+#: I registret heter leverantören Direktglas (på papperet står
+#: Saint-Gobain Autover) — träffen sker via bankgiro/org.nr.
+DIREKTGLAS = [{
+    "name": "Direktglas",
+    "org_number": "556274-6114",
+    "bg": "942-2817",
+}]
+
+SAINT_GOBAIN_TEMPLATES = {"Direktglas": {"fields": {
+    "invoice_number": {"label": "Nummer"},
+    "total_amount": {"label": "Att Betala (SEK)"},
+    "date": {"label": "Datum"},
+    "due_date": {"label": "Förfallodatum"},
+}}}
+
+
+def test_saint_gobain_two_page_invoice_with_template():
+    # Totalen ("Att Betala") ligger på SIDA 2 — flersidig
+    # textextraktion måste slå ihop sidorna innan tolkning.
+    parsed = si.parse_invoice_text(
+        SAINT_GOBAIN_INVOICE, DIREKTGLAS,
+        templates=SAINT_GOBAIN_TEMPLATES,
+    )
+    assert parsed["invoice_number"] == "9750271120"
+    assert parsed["total_amount"] == 15425.00
+    assert parsed["date"] == "2020-03-13"
+    assert parsed["due_date"] == "2020-04-12"
+    assert parsed["missing"] == []
+    assert parsed["supplier"] == "Direktglas"
+    assert parsed["template"] == "Direktglas"
+
+
+def test_saint_gobain_generic_finds_total_but_parks():
+    # Utan bankgiro/org.nr kan registerposten inte identifiera
+    # fakturan: totalen hittas generiskt, numret ("Nummer")
+    # inte → numret kommer aldrig ur registermatchningen.
+    parsed = si.parse_invoice_text(
+        SAINT_GOBAIN_INVOICE, [{"name": "Direktglas"}]
+    )
+    assert parsed["total_amount"] == 15425.00
+    assert parsed["invoice_number"] == "9750271120"
+    assert parsed["supplier"] == "Saint-Gobain Autover Sverige AB"
+
+
+def test_saint_gobain_credit_note_nets_to_tillgodo():
+    # Kreditnotans total är "Er Tillgodo" (3.303,00 inkl moms)
+    # och ska räknas NEGATIVT. Mallen hittar inget "Att Betala"
+    # på kreditnotan — den generiska Tillgodo-vägen måste ge
+    # rätt belopp ändå, annars nettas ATT BETALA fel.
+    parsed = si.parse_invoice_text(
+        SAINT_GOBAIN_CREDIT, DIREKTGLAS,
+        templates=SAINT_GOBAIN_TEMPLATES,
+    )
+    assert parsed["invoice_number"] == "9750269328"
+    assert parsed["total_amount"] == -3303.00
+    assert parsed["date"] == "2020-02-21"
+    assert parsed["due_date"] == "2020-03-22"
+    assert parsed["missing"] == []
+
+
+def test_amount_from_group_quantity_not_glued():
+    # "Summa Glas 1 2.642,50": antalet (1) klistrades förut
+    # ihop med nettobeloppet → 12.642,50.
+    assert si._amount_from_group("1 2.642,50") == 2642.50
+    assert si._amount_from_group("4 12.031,20") == 12031.20
+    assert si.parse_total("Summa Glas 1 2.642,50") == 2642.50
+    # Mellanslags-tusental och US-format får inte förstöras.
+    assert si._amount_from_group("12 031,20") == 12031.20
+    assert si._amount_from_group("3.499,30") == 3499.30
+    assert si._amount_from_group("1,234.56") == 1234.56
+
+
+def test_supplier_matched_via_bankgiro_not_printed_name():
+    # Registerposten saknar bankgiro/org.nr → namnet Direktglas
+    # tilldelas INTE. I stället föreslås det tryckta namnet via
+    # det inbyggda Saint-Gobain-formatet. Matchning mot
+    # Direktglas i registret kräver bankgiro/org.nr på posten.
+    parsed = si.parse_invoice_text(
+        SAINT_GOBAIN_INVOICE,
+        [{"name": "Direktglas"}],
+        templates=SAINT_GOBAIN_TEMPLATES,
+    )
+    assert parsed["supplier"] == "Saint-Gobain Autover Sverige AB"
+    assert parsed["invoice_number"] == "9750271120"
+    assert parsed["total_amount"] == 15425.00
+
+
+# ── Martin G Anderson: parvis vs radvis textextraktion ─────────
+# PDF-text kan komma etikett+värde i par ELLER som rubrikrad
+# följd av värderad. Tolkningen ska aldrig hitta på värden ur
+# fel kolumn — hellre tomt (mall/dialog visar verklig text).
+
+MARTIN_G_PAIRED = """\
+MARTIN G ANDERSON
+Samlad FAKTURA
+Fakturanr. 906178
+Fakturadatum 2023-06-16
+Kundnr. 103
+Förfallodatum: 2023-07-16
+001 Härdad float 4 mm 2 552 x 1692 1,88 18,68 430,61 861,22
+Totalt: 861,22
+001 Isolerglas Trippel 1 947 x 1210 1,15 34,38 1 496,61 1 496,61
+Totalt: 1 496,61
+001 Härdad float 4 mm 1 530 x 1780 0,95 9,43 435,20 435,20
+Totalt: 435,20
+Fakturanr: 906178
+001 Isolerglas Trippel 1 912 x 1005 0,92 27,50 0,00 0
+Totalt: 0,00
+Summa netto 2 793,03 Moms 698,26 Öresavrundning 0,29 Att betala SEK 3 491,00
+Org nr 556824-5806 Bankgiro: 728-0811
+"""
+
+MARTIN_G_ROW = """\
+MARTIN G ANDERSON
+Samlad FAKTURA
+Fakturanr. Fakturadatum Kundnr.
+906178 2023-06-16 103
+Förfallodatum: 2023-07-16
+001 Härdad float 4 mm 2 552 x 1692 1,88 18,68 430,61 861,22
+Totalt: 861,22
+001 Isolerglas Trippel 1 947 x 1210 1,15 34,38 1 496,61 1 496,61
+Totalt: 1 496,61
+Fakturanr: 906178
+001 Isolerglas Trippel 1 912 x 1005 0,92 27,50 0,00 0
+Totalt: 0,00
+Total vikt Totalt antal Total yta (m2) Summa netto Moms Öresavrundning Att betala
+89,99 5 4,90 2 793,03 698,26 0,29 SEK 3 491,00
+Org nr 556824-5806 Bankgiro: 728-0811
+"""
+
+MARTIN_G_TEMPLATES = {"Martin G Anderson": {"fields": {
+    "invoice_number": {"label": "Fakturanr."},
+    "total_amount": {"label": "Att betala"},
+    "date": {"label": "Fakturadatum"},
+    "due_date": {"label": "Förfallodatum"},
+}}}
+
+MARTIN_G_SUPPLIER = [{"name": "Martin G Anderson"}]
+
+
+def test_martin_g_paired_layout_generic_and_template():
+    generic = si.parse_invoice_text(MARTIN_G_PAIRED, MARTIN_G_SUPPLIER)
+    assert generic["invoice_number"] == "906178"
+    assert generic["total_amount"] == 3491.00
+    assert generic["date"] == "2023-06-16"
+    assert generic["due_date"] == "2023-07-16"
+    templated = si.parse_invoice_text(
+        MARTIN_G_PAIRED, MARTIN_G_SUPPLIER,
+        templates=MARTIN_G_TEMPLATES,
+    )
+    assert templated["missing"] == []
+    assert templated["total_amount"] == 3491.00
+    assert templated["template"] == "Martin G Anderson"
+
+
+def test_martin_g_row_layout_no_column_guessing():
+    # Radvis text: den egna mallen läser bara numret ur
+    # sida-2-rubriken ("Fakturanr: 906178") och gör därför
+    # inget anspråk — då får det inbyggda verifierade formatet
+    # ta fakturan i stället och läsa totalen ur värderaden.
+    # Total ur fel kolumn (total vikt 89,99) eller kundnr (103)
+    # bokförs aldrig.
+    templated = si.parse_invoice_text(
+        MARTIN_G_ROW, MARTIN_G_SUPPLIER, templates=MARTIN_G_TEMPLATES,
+    )
+    assert templated["invoice_number"] == "906178"
+    assert templated["total_amount"] == 3491.00
+    assert templated["template"]
+    generic = si.parse_invoice_text(MARTIN_G_ROW, MARTIN_G_SUPPLIER)
+    assert generic["invoice_number"] == "906178"
+    # Nästa kolumnrubrik är aldrig ett fakturanummer.
+    assert si.parse_invoice_number(
+        "Fakturanr. Fakturadatum Kundnr.\n906178 2023-06-16 103"
+    ) == ""
+
+
+# ── Inbyggda verifierade format ─────────────────────────────────
+# Format som matchats mot riktiga exempelfakturor tillsammans
+# med användaren (i chatten) är inbyggda i appen: bevakningen
+# registrerar dem utan separat inlärning i appen. Identifiering
+# via org.nr/bankgiro på fakturan — användarens egna mallar
+# har alltid företräde.
+
+MARTIN_G_REGISTER = [{
+    "name": "AB Martin G Anderson",
+    "org_number": "556824-5806", "bg": "728-0811",
+}]
+
+
+def test_builtin_martin_g_registers_without_user_template():
+    parsed = si.parse_invoice_text(MARTIN_G_PAIRED, MARTIN_G_REGISTER)
+    assert parsed["supplier"] == "AB Martin G Anderson"
+    assert parsed["invoice_number"] == "906178"
+    assert parsed["total_amount"] == 3491.00
+    assert parsed["date"] == "2023-06-16"
+    assert parsed["due_date"] == "2023-07-16"
+    assert parsed["missing"] == []
+    assert parsed["template"]
+
+
+def test_builtin_martin_g_row_layout_registers():
+    # Kolumnlayouten (rubrikrad + värderad) är verifierad mot
+    # riktiga Martin G-fakturor i chatten och är numera en del
+    # av det inbyggda formatet ("below"): fakturanummer, datum
+    # och Att betala (sista beloppet på värderaden) läses ur
+    # sina kolumner — aldrig första beloppet efter etiketten
+    # (det vore Total vikt, 89,99).
+    parsed = si.parse_invoice_text(MARTIN_G_ROW, MARTIN_G_REGISTER)
+    assert parsed["invoice_number"] == "906178"
+    assert parsed["total_amount"] == 3491.00
+    assert parsed["date"] == "2023-06-16"
+    assert parsed["due_date"] == "2023-07-16"
+    assert parsed["missing"] == []
+    assert parsed["template"]
+
+
+# Martin G:s layout från 2024 (faktura 916336, Laxå
+# Glasmästeri, verifierad av användaren i chatten): rubrikrad
+# "Fakturanr. Fakturadatum Kundnr." med värdena under, och
+# summablocket "… Summa netto Moms Öresavrundning Att betala"
+# med "SEK 478,00" som sista belopp på värderaden. Inget
+# upprepas på någon sida 2 — tidigare parkerades alla sådana.
+MARTIN_G_2024 = """\
+MARTIN G ANDERSON
+EN DEL AV GLASGRUPPEN
+FAKTURA
+Fakturanr. Fakturadatum Kundnr.
+916336 2024-05-08 103
+Leveransadress
+Laxå Glasmästeri
+Maskinvägen 4
+695 30 LAXÅ
+Betalningsvillkor: 30 dagar netto
+Förfallodatum: 2024-06-07
+ORDER: 243853
+Pos Varuslag Antal Bredd Höjd Yta (m2) Vikt Styckpris Summa
+001 Isolerglas Dubbel 1 438 x 743 0,50 6,51 382,50 382,50
+Totalt: 382,50
+Total vikt Totalt antal Total yta (m2) Summa netto Moms Öresavrundning Att betala
+6,51 1 0,50 382,50 95,63 0,13 SEK 478,00
+AB Martin G Anderson
+Box 1736
+701 17 ÖREBRO
+Org nr 556824-5806
+Bankgiro: 728-0811
+"""
+
+
+def test_builtin_martin_g_2024_single_page_layout():
+    parsed = si.parse_invoice_text(MARTIN_G_2024, MARTIN_G_REGISTER)
+    assert parsed["supplier"] == "AB Martin G Anderson"
+    assert parsed["invoice_number"] == "916336"
+    assert parsed["total_amount"] == 478.00
+    assert parsed["date"] == "2024-05-08"
+    assert parsed["due_date"] == "2024-06-07"
+    assert parsed["missing"] == []
+    assert parsed["template"]
+
+
+def test_parse_total_never_reads_postal_code():
+    # Postnumret i leverantörens adress ("701 17 ÖREBRO") får
+    # aldrig bli att betala — det var exakt så faktura 914377
+    # (10 378,00) felaktigt bokfördes som 70 117,00 när
+    # etikett och värde hamnade på skilda rader i uttaget.
+    assert si.parse_total(
+        "Att betala\n701 17 ÖREBRO\n10 378,00") == 10378.0
+    assert si.parse_total(
+        "Att betala\n70117 ÖREBRO\n10 378,00") == 10378.0
+    # En äkta total på 70 117,00 (med decimaler) läses som förut.
+    assert si.parse_total("Att betala 70 117,00") == 70117.0
+
+
+def test_builtin_martin_g_stacked_text_claims():
+    # Staplat uttag (alla rubriker först, alla värden efteråt)
+    # paras sekvensvis av det inbyggda formatet: fakturanummer,
+    # datum och att betala läses ur sina positioner — inget
+    # värde gissas ur adressen eller ur fel kolumn.
+    parsed = si.parse_invoice_text(MARTIN_G_STACKED, MARTIN_G_REGISTER)
+    assert parsed["template"]
+    assert parsed["invoice_number"] == "916336"
+    assert parsed["total_amount"] == 478.00
+    assert parsed["date"] == "2024-05-08"
+    assert parsed["due_date"] == "2024-06-07"
+    assert parsed["missing"] == []
+
+
+def test_partial_template_never_claims_a_generic_amount():
+    # En egen mall som bara läser fakturanumret gör INTE
+    # anspråk på fakturan: den generiska beloppsläsningen
+    # (här 10 378,00 efter postnumret i adressen) visas för
+    # granskning, men registreras aldrig automatiskt som
+    # om mallen hade tagit fakturan.
+    text = (
+        "MARTIN G ANDERSON\n"
+        "Fakturanr. Fakturadatum Kundnr.\n"
+        "914377 2024-03-08 103\n"
+        "Fakturanr: 914377\n"
+        "Förfallodatum: 2024-04-07\n"
+        "Att betala\n"
+        "701 17 ÖREBRO\n"
+        "SEK 10 378,00\n"
+        "Org nr 556824-5806\n"
+        "Bankgiro: 728-0811\n"
+    )
+    templates = {"Martin G Anderson": {"fields": {
+        "invoice_number": {"label": "Fakturanr."},
+        "total_amount": {"label": "Finns ingen sådan etikett"},
+    }}}
+    parsed = si.parse_invoice_text(
+        text, MARTIN_G_SUPPLIER, templates=templates)
+    assert not parsed.get("template")
+    assert parsed["invoice_number"] == "914377"
+    assert parsed["total_amount"] == 10378.0
+
+
+# ── Alternativ PDF-läsare när första uttaget saknar mallträff ────
+# Den ena läsaren kan stapla texten (alla rubriker för sig, alla
+# värden för sig) så att ingen mall gör anspråk, medan den andra
+# läsaren ger rubrikrad + värderad. Filtolkningen prövar då det
+# andra uttaget innan filen parkeras — och bara vid mallträff.
+
+MARTIN_G_STACKED = """\
+MARTIN G ANDERSON
+FAKTURA
+Fakturanr.
+Fakturadatum
+Kundnr.
+916336
+2024-05-08
+103
+Förfallodatum: 2024-06-07
+Att betala
+478,00
+AB Martin G Anderson
+Box 1736
+701 17 ÖREBRO
+Org nr 556824-5806
+Bankgiro: 728-0811
+"""
+
+
+def _martin_g_2024_pdf(tmp_path):
+    """Riktig PDF med 916336-layouten (rubrikrad + värderad)."""
+    import fitz
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    y = 60
+    page.insert_text((40, y), "MARTIN G ANDERSON", fontsize=13)
+    y += 30
+    for x, s in ((40, "Fakturanr."), (150, "Fakturadatum"),
+                 (280, "Kundnr.")):
+        page.insert_text((x, y), s, fontsize=10)
+    y += 14
+    for x, s in ((40, "916336"), (150, "2024-05-08"), (280, "103")):
+        page.insert_text((x, y), s, fontsize=10)
+    y += 30
+    page.insert_text((40, y), "001 Isolerglas Dubbel 382,50",
+                     fontsize=9)
+    y += 26
+    for x, s in ((40, "Summa netto"), (150, "Moms"),
+                 (240, "Öresavrundning"), (360, "Att betala")):
+        page.insert_text((x, y), s, fontsize=10)
+    y += 14
+    for x, s in ((40, "382,50"), (150, "95,63"), (240, "0,13"),
+                 (360, "SEK 478,00")):
+        page.insert_text((x, y), s, fontsize=10)
+    y += 30
+    page.insert_text((40, y), "Förfallodatum: 2024-06-07", fontsize=10)
+    y += 20
+    page.insert_text((40, y), "Org nr 556824-5806  Bankgiro: 728-0811",
+                     fontsize=9)
+    pdf = tmp_path / "martin_g_916336.pdf"
+    doc.save(pdf)
+    doc.close()
+    return pdf
+
+
+def test_parse_file_stacked_text_claims_directly(tmp_path):
+    # Det staplade uttaget gör numera anspråk direkt via
+    # stapelparningen (rubriksekvensen paras med värdesekvensen)
+    # — inget annat läsarförsök behövs för att mallen ska ta den.
+    primary = si.parse_invoice_text(MARTIN_G_STACKED, MARTIN_G_REGISTER)
+    assert primary["template"]
+    assert primary["invoice_number"] == "916336"
+    assert primary["total_amount"] == 478.00
+    pdf = _martin_g_2024_pdf(tmp_path)
+    parsed = si.parse_invoice_file(pdf, MARTIN_G_STACKED,
+                                   MARTIN_G_REGISTER)
+    assert parsed["template"]
+    assert parsed["supplier"] == "AB Martin G Anderson"
+    assert parsed["invoice_number"] == "916336"
+    assert parsed["total_amount"] == 478.00
+    assert parsed["date"] == "2024-05-08"
+    assert parsed["due_date"] == "2024-06-07"
+
+
+def test_parse_file_keeps_first_parse_without_any_claim(tmp_path):
+    # Okänt format i båda uttagen → första tolkningen gäller
+    # orörd; alternativet får aldrig skriva över gissningar.
+    import fitz
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((40, 60), "ACME BOLAG AB", fontsize=12)
+    page.insert_text((40, 90), "Fakturanr: 777", fontsize=10)
+    page.insert_text((40, 110), "Att betala: 200,00", fontsize=10)
+    pdf = tmp_path / "acme.pdf"
+    doc.save(pdf)
+    doc.close()
+    parsed = si.parse_invoice_file(
+        pdf, "ACME BOLAG AB\nFakturanr: 555\nAtt betala: 100,00",
+        MARTIN_G_REGISTER,
+    )
+    assert not parsed.get("template")
+    assert parsed["invoice_number"] == "555"
+    assert parsed["total_amount"] == 100.00
+
+
+def test_extract_pdf_texts_offers_both_readers(tmp_path):
+    if not (si.HAS_PYPDF and si.HAS_FITZ):
+        return
+    pdf = _martin_g_2024_pdf(tmp_path)
+    texts = si.extract_pdf_texts(pdf)
+    methods = [m for _t, m in texts]
+    assert methods[0] == "textlager-pypdf"
+    assert "textlager-pymupdf" in methods
+    # Primäruttaget är oförändrat det första alternativet.
+    assert si.extract_pdf_text(pdf) == texts[0]
+
+
+def test_diagnose_invoice_file_explains_each_reader(
+    tmp_path, monkeypatch
+):
+    # Felsökningspaketets malldiagnos: det staplade uttaget
+    # gör numera anspråk via stapelparningen och radtexten
+    # som förut — båda syns som fullträffar med sina fält.
+    monkeypatch.setattr(
+        si, "extract_pdf_texts",
+        lambda _p: [
+            (MARTIN_G_STACKED, "textlager-pypdf"),
+            (MARTIN_G_2024, "textlager-pymupdf"),
+        ],
+    )
+    diags = si.diagnose_invoice_file(
+        tmp_path / "x.pdf", MARTIN_G_REGISTER
+    )
+    assert [d["method"] for d in diags] == [
+        "textlager-pypdf", "textlager-pymupdf",
+    ]
+    stacked, rowed = diags
+    assert stacked["candidate"] == "Martin G Anderson"
+    assert stacked["candidate_kind"] == "inbyggt format"
+    assert stacked["claimed"]
+    assert stacked["fields"]["invoice_number"] == "916336"
+    assert stacked["fields"]["total_amount"] == 478.00
+    assert stacked["failed"] == []
+    assert rowed["claimed"]
+    assert rowed["invoice_number"] == "916336"
+    assert rowed["failed"] == []
+
+
+def test_diagnose_invoice_file_flags_unverified_total(
+    tmp_path, monkeypatch
+):
+    # Beloppet läses i fönstret efter etiketten men står
+    # varken på etikettens rad eller värderaden under den —
+    # diagnosen ska säga att just att betala brast, inte
+    # bara att mallen "inte tog" filen.
+    text = (
+        "MARTIN G ANDERSON\n"
+        "Fakturanr. Fakturadatum Kundnr.\n"
+        "916336 2024-05-08 103\n"
+        "Att betala\n"
+        "Betalningsvillkor: 30 dagar netto\n"
+        "Prislista: 500,00\n"
+        "Org nr 556824-5806\n"
+    )
+    assert not si.parse_invoice_text(
+        text, MARTIN_G_REGISTER
+    ).get("template")
+    monkeypatch.setattr(
+        si, "extract_pdf_texts",
+        lambda _p: [(text, "textlager-pypdf")],
+    )
+    (diag,) = si.diagnose_invoice_file(
+        tmp_path / "x.pdf", MARTIN_G_REGISTER
+    )
+    assert not diag["claimed"]
+    assert diag["total_verified"] is False
+    assert "total_amount" in diag["failed"]
+    assert diag["fields"]["invoice_number"] == "916336"
+
+
+# ── Räknekontroll + datumlogik ───────────────────────────────────
+# Kontrollerna är rådgivande: de ändrar aldrig värden, men
+# flaggar räkne- och datumfel innan beloppet hamnar i summan.
+
+def test_invoice_math_check_ok_mismatch_unknown():
+    ok_text = "Summa netto 1 000,00\nMoms 250,00\nAtt betala 1 250,00"
+    ok = si.invoice_math_check(ok_text, 1250.00)
+    assert ok["status"] == "ok"
+    assert ok["net"] == 1000.00
+    assert ok["vat"] == 250.00
+    assert ok["expected"] == 1250.00
+    assert ok["diff"] == 0.00
+
+    bad = si.invoice_math_check(ok_text, 1300.00)
+    assert bad["status"] == "mismatch"
+    assert bad["expected"] == 1250.00
+    assert bad["diff"] == 50.00
+
+    # Varken netto eller moms på egna rader → kontrollen uttalar
+    # sig inte alls (hellre "unknown" än en falsk varning).
+    assert si.invoice_math_check(
+        "Att betala 1 250,00", 1250.00
+    )["status"] == "unknown"
+    # Kolumnlayout (rubrikrad + värderad): ingen gissning ur
+    # fel kolumn — Martin G 2024 förblir "unknown".
+    assert si.invoice_math_check(
+        MARTIN_G_2024, 478.00
+    )["status"] == "unknown"
+
+
+def test_invoice_math_check_paired_layout_with_rounding():
+    # Martin G:s parvisa layout: netto + moms + öresavrundning
+    # på summarraden; avrundningsdifferensen ryms i toleransen.
+    chk = si.invoice_math_check(MARTIN_G_PAIRED, 3491.00)
+    assert chk["status"] == "ok"
+    assert chk["net"] == 2793.03
+    assert chk["vat"] == 698.26
+    assert chk["rounding"] == 0.29
+    assert chk["expected"] == 3491.58
+
+
+def test_invoice_date_check_flags_problems():
+    ok = si.invoice_date_check("2024-05-08", "2024-06-07")
+    assert ok["status"] == "ok"
+    assert ok["term_days"] == 30
+    assert ok["problems"] == []
+
+    before = si.invoice_date_check("2024-06-07", "2024-05-08")
+    assert before["status"] == "warning"
+    assert before["problems"] == ["due_before_date"]
+    assert before["term_days"] == -30
+
+    long = si.invoice_date_check("2024-01-01", "2024-07-01")
+    assert long["problems"] == ["term_long"]
+    assert long["term_days"] > 120
+
+    assert si.invoice_date_check("", "2024-06-07")["status"] \
+        == "unknown"
+
+    from datetime import date, timedelta
+
+    future = date.today() + timedelta(days=60)
+    future_check = si.invoice_date_check(
+        future.isoformat(),
+        (future + timedelta(days=30)).isoformat(),
+    )
+    assert future_check["problems"] == ["date_future"]
+
+
+def test_parse_attaches_math_and_date_checks():
+    parsed = si.parse_invoice_text(MARTIN_G_PAIRED, MARTIN_G_SUPPLIER)
+    assert parsed["total_amount"] == 3491.00
+    assert parsed["math_check"]["status"] == "ok"
+    assert parsed["date_check"]["status"] == "ok"
+    assert parsed["date_check"]["term_days"] == 30
+
+    due_first = si.parse_invoice_text(
+        "ACME AB\n"
+        "Fakturadatum: 2026-09-10\n"
+        "Förfallodatum: 2026-09-01\n"
+        "Att betala: 100,00\n",
+        [],
+    )
+    assert due_first["date_check"]["problems"] == [
+        "due_before_date"
+    ]
+
+
+# ── Malldriftsassistenten ────────────────────────────────────────
+# Leverantören byter formulering: mallen slutar träffa, men
+# appen föreslår den nya etiketten ur fakturans egen text.
+
+DRIFT_TEXT = """\
+NORDLYS ENERGI AB
+Faktura nr: NL-2026-0771
+Utfärdad: 2026-09-01
+Betalas senast: 2026-10-01
+Pris exkl moms: 900,00
+Moms: 225,00
+Summa att betala: 1 125,00 SEK
+"""
+
+DRIFT_TEMPLATE = {"fields": {
+    "invoice_number": {"label": "Er ref hos oss"},
+    "total_amount": {"label": "SLUTSUMMA ATT BETALA"},
+    "date": {"label": "Fakturadatum"},
+    "due_date": {"label": "Betalas senast"},
+}}
+
+
+def test_suggest_template_repairs_from_invoice_text():
+    suggestions = si.suggest_template_repairs(
+        DRIFT_TEXT, DRIFT_TEMPLATE
+    )
+    by_field = {s["field"]: s for s in suggestions}
+    # Fältet som fortfarande läses (förfallodatum) föreslås inte.
+    assert set(by_field) == {"invoice_number", "total_amount", "date"}
+    assert by_field["invoice_number"]["new_label"] == "Faktura nr"
+    assert by_field["invoice_number"]["value"] == "NL-2026-0771"
+    assert by_field["invoice_number"]["below"] is False
+    assert by_field["total_amount"]["value"] == 1125.00
+    assert by_field["date"]["new_label"] == "Utfärdad"
+    assert by_field["date"]["value"] == "2026-09-01"
+
+    working = {"fields": {
+        "invoice_number": {"label": "Fakturanr."},
+        "total_amount": {"label": "Att betala"},
+        "date": {"label": "Fakturadatum"},
+        "due_date": {"label": "Förfallodatum"},
+    }}
+    assert si.suggest_template_repairs(MARTIN_G_PAIRED, working) == []
+
+    # Rutfält pekas ut av användaren — inga etikettförslag.
+    region_only = {"fields": {
+        "total_amount": {"region": [0.0, 0.0, 0.1, 0.1]},
+    }}
+    assert si.suggest_template_repairs(
+        MARTIN_G_PAIRED, region_only
+    ) == []
+
+
+def test_template_field_suggestions_are_value_checked_and_conservative():
+    suggestions = si.suggest_template_fields(DRIFT_TEXT, {"fields": {}})
+    by_field = {item["field"]: item for item in suggestions}
+    assert set(by_field) == {"invoice_number", "total_amount", "date", "due_date"}
+    assert by_field["invoice_number"]["label"] == "Faktura nr"
+    assert by_field["invoice_number"]["value"] == "NL-2026-0771"
+    assert by_field["total_amount"]["value"] == 1125.0
+    assert by_field["date"]["value"] == "2026-09-01"
+    assert by_field["due_date"]["value"] == "2026-10-01"
+
+    # Fungerande fält bevaras, och bildregioner ersätts aldrig av
+    # automatiskt föreslagna etiketter.
+    existing = {"fields": {
+        "invoice_number": {"label": "Faktura nr"},
+        "total_amount": {"region": [0.1, 0.1, 0.3, 0.2]},
+    }}
+    kept = si.suggest_template_fields(DRIFT_TEXT, existing)
+    assert "invoice_number" not in {item["field"] for item in kept}
+    assert "total_amount" not in {item["field"] for item in kept}
+
+    ambiguous = (
+        "Fakturanr: A-1\nAtt betala: 100,00\nTotalt: 90,00\n"
+    )
+    ambiguous_fields = si.suggest_template_fields(
+        ambiguous, {"fields": {}}
+    )
+    assert "total_amount" not in {
+        item["field"] for item in ambiguous_fields
+    }
+    amount_candidates = si.template_field_label_candidates(
+        ambiguous, "total_amount"
+    )
+    assert {
+        (item["label"], item["value"])
+        for item in amount_candidates
+    } >= {("Att betala", 100.0), ("Totalt", 90.0)}
+
+    # En kolumnrubrik vars värde står på raden under sparar även den
+    # nödvändiga "below"-regeln, inte bara rubriktexten.
+    stacked = {
+        item["field"]: item
+        for item in si.suggest_template_fields(
+            MARTIN_G_ROW, {"fields": {}}
+        )
+    }
+    assert stacked["invoice_number"]["below"] is True
+
+
+def test_drift_offer_repairs_template_and_rereads_rows(
+    tmp_path, monkeypatch
+):
+    """Accepterat reparationsförslag: mallen uppdateras på
+    disk och raden läses om med de nya etiketterna."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as siv
+    from ui.scan_import_view import ScanImportView
+
+    templates_file = tmp_path / "invoice_templates.json"
+    si.save_templates(templates_file, {
+        "Nordlys Energi AB": DRIFT_TEMPLATE,
+    })
+    view = ScanImportView(
+        app=_fake_core(), templates_path=templates_file
+    )
+    try:
+        row = {
+            "supplier": "Nordlys Energi AB",
+            "file": "nordlys.pdf", "_path": "", "_text": DRIFT_TEXT,
+            "invoice_number": "", "ocr": "", "date": "",
+            "due_date": "2026-10-01", "total_amount": 0.0,
+            "method": "test",
+            "missing": ["belopp", "fakturanummer"],
+            "status": "saknas: belopp, fakturanummer",
+        }
+        view._rows = [row]
+
+        asked = []
+
+        def _question(_parent, title, body):
+            asked.append((title, body))
+            return siv.QMessageBox.StandardButton.Yes
+
+        monkeypatch.setattr(
+            siv.QMessageBox, "question", _question
+        )
+        view._offer_template_repairs([row])
+
+        assert asked and "Nordlys Energi AB" in asked[0][1]
+        saved = si.load_templates(templates_file)
+        fields = saved["Nordlys Energi AB"]["fields"]
+        assert fields["invoice_number"]["label"] == "Faktura nr"
+        assert fields["total_amount"]["label"] == "Att betala"
+        assert fields["date"]["label"] == "Utfärdad"
+        assert fields["due_date"]["label"] == "Betalas senast"
+        assert row["invoice_number"] == "NL-2026-0771"
+        assert row["total_amount"] == 1125.0
+        assert row["date"] == "2026-09-01"
+        assert "uppdaterad" in view._lbl_status.text()
+    finally:
+        view.close()
+
+
+def test_print_invoice_document_writes_pdf(tmp_path):
+    """Utskriftsvägen: fakturans sidor renderas till skrivaren
+    (här en PDF-skrivare) — en sida in, en sida ut."""
+    printsupport = pytest.importorskip("PySide6.QtPrintSupport")
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as siv
+
+    pdf = _martin_g_2024_pdf(tmp_path)
+    out = tmp_path / "utskrift.pdf"
+    printer = printsupport.QPrinter(
+        printsupport.QPrinter.PrinterMode.HighResolution
+    )
+    printer.setOutputFormat(
+        printsupport.QPrinter.OutputFormat.PdfFormat
+    )
+    printer.setOutputFileName(str(out))
+    pages = siv.print_invoice_document(pdf, printer)
+    assert pages == 1
+    assert out.exists() and out.stat().st_size > 1000
+    import fitz
+
+    with fitz.open(out) as doc:
+        assert len(doc) == 1
+        assert doc[0].get_images(), "utskriven sida saknar fakturabilden"
+
+
+def test_print_row_missing_file_sets_status(tmp_path):
+    """Saknas originalfilen sägs det i statusraden — ingen
+    dialog, ingen gissning, ingen krasch."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import ScanImportView
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        view._rows = [{
+            "file": "borta.pdf",
+            "_path": str(tmp_path / "borta.pdf"),
+        }]
+        view._selected_rows = lambda: [0]
+        view._print_row()
+        assert "saknas" in view._lbl_status.text()
+    finally:
+        view.close()
+
+
+def test_print_row_accepted_dialog_prints(tmp_path, monkeypatch):
+    """Hela vägen: markerad rad + accepterad skrivardialog ger
+    utskriften och bekräftelsen i statusraden (skrivaren är en
+    PDF-fil här; dialogen är fejkad så inget fönster öppnas)."""
+    printsupport = pytest.importorskip("PySide6.QtPrintSupport")
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as siv
+    from ui.scan_import_view import ScanImportView
+
+    pdf = _martin_g_2024_pdf(tmp_path)
+    out = tmp_path / "utskrift.pdf"
+    real_printer = printsupport.QPrinter
+
+    def _pdf_printer(*_args, **_kwargs):
+        printer = real_printer(
+            real_printer.PrinterMode.HighResolution
+        )
+        printer.setOutputFormat(
+            real_printer.OutputFormat.PdfFormat
+        )
+        printer.setOutputFileName(str(out))
+        return printer
+
+    _pdf_printer.PrinterMode = real_printer.PrinterMode
+
+    class _Dlg:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def exec(self):
+            return 1
+
+    monkeypatch.setattr(siv, "QPrinter", _pdf_printer)
+    monkeypatch.setattr(siv, "QPrintDialog", _Dlg)
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        view._rows = [{"file": pdf.name, "_path": str(pdf)}]
+        view._selected_rows = lambda: [0]
+        view._print_row()
+        assert "skickad till skrivaren" in view._lbl_status.text()
+        assert out.exists() and out.stat().st_size > 1000
+    finally:
+        view.close()
+
+
+def test_open_original_opens_existing_file(tmp_path, monkeypatch):
+    """Öppna original: radens fil lämnas till systemets visare
+    och statusraden bekräftar med filnamnet."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as siv
+    from ui.scan_import_view import ScanImportView
+
+    original = tmp_path / "faktura.pdf"
+    original.write_bytes(b"%PDF-1.4 test")
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        view._rows = [{
+            "file": "faktura.pdf", "_path": str(original),
+        }]
+        view._selected_rows = lambda: [0]
+        opened = []
+        monkeypatch.setattr(
+            siv.QDesktopServices, "openUrl",
+            lambda url: opened.append(url) or True,
+        )
+        view._open_original_row()
+        assert len(opened) == 1
+        assert opened[0].toLocalFile() == str(original)
+        assert "faktura.pdf" in view._lbl_status.text()
+    finally:
+        view.close()
+
+
+def test_open_original_missing_file_sets_status(tmp_path):
+    """Saknas originalfilen sägs det i statusraden — ingen
+    dialog, ingen gissning, ingen krasch."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import ScanImportView
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        view._rows = [{
+            "file": "borta.pdf",
+            "_path": str(tmp_path / "borta.pdf"),
+        }]
+        view._selected_rows = lambda: [0]
+        view._open_original_row()
+        assert "saknas" in view._lbl_status.text()
+    finally:
+        view.close()
+
+
+def test_builtin_martin_g_below_needs_value_row():
+    # Rubrikraden finns men värderaden under Att betala är en
+    # textrad utan belopp (t.ex. avklippt OCR) → ingen träff,
+    # filen parkeras i stället för att gissa ur annat håll.
+    text = MARTIN_G_2024.replace(
+        "6,51 1 0,50 382,50 95,63 0,13 SEK 478,00",
+        "Vid försenad betalning debiteras dröjsmålsränta",
+    )
+    parsed = si.parse_invoice_text(text, MARTIN_G_REGISTER)
+    assert not parsed.get("template")
+
+
+def test_builtin_saint_gobain_and_credit_without_template():
+    inv = si.parse_invoice_text(SAINT_GOBAIN_INVOICE, DIREKTGLAS)
+    assert inv["supplier"] == "Direktglas"
+    assert inv["invoice_number"] == "9750271120"
+    assert inv["total_amount"] == 15425.00
+    assert inv["missing"] == []
+    assert inv["template"]
+    cred = si.parse_invoice_text(SAINT_GOBAIN_CREDIT, DIREKTGLAS)
+    assert cred["invoice_number"] == "9750269328"
+    assert cred["total_amount"] == -3303.00
+    assert cred["template"]
+
+
+def test_builtin_pilkington_registers_without_user_template():
+    parsed = si.parse_invoice_text(
+        PILKINGTON_TEXT,
+        [{"name": "Pilkington", "bg": "572-3457"}],
+    )
+    assert parsed["invoice_number"] == "2075214774"
+    assert parsed["total_amount"] == 4374.00
+    assert parsed["date"] == "2026-10-15"
+    assert parsed["due_date"] == "2026-11-14"
+    assert parsed["missing"] == []
+    assert parsed["template"]
+
+
+def test_builtin_unknown_format_still_untaught():
+    parsed = si.parse_invoice_text(
+        "FAKTURA\nFakturanr: 12345\nAtt betala 100,00\n", []
+    )
+    assert not parsed.get("template")
+    assert si.has_builtin_format("Direktglas")
+    assert si.has_builtin_format("AB Martin G Anderson")
+    assert si.has_builtin_format("Martin G Anderson")
+    assert not si.has_builtin_format("Okänd Leverantör AB")
+
+
+# ── Swede Glass United + AAG Automotive (inbyggda format) ────
+# Verifierade mot riktiga fakturor: Swede Glass United 19072
+# (706,00) och AAG Automotive 1019 (6 344,00). Båda har
+# kolumnsummor i sidfoten (rubrikrad + värderad) — den inbyggda
+# träffen kräver därför att ATT BETALA står på samma rad som
+# etiketten, annars parkeras filen i stället för att bokföra
+# netto/exkl. moms ur fel kolumn.
+
+SWEDE_PAIRED = """\
+SWEDE GLASS UNITED
+Faktura
+Fakturanummer / Kundnummer 19072 318
+Fakturadatum 2020-06-22
+Tadega AB Ormesgatan 1 A 702 83 Örebro
+Betalningsvillkor 30 dagar netto
+Förfallodatum 2020-07-22
+300 Hyra av behållare 1 st 3 mån 180,00 540,00
+ATT BETALA 706,00
+Bankgiro 5592-1449
+Organisationsnr 556637-1588
+www.swedeglassunited.com
+"""
+
+SWEDE_ROW = """\
+SWEDE GLASS UNITED
+Faktura
+Fakturanummer / Kundnummer
+19072 318
+Fakturadatum
+2020-06-22
+Förfallodatum 2020-07-22
+300 Hyra av behållare 1 st 3 mån 180,00 540,00
+Netto Exp avg Exkl moms Moms % Moms kr Öresavr ATT BETALA
+540,00 25,00 565,00 25 141,25 -0,25 706,00
+Bankgiro 5592-1449
+Organisationsnr 556637-1588
+"""
+
+SWEDE_REGISTER = [{
+    "name": "Swede Glass United",
+    "org_number": "556637-1588", "bg": "5592-1449",
+}]
+
+AAG_PAIRED = """\
+AAG Automotive AB
+Faktura
+Fakturadatum 2026-04-01
+Fakturanr 1019
+Tadega AB Ormestagatan 1 A 70283 ÖREBRO Sverige
+Kundnr 1
+Förfallodatum 2026-04-16
+DEO Delar enligt ovan 1,00 St 18 126,00 72,00% 5 075,28
+Exkl. moms 5 075,28
+Moms 1 268,82
+Öresavr -0,10
+Totalt 6 344,00
+ATT BETALA SEK 6 344,00
+Bankgiro 403-0706
+Organisationsnr 559140-0816
+"""
+
+AAG_ROW = """\
+AAG Automotive AB
+Faktura
+Fakturadatum 2026-04-01
+Fakturanr 1019
+Kundnr 1
+Förfallodatum 2026-04-16
+DEO Delar enligt ovan 1,00 St 18 126,00 72,00% 5 075,28
+Exkl. moms Moms Öresavr Totalt ATT BETALA
+5 075,28 1 268,82 -0,10 6 344,00 SEK 6 344,00
+Bankgiro 403-0706
+Organisationsnr 559140-0816
+"""
+
+AAG_REGISTER = [{
+    "name": "AAG Automotive AB",
+    "org_number": "559140-0816", "bg": "403-0706",
+}]
+
+
+def test_builtin_swede_glass_united():
+    parsed = si.parse_invoice_text(SWEDE_PAIRED, SWEDE_REGISTER)
+    assert parsed["supplier"] == "Swede Glass United"
+    assert parsed["invoice_number"] == "19072"
+    assert parsed["total_amount"] == 706.00
+    assert parsed["date"] == "2020-06-22"
+    assert parsed["due_date"] == "2020-07-22"
+    assert parsed["missing"] == []
+    assert parsed["template"]
+
+
+def test_builtin_swede_glass_row_layout_parks():
+    # Kolumnsummorna radvis: 706,00 får inte ersättas av
+    # netto 540,00 ur fel kolumn → ingen inbyggd träff.
+    parsed = si.parse_invoice_text(SWEDE_ROW, SWEDE_REGISTER)
+    assert not parsed.get("template")
+
+
+def test_builtin_aag_automotive():
+    parsed = si.parse_invoice_text(AAG_PAIRED, AAG_REGISTER)
+    assert parsed["supplier"] == "AAG Automotive AB"
+    assert parsed["invoice_number"] == "1019"
+    assert parsed["total_amount"] == 6344.00
+    assert parsed["date"] == "2026-04-01"
+    assert parsed["due_date"] == "2026-04-16"
+    assert parsed["missing"] == []
+    assert parsed["template"]
+
+
+def test_builtin_aag_row_layout_parks():
+    # Radvis sidfot: första beloppet efter ATT BETALA är
+    # exkl. moms (5 075,28) — bokförs aldrig automatiskt.
+    parsed = si.parse_invoice_text(AAG_ROW, AAG_REGISTER)
+    assert not parsed.get("template")
+    assert si.has_builtin_format("Swede Glass United")
+    assert si.has_builtin_format("AAG Automotive AB")
+
+
+def test_parked_dialog_batches_and_informs(monkeypatch):
+    """Otolkbara fakturor ska ge EN samlad dialog (inte en
+    per fil) med filnamn och orsak — testet fångar dialogen."""
+    import ui.scan_import_view as siv
+
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+
+    class _FakeCore:
+        def get_suppliers(self):
+            return []
+
+        def get_setting(self, key, default=None):
+            return default
+
+    view = siv.ScanImportView(app=_FakeCore())
+    view._parked_notify = []
+    view._parked_timer = siv.QTimer(view)
+    view._parked_timer.setSingleShot(True)
+    view._parked_timer.timeout.connect(view._show_parked_dialog)
+
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        siv.QMessageBox, "warning",
+        lambda _parent, title, text: shown.append((title, text)),
+    )
+    view._on_watch_parked(
+        {"file": "a.pdf", "reason": "no-template"}
+    )
+    view._on_watch_parked(
+        {"file": "b.pdf", "reason": "missing: belopp"}
+    )
+    view._show_parked_dialog()
+
+    assert len(shown) == 1
+    title, body = shown[0]
+    assert title
+    assert "a.pdf" in body and "b.pdf" in body
+    assert "okänt format" in body
+    assert "saknar uppgifter" in body
+    # Kön är tömd — samma filer larmar inte igen.
+    view._show_parked_dialog()
+    assert len(shown) == 1
+
+
+# ── Regionsmallar: markering på fakturabilden ─────────────────
+# Användaren drar en ruta runt värdet i matchningsdialogen;
+# mallen sparar rutans plats (andel av sidan + sidnummer) och
+# läsningen sker sedan ur rutan — inga etiketter alls.
+
+import pytest
+
+
+def test_region_value_parsing():
+    assert si._value_from_region("SEK 478,00", "amount") == "478.00"
+    assert si._value_from_region("Fakturanr 916336", "token") == "916336"
+    assert si._value_from_region("916336 2024-05-08 103", "token") \
+        == "916336"
+    assert si._value_from_region("916336 2024-05-08 103", "date") \
+        == "2024-05-08"
+    assert si._value_from_region("OCR 123 4567", "digits") == "1234567"
+    assert si._value_from_region("", "amount") == ""
+    assert si._value_from_region("bara text", "amount") == ""
+
+
+REGION_TEMPLATES = {"Testleverantör AB": {"fields": {
+    "invoice_number": {"region": [0.47, 0.09, 0.56, 0.13], "page": 0},
+    "date": {"region": [0.56, 0.09, 0.70, 0.13], "page": 0},
+    "total_amount": {"region": [0.76, 0.79, 0.97, 0.84], "page": 0},
+}}}
+
+
+def test_region_template_identifies_supplier_without_text():
+    # Ren rutträff: löptexten är tom (t.ex. skannad faktura) —
+    # mallen identifierar leverantören via sina egna rutor.
+    parsed = si.parse_invoice_text(
+        "", [], templates=REGION_TEMPLATES,
+        region_texts={
+            "invoice_number": "916336",
+            "date": "2024-05-08",
+            "total_amount": "SEK 478,00",
+        },
+    )
+    assert parsed["supplier"] == "Testleverantör AB"
+    assert parsed["template"] == "Testleverantör AB"
+    assert parsed["invoice_number"] == "916336"
+    assert parsed["total_amount"] == 478.00
+    assert parsed["date"] == "2024-05-08"
+    assert parsed["missing"] == []
+
+
+def test_region_template_without_hits_does_not_claim():
+    parsed = si.parse_invoice_text(
+        "", [], templates=REGION_TEMPLATES,
+        region_texts={"invoice_number": "", "total_amount": "text"},
+    )
+    assert not parsed.get("template")
+
+
+def test_region_pdf_reads_values_end_to_end(tmp_path):
+    """Hela kedjan mot en riktig PDF: rutorna i mallen läses
+    ur textlagret på rätt platser och filen tolkas komplett."""
+    fitz = pytest.importorskip("fitz")
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((300, 92), "916336", fontsize=11)
+    page.insert_text((345, 92), "2024-05-08", fontsize=11)
+    page.insert_text((470, 690), "SEK 478,00", fontsize=11)
+    pdf = tmp_path / "faktura.pdf"
+    doc.save(pdf)
+    doc.close()
+
+    assert si.page_image_count(pdf) == 1
+    assert si.render_page_image(pdf)
+    parsed = si.parse_invoice_file(
+        pdf, "", [], templates=REGION_TEMPLATES
+    )
+    assert parsed["invoice_number"] == "916336"
+    assert parsed["total_amount"] == 478.00
+    assert parsed["date"] == "2024-05-08"
+    assert parsed["template"] == "Testleverantör AB"
+
+    # Ruta över tom yta träffar inget — ingen mallträff.
+    tom = {"Testleverantör AB": {"fields": {
+        "total_amount": {"region": [0.05, 0.40, 0.30, 0.45]},
+    }}}
+    parsed2 = si.parse_invoice_file(pdf, "", [], templates=tom)
+    assert not parsed2.get("template")
+
+
+def test_parked_dialog_offers_template_creation(tmp_path, monkeypatch):
+    """Okänt format → appen FRÅGAR om en mall ska skapas, öppnar
+    matchningsdialogen med den parkerade fakturans bild och
+    skannar om mappen när mallen är sparad — allt i appen."""
+    import fitz
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as siv
+
+    folder = tmp_path / "NordlysIn"
+    folder.mkdir()
+    pdf = folder / "faktura.pdf"
+    doc = fitz.open()
+    doc.new_page(width=595, height=842)
+    doc.save(pdf)
+    doc.close()
+    templates_file = tmp_path / "invoice_templates.json"
+
+    view = siv.ScanImportView(
+        app=_fake_core(), templates_path=templates_file
+    )
+    try:
+        entry = {"supplier": "Nordlys Energi AB", "path": str(folder)}
+        view._watch.set_folders([entry])
+
+        fragor: list[str] = []
+        monkeypatch.setattr(
+            siv.QMessageBox, "warning",
+            lambda *_a, **_k: None,
+        )
+
+        def _question(_parent, _title, text):
+            fragor.append(text)
+            return siv.QMessageBox.StandardButton.Yes
+
+        monkeypatch.setattr(siv.QMessageBox, "question", _question)
+
+        oppnad: dict = {}
+
+        monkeypatch.setattr(siv.ScanImportView, "_verify_template", lambda self, supplier, template, files: "bekrafta")
+        class FakeTemplateDialog:
+            def __init__(self, parent, text, supplier="",
+                         existing=None, path=None):
+                oppnad["path"] = path
+                self.result_template = {
+                    "supplier": "Nordlys Energi AB",
+                    "fields": {
+                        "total_amount": {
+                            "region": [0.7, 0.8, 0.97, 0.85],
+                            "page": 0,
+                        },
+                    },
+                }
+
+            def exec(self):
+                return 1
+
+        monkeypatch.setattr(siv.ScanImportView, "_verify_template", lambda self, supplier, template, files: "bekrafta")
+        monkeypatch.setattr(siv, "TemplateDialog", FakeTemplateDialog)
+        omskannad: list = []
+        monkeypatch.setattr(
+            view._watch, "scan_folder",
+            lambda e: omskannad.append(e),
+        )
+
+        view._parked_notify = [{
+            "file": "faktura.pdf", "path": str(pdf),
+            "reason": "no-template",
+        }]
+        view._show_parked_dialog()
+
+        assert len(fragor) == 1
+        assert "Nordlys Energi AB" in fragor[0]
+        assert Path(oppnad["path"]) == pdf
+        assert omskannad
+        assert "Nordlys Energi AB" in view._get_templates()
+    finally:
+        view.close()
+
+
+def test_verify_template_reports_missing(tmp_path, monkeypatch):
+    """Säkerhetskontrollen: mallen prövas mot leverantörens filer —
+    den kompletta visas med värden, den trasiga flaggas med
+    vad som saknas. Registrerar ingenting."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as sv
+    from ui.scan_import_view import ScanImportView
+
+    folder = tmp_path / "TestIn"
+    folder.mkdir()
+    import fitz
+    good = folder / "faktura-2025.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((40, 40), "Fakturanummer 555777", fontsize=11)
+    page.insert_text((40, 80), "Summa att betala 1 250,00 kr",
+                     fontsize=11)
+    doc.save(str(good))
+    doc.close()
+    broken = folder / "faktura-broken.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(str(broken))
+    doc.close()
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        template = {"fields": {
+            "invoice_number": {"label": "Fakturanummer"},
+            "total_amount": {"label": "Summa att betala"},
+        }}
+        rows = view._verification_rows(
+            "Test AB", template, [str(good), str(broken)]
+        )
+        assert len(rows) == 2
+        ok_row = next(r for r in rows if set(r["missing"]) <= {"leverantör"})
+        assert {r["file"] for r in rows} == {"faktura-2025.pdf", "faktura-broken.pdf"}
+        assert ok_row["invoice_number"] == "555777"
+        bad_row = next(r for r in rows if r["file"] == "faktura-broken.pdf")
+        assert bad_row["file"] == "faktura-broken.pdf"
+        assert "belopp" in bad_row["missing"]
+    finally:
+        view.close()
+
+
+def test_teach_then_verify_and_remember(tmp_path, monkeypatch):
+    """Efter 🎓+drag: sparad mall säkerhetskontrolleras automatiskt
+    (visar avlästa värden) och bekräftad mall sägs vara ihågkommen
+    till nästa faktura — mappen skannas om direkt."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as sv
+    from ui.scan_import_view import ScanImportView
+
+    folder = tmp_path / "TestIn"
+    folder.mkdir()
+    import fitz
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((40, 80), "Summa att betala 1 250,00 kr",
+                     fontsize=11)
+    path = folder / "faktura-2025.pdf"
+    doc.save(str(path))
+    doc.close()
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        entry = {"supplier": "Test AB", "path": str(folder)}
+        view._watch.set_folders([entry])
+
+        matches = []
+        shown = {}
+
+        class FakeTemplateDialog:
+            def __init__(self, parent, text, supplier="",
+                         existing=None, path=None):
+                self.result_template = {
+                    "supplier": "Test AB",
+                    "fields": {
+                        "total_amount": {
+                            "region": [0.5, 0.6, 0.8, 0.7],
+                            "page": 0,
+                        },
+                    },
+                }
+
+            def exec(self):
+                matches.append(True)
+                return 1
+
+        real_verify = ScanImportView._verify_template
+
+        def fake_verify(self, supplier, template, files):
+            shown["supplier"] = supplier
+            shown["files"] = files
+            return "bekrafta"
+
+        monkeypatch.setattr(sv, "TemplateDialog", FakeTemplateDialog)
+        monkeypatch.setattr(
+            ScanImportView, "_verify_template", fake_verify)
+        try:
+            rescanned = []
+            monkeypatch.setattr(
+                view._watch, "scan_folder",
+                lambda e: rescanned.append(e),
+            )
+            assert view._teach_from_folder(entry) is True
+        finally:
+            monkeypatch.setattr(
+                ScanImportView, "_verify_template", real_verify)
+        assert matches == [True]
+        assert shown["supplier"] == "Test AB"
+        assert shown["files"] and str(shown["files"][0]) \
+            == str(path)
+        assert "Test AB" in view._get_templates()
+        status = view._lbl_status.text()
+        assert "minns den" in status and "Test AB" in status
+        assert any(r.get("path") == str(folder) for r in rescanned)
+    finally:
+        view.close()
+
+
+def test_teach_adjust_loop_recHECKS(tmp_path, monkeypatch):
+    """Väljer användaren Justera i säkerhetskontrollen öppnas
+    markeringen igen (mallen ifylld) och kontrollen körs om på
+    den justerade mallen; minnet + omskanning sker först efteråt."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as sv
+    from ui.scan_import_view import ScanImportView
+
+    folder = tmp_path / "TestIn"
+    folder.mkdir()
+    import fitz
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((40, 80), "Summa att betala 1 250,00 kr",
+                     fontsize=11)
+    path = folder / "faktura-2025.pdf"
+    doc.save(str(path))
+    doc.close()
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        entry = {"supplier": "Test AB", "path": str(folder)}
+        view._watch.set_folders([entry])
+
+        dialog_malls = []
+        answers = iter(["justera", "bekrafta"])
+        fields_seq = [
+            {"total_amount": {"label": "Summa att betala"}},
+            {"total_amount": {"label": "Summa exkl moms"}},
+        ]
+        calls = []
+
+        class FakeTemplateDialog:
+            def __init__(self, parent, text, supplier="",
+                         existing=None, path=None):
+                dialog_malls.append(existing)
+                idx = len(calls)
+                self.result_template = {
+                    "supplier": "Test AB",
+                    "fields": fields_seq[idx],
+                }
+
+            def exec(self):
+                calls.append(True)
+                return 1
+
+        real_verify = ScanImportView._verify_template
+
+        def fake_verify(self, supplier, template, files):
+            return next(answers)
+
+        monkeypatch.setattr(sv, "TemplateDialog", FakeTemplateDialog)
+        monkeypatch.setattr(
+            ScanImportView, "_verify_template", fake_verify)
+        try:
+            assert view._teach_from_folder(entry) is True
+        finally:
+            monkeypatch.setattr(
+                ScanImportView, "_verify_template", real_verify)
+        assert len(calls) == 2
+        assert dialog_malls[1] == {"fields": fields_seq[0]}
+        # Final mallen är den justerade
+        assert view._get_templates()["Test AB"]["fields"] == fields_seq[1]
+        assert "minns den" in view._lbl_status.text()
+    finally:
+        view.close()
+
+
+def test_supplier_match_name_variants_and_bankgiro():
+    """Bättre matchning: bolagsform/punkt/ordning ska inte avgöra,
+    bankgiro-fältet i registret (inte bara "bg") ska identifiera,
+    och delad förstanamns-träff mellan två leverantörer ger ingen
+    gissning."""
+    sups = [
+        {"name": "Martin G Anderson AB", "bankgiro": "728-0811"},
+        {"name": "Direktglas", "bankgiro": "942-2817"},
+        {"name": "Pilkington Sverige AB"},
+        {"name": "Pilkington Glas AB"},
+    ]
+    assert si.match_supplier(
+        "AB Martin G. Anderson\nFakturanr 123", sups
+    ) == "Martin G Anderson AB"
+    # Tryckta namnet är Saint-Gobain — registerposten Direktglas
+    # identifieras via bankgirot, precis som i verkligheten.
+    assert si.match_supplier(
+        "Saint-Gobain Autover Sverige AB\nBankgiro: 942-2817", sups
+    ) == "Direktglas"
+    # Bara "Pilkington" passar båda Pilkington-posterna → ingen
+    # gissning (fakturan parkeras/man granskar i stället).
+    assert si.match_supplier("Pilkington", sups) == ""
+
+
+def test_template_lookup_name_variants_unambiguous():
+    """Malluppslag tål namnvariant men väljer aldrig vid tvetydighet."""
+    templates = {
+        "Nordlys Energi AB": {"fields": {"total_amount": {"label": "X"}}},
+        "Annan AB": {"fields": {"total_amount": {"label": "Y"}}},
+    }
+    assert si.find_template(templates, "AB Nordlys Energi") \
+        is templates["Nordlys Energi AB"]
+    assert si.find_template(templates, "Okänd AB") is None
+    amb = {"Martin G": {"fields": {}}, "Martin G Anderson": {"fields": {}}}
+    assert si.find_template(amb, "Martin G Anderson") is amb["Martin G Anderson"]
+    assert si.find_template(amb, "Martin") is None
+
+    alias_template = {"Northwind Energy": {"fields": {}}}
+    supplier = {
+        "name": "Northwind Legal AB",
+        "aliases": ["Northwind Energy"],
+    }
+    assert si.find_template(
+        alias_template, "Northwind Legal AB", [supplier]
+    ) is alias_template["Northwind Energy"]
+    shared_alias_suppliers = [
+        supplier,
+        {"name": "Northwind Energy Inc", "aliases": ["Northwind Energy"]},
+    ]
+    assert si.find_template(
+        alias_template, "Northwind Legal AB", shared_alias_suppliers
+    ) is None
+    alias_overlaps_another_name = [
+        supplier, {"name": "Northwind Energy AB"},
+    ]
+    assert si.find_template(
+        alias_template, "Northwind Legal AB", alias_overlaps_another_name
+    ) is None
+    competing_aliases = {
+        **alias_template,
+        "Northwind Legal AB": {"fields": {"date": {"label": "Date"}}},
+    }
+    assert si.find_template(
+        competing_aliases, "Northwind Legal AB", [supplier]
+    ) is None
+    case_ambiguous = {
+        "Northwind Energy": {"fields": {}},
+        "northwind energy": {"fields": {"date": {"label": "Date"}}},
+    }
+    assert si.find_template(
+        case_ambiguous, "Northwind Legal AB", [supplier]
+    ) is None
+
+
+def test_number_and_total_label_variants():
+    """Fler entydiga etiketter: 'Faktura nr', 'Invoice number',
+    'Summa att betala' och 'Amount due'."""
+    assert si.parse_invoice_number("Faktura nr: 77881\nAtt betala 10,00") \
+        == "77881"
+    assert si.parse_invoice_number("Invoice number: INV-2026-9") \
+        == "INV-2026-9"
+    assert si.parse_total("Summa att betala 1 234,00 kr") == 1234.0
+    assert si.parse_total("Amount due: 99.50") == 99.5
+
+
+def test_template_applies_for_register_name_variant():
+    """Registernamnets variant ska ändå hitta leverantörens mall
+    och läsa värdena ur den — matchningen sitter i namnet, inte
+    i exakt stavning."""
+    templates = {
+        "Nordlys Energi AB": {"fields": {
+            "invoice_number": {"label": "Er ref hos oss"},
+            "total_amount": {"label": "SLUTSUMMA ATT BETALA"},
+        }},
+    }
+    suppliers = [{"name": "AB Nordlys Energi"}]
+    parsed = si.parse_invoice_text(
+        WEIRD_LAYOUT, suppliers=suppliers, templates=templates
+    )
+    assert parsed["supplier"] == "AB Nordlys Energi"
+    assert parsed["template"] == "AB Nordlys Energi"
+    assert parsed["invoice_number"] == "NL-2026-0771"
+    assert parsed["total_amount"] == 1125.0
+
+
+def test_registered_alias_resolves_its_template_without_false_conflict():
+    supplier = {
+        "name": "Northwind Legal AB",
+        "aliases": ["Northwind Energy"],
+    }
+    template = {"fields": {
+        "invoice_number": {"label": "Invoice number"},
+        "total_amount": {"label": "Amount due"},
+    }}
+    parsed = si.parse_invoice_text(
+        "NORTHWIND ENERGY\nInvoice number: NW-17\nAmount due: 123.45\n",
+        suppliers=[supplier],
+        templates={"Northwind Energy": template},
+    )
+    assert parsed["supplier"] == "Northwind Legal AB"
+    assert parsed["template"] == "Northwind Legal AB"
+    assert parsed["invoice_number"] == "NW-17"
+    assert parsed["total_amount"] == 123.45
+    assert not parsed.get("match_uncertain")
+
+
+def test_multiple_templates_for_registered_alias_remain_uncertain():
+    supplier = {
+        "name": "Northwind Legal AB",
+        "aliases": ["Northwind Energy"],
+    }
+    template = {"fields": {
+        "invoice_number": {"label": "Invoice number"},
+        "total_amount": {"label": "Amount due"},
+    }}
+    parsed = si.parse_invoice_text(
+        "NORTHWIND ENERGY\nInvoice number: NW-17\nAmount due: 123.45\n",
+        suppliers=[supplier],
+        templates={
+            "Northwind Legal AB": template,
+            "Northwind Energy": template,
+        },
+    )
+    assert parsed.get("match_uncertain") is True
+    assert parsed["match_reason"] == "template_ambiguous"
+    assert set(parsed["match_candidates"]) == {
+        "Northwind Legal AB", "Northwind Energy",
+    }
+
+
+def test_manual_create_warns_and_skips_possible_duplicate(
+        tmp_path, monkeypatch):
+    """Manuell registrering: möjlig dubblett ger en fråga FÖRE
+    registrering; Nej lämnar raden kvar orörd och inget skapas."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as siv
+    from ui.scan_import_view import ScanImportView
+
+    created = []
+
+    class FakeCore:
+        def get_suppliers(self):
+            return [{"name": "Test AB"}]
+
+        def get_setting(self, key, default=None):
+            return default
+
+        def get_invoices(self):
+            return [{
+                "supplier": "Test AB", "invoice_number": "9911",
+                "total_amount": 1250.0, "date": "2026-09-01",
+                "status": "Obetald",
+            }]
+
+        def add_invoice(self, data):
+            created.append(data)
+            return {"id": "x", **data}
+
+    view = ScanImportView(
+        app=FakeCore(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        view._rows = [{
+            "file": "igen.pdf", "supplier": "Test AB",
+            "invoice_number": "9912", "total_amount": 1250.0,
+            "date": "2026-09-01", "due_date": "", "ocr": "",
+            "method": "test", "_path": "", "missing": [],
+            "status": "redo",
+        }]
+        view._refresh_table()
+        view._tbl.selectRow(0)
+        asked = []
+        monkeypatch.setattr(
+            siv.QMessageBox, "question",
+            lambda *a, **k: (
+                asked.append(a),
+                siv.QMessageBox.StandardButton.No,
+            )[1],
+        )
+        view._create_invoices()
+        assert asked and created == []
+        assert len(view._rows) == 1  # raden kvar, inget borttaget
+    finally:
+        view.close()
+
+
+def test_saved_template_rereads_other_interpreted_rows(tmp_path):
+    """Krav: när en mall sparats efter granskning av EN faktura
+    läses de andra tolkade raderna om ifall de kan använda samma
+    mall — deras fält fylls i utan att de öppnas en och en."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import ScanImportView
+
+    view = ScanImportView(
+        app=_fake_core(),
+        templates_path=tmp_path / "invoice_templates.json",
+    )
+    view._refresh_table = lambda: None  # isolera hjälparens logik
+    template = {"fields": {
+        "invoice_number": {"label": "Fakturanr"},
+        "total_amount": {"label": "SUMMA"},
+    }}
+
+    def _row(name, text, supplier=""):
+        return {
+            "file": name, "supplier": supplier,
+            "invoice_number": "", "total_amount": 0,
+            "date": "", "due_date": "", "ocr": "",
+            "missing": ["belopp", "fakturanummer"],
+            "template": "", "method": "test",
+            "status": "saknas: belopp, fakturanummer",
+            "_text": text, "_path": "",
+        }
+
+    taught = _row("a.pdf", "Fakturanr: 9911\nSUMMA: 1 250,00\n",
+                  supplier="Pilkington")
+    same = _row("b.pdf", "PILKINGTON GLAS AB\n"
+                         "Fakturanr: 9912\nSUMMA: 2 500,00\n")
+    other = _row("c.pdf", "HELT ANNAN LEVERANTÖR\nBelopp saknas här")
+    view._rows = [taught, same, other]
+
+    n = view._reread_rows_with_template(
+        "Pilkington", template, exclude=taught)
+    assert n == 1
+    assert same["invoice_number"] == "9912"
+    assert same["total_amount"] == 2500.0
+    assert same["supplier"] == "Pilkington"
+    assert same["template"] == "Pilkington"
+    assert same["status"] == "redo"
+    # Mallen gör inte anspråk på det andra dokumentet → orört
+    assert other["invoice_number"] == "" and other["supplier"] == ""
+    # Den granskade raden själv rörs inte av hjälparen
+    assert taught["invoice_number"] == ""
+
+
+def test_region_image_view_zoom(tmp_path):
+    """Krav: vid mallgranskning ska man kunna zooma in på
+    fakturan för att se raderna — bildrektangeln (och därmed
+    rutkoordinaterna) skalar med zoomen och Anpassa återställer."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QPixmap
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import _RegionImageView
+
+    view = _RegionImageView()
+    view.resize(700, 520)
+    view.set_page(QPixmap(1000, 700), 0)
+    fit = view._img_rect()
+    assert fit is not None and view._zoom == 1.0
+
+    view.set_zoom(2.0)
+    zoomed = view._img_rect()
+    assert abs(zoomed.width() - 2 * fit.width()) < 1.5
+    # Vycentret svarar mot fokuspunkten i bilden
+    frac = view._fraction(zoomed.center())
+    assert abs(frac[0] - 0.5) < 0.01 and abs(frac[1] - 0.5) < 0.01
+    # Rutornas pixelrektangel följer samma skalning
+    rp = view._rect_px((0.1, 0.1, 0.3, 0.25))
+    assert abs(rp.width() - 0.2 * zoomed.width()) < 1.5
+
+    view.zoom_fit()
+    assert view._zoom == 1.0
+    assert abs(view._img_rect().width() - fit.width()) < 1.5
+    # Zoomen kläms till rimliga gränser
+    view.set_zoom(100.0)
+    assert view._zoom == 8.0
+    view.set_zoom(0.1)
+    assert view._zoom == 1.0
+    view.set_page(QPixmap(1000, 700), 0)   # ny sida → 100 %
+    assert view._zoom == 1.0

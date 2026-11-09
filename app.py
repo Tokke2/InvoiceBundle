@@ -41,6 +41,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -70,16 +71,17 @@ log = logging.getLogger("FakturaApp")
 
 APP_NAME: str = "Fakturabunten"
 APP_SHORT_NAME: str = "Fakturabunten"
-APP_VERSION: str = "1.4.10"
+APP_VERSION: str = "1.0.0"
 
 COPYRIGHT_YEAR: int = datetime.date.today().year
 COPYRIGHT: str = f"© {COPYRIGHT_YEAR} Rickard Längkvist"
 
-#: Donationsuppgifter — ändras på EN plats.
-#: Används av Om-dialogen (main_window.py) och about.md-öppnaren.
-DONATE_SWISH: str = "123 456 78 90"   # ← ditt Swish-nummer här
-DONATE_PAYPAL: str = "https://www.paypal.com/donate"
-DONATE_BMC: str = "https://www.buymeacoffee.com/fakturabetalaren"
+#: Donationsuppgifter. PayPal/Ko-fi ägs av ui/donate.py (dialogen);
+#: Swish bor här. Används av ui/donate.py och Om-dialogen.
+DONATE_SWISH: str = "0721817177"   # Swish-nummer för donationer
+DONATE_PAYPAL: str = "https://paypal.me/Rickard3dPrint"
+DONATE_KOFI: str = "https://ko-fi.com/tokke2"
+DONATE_BMC: str = "https://ko-fi.com/tokke2"  # bakåtkompat: BMC → Ko-fi
 
 #: Bakåtkompatibilitet (äldre kod/plugins som använder DONATE_URL).
 DONATE_URL: str = DONATE_PAYPAL
@@ -110,6 +112,14 @@ VALID_INVOICE_STATUSES: list[str] = [
 #: Statusar som INTE räknas som obetalda.
 NON_UNPAID_STATUSES: tuple[str, ...] = ("Betald", "Makulerad", "Arkiverad")
 
+#: Exporterade (Arkiverad) OCH manuellt betald-markerade (Betald)
+#: fakturor lever per leverantör i data/betalda/. De räknas aldrig
+#: in i ATT BETALA; Fakturor-fliken läser bara huvudfilen, den egna
+#: Historik-fliken arkivet. Vid import/skanning söks BÅDA registren
+#: igenom (dubblettskyddet gäller alltså även betalda).
+ARCHIVE_STATUSES: tuple[str, ...] = ("Arkiverad", "Betald")
+ARCHIVE_DIR_NAME = "betalda"
+
 #: Statusar som INTE räknas som aktiva.
 NON_ACTIVE_STATUSES: tuple[str, ...] = ("Arkiverad", "Makulerad")
 
@@ -132,6 +142,9 @@ CURRENT_PLATFORM: str = get_platform()
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "theme":            "dark",
+    # Gränssnittsspråk: "sv" (standard) eller "en". Byts i menyn
+    # 🌐 Språk och gäller direkt, utan omstart (ui/i18n.py).
+    "language":         "sv",
     "hidden_tabs":      [],
     "window_width":     1280,
     "window_height":    800,
@@ -140,8 +153,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "window_maximized": False,
     "font_size":        13,
     "startup":          False,
+    "autostart_method": "auto",
     "start_minimized":  True,
     "close_to_tray":    True,
+    "export_include_originals": True,
+    "export_original_first_page_only": False,
+    "update_auto_check": True,
+    "auto_batch":      False,
+    "update_last_check": "",
     "last_opened":      None,
     "company_name":     "",
     "org_number":       "",
@@ -175,6 +194,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # *.tmp-lämmar) automatiskt när programmet avslutas.
     # Data, settings, loggar och backuper röras ALDRIG.
     "clean_cache_on_exit": True,
+    # SMARTFILTER-rensning: automatiskt EN gång per dygn (första
+    # starten på dagen) rensas cachefiler ÄLDRE än 1 dygn — färska
+    # filer (dagens, ev. låsta i körande processer) rörs aldrig.
+    # Stämpel för senaste genomförda dygnsrensningen (ISO-tid).
+    "cache_last_daily_clean": "",
     # Plugin-hälsa: antal raka krascher per plugin (3-strikes-regeln).
     "plugin_strikes": {},
     # Plugins som avaktiverats efter 3 krascher (återställs via
@@ -188,6 +212,7 @@ SETTINGS_SCHEMA_VERSION: int = int(DEFAULT_SETTINGS["schema_version"])
 #: Värden som måste tillhöra en fast mängd.
 SETTINGS_ALLOWED_VALUES: dict[str, tuple] = {
     "theme": ("dark", "light", "auto", "system"),
+    "language": ("sv", "en"),
     "pdf_rounding": ("exact", "hel", "50", "100"),
 }
 
@@ -524,6 +549,96 @@ def cleanup_pycache(root: Path | None = None, days: int = 3) -> int:
     return removed
 
 
+def clean_caches_smart(
+    root: Path | None = None, days: float = 1
+) -> dict[str, Any]:
+    """
+    SMARTFILTER-rensning: tar bara cachefiler ÄLDRE än *days* dygn.
+
+    Samma aldrig-rör-regler som clean_caches (bara __pycache__,
+    *.pyc/*.pyo och *.tmp-lämmar under appmappen), men filerna
+    måste vara äldre än gränsen — färska cachefiler från idag
+    (som kan vara låsta i körande processer) rörs aldrig.
+
+    Returnerar samma statistik-dict som clean_caches.
+    Fail-safe: kastar aldrig, hoppar över låsta filer.
+    """
+    root = root or BASE_DIR
+    stats = {
+        "pycache_mappar": 0,
+        "pyc_filer": 0,
+        "tmp_filer": 0,
+        "frigjorda_bytes": 0,
+    }
+    cutoff = datetime.datetime.now().timestamp() - float(days) * 86400
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            for d in list(dirnames):
+                if d != "__pycache__":
+                    continue
+                dirnames.remove(d)   # traversera inte ner i den
+                p = Path(dirpath) / d
+                try:
+                    if p.stat().st_mtime >= cutoff:
+                        continue      # färsk cache (idag) — rör ej
+                except OSError:
+                    continue
+                try:
+                    size = sum(
+                        f.stat().st_size for f in p.rglob("*")
+                        if f.is_file()
+                    )
+                except OSError:
+                    size = 0
+                shutil.rmtree(p, ignore_errors=True)
+                if not p.exists():
+                    stats["pycache_mappar"] += 1
+                    stats["frigjorda_bytes"] += size
+
+            for f in filenames:
+                lower = f.lower()
+                p = Path(dirpath) / f
+                is_pyc = lower.endswith((".pyc", ".pyo"))
+                is_tmp = lower.endswith(".tmp") or ".tmp." in lower
+                if not (is_pyc or is_tmp):
+                    continue
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                if st.st_mtime >= cutoff:
+                    continue          # färsk — rör ej
+                try:
+                    p.unlink()
+                except OSError:
+                    continue          # låst fil (Windows) — hoppa över
+                if is_pyc:
+                    stats["pyc_filer"] += 1
+                else:
+                    stats["tmp_filer"] += 1
+                stats["frigjorda_bytes"] += st.st_size
+    except Exception as exc:
+        log.warning("clean_caches_smart: %s", exc)
+
+    if (
+        stats["pycache_mappar"]
+        or stats["pyc_filer"]
+        or stats["tmp_filer"]
+    ):
+        log.info(
+            "CACHE_CLEAN_SMART: %d __pycache__, %d pyc, %d tmp äldre "
+            "än %s d borttagna (%.1f KB frigjort)",
+            stats["pycache_mappar"],
+            stats["pyc_filer"],
+            stats["tmp_filer"],
+            days,
+            stats["frigjorda_bytes"] / 1024.0,
+        )
+    else:
+        log.debug("CACHE_CLEAN_SMART: inget gammalt att rensa")
+    return stats
+
+
 def clean_caches(root: Path | None = None) -> dict[str, Any]:
     """
     SMART CACHE-RENSARE — töm appens cache (körs normalt vid avslut).
@@ -620,14 +735,43 @@ LEGACY_LOG_FILES: tuple[str, ...] = (
 )
 
 
+def _move_legacy_startup_log(root: Path) -> bool:
+    """Flyttar en gammal rotbaserad startup_crash.log till logs/."""
+    source = root / "startup_crash.log"
+    target = root / "logs" / "startup_crash.log"
+    if not source.is_file():
+        return False
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            text = source.read_text(encoding="utf-8", errors="replace")
+            if text:
+                with target.open("a", encoding="utf-8") as fh:
+                    if target.stat().st_size:
+                        fh.write("\n")
+                    fh.write(text)
+            source.unlink()
+        else:
+            source.replace(target)
+        log.info(
+            "LEGACY_LOG flyttad: startup_crash.log → logs/startup_crash.log"
+        )
+        return True
+    except OSError as exc:
+        log.warning("LEGACY_LOG kunde inte flyttas (%s): %s", source, exc)
+        return False
+
+
 def clean_legacy_logs(root: Path | None = None) -> int:
     """
-    Tar bort legacy-loggfiler från äldre versioner (EN-fil-principen).
+    Håller runtime-loggar i logs/ och städar gamla loggfiler.
 
-    Rör ALDRIG logs/app.log (den aktuenda enda loggen) eller logs/archive/.
-    Returnerar antal borttagna filer. Fail-safe: kastar aldrig.
+    Äldre startup_crash.log i approten flyttas in i logs/ innan
+    legacy-rensning. logs/app.log, logs/felsamling.log och logs/archive/
+    bevaras. Returnerar antal borttagna filer. Fail-safe: kastar aldrig.
     """
-    root = root or BASE_DIR
+    root = Path(root or BASE_DIR)
+    _move_legacy_startup_log(root)
     removed = 0
     for rel in LEGACY_LOG_FILES:
         p = root / rel
@@ -641,19 +785,6 @@ def clean_legacy_logs(root: Path | None = None) -> int:
                 log.info("LEGACY_LOG borttagen: %s", rel)
         except OSError:
             pass  # låst fil — hoppa över tyst
-    # Töm logs/archive/ (gamla roterade filer) men behåll mappen
-    archive_dir = root / "logs" / "archive"
-    if archive_dir.exists():
-        try:
-            for f in archive_dir.iterdir():
-                try:
-                    if f.is_file():
-                        f.unlink()
-                        removed += 1
-                except OSError:
-                    pass
-        except OSError:
-            pass
     if removed:
         log.info("LEGACY_CLEAN: %d gamla loggfiler borttagna", removed)
     return removed
@@ -880,6 +1011,25 @@ def _same_record_set(
     return lk == rk and len(lk) == len(left)
 
 
+def _replace_with_retry(tmp: Path, path: Path) -> None:
+    """os.replace med tålamod för WinError 5 (Åtkomst nekad):
+    på Windows håller antivirus/indexering ibland
+    destinationsfilen en kort stund. Några korta omförsök
+    förvandlar ett tappat skrivfel till en lyckad skrivning."""
+    import time as _time
+
+    last: OSError | None = None
+    for attempt in range(6):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as exc:
+            last = exc
+            _time.sleep(0.05 * (attempt + 1))
+    assert last is not None
+    raise last
+
+
 def _atomic_write_bytes(path: Path, payload: bytes) -> None:
     """
     Skriver en fil HELT atomärt med fsync:
@@ -902,7 +1052,7 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
             fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        _replace_with_retry(tmp, path)
         try:
             dir_fd = os.open(str(path.parent), os.O_RDONLY)
             try:
@@ -952,6 +1102,17 @@ def _sort_newest_last(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(records, key=_timestamp_sort_key)
 
 
+def _slugify_supplier(name: str) -> str:
+    """Leverantörsnamn → säkert filnamn: "Martin G Anderson" →
+    "martin-g-anderson". Å/Ä/Ö mappas till a/a/o (aldrig tomt)."""
+    text = str(name or "").strip().lower()
+    for src, dst in (("å", "a"), ("ä", "a"), ("ö", "o"),
+                     ("é", "e"), ("ü", "u")):
+        text = text.replace(src, dst)
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    return text or "okand-leverantor"
+
+
 def _to_float(value: Any, default: float = 0.0) -> float:
     """Säker float-konvertering."""
     try:
@@ -967,28 +1128,40 @@ def _to_float(value: Any, default: float = 0.0) -> float:
 
 class AutostartManager:
     """
-    Hanterar OS-nivå autostart.
+    Hanterar OS-nivå autostart på Windows, macOS och Linux.
 
-    Starten går alltid via en startfil INUTI appmappen
-    (autostart/start_hidden.vbs eller .sh):
+    METODER (settings "autostart_method", väljs i Inställningar-menyn)
+    ─────────────────────────────────────────────────────────────────
+    auto      → direct (standard). OS-posten startar Python direkt.
+                INGEN VBS, ingen startfil. main.py gör själv
+                os.chdir(BASE_DIR) vid start, så arbetsmappen är
+                alltid appmappen även från registret/System32 —
+                VBS-tricket behövs inte längre.
+    direct    → samma som auto.
+    launcher  → klassiska startfilen i appmappen
+                (autostart/start_hidden.vbs på Windows, .sh annars)
+                som dessutom väntar upp till 90 s på att disken
+                (t.ex. E:) ska bli redo. För portabla USB-installationer.
 
-    • Arbetsmapp sätts till appmappen — aldrig C:\\Windows\\System32.
-    • Väntar upp till 90 sekunder om disken inte är redo (t.ex. E:).
-    • Startar gömd (--minimized), utan konsolfönster.
-    • OS-posten (register / .desktop / plist) är bara en pekare.
-      All logg och alla startfiler ligger i appmappen.
+    Båda metoderna startar gömt (--minimized → pythonw på Windows).
 
-    Windows : wscript //B  →  autostart/start_hidden.vbs
-              (registret kan inte sätta arbetsmapp — därför VBS)
-    Linux   : ~/.config/autostart/*.desktop  Path=appmappen
-    macOS   : LaunchAgents-plist med WorkingDirectory
+    Windows : Endast Autostart-mappens genväg Fakturabunten.lnk med
+              app_icon.ico godtas. Ingen pythonw-post i Run-nyckeln
+              skrivs; om genvägen misslyckas nekas autostart.
+    Linux   : ~/.config/autostart/Fakturabunten.desktop (Path=)
+    macOS   : ~/Library/LaunchAgents/com.fakturabunten.plist
+              (WorkingDirectory)
     """
+
+    #: Giltiga autostart-metoder.
+    METHODS: tuple[str, ...] = ("auto", "direct", "launcher")
 
     _app_name: str = APP_NAME
     _WIN_RUN_KEY: str = r"Software\Microsoft\Windows\CurrentVersion\Run"
     _WAIT_SECONDS: int = 90
 
-    def __init__(self) -> None:
+    def __init__(self, method: str = "auto") -> None:
+        self.method: str = self.normalize_method(method)
         self._python_exe, self._main_py = self._detect_paths()
         log.debug(
             "AutostartManager: python=%s  main=%s  cwd=%s",
@@ -1052,13 +1225,26 @@ class AutostartManager:
     def pins_working_directory(self) -> bool:
         return True
 
+    @staticmethod
+    def normalize_method(method: str) -> str:
+        """Okänd metod → 'auto'."""
+        m = str(method or "auto").strip().lower()
+        return m if m in AutostartManager.METHODS else "auto"
+
+    def resolved_method(self) -> str:
+        """Effektiv metod: 'auto' betyder 'direct' på alla plattformar."""
+        return "launcher" if self.method == "launcher" else "direct"
+
     def build_command(self) -> str:
         """
         Kommandot som skrivs till OS.
 
-        Pekar på startfilen i appmappen — inte på python direkt.
+        direct   → Python direkt (ingen VBS/startfil).
+        launcher → startfilen i appmappen (VBS/.sh).
         Skriver inga filer (det gör set_enabled / verify).
         """
+        if self.resolved_method() == "direct":
+            return self._app_command()
         launcher = self._launcher_path()
         if CURRENT_PLATFORM == "windows":
             return f'"{self._wscript_exe()}" //nologo //B "{launcher}"'
@@ -1071,14 +1257,23 @@ class AutostartManager:
         return self.build_command()
 
     def plan(self) -> dict[str, Any]:
+        resolved = self.resolved_method()
         return {
             "platform": CURRENT_PLATFORM,
+            "method": self.method,
+            "resolved_method": resolved,
+            "uses_launcher": resolved == "launcher",
             "working_directory": str(self.working_directory()),
             "app_command": self._app_command(),
             "os_command": self.build_command(),
-            "launcher": str(self._launcher_path()),
+            "launcher": (
+                str(self._launcher_path())
+                if resolved == "launcher" else ""
+            ),
             "starts_minimized": self.starts_minimized(),
-            "waits_for_drive_seconds": self._WAIT_SECONDS,
+            "waits_for_drive_seconds": (
+                self._WAIT_SECONDS if resolved == "launcher" else 0
+            ),
         }
 
     def user_message(self, enabled: bool) -> str:
@@ -1088,6 +1283,16 @@ class AutostartManager:
                 "Programmet startar inte längre vid inloggning."
             )
         p = self.plan()
+        if p["resolved_method"] == "direct":
+            return (
+                "Autostart är på (direktstart, utan VBS).\n\n"
+                "Vid inloggning:\n"
+                "• OS startar Python direkt — ingen startfil behövs\n"
+                "• startar gömd i systemfältet, utan konsolfönster\n"
+                "• arbetsmapp = appmappen, aldrig System32\n\n"
+                f"Arbetsmapp: {p['working_directory']}\n"
+                f"Kommando: {p['os_command']}"
+            )
         return (
             "Autostart är på.\n\n"
             "Vid inloggning:\n"
@@ -1120,7 +1325,8 @@ class AutostartManager:
             "OS-posten pekar bara hit. Logg: logs/autostart.log\n"
             "Exporter och data skrivs aldrig här.\n"
             "Startfilen hittar appmappen själv (ingen fast sökväg).\n"
-            "Saknas Python: kör Installera senaste Python.bat.\n",
+            "Python saknas eller behöver uppdateras: kör Installera senaste Python.bat.\n"
+            "Skriptet kontrollerar först och lägger inte till en parallell version.\n",
             encoding="utf-8",
         )
         log.info("AUTOSTART_LAUNCHER: %s", path)
@@ -1288,6 +1494,12 @@ class AutostartManager:
     def get_registered_command(self) -> str:
         if CURRENT_PLATFORM != "windows":
             return ""
+        # Med genväg som post är det byggkommandot som gäller.
+        try:
+            if self._startup_shortcut_path().exists():
+                return self.build_command()
+        except Exception:
+            pass
         try:
             import winreg
 
@@ -1402,7 +1614,7 @@ class AutostartManager:
     def set_enabled(self, enable: bool) -> bool:
         try:
             self._retire_legacy_autostart()
-            if enable:
+            if enable and self.resolved_method() == "launcher":
                 self._write_launcher()
             if CURRENT_PLATFORM == "windows":
                 ok = self._win_set(enable)
@@ -1454,16 +1666,9 @@ class AutostartManager:
             self._write_launcher()
 
         if CURRENT_PLATFORM == "windows":
-            expected = self.build_command()
-            current = self.get_registered_command()
-            if current != expected:
-                log.info(
-                    "AUTOSTART: register pekar fel\n  Nuvarande: %s\n  Korrekt  : %s",
-                    current,
-                    expected,
-                )
-                return self._win_set(True)
-            log.debug("AUTOSTART: register OK %s", expected)
+            # Rebuild the link on startup: the icon and target are
+            # always current, and any legacy Python Run entry is removed.
+            return self._win_set(True)
 
         if CURRENT_PLATFORM == "linux":
             p = self._linux_path()
@@ -1494,6 +1699,12 @@ class AutostartManager:
     # ── Windows ──────────────────────────────────────────────────────────
 
     def _win_check(self) -> bool:
+        # Genvägen i Autostart-mappen räknas först (huvudvägen).
+        try:
+            if self._startup_shortcut_path().exists():
+                return True
+        except Exception:
+            pass
         try:
             import winreg
 
@@ -1513,6 +1724,148 @@ class AutostartManager:
         except Exception:
             return False
 
+    # ── Windows: genväg i Autostart-mappen (egen ikon) ────────────────
+    #
+    # En Run-registerpost som pekar på pythonw.exe visas i Windows
+    # Start-lista/aktivitetshanteraren som "Python" med ormloggan.
+    # En genväg (.lnk) i användarens Autostart-mapp bär i stället
+    # app_icon.ico och namnet Fakturabunten — appens egen ikon överallt.
+
+    def _startup_folder(self) -> Path:
+        """%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup."""
+        appdata = os.environ.get("APPDATA", "")
+        base = (
+            Path(appdata) if appdata
+            else Path.home() / "AppData" / "Roaming"
+        )
+        return (
+            base / "Microsoft" / "Windows" / "Start Menu"
+            / "Programs" / "Startup"
+        )
+
+    def _startup_shortcut_path(self) -> Path:
+        return self._startup_folder() / f"{self._app_name}.lnk"
+
+    def _shortcut_target(self) -> tuple[str, str]:
+        """(målprogram, argument) för autostart-genvägen."""
+        if self.resolved_method() == "launcher":
+            return (
+                self._wscript_exe(),
+                f'//nologo //B "{self._launcher_path()}"',
+            )
+        if self._main_py:
+            return self._python_exe, f'"{self._main_py}" --minimized'
+        return self._python_exe, "--minimized"
+
+    def _shortcut_powershell(self) -> str:
+        """PowerShell som skapar genvägen — med APPENS ikon, aldrig pyw:s."""
+        target, args = self._shortcut_target()
+        lnk = self._startup_shortcut_path()
+        ico = BASE_DIR / "app_icon.ico"
+        return (
+            "$w = New-Object -ComObject WScript.Shell; "
+            f"$s = $w.CreateShortcut('{lnk}'); "
+            f"$s.TargetPath = '{target}'; "
+            f"$s.Arguments = '{args}'; "
+            f"$s.WorkingDirectory = '{BASE_DIR}'; "
+            f"$s.IconLocation = '{ico},0'; "
+            "$s.WindowStyle = 7; "
+            f"$s.Description = '{self._app_name}'; "
+            "$s.Save()"
+        )
+
+    @staticmethod
+    def _vbs_quote(value: object) -> str:
+        """Citerar en sträng säkert som VBScript-literal."""
+        return '"' + str(value).replace('"', '""') + '"'
+
+    def _shortcut_vbscript(self) -> str:
+        """COM-reservväg utan PowerShell; genvägen får fortfarande appikonen."""
+        target, args = self._shortcut_target()
+        lnk = self._startup_shortcut_path()
+        ico = BASE_DIR / "app_icon.ico"
+        q = self._vbs_quote
+        return "\r\n".join((
+            'Set shell = CreateObject("WScript.Shell")',
+            f"Set shortcut = shell.CreateShortcut({q(lnk)})",
+            f"shortcut.TargetPath = {q(target)}",
+            f"shortcut.Arguments = {q(args)}",
+            f"shortcut.WorkingDirectory = {q(BASE_DIR)}",
+            f"shortcut.IconLocation = {q(str(ico) + ',0')}",
+            "shortcut.WindowStyle = 7",
+            f"shortcut.Description = {q(self._app_name)}",
+            "shortcut.Save",
+        ))
+
+    def _write_startup_shortcut(self) -> bool:
+        """Skapar en appikon-genväg; skriver aldrig en Python-Run-post."""
+        lnk = self._startup_shortcut_path()
+        try:
+            _ensure_dir(lnk.parent)
+            # Ta bort en gammal länk först: filens blotta existens får
+            # aldrig misstas för att den redan bär appens ikon.
+            lnk.unlink(missing_ok=True)
+            subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-ExecutionPolicy",
+                    "Bypass", "-Command", self._shortcut_powershell(),
+                ],
+                cwd=str(BASE_DIR),
+                check=False,
+                timeout=30,
+                capture_output=True,
+                creationflags=getattr(
+                    subprocess, "CREATE_NO_WINDOW", 0
+                ),
+            )
+            if lnk.exists():
+                return True
+        except Exception as exc:
+            log.debug("PowerShell-genväg misslyckades: %s", exc)
+
+        # Windows Script Host finns även på system där PowerShell är avstängt.
+        # Tillfälliga VBS-filen tas bort direkt efter COM-anropet.
+        script_path: Path | None = None
+        try:
+            _ensure_dir(lnk.parent)
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-16",
+                suffix=".vbs",
+                prefix=f".{self._app_name}-",
+                dir=str(lnk.parent),
+                delete=False,
+            ) as script:
+                script.write(self._shortcut_vbscript())
+                script_path = Path(script.name)
+            wscript = shutil.which("wscript.exe") or "wscript.exe"
+            subprocess.run(
+                [wscript, "//B", str(script_path)],
+                cwd=str(BASE_DIR),
+                check=False,
+                timeout=20,
+                capture_output=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            return lnk.exists()
+        except Exception as exc:
+            log.warning("Autostart-genväg kunde inte skapas: %s", exc)
+            return False
+        finally:
+            if script_path is not None:
+                try:
+                    script_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def _remove_startup_shortcut(self) -> None:
+        try:
+            self._startup_shortcut_path().unlink(missing_ok=True)
+        except Exception as exc:
+            log.warning("Kunde inte ta bort autostart-genväg: %s", exc)
+
     def _win_set(self, enable: bool) -> bool:
         try:
             import winreg
@@ -1526,16 +1879,35 @@ class AutostartManager:
                     winreg.KEY_SET_VALUE,
                 )
                 if enable:
-                    cmd = self.build_command()
-                    winreg.SetValueEx(
-                        key, self._app_name, 0, winreg.REG_SZ, cmd
+                    # FÖRSTAHANDSVAL: genväg i Autostart-mappen med
+                    # appens egen ikon — ingen pythonw/Python-ikon i
+                    # Start-listan. Run-värdet rensas alltid så appen
+                    # aldrig startar dubbelt.
+                    if self._write_startup_shortcut():
+                        try:
+                            winreg.DeleteValue(key, self._app_name)
+                        except Exception:
+                            pass
+                        log.info(
+                            "Windows autostart: genväg %s (egen ikon)",
+                            self._startup_shortcut_path(),
+                        )
+                        return True
+                    # Windows Run-posten pekar på pythonw.exe och visar
+                    # Python-ikonen. Om .lnk inte kan skapas ska autostart
+                    # nekas i stället för att registrera en Python-post.
+                    try:
+                        winreg.DeleteValue(key, self._app_name)
+                    except Exception:
+                        pass
+                    log.error(
+                        "Windows autostart nekad: genväg med appikon kunde "
+                        "inte skapas; ingen Python/Run-post skrivs."
                     )
-                    log.info(
-                        "Windows registry SET:\n  Nyckel: %s\n  Värde : %s",
-                        self._app_name,
-                        cmd,
-                    )
+                    return False
                 else:
+                    # Bort med BÅDA: genvägen och ett eventuellt Run-värde.
+                    self._remove_startup_shortcut()
                     try:
                         winreg.DeleteValue(key, self._app_name)
                         log.info("Windows registry DELETE: %s", self._app_name)
@@ -1564,7 +1936,8 @@ class AutostartManager:
     def _linux_set(self, enable: bool) -> bool:
         p = self._linux_path()
         if enable:
-            self._write_launcher()
+            if self.resolved_method() == "launcher":
+                self._write_launcher()
             _ensure_dir(p.parent)
             icon = BASE_DIR / "app_icon.png"
             icon_line = f"Icon={icon}\n" if icon.exists() else ""
@@ -1605,7 +1978,8 @@ class AutostartManager:
     def _macos_set(self, enable: bool) -> bool:
         p = self._macos_path()
         if enable:
-            self._write_launcher()
+            if self.resolved_method() == "launcher":
+                self._write_launcher()
             _ensure_dir(p.parent)
             launcher = self._launcher_path()
             p.write_text(
@@ -1618,9 +1992,18 @@ class AutostartManager:
                 "  <string>com.fakturabunten</string>\n"
                 "  <key>ProgramArguments</key>\n"
                 "  <array>\n"
-                "    <string>/bin/sh</string>\n"
-                f"    <string>{launcher}</string>\n"
-                "  </array>\n"
+                + (
+                    "    <string>/bin/sh</string>\n"
+                    f"    <string>{launcher}</string>\n"
+                    if self.resolved_method() == "launcher"
+                    else f"    <string>{self._python_exe}</string>\n"
+                    + (
+                        f"    <string>{self._main_py}</string>\n"
+                        if self._main_py else ""
+                    )
+                    + "    <string>--minimized</string>\n"
+                )
+                + "  </array>\n"
                 "  <key>WorkingDirectory</key>\n"
                 f"  <string>{BASE_DIR}</string>\n"
                 "  <key>RunAtLoad</key>\n"
@@ -1696,6 +2079,16 @@ class SettingsManager:
         self._lock = threading.RLock()
         self._autostart = AutostartManager()
         self.load()
+        self._sync_autostart_method()
+
+    def _sync_autostart_method(self) -> None:
+        """Håller AutostartManager.method = settings autostart_method."""
+        try:
+            self._autostart.method = AutostartManager.normalize_method(
+                str(self.get("autostart_method", "auto"))
+            )
+        except Exception:
+            pass
 
     # ── Läs / spara ──────────────────────────────────────────────────────
 
@@ -1864,6 +2257,7 @@ class SettingsManager:
         return bool(self._data.get("close_to_tray", True))
 
     def get_autostart_manager(self) -> AutostartManager:
+        self._sync_autostart_method()
         return self._autostart
 
 
@@ -2193,6 +2587,186 @@ class DataStore:
 
 
 # ═════════════════════════════════════════════════════════════════════
+class SupplierArchiveStore:
+    """Exporterade/betalda fakturor — en JSON-fil per leverantör.
+
+    Filerna bor i <datamapp>/betalda/<leverantör>.json och är
+    registret bakom Historik-fliken. EN post bor i exakt EN av
+    huvudfilen och leverantörsfilen (InvoiceEngine håller det så).
+    Vid import/skanning söks BÅDA registren igenom så en redan
+    betald faktura känns igen som dubblett och aldrig registreras
+    igen. En oläsbar fil skrivs aldrig över (samma skydd som
+    DataStore har).
+    """
+
+    def __init__(self, archive_dir: Path, changelog: Any = None) -> None:
+        self._dir = Path(archive_dir)
+        self._log = changelog
+        self._lock = threading.RLock()
+        self._files: dict[str, Path] = {}
+        self._records: dict[str, list[dict]] = {}
+        self._load_ok: dict[str, bool] = {}
+        self._load_all()
+
+    # ── Lastning/sparning ──────────────────────────────────────────
+
+    def _load_all(self) -> None:
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
+            paths = sorted(self._dir.glob("*.json"))
+        except Exception as exc:
+            log.warning("ARKIV: kan inte lista %s: %s", self._dir, exc)
+            return
+        for path in paths:
+            slug = path.stem
+            data, status = read_json_any(path)
+            if status == "parse_error":
+                self._load_ok[slug] = False
+                self._files[slug] = path
+                log.error("ARKIV: %s oläsbar — skrivs aldrig över", path)
+                continue
+            self._files[slug] = path
+            self._records[slug] = (
+                unwrap_records(data, path.name) if status == "ok" else []
+            )
+            self._load_ok[slug] = True
+        total = sum(len(v) for v in self._records.values())
+        log.info(
+            "ARKIV: %d betalda/exporterade i %d leverantörsfil(er) (%s)",
+            total, len(self._records), self._dir,
+        )
+
+    def _save_slug(self, slug: str) -> None:
+        records = self._records.get(slug, [])
+        if not self._load_ok.get(slug, True):
+            log.error(
+                "DATA_SKYDD: skriver inte över oläsbar "
+                "arkivfil för %s",
+                slug,
+            )
+            return
+        path = self._files.get(slug) or (self._dir / f"{slug}.json")
+        self._files[slug] = path
+        _save_json(path, records)
+        self._load_ok[slug] = True
+
+    @classmethod
+    def memory(cls) -> "SupplierArchiveStore":
+        """Tomt minnesarkiv (fristående användning/tester):
+        rör aldrig disk."""
+        obj = cls.__new__(cls)
+        obj._dir = Path(ARCHIVE_DIR_NAME)
+        obj._log = None
+        obj._lock = threading.RLock()
+        obj._files = {}
+        obj._records = {}
+        obj._load_ok = {}
+
+        def _noop_save(slug: str) -> None:
+            return None
+
+        obj._save_slug = _noop_save  # type: ignore[method-assign]
+        return obj
+
+    def reload(self) -> None:
+        """Läser om alla leverantörsfiler från disk."""
+        with self._lock:
+            self._files = {}
+            self._records = {}
+            self._load_ok = {}
+            self._load_all()
+
+    # ── Läsning ────────────────────────────────────────────────────
+
+    def get(self, record_id: str) -> dict | None:
+        with self._lock:
+            for records in self._records.values():
+                for r in records:
+                    if r.get("id") == record_id:
+                        return dict(r)
+        return None
+
+    def all(self) -> list[dict]:
+        with self._lock:
+            out = [
+                dict(r) for recs in self._records.values() for r in recs
+            ]
+        return _sort_newest_last(out)
+
+    def by_supplier(self, supplier: str) -> list[dict]:
+        with self._lock:
+            recs = self._records.get(_slugify_supplier(supplier), [])
+            out = [dict(r) for r in recs]
+        return _sort_newest_last(out)
+
+    def count(self) -> int:
+        with self._lock:
+            return sum(len(v) for v in self._records.values())
+
+    def files(self) -> dict[str, Path]:
+        """slug → fil (diagnostik/gränssnitt)."""
+        return dict(self._files)
+
+    # ── Mutationer ─────────────────────────────────────────────────
+
+    def move_in(self, record: dict) -> dict:
+        """Tar emot en post (id/timestamps bevaras). Samma id
+        ersätter — aldrig två kopior av samma faktura i arkivet."""
+        with self._lock:
+            rid = str(record.get("id") or "")
+            slug = _slugify_supplier(str(record.get("supplier", "")))
+            recs = self._records.setdefault(slug, [])
+            if rid:
+                recs[:] = [r for r in recs if r.get("id") != rid]
+            recs.append(dict(record))
+            self._save_slug(slug)
+        if self._log is not None:
+            try:
+                self._log.record(
+                    "ARCHIVE_IN", "invoices_archive",
+                    str(record.get("id", "")), {},
+                )
+            except Exception:
+                pass
+        return dict(record)
+
+    def update(self, record_id: str, data: dict) -> dict | None:
+        """Uppdaterar en arkiverad post på plats i sin fil."""
+        with self._lock:
+            for slug, records in self._records.items():
+                for r in records:
+                    if r.get("id") == record_id:
+                        r.update(data)
+                        r["id"] = record_id
+                        r["updated_at"] = _now_iso()
+                        result = dict(r)
+                        self._save_slug(slug)
+                        return result
+        log.warning("ARKIV UPDATE — ej funnen: %s", record_id)
+        return None
+
+    def take_out(self, record_id: str) -> dict | None:
+        """Plockar ut en post ur arkivet (återställning till
+        huvudregistret). Tom leverantörsfil tas bort."""
+        with self._lock:
+            for slug, records in list(self._records.items()):
+                for i, r in enumerate(records):
+                    if r.get("id") == record_id:
+                        rec = records.pop(i)
+                        if not records:
+                            del self._records[slug]
+                            path = self._files.pop(slug, None)
+                            if path is not None:
+                                try:
+                                    path.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+                        else:
+                            self._save_slug(slug)
+                        return dict(rec)
+        return None
+
+
 #  INVOICE ENGINE — affärslogik ovanpå DataStore
 # ═════════════════════════════════════════════════════════════════════
 
@@ -2200,8 +2774,18 @@ class DataStore:
 class InvoiceEngine:
     """Faktura-affärslogik: typer, filter, summor, status, dubbletter."""
 
-    def __init__(self, store: DataStore) -> None:
+    def __init__(
+        self,
+        store: DataStore,
+        archive: "SupplierArchiveStore | None" = None,
+    ) -> None:
         self._store = store
+        # Arkivet (data/betalda/): FakturaApp skickar in den
+        # riktiga filbutiken. Utan angivet arkiv används ett tomt
+        # minnesarkiv — fristående motoranvändning (tester) rör
+        # aldrig disk oombedd.
+        self._archive = archive if archive is not None else \
+            SupplierArchiveStore.memory()
 
     # ── CRUD ─────────────────────────────────────────────────────────────
 
@@ -2209,40 +2793,96 @@ class InvoiceEngine:
         data.setdefault("status", "Obetald")
         data.setdefault("invoice_type", "Faktura")
         self._sync_type(data)
+        if data.get("status") == "Arkiverad":
+            rec = dict(data)
+            if not rec.get("id"):
+                rec["id"] = _new_id()
+            rec.setdefault("created_at", _now_iso())
+            rec["updated_at"] = _now_iso()
+            return self._archive.move_in(rec)
         return self._store.add(data)
 
     def update(self, record_id: str, data: dict) -> dict | None:
         if "total_amount" in data:
             self._sync_type(data)
-        return self._store.update(record_id, data)
+        if self._store.get(record_id) is not None:
+            if data.get("status") == "Arkiverad":
+                # Exporterad → flytta till leverantörsfilen.
+                # Övriga fält i samma anrop (t.ex. payment_date)
+                # appliceras FÖRST — annars tappades de i flytten.
+                rest = {
+                    k: v for k, v in data.items() if k != "status"
+                }
+                if rest:
+                    self._store.update(record_id, rest)
+                self.mark_archived([record_id])
+                return self._archive.get(record_id)
+            return self._store.update(record_id, data)
+        # Posten bor i arkivet — uppdatera på plats där
+        return self._archive.update(record_id, data)
 
     def delete(self, record_id: str) -> bool:
-        return self._store.delete(record_id)
+        if self._store.get(record_id) is not None:
+            return self._store.delete(record_id)
+        return self._archive.take_out(record_id) is not None
 
     def get(self, record_id: str) -> dict | None:
-        return self._store.get(record_id)
+        return (
+            self._store.get(record_id)
+            or self._archive.get(record_id)
+        )
 
     def all(self) -> list[dict]:
-        return self._store.all()
+        """Hela registret: huvudfil + arkiv (samma id → huvudfilen
+        vinner; en post bor normalt i exakt en av dem)."""
+        merged: dict[str, dict] = {}
+        for r in self._archive.all():
+            merged[str(r.get("id", ""))] = r
+        for r in self._store.all():
+            merged[str(r.get("id", ""))] = r
+        return _sort_newest_last(list(merged.values()))
 
     def count(self) -> int:
-        return self._store.count()
+        return self._store.count() + self._archive.count()
+
+    def archived_records(self) -> list[dict]:
+        """Bara arkivet: betalda/exporterade (Historik-fliken)."""
+        return self._archive.all()
+
+    def main_records(self) -> list[dict]:
+        """Bara huvudfilen: det aktiva registret (Fakturor)."""
+        return self._store.all()
+
+    def archive_files(self) -> dict[str, Path]:
+        return self._archive.files()
+
+    _SEARCH_FIELDS = [
+        "supplier",
+        "invoice_number",
+        "ocr",
+        "invoice_type",
+        "reference",
+        "note",
+        "category",
+        "status",
+        "payment_date",
+    ]
 
     def search(self, query: str) -> list[dict]:
-        return self._store.search(
-            query,
-            fields=[
-                "supplier",
-                "invoice_number",
-                "ocr",
-                "invoice_type",
-                "reference",
-                "note",
-                "category",
-                "status",
-                "payment_date",
-            ],
-        )
+        """Söker i BÅDA registren — även vid import ska en redan
+        betald faktura hittas (dubblettskyddet)."""
+        hits = self._store.search(query, fields=self._SEARCH_FIELDS)
+        seen = {str(r.get("id", "")) for r in hits}
+        q = str(query or "").strip().lower()
+        for r in self._archive.all():
+            if str(r.get("id", "")) in seen:
+                continue
+            if not q or any(
+                q in str(r.get(f, "")).lower()
+                for f in self._SEARCH_FIELDS
+            ):
+                hits.append(r)
+        return _sort_newest_last(hits)
 
     # ── Typsynk ──────────────────────────────────────────────────────────
 
@@ -2264,9 +2904,13 @@ class InvoiceEngine:
     # ── Filter ───────────────────────────────────────────────────────────
 
     def active(self) -> list[dict]:
-        """Alla utom Arkiverad / Makulerad."""
+        """Aktiva för ATT BETALA: bara HUVUDFILEN, utom
+        Arkiverad/Makulerad. Arkivet (data/betalda/) räknas aldrig
+        in — ATT BETALA gäller bara det som ska betalas."""
         return [
-            r for r in self.all() if r.get("status") not in NON_ACTIVE_STATUSES
+            r
+            for r in self._store.all()
+            if r.get("status") not in NON_ACTIVE_STATUSES
         ]
 
     def archived(self) -> list[dict]:
@@ -2436,12 +3080,25 @@ class InvoiceEngine:
         supplier: str,
         exclude_id: str = "",
     ) -> list[dict]:
-        """Samma fakturanummer + leverantör = möjlig dubblett."""
-        return self._store.find_duplicates(
+        """Samma fakturanummer + leverantör = möjlig dubblett.
+        Söker i BÅDA registren: en redan exporterad/betald faktura
+        i data/betalda/ är fortfarande en dubblett."""
+        hits = self._store.find_duplicates(
             ["invoice_number", "supplier"],
             {"invoice_number": invoice_number, "supplier": supplier},
             exclude_id=exclude_id,
         )
+        num = str(invoice_number or "").strip().lower()
+        sup = str(supplier or "").strip().lower()
+        for r in self._archive.all():
+            if exclude_id and r.get("id") == exclude_id:
+                continue
+            if (
+                str(r.get("invoice_number", "")).strip().lower() == num
+                and str(r.get("supplier", "")).strip().lower() == sup
+            ):
+                hits.append(r)
+        return hits
 
     def check_duplicate_amount(
         self,
@@ -2470,7 +3127,12 @@ class InvoiceEngine:
     # ── Statusändringar ──────────────────────────────────────────────────
 
     def mark_paid(self, ids: list[str], payment_date: str = "") -> int:
-        """Markerar fakturor som Betalda + sätter betalningsdatum."""
+        """Markerar betalda + sätter betalningsdatum. Posten
+        STANNAR i huvudfilen tills den exporteras — flytten till
+        leverantörsfilen (data/betalda/) sker först vid export
+        (då med status Betald via mark_exported_paid). Markera
+        betald ensam flyttar alltså aldrig posten ur
+        huvudregistret."""
         date = payment_date or datetime.date.today().isoformat()
         count = 0
         for rid in ids:
@@ -2479,29 +3141,80 @@ class InvoiceEngine:
         return count
 
     def mark_archived(self, ids: list[str]) -> int:
-        """Arkiverar fakturor (sätts automatiskt efter PDF-export)."""
+        """Arkiverar fakturor: posten FLYTTAS till leverantörens
+        fil i data/betalda/ med status Arkiverad."""
         count = 0
         for rid in ids:
-            if self.update(rid, {"status": "Arkiverad"}):
-                count += 1
+            rec = self._store.get(rid)
+            if rec is None:
+                continue
+            moved = dict(rec)
+            moved["status"] = "Arkiverad"
+            self._archive.move_in(moved)
+            self._store.delete(rid)
+            count += 1
+        return count
+
+    def mark_exported_paid(
+        self, ids: list[str], payment_date: str = ""
+    ) -> int:
+        """Efter LYCKAD export: posten markeras Betald med
+        exportens betalningsdatum och FLYTTAS i samma steg till
+        leverantörens fil i data/betalda/ (Historik). Därifrån
+        ser importens dubblettskydd den — en exporterad faktura
+        kan aldrig registreras igen. Poster som redan bor i
+        arkivet uppdateras på plats till Betald."""
+        date = payment_date or datetime.date.today().isoformat()
+        count = 0
+        for rid in ids:
+            rec = self._store.get(rid)
+            if rec is None:
+                if self._archive.get(rid) is not None:
+                    self._archive.update(
+                        rid,
+                        {"status": "Betald", "payment_date": date},
+                    )
+                    count += 1
+                continue
+            moved = dict(rec)
+            moved["status"] = "Betald"
+            moved["payment_date"] = date
+            moved["updated_at"] = _now_iso()
+            self._archive.move_in(moved)
+            self._store.delete(rid)
+            count += 1
         return count
 
     def restore_from_archive(self, ids: list[str]) -> int:
-        """Återställer Arkiverade fakturor till Obetald."""
+        """Återställer arkiverade/betalda till Obetald — posten
+        flyttas tillbaka till huvudfilen."""
         count = 0
         for rid in ids:
-            rec = self.get(rid)
-            if rec and rec.get("status") == "Arkiverad":
-                if self.update(rid, {"status": "Obetald"}):
-                    count += 1
+            rec = self._archive.take_out(rid)
+            if rec is None:
+                continue
+            rec["status"] = "Obetald"
+            self._store.add(rec)
+            count += 1
         return count
 
     def mark_status(self, ids: list[str], status: str) -> int:
-        """Sätter valfri giltig status på flera fakturor."""
+        """Sätter valfri giltig status på flera fakturor.
+        Arkiverad flyttar posten till leverantörsfilen; annan
+        status på en arkiverad post flyttar tillbaka den."""
         if status not in VALID_INVOICE_STATUSES:
             raise ValueError(f"Ogiltig status: {status}")
+        if status == "Arkiverad":
+            return self.mark_archived(ids)
         count = 0
         for rid in ids:
+            if self._archive.get(rid) is not None:
+                back = self._archive.take_out(rid)
+                if back is not None:
+                    back["status"] = status
+                    self._store.add(back)
+                    count += 1
+                continue
             if self.update(rid, {"status": status}):
                 count += 1
         return count
@@ -3012,6 +3725,7 @@ DEFAULT_SHORTCUTS: dict[str, str] = {
     "tab_import":     "Ctrl+5",
     "tab_rapporter":  "Ctrl+6",
     "tab_installningar": "Ctrl+7",
+    "tab_logg":       "Ctrl+8",
 }
 
 SHORTCUT_LABELS: dict[str, str] = {
@@ -3021,6 +3735,7 @@ SHORTCUT_LABELS: dict[str, str] = {
     "exportera_pdf":    "Exportera alla aktiva till PDF",
     "uppdatera":        "Uppdatera alla vyer",
     "avsluta":          "Avsluta programmet helt",
+    "tab_logg":         "Hoppa till Logg",
     "tab_dashboard":    "Hoppa till Dashboard",
     "tab_fakturor":     "Hoppa till Fakturor",
     "tab_leverantorer": "Hoppa till Leverantörer",
@@ -3152,6 +3867,41 @@ def collect_diagnostics(app_core: Any) -> str:
         add(f"Ändringslogg  : {len(app_core.changelog.all())} rader")
     except Exception as exc:
         add(f"Data räknare  : fel — {exc}")
+
+    # ── Bevakade mappar (varför en fil inte lästs in) ────────────
+    add("")
+    add("── Bevakade mappar ──")
+    try:
+        from ui.watch_folders import watch_diagnostic_lines
+
+        wcfg_path = DATA_DIR / "watch_folders.json"
+        wcfg: dict = {}
+        if wcfg_path.is_file():
+            loaded = _load_json(wcfg_path)
+            if isinstance(loaded, dict):
+                wcfg = loaded
+        # Malldiagnosen per parkerad fil behöver registret och
+        # mallarna (samma underlag som tolkningen).
+        _suppliers: list = []
+        try:
+            _suppliers = list(app_core.get_suppliers() or [])
+        except Exception:
+            pass
+        _templates: dict = {}
+        try:
+            import scan_import as _si
+
+            _templates = _si.load_templates(
+                DATA_DIR / "invoice_templates.json"
+            )
+        except Exception:
+            pass
+        for wline in watch_diagnostic_lines(
+            wcfg, suppliers=_suppliers, templates=_templates
+        ):
+            add(wline)
+    except Exception as exc:
+        add(f"Bevakningsdiagnos: fel — {exc}")
 
     # ── Plugins (3-strikes-hälsa) ────────────────────────────────────
     add("")
@@ -3300,7 +4050,18 @@ class FakturaApp:
         _t.stop()
 
         # ── Motorer ──────────────────────────────────────────────────────
-        self.invoices = InvoiceEngine(self.invoices_store)
+        self.invoices_archive = SupplierArchiveStore(
+            db_path / ARCHIVE_DIR_NAME, self.changelog
+        )
+        self.invoices = InvoiceEngine(
+            self.invoices_store, self.invoices_archive
+        )
+        # Engångsflytt: befintliga exporterade/betalda ur
+        # huvudfilen till en JSON per leverantör i data/betalda/.
+        try:
+            self._migrate_invoice_archive()
+        except Exception as exc:
+            log.warning("ARKIV-migrering: %s", exc)
         self.payments = PaymentEngine(self.payments_store, self.invoices)
 
         # ── Backup + plugins (3-strikes-recovery) ───────────────────────
@@ -3339,8 +4100,14 @@ class FakturaApp:
             )
         except Exception as exc:
             log.warning("pycache-städning: %s", exc)
-        # Legacy-loggar från äldre versioner (audit/errors/performance/
-        # structured + lös app.log i roten) — en-fil-principen.
+        # SMARTFILTER-dygnsrensning: automatiskt 1 gång/dygn
+        # (cachefiler äldre än 1 dygn; se maybe_daily_cache_clean).
+        try:
+            self.maybe_daily_cache_clean()
+        except Exception as exc:
+            log.warning("dygnsrensning av cache: %s", exc)
+        # Legacy-loggar från äldre versioner: root-startup-loggen flyttas
+        # till logs/ och gamla splittrade loggar städas bort.
         try:
             clean_legacy_logs()
         except Exception as exc:
@@ -3390,6 +4157,66 @@ class FakturaApp:
         except Exception as exc:
             log.warning("clean_caches_on_exit: %s", exc)
             return {}
+
+    def clean_caches_now(self, mode: str = "old") -> dict[str, Any]:
+        """
+        Manuell SMARTFILTER-rensning (Inställningar-menyn).
+
+        mode="old": rensa bara cachefiler ÄLDRE än 1 dygn (det
+            smartfiltret tar hand om även i dygnsautomatiken).
+        mode="all": rensa ALL cache nu (som avslutrensningen).
+        Rör aldrig data, settings, loggar eller backuper.
+        Returnerar statistik — tom dict vid okänt läge.
+        """
+        try:
+            if mode == "all":
+                return clean_caches(BASE_DIR)
+            if mode == "old":
+                return clean_caches_smart(BASE_DIR, days=1)
+        except Exception as exc:
+            log.warning("clean_caches_now(%s): %s", mode, exc)
+        return {}
+
+    def maybe_daily_cache_clean(self) -> dict[str, Any] | None:
+        """
+        Automatisk SMARTFILTER-rensning EN gång per dygn.
+
+        Körs vid första starten på dagen (stämpeln
+        cache_last_daily_clean sparas först NÄR rensningen
+        genomförts, så ett misslyckande förbrukar inte dagens
+        rensning). Rensar bara cachefiler äldre än 1 dygn —
+        samma smartfilter som det manuella valet.
+        Returnerar statistiken, eller None om dagens rensning
+        redan är gjord.
+        """
+        try:
+            last = str(
+                self.settings.get("cache_last_daily_clean", "") or ""
+            )
+            try:
+                last_dt = datetime.datetime.fromisoformat(last)
+            except Exception:
+                last_dt = None
+            now = datetime.datetime.now()
+            if last_dt is not None and (
+                now - last_dt
+            ) < datetime.timedelta(hours=24):
+                return None
+            stats = clean_caches_smart(BASE_DIR, days=1)
+            self.settings.set(
+                "cache_last_daily_clean", now.isoformat()
+            )
+            log.info(
+                "CACHE_DAILY_CLEAN: dygnsrensning gjord "
+                "(%d __pycache__, %d pyc, %d tmp)",
+                stats["pycache_mappar"],
+                stats["pyc_filer"],
+                stats["tmp_filer"],
+            )
+            return stats
+        except Exception as exc:
+            log.warning("maybe_daily_cache_clean: %s", exc)
+            return None
 
     # ── Session-betalningsdatum API ──────────────────────────────────────
 
@@ -3452,6 +4279,52 @@ class FakturaApp:
     def get_invoices(self) -> list[dict]:
         return self.invoices.all()
 
+    def get_archived_invoices(self) -> list[dict]:
+        """Betalda/exporterade ur leverantörsfilerna i
+        data/betalda/ — underlaget för Historik-fliken."""
+        return self.invoices.archived_records()
+
+    def get_active_invoices(self) -> list[dict]:
+        """Bara huvudfilen (det som ännu inte exporterats) —
+        Fakturor-flikens register."""
+        return self.invoices.main_records()
+
+    def _migrate_invoice_archive(self) -> None:
+        """Engångsflytt av befintliga Arkiverad/Betald-poster ur
+        huvudfilen till data/betalda/<leverantör>.json. Backup av
+        huvudfilen sparas först (invoices.json.bak-arkivflytt);
+        arkivfilerna följer sedan med i den vanliga ZIP-backupen.
+        Idempotent: finns inget att flytta händer ingenting."""
+        main = [
+            r for r in self.invoices_store.all()
+            if r.get("status") in ARCHIVE_STATUSES
+        ]
+        if not main:
+            return
+        try:
+            shutil.copy2(
+                self.invoices_store.file,
+                self.invoices_store.file.with_name(
+                    "invoices.json.bak-arkivflytt"
+                ),
+            )
+        except Exception as exc:
+            log.warning("ARKIV backup före flytt: %s", exc)
+        moved = 0
+        for rec in main:
+            try:
+                self.invoices_archive.move_in(dict(rec))
+                self.invoices_store.delete(str(rec.get("id", "")))
+                moved += 1
+            except Exception as exc:
+                log.warning("ARKIV flytt %s: %s", rec.get("id"), exc)
+        if moved:
+            log.info(
+                "ARKIV: %d befintliga betalda/exporterade flyttade "
+                "till leverantörsfiler i data/betalda/",
+                moved,
+            )
+
     def get_invoice(self, record_id: str) -> dict | None:
         return self.invoices.get(record_id)
 
@@ -3495,6 +4368,11 @@ class FakturaApp:
             except Exception as exc:
                 log.error("rescan_data %s: %s", fname, exc)
                 parts.append(f"{kind} fel")
+        try:
+            self.invoices_archive.reload()
+            parts.append(f"arkiv {self.invoices_archive.count()}")
+        except Exception as exc:
+            log.error("rescan_data arkiv: %s", exc)
         summary = "Läste om data/: " + ", ".join(parts)
         log.info("DATA_RESCAN: %s", summary)
         return summary

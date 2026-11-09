@@ -23,9 +23,9 @@ Ansvar (i startordning):
     9.  Skapa MainWindow, kör plugin phase-2, koppla watchers
     9b. Globala snabbknappar: Ctrl+1–7 (flikhopp), Ctrl+E (export),
         F5 (uppdatera)
-    10. Starta minimerat i systemfältet (standard) eller synligt
+    10. Starta alltid minimerat i systemfältet; utan tray synligt
     11. Kör event-loopen, frigör låset vid avslut
-    12. Kraschskydd: startup_crash.log för tysta pythonw-krascher
+    12. Kraschskydd: CRITICAL-rad i logs/app.log vid startfel
 
 Övrigt:
     • Autostart hanteras av AutostartManager i app.py (MASTER).
@@ -37,10 +37,13 @@ Copyright © dynamiskt år Rickard Längkvist
 """
 
 import datetime
+import hashlib
 import json
 import logging
 import os
 import platform
+import shutil
+import subprocess
 import sys
 import time
 import traceback
@@ -72,7 +75,7 @@ for _dir in (str(BASE_DIR), str(UI_DIR)):
 
 APP_NAME: str = "Fakturabunten"
 APP_SHORT_NAME: str = "Fakturabunten"
-APP_VERSION: str = "1.4.10"
+APP_VERSION: str = "1.0.0"
 APP_ORGANIZATION: str = "Rickard Längkvist"
 
 COPYRIGHT_YEAR: int = datetime.date.today().year
@@ -80,16 +83,30 @@ COPYRIGHT: str = f"© {COPYRIGHT_YEAR} Rickard Längkvist"
 
 SETTINGS_FILE: Path = BASE_DIR / "settings.json"
 LOG_DIR: Path = BASE_DIR / "logs"
-#: ENDA loggfilen (JSONL) — delas med advanced_logger-pluginet.
+#: Aktiv huvudlogg (JSONL) — äldre dygn arkiveras i logs/archive/.
 LOG_FILE: Path = LOG_DIR / "app.log"
 LOCK_FILE_NAME: str = f"{APP_SHORT_NAME}_single_instance.lock"
-FOCUS_SERVER_NAME: str = f"{APP_SHORT_NAME}_focus_server"
+# QLocalServer is per-user to avoid collisions on shared computers. The
+# legacy name is probed once so an older running version can still be focused.
+_USER_SCOPE = (
+    os.environ.get("USERDOMAIN", "")
+    + "\\"
+    + (
+        os.environ.get("USERNAME")
+        or os.environ.get("USER")
+        or str(Path.home())
+    )
+)
+_FOCUS_SUFFIX = hashlib.sha256(
+    _USER_SCOPE.casefold().encode("utf-8")
+).hexdigest()[:12]
+FOCUS_SERVER_NAME: str = f"{APP_SHORT_NAME}_focus_{_FOCUS_SUFFIX}"
+LEGACY_FOCUS_SERVER_NAME: str = f"{APP_SHORT_NAME}_focus_server"
 
 DEBUG_MODE: bool = "--debug" in sys.argv
 
 #: True när appen startats via autostart (registret/.desktop/plist).
-#: Då (och endast då) startar appen minimerad i systemfältet.
-#: Manuell start (dubbelklick/genväg) visar alltid fönstret.
+#: Flaggan behålls för loggning/bakåtkompatibilitet; alla starter minimeras.
 AUTOSTART_LAUNCH: bool = "--minimized" in sys.argv
 
 #: Headless självtest (idén från PDF reader Pro SPEC v2.1 §2.8):
@@ -178,15 +195,30 @@ CURRENT_PLATFORM: str = get_platform()
 
 
 # ═════════════════════════════════════════════════════════════════════
-#  LOGGING — EN fil (JSONL), samma schema som advanced_logger
+#  LOGGING — aktiv dagslogg (JSONL), samma schema som advanced_logger
 # ═════════════════════════════════════════════════════════════════════
 
 
 class _EarlyJsonlHandler(logging.Handler):
-    """Tidig JSONL-skrivning till logs/app.log (enda loggfilen)."""
+    """Tidig JSONL-skrivning till logs/app.log."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._archive_checked_day: datetime.date | None = None
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
+            today = datetime.date.today()
+            if today != self._archive_checked_day:
+                try:
+                    if str(BASE_DIR / "plugins") not in sys.path:
+                        sys.path.insert(0, str(BASE_DIR / "plugins"))
+                    from log_archive import archive_previous_day_logs
+
+                    archive_previous_day_logs(LOG_DIR, today=today)
+                except Exception:
+                    pass  # loggningen går vidare även om arkivet är otillgängligt
+                self._archive_checked_day = today
             entry = {
                 "ts": datetime.datetime.fromtimestamp(
                     record.created
@@ -244,6 +276,16 @@ def _setup_logging() -> None:
         handlers.append(console_handler)
 
     logging.basicConfig(level=level, handlers=handlers, force=True)
+    # Felsamling (logs/felsamling.log) redan från första raden:
+    # startfel speglas dit direkt. advanced_logger:s setup tar
+    # över loggningen senare och ser till att spegeln läggs tillbaka.
+    try:
+        sys.path.insert(0, str(BASE_DIR / "plugins"))
+        from error_collect import install_error_mirror
+
+        install_error_mirror(BASE_DIR)
+    except Exception:
+        pass
 
 
 _setup_logging()
@@ -272,7 +314,7 @@ except Exception:
 
 
 # ═════════════════════════════════════════════════════════════════════
-#  KRASCHSKYDD — skrivs som JSONL-rad i ENDA loggfilen
+#  KRASCHSKYDD — skrivs som JSONL-rad i huvudloggen
 # ═════════════════════════════════════════════════════════════════════
 
 
@@ -304,6 +346,299 @@ def _write_startup_crash(exc: BaseException) -> None:
 # ═════════════════════════════════════════════════════════════════════
 #  PLATTFORMS-HJÄLPARE
 # ═════════════════════════════════════════════════════════════════════
+
+
+#: Sätts i miljön för den fönsterlösa omstarten så den aldrig loopar.
+_WINDOWLESS_GUARD = "FAKTURABUNTEN_WINDOWLESS_RELAUNCH"
+
+
+def _windowless_python(executable: str | None = None) -> Path | None:
+    """Motsvarande pythonw.exe för en Windows-Python, om den finns.
+
+    python.exe ger alltid ett konsolfönster; pythonw.exe ger
+    aldrig något. Returnerar None för andra plattformar/tolkar.
+    """
+    if CURRENT_PLATFORM != "windows":
+        return None
+    exe = Path(executable or sys.executable)
+    if exe.name.lower() == "pythonw.exe":
+        return exe
+    if exe.name.lower() != "python.exe":
+        return None
+    candidate = exe.with_name("pythonw.exe")
+    return candidate if candidate.is_file() else None
+
+
+def _relaunch_windowless() -> bool:
+    """Startar om appen fönsterlöst om den råkade startas med python.exe.
+
+    Körs allra först i main(): startades appen med konsoltolken
+    (t.ex. dubbelklick på main.py, en gammal genväg eller ett
+    .bat-skript) startas en ny instans med pythonw.exe + main.pyw
+    och den gamla processen avslutar direkt — inget konsolfönster
+    blir kvar på skärmen. --debug och --selftest rörs aldrig
+    (där VILL man se konsolen). Returnerar True när omstart skett.
+    """
+    if CURRENT_PLATFORM != "windows" or DEBUG_MODE or SELFTEST:
+        return False
+    if os.environ.get(_WINDOWLESS_GUARD) == "1":
+        return False
+    pythonw = _windowless_python()
+    if pythonw is None:
+        return False
+    script = BASE_DIR / "main.pyw"
+    if not script.is_file():
+        script = BASE_DIR / "main.py"
+    if not script.is_file():
+        return False
+    env = dict(os.environ)
+    env[_WINDOWLESS_GUARD] = "1"
+    try:
+        subprocess.Popen(
+            [str(pythonw), str(script), *sys.argv[1:]],
+            cwd=str(BASE_DIR),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        log.info(
+            "FONSTERLOS_OMSTART: python.exe -> %s %s",
+            pythonw, script,
+        )
+        return True
+    except Exception as exc:
+        log.warning("FONSTERLOS_OMSTART misslyckades: %s", exc)
+        return False
+
+
+_RUNTIME_ATTEMPTS = "FAKTURABUNTEN_RUNTIME_ATTEMPTS"
+_RUNTIME_PROBE = (
+    "import importlib; "
+    "[importlib.import_module(name) for name in "
+    "('PySide6', 'reportlab', 'pypdf', 'fitz', 'PIL', "
+    "'pytesseract', 'qrcode')]; "
+    "from PySide6.QtWidgets import QApplication; "
+    "app = QApplication([]); app.quit(); "
+    "print('FAKTURABUNTEN_RUNTIME_OK')"
+)
+
+
+def _python_path_key(path: str | Path) -> str:
+    try:
+        return os.path.normcase(os.path.abspath(str(path))).casefold()
+    except Exception:
+        return str(path).casefold()
+
+
+def _runtime_attempted() -> set[str]:
+    try:
+        values = json.loads(os.environ.get(_RUNTIME_ATTEMPTS, "[]"))
+        if isinstance(values, list):
+            return {_python_path_key(value) for value in values if value}
+    except Exception:
+        pass
+    return set()
+
+
+def _inspect_python(command: list[str]) -> tuple[str, tuple[int, ...]] | None:
+    """Return executable path/version for a system Python command."""
+    code = (
+        "import sys; print(sys.executable); "
+        "print('.'.join(map(str, sys.version_info[:3])))"
+    )
+    try:
+        result = subprocess.run(
+            [*command, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0:
+            return None
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if len(lines) < 2:
+            return None
+        version = tuple(int(part) for part in lines[1].split(".") if part.isdigit())
+        if len(version) < 2 or version[:2] < (3, 10):
+            return None
+        executable = str(Path(lines[0]).resolve())
+        return executable, version
+    except Exception:
+        return None
+
+
+def _system_python_candidates() -> list[tuple[str, tuple[int, ...]]]:
+    """Find installed interpreters, with the requested 3.15/3.14 order."""
+    commands: list[list[str]] = []
+    if CURRENT_PLATFORM == "windows":
+        launcher = shutil.which("py.exe") or shutil.which("py")
+        if launcher:
+            for minor in range(15, 9, -1):
+                commands.append([launcher, f"-3.{minor}"])
+        roots = [
+            os.environ.get("LOCALAPPDATA", ""),
+            os.environ.get("ProgramFiles", ""),
+            os.environ.get("ProgramFiles(x86)", ""),
+        ]
+        for raw_root in roots:
+            if not raw_root:
+                continue
+            root = Path(raw_root)
+            for base in (root / "Programs" / "Python", root):
+                for minor in range(15, 9, -1):
+                    commands.append([
+                        str(base / f"Python3{minor}" / "python.exe")
+                    ])
+        for name in (
+            "python3.15.exe", "python3.14.exe", "python3.13.exe",
+            "python3.12.exe", "python3.11.exe", "python3.10.exe",
+            "python.exe",
+        ):
+            found = shutil.which(name)
+            if found and "\\Microsoft\\WindowsApps\\" not in found:
+                commands.append([found])
+    else:
+        local = Path(__file__).resolve().parent / "python" / "bin"
+        for name in (
+            "python3.15", "python3.14", "python3.13", "python3.12",
+            "python3.11", "python3.10", "python3", "python",
+        ):
+            local_candidate = local / name
+            if local_candidate.is_file():
+                commands.append([str(local_candidate)])
+            found = shutil.which(name)
+            if found:
+                commands.append([found])
+
+    current = _python_path_key(sys.executable)
+    seen: set[str] = set()
+    candidates: list[tuple[str, tuple[int, ...]]] = []
+    for command in commands:
+        inspected = _inspect_python(command)
+        if inspected is None:
+            continue
+        executable, version = inspected
+        key = _python_path_key(executable)
+        if key == current or key in seen:
+            continue
+        seen.add(key)
+        candidates.append((executable, version))
+    return sorted(candidates, key=lambda item: item[1], reverse=True)
+
+
+def _python_has_runtime(executable: str) -> bool:
+    """Probe the app's declared runtime imports without starting its UI."""
+    env = dict(os.environ)
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    try:
+        result = subprocess.run(
+            [executable, "-c", _RUNTIME_PROBE],
+            cwd=str(BASE_DIR),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=35,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return (
+            result.returncode == 0
+            and "FAKTURABUNTEN_RUNTIME_OK" in result.stdout
+        )
+    except Exception as exc:
+        log.debug("Python-runtime probe misslyckades för %s: %s", executable, exc)
+        return False
+
+
+def _spawn_with_python(
+    executable: str, *, reason: str, mark_current: bool,
+) -> bool:
+    """Restart under a selected runtime while preventing interpreter loops."""
+    script = BASE_DIR / "main.pyw" if CURRENT_PLATFORM == "windows" else BASE_DIR / "main.py"
+    if not script.is_file():
+        script = BASE_DIR / "main.py"
+    if not script.is_file():
+        return False
+    attempts = _runtime_attempted()
+    if mark_current:
+        attempts.add(_python_path_key(sys.executable))
+    attempts.add(_python_path_key(executable))
+    env = dict(os.environ)
+    env[_RUNTIME_ATTEMPTS] = json.dumps(sorted(attempts))
+    try:
+        subprocess.Popen(
+            [executable, str(script), *sys.argv[1:]],
+            cwd=str(BASE_DIR),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        log.info(
+            "PYTHON_RUNTIME_RELAUNCH: %s via %s (%s)",
+            sys.executable, executable, reason,
+        )
+        return True
+    except Exception as exc:
+        log.warning(
+            "PYTHON_RUNTIME_RELAUNCH_FAIL: %s via %s: %s",
+            sys.executable, executable, exc,
+        )
+        return False
+
+
+def _relaunch_preferred_python() -> bool:
+    """Prefer a working Python 3.15 installation when currently below it."""
+    if DEBUG_MODE or SELFTEST or os.environ.get("FAKTURA_SKIP_PACKAGES") == "1":
+        return False
+    if sys.version_info[:2] >= (3, 15):
+        return False
+    attempted = _runtime_attempted()
+    for executable, version in _system_python_candidates():
+        if version[:2] != (3, 15):
+            continue
+        if _python_path_key(executable) in attempted:
+            continue
+        if not _python_has_runtime(executable):
+            log.info(
+                "PYTHON_RUNTIME_NOT_READY: Python %s at %s; keeping current %s",
+                ".".join(map(str, version)), executable, sys.executable,
+            )
+            continue
+        return _spawn_with_python(
+            executable, reason="preferred Python 3.15 is usable",
+            mark_current=False,
+        )
+    return False
+
+
+def _relaunch_runtime_fallback() -> bool:
+    """Use a tested installed Python (3.14 first, then any compatible one)."""
+    if DEBUG_MODE or SELFTEST:
+        return False
+    attempted = _runtime_attempted()
+    current = _python_path_key(sys.executable)
+    for executable, version in _system_python_candidates():
+        key = _python_path_key(executable)
+        if key == current or key in attempted:
+            continue
+        if not _python_has_runtime(executable):
+            continue
+        return _spawn_with_python(
+            executable,
+            reason=f"fallback Python {'.'.join(map(str, version))}",
+            mark_current=True,
+        )
+    log.error(
+        "PYTHON_RUNTIME_FALLBACK_UNAVAILABLE: no other installed Python "
+        "passed the application dependency probe"
+    )
+    return False
 
 
 def _hide_console() -> None:
@@ -360,31 +695,67 @@ def _windows_shortcut() -> None:
             check=False,
             timeout=20,
             capture_output=True,
+            # PowerShell är ett konsolprogram — utan flaggan blinkar
+            # ett konsolfönster till vid varje appstart.
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         log.info("IKON_GENVAG: %s", lnk)
     except Exception as exc:
         log.warning("IKON_GENVAG: %s", exc)
 
 
+_WIN32_APP_ICON_HANDLES: tuple[int, int] | None = None
+
+
 def _set_win32_window_icon(hwnd: int) -> None:
-    """Tvingar fönsterikonen så aktivitetsfältet inte behåller Python."""
+    """Tvingar ikonhandtagen från appens .ico till Windows-fönstret."""
+    global _WIN32_APP_ICON_HANDLES
     ico = BASE_DIR / "app_icon.ico"
     if not ico.is_file() or not hwnd:
         return
     try:
         import ctypes
+        from ctypes import wintypes
+
         user32 = ctypes.windll.user32
-        IMAGE_ICON = 1
-        LR_LOADFROMFILE = 0x0010
-        WM_SETICON = 0x0080
-        big = user32.LoadImageW(None, str(ico), IMAGE_ICON, 0, 0, LR_LOADFROMFILE)
-        small = user32.LoadImageW(None, str(ico), IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+        if _WIN32_APP_ICON_HANDLES is None:
+            image_icon = 1
+            load_from_file = 0x0010
+            user32.LoadImageW.argtypes = [
+                ctypes.c_void_p,
+                wintypes.LPCWSTR,
+                wintypes.UINT,
+                ctypes.c_int,
+                ctypes.c_int,
+                wintypes.UINT,
+            ]
+            user32.LoadImageW.restype = ctypes.c_void_p
+            big_handle = user32.LoadImageW(
+                None, str(ico), image_icon, 0, 0, load_from_file
+            )
+            small_handle = user32.LoadImageW(
+                None, str(ico), image_icon, 16, 16, load_from_file
+            )
+            _WIN32_APP_ICON_HANDLES = (
+                int(big_handle or 0),
+                int(small_handle or 0),
+            )
+
+        big, small = _WIN32_APP_ICON_HANDLES
+        user32.SendMessageW.argtypes = [
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        user32.SendMessageW.restype = ctypes.c_ssize_t
+        wm_seticon = 0x0080
         if big:
-            user32.SendMessageW(hwnd, WM_SETICON, 1, big)
+            user32.SendMessageW(hwnd, wm_seticon, 1, big)
         if small:
-            user32.SendMessageW(hwnd, WM_SETICON, 0, small)
-    except Exception:
-        pass
+            user32.SendMessageW(hwnd, wm_seticon, 0, small)
+    except Exception as exc:
+        log.debug("Windows HWND-ikon kunde inte sättas: %s", exc)
 
 
 def _set_windows_app_id() -> None:
@@ -397,9 +768,10 @@ def _set_windows_app_id() -> None:
     try:
         import ctypes
 
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            f"RickardLangkvist.{APP_SHORT_NAME}"
-        )
+        setter = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
+        setter.argtypes = [ctypes.c_wchar_p]
+        setter.restype = ctypes.c_long
+        setter(f"RickardLangkvist.{APP_SHORT_NAME}")
     except Exception:
         pass
 
@@ -409,39 +781,56 @@ def _set_windows_app_id() -> None:
 # ═════════════════════════════════════════════════════════════════════
 
 
-def _acquire_single_instance_lock() -> bool:
-    """
-    Säkerställer att bara EN kopia av Fakturabunten körs.
+def _single_instance_lock_path() -> Path:
+    """Gemensam per-användare-låsfil, även när appen ligger i flera mappar."""
+    home = Path.home()
+    if CURRENT_PLATFORM == "windows":
+        root = (
+            os.environ.get("LOCALAPPDATA")
+            or os.environ.get("APPDATA")
+            or str(home / "AppData" / "Local")
+        )
+        base = Path(root)
+    elif CURRENT_PLATFORM == "macos":
+        base = home / "Library" / "Application Support"
+    else:
+        state_home = os.environ.get("XDG_STATE_HOME", "")
+        state = Path(state_home).expanduser() if state_home else Path()
+        base = (
+            state if state.is_absolute()
+            else home / ".local" / "state"
+        )
+    lock_dir = base / "RickardLangkvist" / APP_SHORT_NAME
+    return lock_dir / LOCK_FILE_NAME
 
-    Lockfilen ligger i logs/ inuti appmappen — aldrig i systemets temp.
-    Den är unik för denna app och påverkar inte andra program.
+
+def _acquire_single_instance_lock() -> bool:
+    """Säkrar en enda appinstans per användare på alla startvägar.
+
+    Fel vid låsning är fail-closed: utan ett fungerande lås startar vi
+    aldrig en andra kopia på chans.
     """
     global _APP_LOCK
+    if _APP_LOCK is not None:
+        return True
     try:
         from PySide6.QtCore import QLockFile
 
-        lock_dir = BASE_DIR / "logs"
-        lock_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = lock_dir / LOCK_FILE_NAME
-
+        lock_path = _single_instance_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock = QLockFile(str(lock_path))
         if lock.tryLock(100):
             _APP_LOCK = lock
             log.info("Single-instance lås OK: %s", lock_path)
             return True
-
         log.warning(
-            "Programmet körs redan — avbryter ny instans.\n"
-            "  Lockfil: %s",
+            "En annan Fakturabunten-instans håller låset: %s",
             lock_path,
         )
         return False
-    except ImportError:
-        log.debug("QLockFile ej tillgänglig — hoppar över single-instance")
-        return True
     except Exception as exc:
-        log.error("Single-instance låsfel: %s", exc)
-        return True
+        log.error("Single-instance låsfel — start nekas: %s", exc)
+        return False
 
 
 def _release_single_instance_lock() -> None:
@@ -457,41 +846,130 @@ def _release_single_instance_lock() -> None:
     _APP_LOCK = None
 
 
-def _start_focus_server(on_focus: Callable[[], None]) -> None:
-    """
-    Första instansen lyssnar på fokus-förfrågningar via QLocalServer.
-    När en andra instans kopplar upp → visa/aktivera fönstret.
-    """
+def _start_focus_server(on_focus: Callable[[], None]) -> str:
+    """Startar IPC-servern; returnerar ``started``, ``existing`` eller ``failed``."""
     global _FOCUS_SERVER
     try:
+        from PySide6.QtCore import QTimer
         from PySide6.QtNetwork import QLocalServer
 
-        QLocalServer.removeServer(FOCUS_SERVER_NAME)  # rensa gammal socket
+        # Versionen före per-användar-namn använde ett fast servernamn.
+        if _request_focus_existing(
+            timeout_seconds=0.35,
+            server_name=LEGACY_FOCUS_SERVER_NAME,
+        ):
+            log.info("Fokus överlämnat till äldre körande instans")
+            return "existing"
+
         server = QLocalServer()
-        if server.listen(FOCUS_SERVER_NAME):
-            server.newConnection.connect(lambda: on_focus())
-            _FOCUS_SERVER = server
-            log.debug("Fokus-server lyssnar: %s", FOCUS_SERVER_NAME)
+        try:
+            server.setSocketOptions(
+                QLocalServer.SocketOption.UserAccessOption
+            )
+        except Exception:
+            pass
+
+        if not server.listen(FOCUS_SERVER_NAME):
+            # En tidigare version kan fortfarande köra med den äldre
+            # låsfilen. Be den visa sig i stället för att ta över dess socket.
+            if _request_focus_existing(timeout_seconds=0.5):
+                log.info("Fokus överlämnat till redan körande version")
+                return "existing"
+            # Ingen aktiv server kunde nås: socketen är kvar efter en krasch.
+            QLocalServer.removeServer(FOCUS_SERVER_NAME)
+            if not server.listen(FOCUS_SERVER_NAME):
+                raise RuntimeError(server.errorString())
+
+        def _accept_connections() -> None:
+            while server.hasPendingConnections():
+                sock = server.nextPendingConnection()
+                if sock is None:
+                    continue
+                buffer = bytearray()
+                completed = {"value": False}
+
+                def _read_request(socket=sock, data=buffer, done=completed):
+                    if done["value"]:
+                        return
+                    try:
+                        data.extend(bytes(socket.readAll()))
+                        if b"\n" not in data and len(data) < 64:
+                            return
+                        command = bytes(data).split(b"\n", 1)[0].strip()
+                        done["value"] = True
+                        if command.upper() == b"FOCUS":
+                            on_focus()
+                            socket.write(b"OK\n")
+                            socket.flush()
+                    except Exception as exc:
+                        log.debug("Fokus-IPC läsfel: %s", exc)
+                    finally:
+                        if done["value"]:
+                            try:
+                                socket.disconnectFromServer()
+                            except Exception:
+                                pass
+
+                sock.readyRead.connect(_read_request)
+                sock.disconnected.connect(sock.deleteLater)
+                if sock.bytesAvailable():
+                    _read_request()
+                QTimer.singleShot(
+                    5000,
+                    lambda s=sock, d=completed: _expire_focus_socket(s, d),
+                )
+
+        server.newConnection.connect(_accept_connections)
+        _FOCUS_SERVER = server
+        log.info("Fokus-server lyssnar: %s", FOCUS_SERVER_NAME)
+        return "started"
     except Exception as exc:
-        log.debug("Fokus-server ej tillgänglig: %s", exc)
+        log.error("Fokus-server kunde inte starta: %s", exc)
+        return "failed"
 
 
-def _request_focus_existing() -> None:
-    """
-    Andra instansen ber den första visa fönstret innan den avslutar.
-    """
+def _expire_focus_socket(sock: Any, completed: dict[str, bool]) -> None:
+    """Stänger en klient som anslöt men aldrig skickade en begäran."""
+    if completed.get("value"):
+        return
+    try:
+        sock.abort()
+        sock.deleteLater()
+    except Exception:
+        pass
+
+
+def _request_focus_existing(
+    timeout_seconds: float = 2.5,
+    server_name: str | None = None,
+) -> bool:
+    """Be en körande instans visa fönstret och rapportera om IPC gick iväg."""
     try:
         from PySide6.QtNetwork import QLocalSocket
 
-        sock = QLocalSocket()
-        sock.connectToServer(FOCUS_SERVER_NAME)
-        if sock.waitForConnected(300):
-            sock.write(b"focus")
-            sock.waitForBytesWritten(300)
-            log.info("Fokus-förfrågan skickad till första instansen")
-        sock.disconnectFromServer()
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while True:
+            sock = QLocalSocket()
+            sock.connectToServer(server_name or FOCUS_SERVER_NAME)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                sock.abort()
+                return False
+            if sock.waitForConnected(min(250, max(1, int(remaining * 1000)))):
+                written = sock.write(b"FOCUS\n")
+                sock.flush()
+                if written > 0:
+                    # Servern kan inte processa förrän dess event loop kör;
+                    # en timeout här är okej — datan ligger i socketbufferten.
+                    sock.waitForBytesWritten(300)
+                    sock.disconnectFromServer()
+                    log.info("Fokus-förfrågan skickad till första instansen")
+                    return True
+            sock.abort()
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
     except Exception as exc:
         log.debug("Fokus-förfrågan misslyckades: %s", exc)
+        return False
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -715,6 +1193,23 @@ def _verify_window_visible(window: Any) -> None:
                     x=geo.x(), y=geo.y(),
                 )
             if visible:
+                # Synligt enligt Qt — men det kan ändå ligga utanför
+                # alla anslutna skärmar (bortkopplad extern skärm).
+                # Skärmvakten i huvudfönstret flyttar i så fall
+                # tillbaka det och vi loggar vad som hände.
+                moved = False
+                try:
+                    from ui.main_window import ensure_window_on_screen
+                    moved = ensure_window_on_screen(window)
+                except Exception:
+                    moved = False
+                if moved and alog_fn is not None:
+                    alog_fn(
+                        "WINDOW_OFFSCREEN_GUARD",
+                        "Fönstret låg utanför alla skärmar → centrerat "
+                        "på primärskärmen",
+                        logger="FakturaMain",
+                    )
                 return
 
             log.warning(
@@ -751,24 +1246,26 @@ def _verify_window_visible(window: Any) -> None:
 
 def _verify_window_hidden(window: Any) -> None:
     """
-    Motsvarande vakt för GÖMD autostart: om fönstret mot förmodan
-    är synligt 700 ms efter start → döljs det och händelsen loggas.
+    Säkerhetsvakt för minimerad start: om fönstret ändå är synligt
+    700 ms senare döljs det och händelsen loggas.
     """
     from PySide6.QtCore import QTimer
 
     def _check() -> None:
         try:
+            if not getattr(window, "_startup_hide_guard_active", False):
+                return
             if not window.isVisible():
                 return
             log.warning(
-                "Fönstret var SYNLIGT trots gömd autostart → döljs"
+                "Fönstret var SYNLIGT trots minimerad start → döljs"
             )
             window.hide()
             alog_fn = _get_alog()
             if alog_fn is not None:
                 alog_fn(
                     "WINDOW_HIDDEN_GUARD",
-                    "Fönstret var synligt vid gömd autostart → dolt",
+                    "Fönstret blev synligt före första användaröppning → dolt",
                     logger="FakturaMain",
                 )
         except Exception as exc:
@@ -780,58 +1277,69 @@ def _verify_window_hidden(window: Any) -> None:
 def _start_minimized_or_show(
     window: Any, app_core: Any, autostart_launch: bool
 ) -> None:
-    """
-    Startläge:
+    """Starta alltid minimerat i tray; visa bara om tray saknas.
 
-    • AUTOSTART (registry/.desktop/plist → --minimized) +
-      start_minimized=True + tray → starta GÖMD i systemfältet.
-    • MANUELL start (dubbelklick/genväg) → visa ALLTID fönstret.
-      (Tidigare blinkade fönstret till och gömdes även vid manuell
-      start — det är nu fixat.)
+    `start_minimized` och `autostart_launch` behålls i inställningar/
+    startprotokoll för bakåtkompatibilitet, men påverkar inte längre
+    startläget. Utan en fungerande systembricka lämnas fönstret synligt
+    så att appen inte blir omöjlig att hitta.
     """
+    del app_core  # gammal inställning får inte kunna slå av minimerad start
     from PySide6.QtWidgets import QSystemTrayIcon
 
-    start_minimized = app_core.settings.get("start_minimized", True)
     tray_available = QSystemTrayIcon.isSystemTrayAvailable()
+    tray = getattr(window, "tray", None)
+    tray_ready = tray_available and tray is not None
+    if tray_ready:
+        try:
+            tray_ready = bool(tray.isVisible())
+        except Exception:
+            tray_ready = False
 
-    if (
-        autostart_launch
-        and start_minimized
-        and tray_available
-        and hasattr(window, "tray")
-    ):
-        # Säkerhet på säkerhet: fönstret får ALDRIG vara synligt vid
-        # gömd autostart — även om något oväntat skulle ha show():at det.
+    if tray_ready:
+        # Vakten får inte ångra ett uttryckligt tray-/fokusöppnande.
+        try:
+            setattr(window, "_startup_hide_guard_active", True)
+        except Exception:
+            pass
+        # Göm före event-loopen så ingen synlig fönsterblinkning sker.
         try:
             window.hide()
         except Exception:
             pass
         log.info(
-            "Startar MINIMERAT (autostart)", extra={"action": "START_MIN"}
+            "Startar MINIMERAT (autostart=%s)",
+            autostart_launch,
+            extra={"action": "START_MIN"},
         )
         try:
-            window.tray.showMessage(
+            tray.showMessage(
                 APP_NAME,
-                "Fakturabunten körs i systemfältet.\n"
-                "Klicka på ikonen för att öppna.",
+                "Fakturabunten startade minimerad.\n"
+                "Klicka på ikonen i systemfältet för att öppna.",
                 QSystemTrayIcon.MessageIcon.Information,
                 3000,
             )
         except Exception:
             pass
         _verify_window_hidden(window)
-    else:
-        window.show()
-        window.raise_()
-        window.activateWindow()
-        log.info(
-            "Startar SYNLIGT (autostart=%s, tray=%s, minimized-setting=%s)",
-            autostart_launch,
-            tray_available,
-            start_minimized,
-            extra={"action": "START_SHOW"},
-        )
-        _verify_window_visible(window)
+        return
+
+    # Utan tray får appen inte försvinna från användaren.
+    try:
+        setattr(window, "_startup_hide_guard_active", False)
+    except Exception:
+        pass
+    window.show()
+    window.raise_()
+    window.activateWindow()
+    log.info(
+        "Startar SYNLIGT eftersom systemfält saknas (autostart=%s, tray=%s)",
+        autostart_launch,
+        tray_ready,
+        extra={"action": "START_SHOW_NO_TRAY"},
+    )
+    _verify_window_visible(window)
 
 
 def _install_shortcuts(window: Any) -> None:
@@ -1320,12 +1828,10 @@ def _watch_settings(app_core: Any) -> None:
     try:
         def _on_settings_changed(snap: dict) -> None:
             app_watcher.info(
-                "Settings ändrades — tema=%s  startup=%s  "
-                "close_to_tray=%s  start_minimized=%s",
+                "Settings ändrades — tema=%s  startup=%s  close_to_tray=%s",
                 snap.get("theme", "?"),
                 snap.get("startup", "?"),
                 snap.get("close_to_tray", "?"),
-                snap.get("start_minimized", "?"),
             )
 
         app_core.settings.on_change(_on_settings_changed)
@@ -1396,8 +1902,11 @@ def _setup_window_watchers(window: Any, app_core: Any) -> None:
 #: Ikoner och settings.json krävs inte för att starten ska gå vidare.
 _COMPANION_FILES: tuple[str, ...] = (
     "app.py",
+    "app_icon.ico",
+    "app_icon.png",
     "ensure_packages.py",
     "requirements.txt",
+    "ui/design.py",
     "ui/letter_jump.py",
     "ui/main_window.py",
     "ui/invoices_view.py",
@@ -1410,6 +1919,7 @@ _COMPANION_FILES: tuple[str, ...] = (
     "plugins/pdf_export.py",
     "plugins/pdf_export_helpers.py",
     "plugins/scan_import.py",
+    "plugins/python_update_scheduler.py",
 )
 
 
@@ -1447,6 +1957,12 @@ def main() -> None:
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
 
+    # Startades vi med konsoltolken (python.exe) startar vi om
+    # fönsterlöst med pythonw.exe och avslutar direkt — annars
+    # blir ett konsolfönster kvar bredvid appen.
+    if _relaunch_windowless():
+        return
+
     _hide_console()
     _set_windows_app_id()
 
@@ -1456,6 +1972,22 @@ def main() -> None:
     if missing:
         _abort_missing_files(missing)
 
+    # Python 3.15 föredras när den faktiskt kan importera appens beroenden.
+    # Om den senare visar sig oanvändbar kan paketsteget välja en testad
+    # Python 3.14 eller annan installerad systemtolk.
+    if _relaunch_preferred_python():
+        return
+
+    # Om en tidigare veckouppdatering redan arbetar (efter att förra
+    # appinstansen stängts), vänta innan paketkontrollen så pip inte körs
+    # parallellt med uppgraderingen. En aktiv appinstans väntas inte på.
+    if not SELFTEST and os.environ.get("FAKTURA_SKIP_PACKAGES") != "1":
+        try:
+            from plugins.python_update_scheduler import wait_for_active_update
+            wait_for_active_update(BASE_DIR)
+        except Exception as exc:
+            log.warning("PYTHON_WEEKLY_UPDATE_WAIT_FAIL: %s", exc)
+
     # Saknade tillbehör (PySide6, reportlab, pypdf) hämtas här,
     # med förloppsindikator, innan resten av programmet startar.
     # Hoppas över vid --selftest så kontrollen förblir tyst.
@@ -1463,6 +1995,8 @@ def main() -> None:
         try:
             from ensure_packages import ensure_packages
             if not ensure_packages():
+                if _relaunch_runtime_fallback():
+                    return
                 sys.exit(1)
         except ModuleNotFoundError as exc:
             log.error(
@@ -1472,6 +2006,8 @@ def main() -> None:
             )
         except Exception as exc:
             log.error("TILLBEHOR: %s", exc, exc_info=True)
+            if _relaunch_runtime_fallback():
+                return
 
     # ── PySide6 måste finnas. Lokal fil är ett annat fel. ───────────────
     try:
@@ -1513,47 +2049,88 @@ def main() -> None:
     app_qt.setOrganizationName(APP_ORGANIZATION)
     app_qt.setStyle("Fusion")
     app_qt.setQuitOnLastWindowClosed(False)
-    for _icon_name in ("app_icon.ico", "app_icon.png", "app_icon.svg"):
-        _icon_path = BASE_DIR / _icon_name
-        if _icon_path.exists():
-            from PySide6.QtCore import QEvent, QObject
-            from PySide6.QtGui import QIcon
+    # Läsbar grundtypografi i hela appen (temat förstärker rubriker,
+    # flikar och tabeller ytterligare via stilarket).
+    try:
+        from PySide6.QtGui import QFont as _QFont
 
-            _app_icon = QIcon(str(_icon_path))
-            app_qt.setWindowIcon(_app_icon)
+        app_qt.setFont(_QFont("Segoe UI", 11))
+    except Exception:
+        pass
+    try:
+        from PySide6.QtCore import QEvent, QObject
+        from ui.design import load_app_icon
 
-            class _IconOnShow(QObject):
-                """Sätter appikonen på varje fönster och dialog."""
+        _app_icon = load_app_icon()
+    except Exception as exc:
+        _app_icon = None
+        log.warning("Appikonen kunde inte laddas: %s", exc)
 
-                def __init__(self, icon: QIcon, parent: QObject | None = None) -> None:
-                    super().__init__(parent)
-                    self._icon = icon
+    if _app_icon is not None:
+        app_qt.setWindowIcon(_app_icon)
 
-                def eventFilter(self, obj, event):  # noqa: N802
-                    if event.type() == QEvent.Type.Show:
-                        try:
-                            if (
-                                obj.isWindow()
-                                and not obj.property("_frak_icon")
-                            ):
-                                obj.setWindowIcon(self._icon)
-                                obj.setProperty("_frak_icon", True)
-                                if CURRENT_PLATFORM == "windows":
-                                    _set_win32_window_icon(int(obj.winId()))
-                        except Exception:
-                            pass
-                    return False
+        class _IconOnShow(QObject):
+            """Sätter den gemensamma appikonen på varje fönster/dialog."""
 
-            app_qt.installEventFilter(_IconOnShow(_app_icon, app_qt))
-            _windows_shortcut()
-            break
+            def __init__(self, icon, parent=None) -> None:
+                super().__init__(parent)
+                self._icon = icon
 
-    # ── Single instance — bara EN kopia åt gången ─────────────────────
+            def eventFilter(self, obj, event):  # noqa: N802
+                if event.type() == QEvent.Type.Show:
+                    try:
+                        if obj.isWindow() and not obj.property("_frak_icon"):
+                            obj.setWindowIcon(self._icon)
+                            obj.setProperty("_frak_icon", True)
+                            if CURRENT_PLATFORM == "windows":
+                                _set_win32_window_icon(int(obj.winId()))
+                    except Exception:
+                        pass
+                return False
+
+        app_qt.installEventFilter(_IconOnShow(_app_icon, app_qt))
+
+    # ── Single instance — en instans per användare, mellan appmappar ──
     if not _acquire_single_instance_lock():
-        # Be första instansen visa fönstret, avsluta sedan själv.
-        _request_focus_existing()
-        log.info("Avbryter — programmet körs redan.")
+        if _request_focus_existing():
+            log.info("Avbryter — befintlig instans har fått fokusbegäran.")
+            sys.exit(0)
+        _fatal_exit(
+            "Kunde inte säkra en enda Fakturabunten-instans eller "
+            "kontakta den redan körande appen. Starten avbryts för att "
+            "inte öppna en extra kopia. Kontrollera logs/app.log."
+        )
+
+    # Genvägen skrivs endast av den instans som äger låset.
+    if _app_icon is not None:
+        _windows_shortcut()
+
+    window_holder: dict[str, Any] = {
+        "window": None,
+        "focus_pending": False,
+        "ready": False,
+    }
+
+    def _on_focus_request() -> None:
+        window = window_holder.get("window")
+        if (
+            window_holder.get("ready")
+            and window is not None
+            and hasattr(window, "_bring_to_front")
+        ):
+            window._bring_to_front()
+        else:
+            window_holder["focus_pending"] = True
+
+    focus_server_state = _start_focus_server(_on_focus_request)
+    if focus_server_state == "existing":
+        _release_single_instance_lock()
         sys.exit(0)
+    if focus_server_state != "started":
+        _fatal_exit(
+            "Kunde inte starta fokuskanalen. Appen avbryts för att "
+            "förhindra att en andra instans öppnas."
+        )
 
     try:
         # ── Tidigt tema (från settings.json direkt) ───────────────────
@@ -1584,16 +2161,7 @@ def main() -> None:
 
         # ── Huvudfönster + plugin phase-2 ─────────────────────────────
         window = _create_main_window(app_core)
-
-        # ── Fokus-server: andra instanser kan be oss visa fönstret ──
-        window_holder: dict[str, Any] = {"window": window}
-
-        def _on_focus_request() -> None:
-            w = window_holder.get("window")
-            if w is not None and hasattr(w, "_bring_to_front"):
-                w._bring_to_front()
-
-        _start_focus_server(_on_focus_request)
+        window_holder["window"] = window
 
         try:
             app_core.register_plugins_ui(window)
@@ -1604,9 +2172,39 @@ def main() -> None:
         # ── Watchers, snabbknappar, startläge, startinfo ─────────────
         _setup_window_watchers(window, app_core)
         _install_shortcuts(window)
+        # Felsamling: skörda fel ur alla loggar till logs/felsamling.log
+        # vid varje start (nya fel speglas sedan dit direkt).
+        try:
+            from error_collect import collect_errors
+
+            collect_errors(BASE_DIR)
+        except Exception:
+            pass
         _start_minimized_or_show(window, app_core, AUTOSTART_LAUNCH)
+        window_holder["ready"] = True
+        if window_holder.pop("focus_pending", False):
+            try:
+                from PySide6.QtCore import QTimer
+
+                QTimer.singleShot(0, window._bring_to_front)
+            except Exception:
+                window._bring_to_front()
 
         _log_startup_info(app_core)
+
+        # Veckovis Python-/paketuppdatering: måndag kl. 08 lokal tid.
+        # QTimer gör bara en lokal tids-/statuskontroll; uppdateraren
+        # väntar tills denna appinstans stängts innan den ändrar filer.
+        try:
+            from plugins.python_update_scheduler import (
+                schedule_weekly_python_updates,
+            )
+
+            schedule_weekly_python_updates(
+                app_qt, BASE_DIR, python_exe=sys.executable
+            )
+        except Exception as exc:
+            log.warning("PYTHON_WEEKLY_UPDATE_SCHEDULE_FAIL: %s", exc)
 
         # ── Event loop ────────────────────────────────────────────────
         alog_fn = _get_alog()
