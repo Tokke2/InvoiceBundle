@@ -122,57 +122,6 @@ ROW_FG_MATCH_UNCERTAIN = ("#ffd9d6", "#8a1a12")
 ROW_FG_MATCH_SECURE = ("#d9f4e2", "#14532d")
 
 
-def _supplier_monogram(name: str) -> str:
-    """Logotyp-monom för leverantörsvalet: första bokstäverna ur
-    namnets två första ord ("Martin G Anderson" → "MG")."""
-    words = [
-        w for w in re.split(r"[\s\-/]+", str(name or ""))
-        if w and any(c.isalpha() for c in w)
-    ]
-    if not words:
-        return "?"
-    initials = "".join(w[0] for w in words[:2])
-    return initials.upper()
-
-
-#: Palett för leverantörernas logotyp-rutor (samma namn ger
-#: alltid samma färg, så leverantören känns igen visuellt).
-_SUPPLIER_TILE_COLORS: tuple[str, ...] = (
-    "#1565c0", "#6a1b9a", "#00838f", "#2e7d32", "#ad1457",
-    "#4e342e", "#37474f", "#283593", "#00695c", "#bf360c",
-)
-
-
-def _supplier_tile_pixmap(name: str, size: int = 44) -> QPixmap:
-    """Ritar leverantörens logotyp-ruta: färgad rundad platta med
-    monogrammet — igenkänning på en blick i matchningsdialogen."""
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    try:
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        idx = sum(ord(c) for c in str(name or "")) % len(
-            _SUPPLIER_TILE_COLORS
-        )
-        painter.setBrush(QColor(_SUPPLIER_TILE_COLORS[idx]))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(
-            1, 1, size - 2, size - 2, 9, 9
-        )
-        painter.setPen(QColor("#ffffff"))
-        font = QFont()
-        font.setBold(True)
-        font.setPixelSize(int(size * 0.36))
-        painter.setFont(font)
-        painter.drawText(
-            pixmap.rect(), Qt.AlignmentFlag.AlignCenter,
-            _supplier_monogram(name),
-        )
-    finally:
-        painter.end()
-    return pixmap
-
-
 def _fmt_amount(value: float) -> str:
     """45546.0 → '45 546,00' (svenskt format)."""
     try:
@@ -2943,49 +2892,123 @@ class ScanImportView(QWidget):
             ) if not ok
         ]
 
-    def _add_supplier_logo_picker(self, layout, options, combo) -> None:
-        """Klickbara logotyprutor för leverantörsvalet.
+    def _add_supplier_logo_picker(
+        self, layout, options, combo, row: dict | None = None,
+    ) -> None:
+        """Visa klickbara utsnitt av riktiga fakturalogotyper.
 
-        Varje alternativ får en färgad logotyp-ruta med sitt
-        monogram bredvid namnet — användaren väljer leverantör via
-        logotypen på en blick i stället för att läsa en lång lista.
-        Rutorna och dropdownen hålls i sync åt båda hållen. Fler
-        alternativ än en handfull rullas i en egen yta så dialogen
-        aldrig växer iväg.
+        Inga monogram eller genererade symboler används. En ruta visas
+        bara när logotypområdet faktiskt har hittats i originalfakturan;
+        saknas en bild går leverantören fortfarande att välja i dropdownen.
+        Rutorna och dropdownen hålls i sync åt båda hållen.
         """
-        if len(options) < 2:
+        if len(options) < 2 or not isinstance(row, dict):
+            return
+        raw_matches = row.get("_logo_match_candidates", [])
+        if not isinstance(raw_matches, (list, tuple)):
+            return
+        by_name: dict[str, dict] = {}
+        for item in raw_matches:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "") or "").strip()
+            if name:
+                by_name.setdefault(name.casefold(), item)
+        if not by_name:
+            return
+
+        si = _scan_module()
+        suppliers = self._suppliers()
+        path = str(row.get("_path", "") or "")
+        buttons: list[tuple[int, QPushButton]] = []
+        preview_cache: dict[tuple, QPixmap] = {}
+        for name in options:
+            option_key = str(name).strip().casefold()
+            candidate = by_name.get(option_key)
+            if candidate is None:
+                for candidate_name, possible in by_name.items():
+                    try:
+                        same = si._same_registered_supplier_name(
+                            candidate_name, str(name), suppliers
+                        ) or si._names_match(candidate_name, str(name))
+                    except Exception:
+                        same = candidate_name == option_key
+                    if same:
+                        candidate = possible
+                        break
+            if candidate is None:
+                continue
+            try:
+                page = max(0, int(candidate.get("page", 0) or 0))
+                region = tuple(
+                    round(float(value), 4)
+                    for value in candidate.get("region", ())
+                )
+                distance = int(candidate.get("distance", 999))
+            except (TypeError, ValueError):
+                continue
+            if len(region) != 4:
+                continue
+            match_index = next(
+                (index for index in range(combo.count())
+                 if combo.itemText(index).strip().casefold()
+                 == str(name).strip().casefold()),
+                -1,
+            )
+            if match_index < 0:
+                continue
+            cache_key = (page, region)
+            pixmap = preview_cache.get(cache_key)
+            if pixmap is None:
+                try:
+                    image_data = si.supplier_logo_preview_png(
+                        path, page, region
+                    )
+                except Exception as exc:
+                    log.debug("invoice logo preview: %s", exc)
+                    image_data = None
+                pixmap = QPixmap()
+                if not image_data or not pixmap.loadFromData(image_data):
+                    continue
+                preview_cache[cache_key] = pixmap
+
+            btn = QPushButton(str(name))
+            btn.setObjectName("supplierLogoChoiceButton")
+            btn.setCheckable(True)
+            btn.setMinimumSize(190, 76)
+            btn.setIcon(QIcon(pixmap))
+            btn.setIconSize(QSize(96, 56))
+            btn.setToolTip(
+                f"{name}\n" + tr(
+                    "scan.match_logo_distance_tip", distance=distance
+                )
+            )
+            btn.clicked.connect(
+                lambda _checked=False, idx=match_index: (
+                    combo.setCurrentIndex(idx)
+                )
+            )
+            buttons.append((match_index, btn))
+
+        if not buttons:
             return
         layout.addWidget(QLabel(tr("scan.match_pick_logo")))
         scroll = QScrollArea()
+        scroll.setObjectName("supplierLogoChoiceScrollArea")
         scroll.setWidgetResizable(True)
         scroll.setMaximumHeight(190)
         holder = QWidget()
         grid = QGridLayout(holder)
         grid.setSpacing(6)
-        buttons: list[QPushButton] = []
-
-        def _sync(idx: int) -> None:
-            for j, btn in enumerate(buttons):
-                btn.setChecked(j == idx)
-
-        def _pick(idx: int) -> None:
-            combo.setCurrentIndex(idx)
-            _sync(idx)
-
-        for i, name in enumerate(options):
-            btn = QPushButton(str(name))
-            btn.setCheckable(True)
-            btn.setMinimumHeight(48)
-            btn.setIcon(QIcon(_supplier_tile_pixmap(str(name))))
-            btn.setIconSize(QSize(36, 36))
-            btn.setToolTip(str(name))
-            btn.clicked.connect(
-                lambda _checked=False, idx=i: _pick(idx)
-            )
-            grid.addWidget(btn, i // 3, i % 3)
-            buttons.append(btn)
+        for index, (_combo_index, button) in enumerate(buttons):
+            grid.addWidget(button, index // 2, index % 2)
         scroll.setWidget(holder)
         layout.addWidget(scroll)
+
+        def _sync(idx: int) -> None:
+            for combo_index, button in buttons:
+                button.setChecked(combo_index == idx)
+
         combo.currentIndexChanged.connect(_sync)
         _sync(combo.currentIndex())
 
@@ -3262,7 +3285,7 @@ class ScanImportView(QWidget):
         combo.setCurrentIndex(-1)
         combo.setPlaceholderText(tr("scan.match_ask_placeholder"))
         layout.addWidget(combo)
-        self._add_supplier_logo_picker(layout, options, combo)
+        self._add_supplier_logo_picker(layout, options, combo, row)
         btn_mark_logo = QPushButton(tr("scan.match_mark_logo"))
         btn_mark_logo.setObjectName("matchMarkInvoiceLogo")
         logo_note = QLabel()
@@ -3822,7 +3845,19 @@ class ScanImportView(QWidget):
         combo.setCurrentIndex(idx)
         combo.setPlaceholderText(tr("scan.match_ask_placeholder"))
         layout.addWidget(combo)
-        self._add_supplier_logo_picker(layout, options, combo)
+        self._add_supplier_logo_picker(layout, options, combo, row)
+        btn_mark_logo = QPushButton(tr("scan.match_mark_logo"))
+        btn_mark_logo.setObjectName("matchMarkInvoiceLogo")
+        logo_note = QLabel()
+        logo_note.setObjectName("supplierLogoNote")
+        logo_note.setWordWrap(True)
+        btn_mark_logo.clicked.connect(
+            lambda _checked=False: self._mark_supplier_logo_for_match(
+                row, combo, dlg, logo_note
+            )
+        )
+        layout.addWidget(btn_mark_logo)
+        layout.addWidget(logo_note)
         amount_edit = self._add_multipage_amount_field(layout, row)
         buttons = QHBoxLayout()
         btn_cancel = QPushButton(tr("common.cancel"))

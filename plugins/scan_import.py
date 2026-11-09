@@ -1610,6 +1610,9 @@ def _apply_supplier_logo_match(
     candidates = supplier_logo_match_candidates(path, templates)
     if not candidates:
         return result
+    # Transient evidence used by the match dialog for real invoice-logo
+    # thumbnails. It is not a confirmation, save, or learning signal.
+    result["_logo_match_candidates"] = candidates
 
     logo_names: list[str] = []
     for candidate in candidates:
@@ -1626,8 +1629,15 @@ def _apply_supplier_logo_match(
             elif str(raw or "").strip():
                 existing.append({"name": str(raw).strip()})
         additions = [
-            {"name": name, "score": 4, "signals": ["supplier_logo"]}
-            for name in logo_names
+            {
+                "name": str(candidate["name"]),
+                "score": max(
+                    6,
+                    25 - int(candidate.get("distance", 999)),
+                ),
+                "signals": ["supplier_logo"],
+            }
+            for candidate in candidates
         ]
         merged = _merge_match_candidates(existing, additions)
         result["match_candidates"] = merged
@@ -1728,12 +1738,17 @@ def _apply_supplier_logo_match(
 
     # Alla ej inlärda eller konkurrerande logoträffar ska avgöras
     # av användaren — inte av den första kandidaten i listan.
+    logo_additions = [
+        {
+            "name": str(candidate["name"]),
+            "score": max(6, 25 - int(candidate.get("distance", 999))),
+            "signals": ["supplier_logo"],
+        }
+        for candidate in candidates
+    ]
     merged = _merge_match_candidates(
         [{"name": current}] if current else [],
-        [
-            {"name": name, "score": 4, "signals": ["supplier_logo"]}
-            for name in possible
-        ],
+        logo_additions,
     )
     result["supplier"] = ""
     result["match_uncertain"] = True
@@ -3415,46 +3430,190 @@ def supplier_logo_match_candidates(
     templates: dict | None,
     max_distance: int = SUPPLIER_LOGO_CANDIDATE_MAX_DISTANCE,
 ) -> list[dict[str, Any]]:
-    """Mallleverantörer vars sparade riktiga PDF-logotypvarianter syns.
+    """Hitta riktiga logotyper även när de flyttats på fakturasidan.
 
-    Alla sparade sid-/koordinatregioner prövas, men varje leverantör
-    returneras högst en gång med sin starkaste träff. Svaga träffar
-    lämnas bort; kandidater måste fortfarande bekräftas innan de används.
+    Först jämförs varje sparad ruta på samma sidkoordinater som mallen.
+    För PDF:er jämförs därefter också inbäddade bilder och kompakta
+    vektorgrafiker som hittats på andra positioner. Generiska header-rutor
+    används aldrig som automatisk logotypträff. Varje leverantör returneras
+    högst en gång; svaga träffar lämnas bort och val måste fortfarande
+    bekräftas enligt de befintliga säkerhetsreglerna.
+
+    Träffarna innehåller sid-/regionsinformation för att dialogen ska kunna
+    visa den faktiska beskurna logotypen ur den aktuella originalfakturan.
     """
-    out: list[dict[str, Any]] = []
+    specs_by_supplier = [
+        (str(name), supplier_logo_specs(template))
+        for name, template in (templates or {}).items()
+    ]
+    specs_by_supplier = [
+        (name, specs) for name, specs in specs_by_supplier if specs
+    ]
+    if not path or not specs_by_supplier:
+        return []
+
     page_images: dict[int, bytes | None] = {}
-    for name, template in (templates or {}).items():
-        best: dict[str, Any] | None = None
-        for spec in supplier_logo_specs(template):
-            try:
-                page = max(0, int(spec.get("page", 0) or 0))
-            except (TypeError, ValueError):
-                page = 0
+    region_hashes: dict[tuple[int, tuple], str] = {}
+
+    def _region_hash(page: int, region: Any) -> str:
+        try:
+            normalized = tuple(round(float(value), 4) for value in region)
+        except (TypeError, ValueError):
+            return ""
+        if len(normalized) != 4 or not (
+            0 <= normalized[0] < normalized[2] <= 1
+            and 0 <= normalized[1] < normalized[3] <= 1
+        ):
+            return ""
+        key = (int(page), normalized)
+        if key not in region_hashes:
             if page not in page_images:
                 page_images[page] = render_page_image(
                     path, page, dpi=150
                 )
             png = page_images[page]
-            if not png:
-                continue
-            current = _supplier_logo_hash_from_png(
-                png, spec.get("region", ())
+            region_hashes[key] = (
+                _supplier_logo_hash_from_png(png, normalized)
+                if png else ""
             )
-            signature = str(spec.get("dhash", ""))
-            distance = supplier_logo_distance(current, signature)
+        return region_hashes[key]
+
+    # Endast tydligt avgränsade bilder och vektorgrafiker kan användas
+    # som sökträffar. "header_area" är en manuell ledtråd, inte ett logo-ID.
+    observed_regions: list[dict[str, Any]] = []
+    try:
+        detected = supplier_logo_region_candidates(path)
+    except Exception as exc:
+        log.debug("supplier logo region scan %s: %s", path, exc)
+        detected = []
+    for candidate in detected:
+        source = str(candidate.get("source", "") or "")
+        if source not in ("embedded_image", "vector_art"):
+            continue
+        try:
+            page = max(0, int(candidate.get("page", 0) or 0))
+            region = tuple(
+                round(float(value), 4)
+                for value in candidate.get("region", ())
+            )
+        except (TypeError, ValueError):
+            continue
+        if len(region) != 4:
+            continue
+        observed = _region_hash(page, region)
+        if observed:
+            observed_regions.append({
+                "page": page, "region": list(region),
+                "source": source, "score": int(
+                    candidate.get("score", 0) or 0
+                ),
+                "dhash": observed,
+            })
+
+    out: list[dict[str, Any]] = []
+    for name, specs in specs_by_supplier:
+        best: dict[str, Any] | None = None
+        best_key: tuple[int, int, int] | None = None
+
+        def _consider(
+            observed_signature: str, signature: str, page: int,
+            region: Any, *, match_mode: str, source: str,
+            region_score: int = 0,
+        ) -> None:
+            nonlocal best, best_key
+            distance = supplier_logo_distance(
+                observed_signature, signature
+            )
             if distance is None or distance > max_distance:
-                continue
-            if best is None or distance < int(best["distance"]):
+                return
+            # At equal distance prefer the template's known location; it
+            # is a stronger basis for learned auto-matching than discovery.
+            key = (
+                int(distance),
+                0 if match_mode == "saved_region" else 1,
+                -int(region_score),
+            )
+            if best_key is None or key < best_key:
+                best_key = key
                 best = {
-                    "name": str(name), "distance": distance,
-                    "dhash": signature,
+                    "name": name, "distance": int(distance),
+                    "dhash": str(signature), "page": int(page),
+                    "region": list(region), "match_mode": match_mode,
+                    "source": source,
                 }
+
+        for spec in specs:
+            try:
+                page = max(0, int(spec.get("page", 0) or 0))
+            except (TypeError, ValueError):
+                page = 0
+            signature = str(spec.get("dhash", "") or "").strip()
+            region = spec.get("region", ())
+            observed_signature = _region_hash(page, region)
+            if observed_signature:
+                _consider(
+                    observed_signature, signature, page, region,
+                    match_mode="saved_region", source="saved_region",
+                )
+            for observed in observed_regions:
+                observed_signature = str(observed.get("dhash", "") or "")
+                _consider(
+                    observed_signature, signature,
+                    int(observed["page"]),
+                    observed["region"],
+                    match_mode="detected_region",
+                    source=str(observed.get("source", "")),
+                    region_score=int(observed.get("score", 0) or 0),
+                )
         if best is not None:
             out.append(best)
     return sorted(
-        out, key=lambda item: (int(item["distance"]),
-                               _fold_text(item["name"]))
+        out,
+        key=lambda item: (
+            int(item["distance"]), _fold_text(item["name"]),
+        ),
     )
+
+
+def supplier_logo_preview_png(
+    path: Any, page_index: int, region: Any,
+    max_size: tuple[int, int] = (144, 84),
+) -> bytes | None:
+    """Beskär en riktig logotyp ur originalfakturan för matchningsdialogen.
+
+    Endast en visningskopia skapas; inga filer eller mallar sparas här.
+    """
+    png = render_page_image(path, page_index, dpi=150)
+    if not png:
+        return None
+    try:
+        import io
+        from PIL import Image as PILImage
+
+        normalized = _clamp_rect(region)
+        with PILImage.open(io.BytesIO(png)) as source:
+            width, height = source.size
+            left = max(0, min(width - 1, int(normalized[0] * width)))
+            top = max(0, min(height - 1, int(normalized[1] * height)))
+            right = max(left + 1, min(width, int(normalized[2] * width)))
+            bottom = max(top + 1, min(height, int(normalized[3] * height)))
+            crop = source.crop((left, top, right, bottom)).convert("RGB")
+        target_width = max(32, min(320, int(max_size[0])))
+        target_height = max(24, min(240, int(max_size[1])))
+        resampling = getattr(PILImage, "Resampling", PILImage)
+        crop.thumbnail((target_width - 8, target_height - 8), resampling.LANCZOS)
+        canvas = PILImage.new("RGB", (target_width, target_height), "white")
+        canvas.paste(
+            crop,
+            ((target_width - crop.width) // 2,
+             (target_height - crop.height) // 2),
+        )
+        buffer = io.BytesIO()
+        canvas.save(buffer, format="PNG")
+        return buffer.getvalue()
+    except Exception as exc:
+        log.debug("supplier logo preview %s: %s", path, exc)
+        return None
 
 
 def find_template(
@@ -3487,33 +3646,21 @@ def confirmed_supplier_logo_signature(
     *,
     suppliers: list[dict] | None = None,
 ) -> str:
-    """Logosignatur som får räknas efter att användaren bekräftat raden.
+    """Sparad logotypsignatur som matchade efter manuell bekräftelse.
 
-    Returnerar bara den sparade leverantörssignaturen om den verkliga
-    PDF-bilden ligger inom kandidatgränsen. Därmed kan varje manuell
-    matchningsvy mata samma inlärningsminne utan att räkna en annan
-    leverantörs logotyp som bekräftelse.
+    Använder samma positionstoleranta sökning som matchdialogen, men
+    returnerar bara en redan sparad signatur. Ett nytt upptäckt område
+    lärs aldrig in automatiskt och räknas först efter användarens val.
     """
     if not path or not supplier:
         return ""
     template = find_template(templates or {}, supplier, suppliers)
-    best: tuple[int, str] | None = None
-    for spec in supplier_logo_specs(template):
-        signature = str(spec.get("dhash", "") or "")
-        try:
-            page = max(0, int(spec.get("page", 0) or 0))
-            observed = supplier_logo_signature(
-                path, page, spec.get("region", ())
-            )
-        except Exception as exc:
-            log.debug("confirmed supplier logo: %s", exc)
-            continue
-        distance = supplier_logo_distance(observed, signature)
-        if distance is None or distance > max_distance:
-            continue
-        if best is None or distance < best[0]:
-            best = (distance, signature)
-    return best[1] if best is not None else ""
+    if not template:
+        return ""
+    matches = supplier_logo_match_candidates(
+        path, {supplier: template}, max_distance=max_distance
+    )
+    return str(matches[0].get("dhash", "") or "") if matches else ""
 
 
 #: Inbyggda, verifierade leverantörsformat. Varje format har

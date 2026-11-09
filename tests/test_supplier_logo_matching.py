@@ -100,9 +100,67 @@ def test_logo_signature_and_matching_run_on_a_real_pdf_page(tmp_path):
             "page": 0, "region": region, "dhash": signature,
         }},
     })
-    assert matches == [{
-        "name": "Alpha AB", "distance": 0, "dhash": signature,
-    }]
+    assert len(matches) == 1
+    assert matches[0]["name"] == "Alpha AB"
+    assert matches[0]["distance"] == 0
+    assert matches[0]["dhash"] == signature
+    assert matches[0]["match_mode"] == "saved_region"
+    assert matches[0]["region"] == list(region)
+
+
+def test_logo_match_finds_embedded_invoice_logo_after_it_moves(tmp_path):
+    import fitz
+
+    path = tmp_path / "moved-logo.pdf"
+    document = fitz.open()
+    page = document.new_page(width=600, height=800)
+    page.insert_image(fitz.Rect(390, 35, 545, 132), stream=_logo_png())
+    document.save(path)
+    document.close()
+
+    detected = si.supplier_logo_region_candidates(path)
+    logo = next(
+        item for item in detected
+        if item["source"] == "embedded_image"
+    )
+    region = tuple(logo["region"])
+    page_png = si.render_page_image(path, 0)
+    signature = si._supplier_logo_hash_from_png(page_png, region)
+    assert signature
+    templates = {"Alpha AB": {"supplier_logo": {
+        "page": 0, "region": [0.08, 0.55, 0.30, 0.82],
+        "dhash": signature,
+    }}}
+
+    matches = si.supplier_logo_match_candidates(path, templates)
+    assert len(matches) == 1
+    assert matches[0]["name"] == "Alpha AB"
+    assert matches[0]["distance"] == 0
+    assert matches[0]["match_mode"] == "detected_region"
+    assert matches[0]["source"] == "embedded_image"
+    assert matches[0]["region"] == list(region)
+    preview = si.supplier_logo_preview_png(path, 0, region)
+    assert preview and preview.startswith(b"\x89PNG\r\n\x1a\n")
+    from PIL import Image
+    with Image.open(io.BytesIO(preview)) as image:
+        assert image.size == (144, 84)
+    # A newly discovered logo is only a candidate; it remains a user choice.
+    result = {
+        "supplier": "", "invoice_number": "A-1",
+        "total_amount": 250.0, "missing": [],
+        "supplier_match": {"status": "none"},
+    }
+    uncertain = si._apply_supplier_logo_match(
+        result, path, "", templates, {},
+    )
+    assert uncertain["supplier"] == ""
+    assert uncertain["match_uncertain"] is True
+    assert uncertain["_logo_match_candidates"][0]["region"] == list(region)
+    # If the user later confirms the supplier, the existing saved variant
+    # can be credited even though its on-page position changed.
+    assert si.confirmed_supplier_logo_signature(
+        path, "Alpha AB", templates
+    ) == signature
 
 
 def test_pdf_logo_region_suggestions_find_embedded_images_and_vectors(
@@ -389,10 +447,10 @@ def test_confirmed_logo_signature_checks_all_saved_variants(monkeypatch):
         ],
     }}
     monkeypatch.setattr(
-        si, "supplier_logo_signature",
-        lambda _path, _page, region: (
-            second if region[0] > 0.5 else "dhash128-v1:" + "f" * 32
-        ),
+        si, "supplier_logo_match_candidates",
+        lambda _path, _templates, max_distance=20: [{
+            "name": "Alpha AB", "distance": 0, "dhash": second,
+        }],
     )
     assert si.confirmed_supplier_logo_signature(
         "invoice.pdf", "Alpha AB", templates
@@ -402,7 +460,11 @@ def test_confirmed_logo_signature_checks_all_saved_variants(monkeypatch):
 def test_confirmed_logo_signature_resolves_a_registered_alias(monkeypatch):
     signature = LOGO_HASH
     monkeypatch.setattr(
-        si, "supplier_logo_signature", lambda *_args: signature,
+        si, "supplier_logo_match_candidates",
+        lambda _path, templates, max_distance=20: [{
+            "name": next(iter(templates)), "distance": 0,
+            "dhash": signature,
+        }],
     )
     templates = {"Alpha Trading": {"supplier_logo": {
         "page": 0, "region": [0.1, 0.1, 0.4, 0.4],
@@ -426,8 +488,12 @@ def test_confirmed_logo_signature_is_counted_only_for_its_supplier(
     monkeypatch,
 ):
     signature = LOGO_HASH
+    matches = [{
+        "name": "Alpha AB", "distance": 0, "dhash": signature,
+    }]
     monkeypatch.setattr(
-        si, "supplier_logo_signature", lambda *_args: signature,
+        si, "supplier_logo_match_candidates",
+        lambda _path, _templates, max_distance=20: matches,
     )
     templates = {"Alpha AB": {"supplier_logo": {
         "page": 0, "region": [0.1, 0.1, 0.4, 0.4],
@@ -440,10 +506,7 @@ def test_confirmed_logo_signature_is_counted_only_for_its_supplier(
         "invoice.pdf", "Unknown AB", templates
     ) == ""
 
-    monkeypatch.setattr(
-        si, "supplier_logo_signature",
-        lambda *_args: "dhash128-v1:" + "f" * 32,
-    )
+    matches[:] = []
     assert si.confirmed_supplier_logo_signature(
         "invoice.pdf", "Alpha AB", templates
     ) == ""
@@ -486,9 +549,12 @@ def test_logo_candidates_compare_saved_real_pdf_regions(monkeypatch):
         }},
     }
     matches = si.supplier_logo_match_candidates("invoice.pdf", templates)
-    assert matches == [{
-        "name": "Alpha AB", "distance": 0, "dhash": signature,
-    }]
+    assert len(matches) == 1
+    assert matches[0]["name"] == "Alpha AB"
+    assert matches[0]["distance"] == 0
+    assert matches[0]["dhash"] == signature
+    assert matches[0]["match_mode"] == "saved_region"
+    assert matches[0]["region"] == list(region)
 
 
 def test_unlearned_logo_is_only_a_candidate_not_an_automatic_match(monkeypatch):

@@ -2,10 +2,9 @@
 """
 Tester: alla OSÄKRA fakturor i Import-tabellen + logotypval.
 
-Användarens krav (2026-10-28): fakturor som är osäkra ska
-läggas direkt i Import-tabellen (inte bara ligga i bevakningens
-parkering), och man ska kunna välja leverantör via logotyp —
-klickbara logotyp-rutor (monogram-märken) i matchningsdialogen.
+Krav: osäkra fakturor ska ligga synliga i Import-tabellen och
+matchningsdialogen ska visa beskurna, verkliga logotyper ur
+originalfakturan — aldrig genererade monogram som logotyp.
 """
 from __future__ import annotations
 
@@ -319,21 +318,30 @@ def test_created_invoice_also_unparks(tmp_path, monkeypatch):
 
 # ── Logotypvalet ────────────────────────────────────────────
 
-def test_supplier_monograms():
-    from ui.scan_import_view import _supplier_monogram
+def _logo_preview_png():
+    from PySide6.QtCore import QBuffer, QIODevice
+    from PySide6.QtGui import QColor, QPixmap
 
-    assert _supplier_monogram("Martin G Anderson") == "MG"
-    assert _supplier_monogram("Pilkington") == "P"
-    assert _supplier_monogram("Testbolaget AB") == "TA"
-    assert _supplier_monogram("") == "?"
+    pixmap = QPixmap(80, 48)
+    pixmap.fill(QColor("#176b5b"))
+    buffer = QBuffer()
+    assert buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    assert pixmap.save(buffer, "PNG")
+    return bytes(buffer.data())
 
 
-def test_choose_supplier_by_clicking_logo_tile(tmp_path, monkeypatch):
-    """Matchningsdialogen: klick på leverantörens logotyp-ruta
-    väljer den (dropdownen följer med) och valet tillämpas."""
+def test_logo_picker_shows_real_invoice_crop_and_selects_supplier(
+    tmp_path, monkeypatch,
+):
+    """Klick på beskuren fakturalogotyp väljer leverantören i dropdownen."""
     _qapp()
+    import scan_import as si
     import ui.scan_import_view as siv
     monkeypatch.setattr(siv.QMessageBox, "information", lambda *_a, **_k: None)
+    monkeypatch.setattr(siv, "_scan_module", lambda: si)
+    monkeypatch.setattr(
+        si, "supplier_logo_preview_png", lambda *_args: _logo_preview_png(),
+    )
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import (
         QApplication, QComboBox, QDialog, QPushButton,
@@ -346,8 +354,14 @@ def test_choose_supplier_by_clicking_logo_tile(tmp_path, monkeypatch):
             "invoice_number": "921040", "total_amount": 857.25,
             "date": "", "due_date": "", "ocr": "",
             "method": "pdf", "status": "saknas: leverantör",
-            "missing": ["leverantör"], "_path": "", "pages": 1,
-            "_text": _TEXT,
+            "missing": ["leverantör"],
+            "_path": "/tmp/x/f.pdf", "pages": 1, "_text": _TEXT,
+            "_logo_match_candidates": [{
+                "name": "Testbolaget AB", "distance": 2, "page": 0,
+                "region": [0.1, 0.1, 0.4, 0.3],
+                "match_mode": "detected_region",
+                "source": "embedded_image",
+            }],
         }
         view._rows = [row]
         view._refresh_table()
@@ -356,12 +370,12 @@ def test_choose_supplier_by_clicking_logo_tile(tmp_path, monkeypatch):
         def _act():
             dlg = QApplication.activeModalWidget()
             assert isinstance(dlg, QDialog)
-            tiles = [
-                b for b in dlg.findChildren(QPushButton)
-                if b.toolTip() == "Testbolaget AB"
-            ]
-            assert tiles, "ingen logotyp-ruta för Testbolaget AB"
-            tiles[0].click()
+            thumbnails = dlg.findChildren(
+                QPushButton, "supplierLogoChoiceButton"
+            )
+            assert thumbnails, "ingen riktig fakturalogotyp visades"
+            assert not thumbnails[0].icon().isNull()
+            thumbnails[0].click()
             combo = dlg.findChild(QComboBox)
             assert combo.currentText() == "Testbolaget AB"
             dlg.accept()
@@ -371,3 +385,23 @@ def test_choose_supplier_by_clicking_logo_tile(tmp_path, monkeypatch):
         assert row["supplier"] == "Testbolaget AB"
     finally:
         view.close()
+
+
+def test_logo_picker_never_generates_a_monogram(tmp_path):
+    _qapp()
+    from PySide6.QtWidgets import QComboBox, QDialog, QVBoxLayout, QPushButton
+
+    view = _view(tmp_path)
+    dialog = QDialog()
+    layout = QVBoxLayout(dialog)
+    combo = QComboBox(dialog)
+    combo.addItems(["Testbolaget AB", "Annan AB"])
+    view._add_supplier_logo_picker(
+        layout, ["Testbolaget AB", "Annan AB"], combo,
+        {"_path": "", "_logo_match_candidates": []},
+    )
+    assert not dialog.findChildren(
+        QPushButton, "supplierLogoChoiceButton"
+    )
+    dialog.close()
+    view.close()
