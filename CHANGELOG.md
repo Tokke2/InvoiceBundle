@@ -1,5 +1,13 @@
 # Ändringslogg / Changelog
 
+## Ej släppt / Unreleased
+
+### Svenska
+- **Fakturamallens bilddialog anpassar sig till skärmen** — dialogen ryms inom arbetsytan, bild/fält kan rullas när skärmen är låg, och på smala skärmar läggs panelerna under varandra. Åtgärdsknapparna ligger kvar synliga längst ned och flyttas till två rader vid smal bredd.
+
+### English
+- **Invoice-template editor adapts to the screen** — the dialog fits the available work area, the image/fields can scroll on short screens, and the panels stack on narrow displays. Action buttons stay visible in the footer and wrap to two rows when needed.
+
 ## v1.0.0 — uppdatering / update
 
 ### Svenska

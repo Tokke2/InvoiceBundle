@@ -199,6 +199,50 @@ def test_template_dialog_can_save_a_logo_only_supplier_template(
         dlg.close()
 
 
+def test_template_dialog_fits_short_work_area_and_keeps_footer_visible():
+    from PySide6.QtWidgets import (
+        QApplication, QBoxLayout, QScrollArea, QPushButton,
+    )
+
+    app = QApplication.instance() or QApplication([])
+    from ui.scan_import_view import TemplateDialog
+
+    dialog = TemplateDialog(
+        None, "", supplier="Alpha AB",
+        suppliers=[{"name": "Alpha AB"}, {"name": "Beta AB"}],
+        templates={"Alpha AB": {}, "Beta AB": {}},
+    )
+    try:
+        screen = dialog.screen() or app.primaryScreen()
+        available = screen.availableGeometry()
+        assert dialog.width() <= available.width()
+        assert dialog.height() <= available.height()
+        body = dialog.findChild(
+            QScrollArea, "templateEditorScrollArea"
+        )
+        save = dialog.findChild(QPushButton, "templateSaveButton")
+        assert body is not None and body.widgetResizable()
+        assert save is not None
+
+        # Even when the user narrows the dialog, body content can scroll
+        # while Save remains in the fixed footer instead of being clipped.
+        dialog.setMinimumSize(500, 360)
+        dialog.setMaximumSize(500, 360)
+        dialog.resize(500, 360)
+        dialog._middle_layout.setDirection(
+            QBoxLayout.Direction.TopToBottom
+        )
+        dialog._layout_template_footer(compact=True)
+        dialog.show()
+        app.processEvents()
+        assert body.isVisible()
+        assert body.verticalScrollBar().maximum() > 0
+        assert save.isVisible()
+        assert save.geometry().bottom() <= dialog.rect().bottom()
+    finally:
+        dialog.close()
+
+
 def test_template_dialog_matches_unique_bankgiro():
     from PySide6.QtWidgets import QApplication
 

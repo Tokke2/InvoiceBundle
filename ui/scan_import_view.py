@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QTextEdit, QMessageBox, QFileDialog, QFrame,
     QLineEdit, QCheckBox, QApplication, QInputDialog,
     QDialog, QListWidget, QPlainTextEdit, QComboBox, QMenu,
-    QGridLayout, QScrollArea,
+    QGridLayout, QScrollArea, QBoxLayout,
 )
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal, QRectF, QSizeF, QSize
 from PySide6.QtGui import (
@@ -304,7 +304,10 @@ class _RegionImageView(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(350, 420)
+        # The editor can be opened on compact/high-DPI displays. Keep the
+        # canvas useful but let the dialog scroll instead of enforcing a
+        # 350×420 minimum that can push the footer off screen.
+        self.setMinimumSize(220, 200)
         self._pixmap: QPixmap | None = None
         self._page = 0
         self._regions: dict[str, tuple[int, tuple]] = {}
@@ -642,9 +645,9 @@ class TemplateDialog(QDialog):
         self._active = ""
 
         self.setWindowTitle(tr("tmpl.title", supplier=supplier or "…"))
-        self.setMinimumSize(980, 640)
         root = QVBoxLayout(self)
-        root.setSpacing(8)
+        root.setContentsMargins(10, 8, 10, 8)
+        root.setSpacing(6)
 
         row_sup = QHBoxLayout()
         row_sup.addWidget(QLabel(tr("tmpl.supplier")))
@@ -692,8 +695,12 @@ class TemplateDialog(QDialog):
         intro.setWordWrap(True)
         root.addWidget(intro)
 
-        middle = QHBoxLayout()
+        middle_widget = QWidget(self)
+        middle_widget.setObjectName("templateEditorBody")
+        middle = QHBoxLayout(middle_widget)
+        middle.setContentsMargins(2, 2, 2, 2)
         middle.setSpacing(10)
+        self._middle_layout = middle
 
         left = QVBoxLayout()
         nav = QHBoxLayout()
@@ -752,12 +759,14 @@ class TemplateDialog(QDialog):
             row.addWidget(chip)
             texts = QVBoxLayout()
             name_lbl = QLabel(tr(f"tmpl.field_{field}"))
+            name_lbl.setWordWrap(True)
             name_lbl.setStyleSheet(
                 "font-weight:bold;background:transparent;"
             )
             texts.addWidget(name_lbl)
             prev = QLabel()
-            prev.setMinimumWidth(120)
+            prev.setMinimumWidth(80)
+            prev.setWordWrap(True)
             texts.addWidget(prev)
             row.addLayout(texts, stretch=1)
             btn = QPushButton(tr("tmpl.mark"))
@@ -778,10 +787,12 @@ class TemplateDialog(QDialog):
         logo_row.addWidget(logo_chip)
         logo_texts = QVBoxLayout()
         logo_title = QLabel(tr("tmpl.field_supplier_logo"))
+        logo_title.setWordWrap(True)
         logo_title.setStyleSheet("font-weight:bold;background:transparent;")
         logo_texts.addWidget(logo_title)
         self._logo_preview = QLabel()
-        self._logo_preview.setMinimumWidth(120)
+        self._logo_preview.setMinimumWidth(80)
+        self._logo_preview.setWordWrap(True)
         logo_texts.addWidget(self._logo_preview)
         logo_row.addLayout(logo_texts, stretch=1)
         self._btn_suggest_logo = QPushButton(tr("tmpl.suggest_logo"))
@@ -801,40 +812,57 @@ class TemplateDialog(QDialog):
         )
         logo_row.addWidget(self._btn_mark_logo)
         right.addLayout(logo_row)
-        right.addStretch(1)
-        middle.addLayout(right, stretch=2)
-        root.addLayout(middle, stretch=1)
-
         self._lbl_hint = QLabel()
         self._lbl_hint.setWordWrap(True)
-        root.addWidget(self._lbl_hint)
+        right.addWidget(self._lbl_hint)
+        right.addStretch(1)
+        middle.addLayout(right, stretch=2)
 
-        row_btn = QHBoxLayout()
+        # The editor's image and field controls live in a scroll area. On
+        # short screens the footer stays fixed while the body scrolls, so
+        # neither the last field nor Save/Cancel is pushed off-screen.
+        editor_scroll = QScrollArea(self)
+        editor_scroll.setObjectName("templateEditorScrollArea")
+        editor_scroll.setWidgetResizable(True)
+        editor_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        editor_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        editor_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        editor_scroll.setWidget(middle_widget)
+        root.addWidget(editor_scroll, stretch=1)
+
+        row_btn = QGridLayout()
+        row_btn.setContentsMargins(0, 0, 0, 0)
+        row_btn.setHorizontalSpacing(6)
         btn_clear = QPushButton(tr("tmpl.clear_marks"))
         btn_clear.clicked.connect(self._clear_marks)
-        row_btn.addWidget(btn_clear)
         btn_test = QPushButton(tr("tmpl.test"))
         btn_test.clicked.connect(self._test_all)
-        row_btn.addWidget(btn_test)
         btn_suggest = QPushButton(tr("tmpl.suggest_fields"))
         btn_suggest.setToolTip(tr("tmpl.suggest_fields_tip"))
         btn_suggest.setEnabled(bool(self._text))
         btn_suggest.clicked.connect(self._suggest_fields_from_text)
-        row_btn.addWidget(btn_suggest)
+        btn_cancel = QPushButton(f"✖  {tr('common.cancel')}")
+        btn_cancel.setObjectName("templateCancelButton")
+        btn_cancel.clicked.connect(self.reject)
+        btn_save = QPushButton(tr("tmpl.save"))
+        btn_save.setObjectName("templateSaveButton")
+        btn_save.setProperty("success", True)
+        btn_save.clicked.connect(self._save)
+        self._footer_layout = row_btn
+        self._footer_buttons = (
+            btn_clear, btn_test, btn_suggest, btn_cancel, btn_save,
+        )
+        self._layout_template_footer(compact=False)
         if self._logo_only:
             for mark_button in self._mark_buttons.values():
                 mark_button.setEnabled(False)
             btn_clear.hide()
             btn_test.hide()
             btn_suggest.hide()
-        row_btn.addStretch()
-        btn_cancel = QPushButton(f"✖  {tr('common.cancel')}")
-        btn_cancel.clicked.connect(self.reject)
-        row_btn.addWidget(btn_cancel)
-        btn_save = QPushButton(tr("tmpl.save"))
-        btn_save.setProperty("success", True)
-        btn_save.clicked.connect(self._save)
-        row_btn.addWidget(btn_save)
         root.addLayout(row_btn)
 
         self._view.set_regions(self._all_regions())
@@ -847,6 +875,63 @@ class TemplateDialog(QDialog):
             )
         )
         self._test_all()
+        self._fit_to_available_screen()
+
+    def _layout_template_footer(self, *, compact: bool) -> None:
+        """Placera knapparna så även smala fönster behåller åtkomst."""
+        clear, test, suggest, cancel, save = self._footer_buttons
+        for button in self._footer_buttons:
+            self._footer_layout.removeWidget(button)
+        for column in range(6):
+            self._footer_layout.setColumnStretch(column, 0)
+
+        if compact:
+            if self._logo_only:
+                self._footer_layout.addWidget(cancel, 0, 0)
+                self._footer_layout.addWidget(save, 0, 1)
+                self._footer_layout.setColumnStretch(2, 1)
+            else:
+                self._footer_layout.addWidget(clear, 0, 0)
+                self._footer_layout.addWidget(test, 0, 1)
+                self._footer_layout.addWidget(suggest, 0, 2)
+                self._footer_layout.addWidget(cancel, 1, 1)
+                self._footer_layout.addWidget(save, 1, 2)
+                self._footer_layout.setColumnStretch(3, 1)
+        else:
+            self._footer_layout.addWidget(clear, 0, 0)
+            self._footer_layout.addWidget(test, 0, 1)
+            self._footer_layout.addWidget(suggest, 0, 2)
+            self._footer_layout.setColumnStretch(3, 1)
+            self._footer_layout.addWidget(cancel, 0, 4)
+            self._footer_layout.addWidget(save, 0, 5)
+
+    def _fit_to_available_screen(self) -> None:
+        """Storleksanpassa editorn efter skärmen som dialogen öppnas på."""
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1100, 760)
+            return
+        available = screen.availableGeometry()
+        margin = 16
+        max_width = max(1, available.width() - margin * 2)
+        max_height = max(1, available.height() - margin * 2)
+        min_width = min(980, max_width)
+        min_height = min(640, max_height)
+        self.setMinimumSize(min_width, min_height)
+        self.setMaximumSize(max_width, max_height)
+        self.resize(min(1280, max_width), min(820, max_height))
+        self._layout_template_footer(compact=max_width < 760)
+
+        # På smala skärmar läggs bild och fält under varandra i scroll-ytan;
+        # annars visas de sida vid sida som tidigare.
+        self._middle_layout.setDirection(
+            QBoxLayout.Direction.TopToBottom
+            if max_width < 900
+            else QBoxLayout.Direction.LeftToRight
+        )
+        frame = self.frameGeometry()
+        frame.moveCenter(available.center())
+        self.move(frame.topLeft())
 
     # ── Sidor ─────────────────────────────────────────────────
     def _on_zoom_changed(self, zoom: float) -> None:
