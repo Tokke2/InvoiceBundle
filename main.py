@@ -414,6 +414,7 @@ def _relaunch_windowless() -> bool:
 
 
 _RUNTIME_ATTEMPTS = "FAKTURABUNTEN_RUNTIME_ATTEMPTS"
+_RUNTIME_VERIFIED: set[str] = set()
 _RUNTIME_PROBE = (
     "import importlib; "
     "[importlib.import_module(name) for name in "
@@ -427,22 +428,77 @@ _RUNTIME_PROBE = (
 
 def _python_path_key(path: str | Path) -> str:
     try:
-        return os.path.normcase(os.path.abspath(str(path))).casefold()
+        resolved = Path(path).resolve()
+        if resolved.name.casefold() == "pythonw.exe":
+            resolved = resolved.with_name("python.exe")
+        return os.path.normcase(os.path.abspath(str(resolved))).casefold()
     except Exception:
         return str(path).casefold()
 
 
 def _is_app_local_python(executable: str | Path | None = None) -> bool:
-    """Return whether an interpreter lives in the app's private python folder."""
+    """Return whether an interpreter lives anywhere inside the app folder."""
     if getattr(sys, "frozen", False):
         return False
     try:
-        app_python = (BASE_DIR / "python").resolve()
+        app_root = BASE_DIR.resolve()
         candidate = Path(executable or sys.executable).resolve()
-        candidate.relative_to(app_python)
+        candidate.relative_to(app_root)
         return True
     except (OSError, ValueError, TypeError):
         return False
+
+
+def _runtime_selection_path() -> Path:
+    """Persistent record of the last system interpreter that passed probing."""
+    return BASE_DIR / "data" / "python_runtime_selection.json"
+
+
+def _load_selected_python() -> tuple[str, tuple[int, ...]] | None:
+    try:
+        state = json.loads(_runtime_selection_path().read_text(encoding="utf-8"))
+        executable = state.get("executable")
+        version = tuple(int(part) for part in state.get("version", []))
+        if not executable or len(version) < 2 or _is_app_local_python(executable):
+            return None
+        return str(Path(executable).resolve()), version
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def _remember_selected_python(
+    executable: str | Path, version: tuple[int, ...],
+) -> None:
+    if _is_app_local_python(executable):
+        log.warning("PYTHON_SELECTION_NOT_SAVED_APP_LOCAL: %s", executable)
+        return
+    path = _runtime_selection_path()
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    state = {
+        "executable": str(Path(executable).resolve()),
+        "version": [int(part) for part in version[:3]],
+        "verified_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    except OSError as exc:
+        log.warning("PYTHON_SELECTION_SAVE_FAILED: %s: %s", path, exc)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _clear_selected_python() -> None:
+    try:
+        _runtime_selection_path().unlink(missing_ok=True)
+    except OSError as exc:
+        log.debug("PYTHON_SELECTION_CLEAR_FAILED: %s", exc)
 
 
 def _runtime_attempted() -> set[str]:
@@ -560,13 +616,108 @@ def _python_has_runtime(executable: str) -> bool:
             check=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        return (
+        usable = (
             result.returncode == 0
             and "FAKTURABUNTEN_RUNTIME_OK" in result.stdout
         )
+        if usable:
+            _RUNTIME_VERIFIED.add(_python_path_key(executable))
+        return usable
     except Exception as exc:
         log.debug("Python-runtime probe misslyckades för %s: %s", executable, exc)
         return False
+
+
+def _available_system_python_options(
+    remembered: tuple[str, tuple[int, ...]] | None,
+) -> list[tuple[str, tuple[int, ...]]]:
+    options = _system_python_candidates()
+    if remembered is not None:
+        options.insert(0, remembered)
+    if (
+        not getattr(sys, "frozen", False)
+        and not _is_app_local_python(sys.executable)
+    ):
+        version = tuple(int(part) for part in sys.version_info[:3])
+        if len(version) >= 2 and version[:2] >= (3, 10):
+            options.append((str(Path(sys.executable).resolve()), version))
+
+    unique: dict[str, tuple[str, tuple[int, ...]]] = {}
+    for executable, version in options:
+        if not executable or _is_app_local_python(executable):
+            continue
+        key = _python_path_key(executable)
+        previous = unique.get(key)
+        if previous is None or version > previous[1]:
+            unique[key] = (str(Path(executable).resolve()), version)
+    remembered_key = (
+        _python_path_key(remembered[0]) if remembered is not None else ""
+    )
+    return sorted(
+        unique.values(),
+        key=lambda item: (
+            item[1], _python_path_key(item[0]) == remembered_key
+        ),
+        reverse=True,
+    )
+
+
+def _choose_working_system_python() -> tuple[str, tuple[int, ...]] | None:
+    """Probe installed interpreters in preference order and persist the winner."""
+    remembered = _load_selected_python()
+    options = _available_system_python_options(remembered)
+    attempted = _runtime_attempted()
+    current_key = _python_path_key(sys.executable)
+    tested: set[str] = set()
+
+    def _test(option: tuple[str, tuple[int, ...]]):
+        executable, version = option
+        key = _python_path_key(executable)
+        if key in tested:
+            return None
+        tested.add(key)
+        if key in attempted and key != current_key:
+            return None
+        if not _python_has_runtime(executable):
+            return None
+        selected = (str(Path(executable).resolve()), version)
+        _remember_selected_python(*selected)
+        log.info(
+            "PYTHON_RUNTIME_SELECTED: Python %s at %s",
+            ".".join(map(str, version)), executable,
+        )
+        return selected
+
+    if remembered is not None:
+        remembered_key = _python_path_key(remembered[0])
+        remembered_option = next(
+            (
+                option for option in options
+                if _python_path_key(option[0]) == remembered_key
+            ),
+            remembered,
+        )
+        remembered_version = remembered_option[1]
+        # Check newly available, newer interpreters, but keep using the saved
+        # choice when it still works and no newer candidate passes the probe.
+        for option in options:
+            if (
+                _python_path_key(option[0]) != remembered_key
+                and option[1] > remembered_version
+            ):
+                selected = _test(option)
+                if selected is not None:
+                    return selected
+        selected = _test(remembered_option)
+        if selected is not None:
+            return selected
+        _clear_selected_python()
+
+    for option in options:
+        selected = _test(option)
+        if selected is not None:
+            return selected
+    return None
 
 
 def _spawn_with_python(
@@ -608,45 +759,48 @@ def _spawn_with_python(
 
 
 def _relaunch_preferred_python() -> bool:
-    """Prefer a working Python 3.15 installation when currently below it."""
-    if DEBUG_MODE or SELFTEST or os.environ.get("FAKTURA_SKIP_PACKAGES") == "1":
+    """Select a tested installed Python, remembering the last working one."""
+    if DEBUG_MODE or SELFTEST:
         return False
-    if sys.version_info[:2] >= (3, 15):
+    if (
+        os.environ.get("FAKTURA_SKIP_PACKAGES") == "1"
+        and not _is_app_local_python(sys.executable)
+    ):
         return False
-    attempted = _runtime_attempted()
-    for executable, version in _system_python_candidates():
-        if version[:2] != (3, 15):
-            continue
-        if _python_path_key(executable) in attempted:
-            continue
-        if not _python_has_runtime(executable):
-            log.info(
-                "PYTHON_RUNTIME_NOT_READY: Python %s at %s; keeping current %s",
-                ".".join(map(str, version)), executable, sys.executable,
-            )
-            continue
-        return _spawn_with_python(
-            executable, reason="preferred Python 3.15 is usable",
-            mark_current=False,
-        )
-    return False
+    selected = _choose_working_system_python()
+    if selected is None:
+        return False
+    executable, version = selected
+    if _python_path_key(executable) == _python_path_key(sys.executable):
+        return False
+    return _spawn_with_python(
+        executable,
+        reason=f"tested system Python {'.'.join(map(str, version))}",
+        mark_current=False,
+    )
 
 
 def _relaunch_runtime_fallback() -> bool:
-    """Use a tested installed Python (3.14 first, then any compatible one)."""
+    """Restart with another tested system interpreter after a runtime failure."""
     if DEBUG_MODE or SELFTEST:
         return False
     attempted = _runtime_attempted()
     current = _python_path_key(sys.executable)
-    for executable, version in _system_python_candidates():
+    candidates = _available_system_python_options(_load_selected_python())
+    for executable, version in candidates:
         key = _python_path_key(executable)
-        if key == current or key in attempted:
+        if (
+            key == current
+            or key in attempted
+            or _is_app_local_python(executable)
+        ):
             continue
         if not _python_has_runtime(executable):
             continue
+        _remember_selected_python(executable, version)
         return _spawn_with_python(
             executable,
-            reason=f"fallback Python {'.'.join(map(str, version))}",
+            reason=f"tested fallback Python {'.'.join(map(str, version))}",
             mark_current=True,
         )
     log.error(
@@ -1976,7 +2130,7 @@ def main() -> None:
     # i appmappen. Byt bara till en testad systemtolk; kör aldrig vidare
     # i den privata miljön om ingen kompatibel systemtolk finns.
     if not SELFTEST and not DEBUG_MODE and _is_app_local_python(sys.executable):
-        if _relaunch_runtime_fallback():
+        if _relaunch_preferred_python():
             return
         message = (
             f"{APP_NAME} startar inte med en Python-kopia från appmappen.\n"
@@ -2038,6 +2192,27 @@ def main() -> None:
             log.error("TILLBEHOR: %s", exc, exc_info=True)
             if _relaunch_runtime_fallback():
                 return
+
+    # Paketinstallationen kan ha gjort den aktuella systemtolken användbar.
+    # Verifiera den och spara valet så nästa start använder samma fungerande
+    # installation i stället för att gissa igen.
+    if (
+        not SELFTEST
+        and not DEBUG_MODE
+        and os.environ.get("FAKTURA_SKIP_PACKAGES") != "1"
+        and not _is_app_local_python(sys.executable)
+    ):
+        current_key = _python_path_key(sys.executable)
+        if (
+            current_key not in _RUNTIME_VERIFIED
+            and not _python_has_runtime(sys.executable)
+        ):
+            if _relaunch_runtime_fallback():
+                return
+        else:
+            _remember_selected_python(
+                sys.executable, tuple(int(part) for part in sys.version_info[:3])
+            )
 
     # ── PySide6 måste finnas. Lokal fil är ett annat fel. ───────────────
     try:

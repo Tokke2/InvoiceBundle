@@ -71,6 +71,9 @@ def test_python_runtime_and_autostart_use_system_interpreters_only():
     assert 'local = BASE_DIR / "python"' not in app
     assert 'parent / "python" / "bin"' not in main
     assert "APP_LOCAL_PYTHON_REJECTED" in main
+    assert "python_runtime_selection.json" in main
+    assert "_choose_working_system_python" in main
+    assert "_remember_selected_python" in main
     assert "$candidates.Add($localAppPython)" not in installer
     assert "APP_DIR/python/bin/" not in shell
     assert 'appDir & "\\python\\pythonw.exe"' not in vbs
