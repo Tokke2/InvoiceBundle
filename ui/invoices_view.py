@@ -408,6 +408,9 @@ class InvoicesView(QWidget):
         self._sup_selector.setMinimumHeight(40)
         self._sup_selector.setMinimumWidth(160)
         self._sup_selector.setFont(make_font(13, True))
+        self._sup_selector.setToolTip(
+            tr("invoices.supplier_selector_tip")
+        )
         self._sup_selector.setEditable(True)
         self._sup_selector.setPlaceholderText(tr("invoices.choose_ph"))
         self._sup_selector.setSizePolicy(
@@ -1254,9 +1257,26 @@ class InvoicesView(QWidget):
                 and _to_float(r.get("total_amount")) >= 0
             ]
 
+        # Dropdownen högst upp väljer både leverantör för nya fakturor
+        # och leverantörsgruppen som visas i listan. Under filtren finns
+        # ett extra leverantörsfilter; båda får kombineras.
+        selector_supplier = self._supplier_selector_filter()
+        if selector_supplier:
+            wanted = selector_supplier.casefold()
+            data = [
+                r for r in data
+                if str(r.get("supplier", "") or "").strip().casefold()
+                == wanted
+            ]
+
         # Leverantörs-filter ("" = alla; annars leverantörens namn)
         if sup_f:
-            data = [r for r in data if r.get("supplier") == sup_f]
+            wanted = str(sup_f).strip().casefold()
+            data = [
+                r for r in data
+                if str(r.get("supplier", "") or "").strip().casefold()
+                == wanted
+            ]
 
         # Snabbfilter (chips): förfallofönster ovanpå övriga filter
         mode = getattr(self, "_chip_mode", "")
@@ -1325,17 +1345,34 @@ class InvoicesView(QWidget):
         completer.setFilterMode(Qt.MatchFlag.MatchContains)
         self._sup_selector.setCompleter(completer)
 
-        idx = self._sup_selector.findText(current)
-        self._sup_selector.setCurrentIndex(max(idx, 0))
+        idx = next(
+            (i for i in range(self._sup_selector.count())
+             if self._sup_selector.itemText(i).strip().casefold()
+             == current.strip().casefold()),
+            -1,
+        )
+        if idx >= 0:
+            self._sup_selector.setCurrentIndex(idx)
+        else:
+            # The selector is editable for new supplier names. Keep
+            # in-progress/free-form text through a table refresh instead
+            # of replacing it with the blank item.
+            self._sup_selector.setCurrentIndex(0)
+            if current:
+                self._sup_selector.setCurrentText(current)
         self._sup_selector.blockSignals(False)
 
-        self._on_supplier_selector_changed(
-            self._sup_selector.currentText()
-        )
+        self._update_supplier_info(self._sup_selector.currentText())
 
     def _on_supplier_selector_changed(self, name: str) -> None:
+        """Visar leverantörsinfo och filtrerar fakturalistan vid val."""
+        self._update_supplier_info(name)
+        if self._initialised:
+            self._search_timer.start()
+
+    def _update_supplier_info(self, name: str) -> None:
         """Visar leverantörsinfo (org.nr, BG/PG/IBAN) bredvid väljaren."""
-        name = name.strip()
+        name = str(name or "").strip()
         if not name:
             self._lbl_supplier_info.setText(tr("invoices.none_chosen"))
             return
@@ -1346,7 +1383,7 @@ class InvoicesView(QWidget):
                 (
                     s
                     for s in suppliers
-                    if s.get("name", "").strip() == name
+                    if str(s.get("name", "") or "").strip() == name
                 ),
                 None,
             )
@@ -1374,6 +1411,22 @@ class InvoicesView(QWidget):
     def _selected_supplier(self) -> str:
         """Aktuellt valt leverantörsnamn."""
         return self._sup_selector.currentText().strip()
+
+    def _supplier_selector_filter(self) -> str:
+        """Returnerar bara ett faktiskt registerval som tabellfilter.
+
+        Dropdownen är redigerbar så att användaren kan skriva ett nytt
+        leverantörsnamn inför registrering. En ofärdig/friformstext ska
+        därför inte tömma fakturalistan medan användaren skriver.
+        """
+        selected = self._selected_supplier.casefold()
+        if not selected:
+            return ""
+        for index in range(self._sup_selector.count()):
+            option = self._sup_selector.itemText(index).strip()
+            if option and option.casefold() == selected:
+                return option
+        return ""
 
     def _update_filter_supplier_combo(self) -> None:
         """Uppdaterar leverantörs-filtret (bevarar aktuellt val)."""

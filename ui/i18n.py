@@ -189,6 +189,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "invoices.title": {"sv": "🧾  Registrerade leverantörsfakturor", "en": "🧾  Registered supplier invoices"},
     "invoices.choose_supplier": {"sv": "🏢  Välj leverantör:", "en": "🏢  Choose supplier:"},
     "invoices.choose_ph": {"sv": "— välj leverantör —", "en": "— choose supplier —"},
+    "invoices.supplier_selector_tip": {"sv": "Välj en leverantör för att visa bara dess fakturor. Rensa valet för att visa alla. Valet används också när du registrerar en ny faktura.", "en": "Choose a supplier to show only its invoices. Clear the selection to show all. The selection is also used when registering a new invoice."},
     "invoices.search_ph": {"sv": "🔍  Sök fakturanummer, leverantör, OCR, referens …", "en": "🔍  Search invoice number, supplier, OCR, reference …"},
     "invoices.add": {"sv": "➕  Registrera faktura", "en": "➕  Register invoice"},
     "invoices.edit": {"sv": "✏️  Redigera", "en": "✏️  Edit"},

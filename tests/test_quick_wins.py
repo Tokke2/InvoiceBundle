@@ -155,6 +155,44 @@ def _fake_app(tmp_path, invoices):
     return FakeApp()
 
 
+def test_top_supplier_selector_filters_invoice_list(tmp_path):
+    """The invoice-entry supplier picker also scopes the visible table."""
+    _qapp()
+    from ui.invoices_view import InvoicesView
+
+    rows = [
+        {"id": "p1", "supplier": "Pilkington", "invoice_number": "P-1",
+         "invoice_type": "Faktura", "total_amount": 100.0,
+         "status": "Obetald"},
+        {"id": "d1", "supplier": "Direktglas", "invoice_number": "D-1",
+         "invoice_type": "Faktura", "total_amount": 200.0,
+         "status": "Obetald"},
+    ]
+    view = InvoicesView(_fake_app(tmp_path, rows))
+    try:
+        assert {row["id"] for row in view._apply_filters()} == {"p1", "d1"}
+
+        view._sup_selector.setCurrentText("Pilkington")
+        assert view._search_timer.isActive()
+        view._search_timer.stop()
+        view._do_refresh()
+        assert view._displayed_ids == ["p1"]
+
+        # A free-form/partial supplier name does not accidentally hide
+        # invoices while the editable selector is being typed into.
+        view._sup_selector.setCurrentText("Pilk")
+        view._do_refresh()
+        assert view._sup_selector.currentText() == "Pilk"
+        assert set(view._displayed_ids) == {"p1", "d1"}
+
+        view._sup_selector.setCurrentIndex(0)
+        view._do_refresh()
+        assert set(view._displayed_ids) == {"p1", "d1"}
+    finally:
+        view._search_timer.stop()
+        view.close()
+
+
 def test_chips_filter_invoices_view(tmp_path):
     _qapp()
     from ui.invoices_view import InvoicesView

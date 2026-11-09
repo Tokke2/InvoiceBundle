@@ -3,11 +3,13 @@
 ## Ej släppt / Unreleased
 
 ### Svenska
+- **Leverantörsvalet filtrerar fakturalistan** — välj en leverantör i dropdownen högst upp i Fakturor för att visa endast den leverantörens fakturor. Rensa valet för att visa alla igen; sök-, status- och typfilter fungerar fortsatt tillsammans med leverantörsvalet.
 - **Fakturamallens bilddialog anpassar sig till skärmen** — dialogen ryms inom arbetsytan, bild/fält kan rullas när skärmen är låg, och på smala skärmar läggs panelerna under varandra. Åtgärdsknapparna ligger kvar synliga längst ned och flyttas till två rader vid smal bredd.
 - **OCR-nummer är frivilligt** — tomt OCR-nummer ger varken valideringsvarning eller hinder vid registrering. Fältet märks som valfritt; kontrollsifferavvikelse varnas fortfarande om OCR har fyllts i.
 - **Bättre leverantörsmatchning via fakturalogotyp** — sparade logotyper kan hittas även när de flyttats på PDF-sidan. Matchningsdialogen visar verkliga, beskurna logotyper från originalfakturan (inga monogram) och rankar den starkaste träffen först. Manuell matchning kan också öppna originalet för att markera logotypen; osäkra träffar kräver fortfarande användarens val.
 
 ### English
+- **Supplier selection filters the invoice list** — choose a supplier in the top dropdown on the Invoices tab to show only that supplier's invoices. Clear the selection to show all again; search, status, and type filters continue to work together with the supplier selection.
 - **Invoice-template editor adapts to the screen** — the dialog fits the available work area, the image/fields can scroll on short screens, and the panels stack on narrow displays. Action buttons stay visible in the footer and wrap to two rows when needed.
 - **OCR number is optional** — an empty OCR number no longer produces a validation warning or blocks registration. The field is labelled optional; an invalid check digit is still flagged when an OCR number is entered.
 - **Better supplier matching using invoice logos** — saved logos can be found even when they move on a PDF page. The match dialog shows real cropped logos from the original invoice (no monograms) and ranks the strongest match first. Manual matching can also open the original to mark a logo; uncertain matches still require the user's choice.
