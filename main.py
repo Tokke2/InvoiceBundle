@@ -432,6 +432,19 @@ def _python_path_key(path: str | Path) -> str:
         return str(path).casefold()
 
 
+def _is_app_local_python(executable: str | Path | None = None) -> bool:
+    """Return whether an interpreter lives in the app's private python folder."""
+    if getattr(sys, "frozen", False):
+        return False
+    try:
+        app_python = (BASE_DIR / "python").resolve()
+        candidate = Path(executable or sys.executable).resolve()
+        candidate.relative_to(app_python)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def _runtime_attempted() -> set[str]:
     try:
         values = json.loads(os.environ.get(_RUNTIME_ATTEMPTS, "[]"))
@@ -502,14 +515,12 @@ def _system_python_candidates() -> list[tuple[str, tuple[int, ...]]]:
             if found and "\\Microsoft\\WindowsApps\\" not in found:
                 commands.append([found])
     else:
-        local = Path(__file__).resolve().parent / "python" / "bin"
+        # Only use interpreters installed on the system/PATH. Never prefer
+        # a private Python copy placed inside the app directory.
         for name in (
             "python3.15", "python3.14", "python3.13", "python3.12",
             "python3.11", "python3.10", "python3", "python",
         ):
-            local_candidate = local / name
-            if local_candidate.is_file():
-                commands.append([str(local_candidate)])
             found = shutil.which(name)
             if found:
                 commands.append([found])
@@ -518,10 +529,14 @@ def _system_python_candidates() -> list[tuple[str, tuple[int, ...]]]:
     seen: set[str] = set()
     candidates: list[tuple[str, tuple[int, ...]]] = []
     for command in commands:
+        if command and _is_app_local_python(command[0]):
+            continue
         inspected = _inspect_python(command)
         if inspected is None:
             continue
         executable, version = inspected
+        if _is_app_local_python(executable):
+            continue
         key = _python_path_key(executable)
         if key == current or key in seen:
             continue
@@ -1956,6 +1971,21 @@ def main() -> None:
     # Qt-runtime-miljö före QApplication (DPI-scalning, Qt6-hantering)
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
+
+    # Avvisa en äldre genväg som fortfarande pekar på en privat Python
+    # i appmappen. Byt bara till en testad systemtolk; kör aldrig vidare
+    # i den privata miljön om ingen kompatibel systemtolk finns.
+    if not SELFTEST and not DEBUG_MODE and _is_app_local_python(sys.executable):
+        if _relaunch_runtime_fallback():
+            return
+        message = (
+            f"{APP_NAME} startar inte med en Python-kopia från appmappen.\n"
+            "Installera eller välj en kompatibel systeminstallerad Python "
+            "och starta appen igen."
+        )
+        log.critical("APP_LOCAL_PYTHON_REJECTED: %s", sys.executable)
+        print(message, file=sys.stderr)
+        sys.exit(1)
 
     # Startades vi med konsoltolken (python.exe) startar vi om
     # fönsterlöst med pythonw.exe och avslutar direkt — annars

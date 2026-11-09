@@ -18,12 +18,7 @@ if [ ! -f "$APP_DIR/main.py" ]; then
 fi
 cd "$APP_DIR" || exit 1
 mkdir -p "$APP_DIR/logs"
-PY=""
-if [ -x "$APP_DIR/python/bin/python3" ]; then
-  PY="$APP_DIR/python/bin/python3"
-elif [ -x "$APP_DIR/python/bin/python" ]; then
-  PY="$APP_DIR/python/bin/python"
-elif command -v python3 >/dev/null 2>&1; then
+if command -v python3 >/dev/null 2>&1; then
   PY=python3
 else
   PY=python

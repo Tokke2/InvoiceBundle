@@ -94,6 +94,38 @@ def test_failed_runtime_falls_back_to_healthy_python_314(monkeypatch):
     assert calls[0][1]["mark_current"] is True
 
 
+def test_python_discovery_ignores_app_local_runtime(monkeypatch, tmp_path):
+    main = _main_module(monkeypatch)
+    monkeypatch.setattr(main, "CURRENT_PLATFORM", "linux")
+    monkeypatch.setattr(main, "BASE_DIR", tmp_path)
+    private = tmp_path / "python" / "bin" / "python3.15"
+    private.parent.mkdir(parents=True)
+    private.write_text("private", encoding="utf-8")
+    assert main._is_app_local_python(private)
+    commands = []
+
+    def _which(name):
+        if name == "python3.15":
+            return str(private)
+        if name == "python3.14":
+            return "/usr/bin/python3.14"
+        return None
+
+    def _inspect(command):
+        commands.append(command)
+        if command == ["/usr/bin/python3.14"]:
+            return "/usr/bin/python3.14", (3, 14, 9)
+        return None
+
+    monkeypatch.setattr(main.shutil, "which", _which)
+    monkeypatch.setattr(main, "_inspect_python", _inspect)
+
+    assert main._system_python_candidates() == [
+        ("/usr/bin/python3.14", (3, 14, 9))
+    ]
+    assert commands == [["/usr/bin/python3.14"]]
+
+
 def test_runtime_attempt_guard_prevents_returning_to_failed_python(monkeypatch):
     main = _main_module(monkeypatch, version=(3, 14, 9), executable="python314")
     monkeypatch.setenv(

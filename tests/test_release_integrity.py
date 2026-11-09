@@ -56,6 +56,28 @@ def test_tag_workflow_builds_and_attaches_the_release_package():
     assert 'VERSION="${GITHUB_REF_NAME#v}"' in workflow
 
 
+def test_python_runtime_and_autostart_use_system_interpreters_only():
+    app = (PROJECT_DIR / "app.py").read_text(encoding="utf-8")
+    main = (PROJECT_DIR / "main.py").read_text(encoding="utf-8")
+    installer = (
+        PROJECT_DIR / "autostart" / "install_python.ps1"
+    ).read_text(encoding="utf-8")
+    shell = (
+        PROJECT_DIR / "autostart" / "start_hidden.sh"
+    ).read_text(encoding="utf-8")
+    vbs = (
+        PROJECT_DIR / "autostart" / "start_hidden.vbs"
+    ).read_text(encoding="utf-16")
+    assert 'local = BASE_DIR / "python"' not in app
+    assert 'parent / "python" / "bin"' not in main
+    assert "APP_LOCAL_PYTHON_REJECTED" in main
+    assert "$candidates.Add($localAppPython)" not in installer
+    assert "APP_DIR/python/bin/" not in shell
+    assert 'appDir & "\\python\\pythonw.exe"' not in vbs
+    assert 'appDir & "\\python\\pythonw.exe"' not in app
+    assert "system-Python" in app or "systemtolk" in app
+
+
 def test_runtime_helper_modules_are_in_the_release_manifest():
     for rel in (
         "plugins/error_collect.py",
@@ -90,6 +112,8 @@ def test_python_update_helper_is_shipped_and_checks_before_download():
     download = source.index("Download-Installer $release.Url $TempInstaller")
     assert detect < release_lookup < download
     assert "Find-UnregisteredPython $registered" in source
+    assert "PYTHON_APP_LOCAL_IGNORED" in source
+    assert "$candidates.Add($localAppPython)" not in source
     assert "Get-UninstallEntry $selected $selected.Scope" in source
     assert "Rollback-NewPython" in source
     assert "Test-AppPythonRuntime" in source

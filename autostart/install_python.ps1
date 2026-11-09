@@ -212,7 +212,7 @@ function Find-UnregisteredPython($KnownEntries) {
     $candidates = New-Object System.Collections.Generic.List[string]
     $localAppPython = Join-Path $AppDir 'python\python.exe'
     if (Test-Path -LiteralPath $localAppPython -PathType Leaf) {
-        $candidates.Add($localAppPython)
+        Write-Log "PYTHON_APP_LOCAL_IGNORED: $localAppPython; only system Python installations are eligible."
     }
 
     $command = Get-Command python.exe -ErrorAction SilentlyContinue

@@ -72,6 +72,77 @@ def test_method_normalization():
     assert "autostart_method" in appmod.DEFAULT_SETTINGS
 
 
+def test_autostart_uses_system_python_even_if_app_copy_exists(
+    monkeypatch, tmp_path,
+):
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    (app_dir / "main.pyw").write_text("", encoding="utf-8")
+    app_local = app_dir / "python"
+    app_local.mkdir()
+    (app_local / "pythonw.exe").write_text("private", encoding="utf-8")
+
+    system_python = tmp_path / "Programs" / "Python315"
+    system_python.mkdir(parents=True)
+    python_exe = system_python / "python.exe"
+    pythonw_exe = system_python / "pythonw.exe"
+    python_exe.write_text("system", encoding="utf-8")
+    pythonw_exe.write_text("system", encoding="utf-8")
+
+    monkeypatch.setattr(appmod, "BASE_DIR", app_dir)
+    monkeypatch.setattr(
+        appmod, "sys",
+        types.SimpleNamespace(executable=str(python_exe), frozen=False),
+    )
+    mgr = _mgr(monkeypatch, "windows")
+    assert mgr._python_exe == str(pythonw_exe)
+    assert mgr._main_py == str(app_dir / "main.pyw")
+
+
+def test_linux_autostart_uses_system_python_even_if_app_copy_exists(
+    monkeypatch, tmp_path,
+):
+    app_dir = tmp_path / "app"
+    (app_dir / "python" / "bin").mkdir(parents=True)
+    (app_dir / "python" / "bin" / "python3").write_text(
+        "private", encoding="utf-8"
+    )
+    system_python = "/usr/bin/python3"
+    monkeypatch.setattr(appmod, "BASE_DIR", app_dir)
+    monkeypatch.setattr(
+        appmod, "sys",
+        types.SimpleNamespace(executable=system_python, frozen=False),
+    )
+    mgr = _mgr(monkeypatch, "linux")
+    assert mgr._python_exe == system_python
+    assert mgr._main_py == str(app_dir / "main.py")
+
+
+def test_generated_and_static_launchers_only_choose_system_python(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(appmod, "BASE_DIR", tmp_path)
+    linux = _mgr(monkeypatch, "linux")
+    shell = linux._sh_text()
+    assert '"$APP_DIR/python/bin/' not in shell
+    assert "command -v python3" in shell
+
+    windows = _mgr(monkeypatch, "windows", method="launcher")
+    vbs = windows._vbs_text()
+    assert 'appDir & "\\\\python\\\\pythonw.exe"' not in vbs
+    assert "%LocalAppData%" in vbs
+    assert "%ProgramFiles%" in vbs
+
+    static_sh = (PROJECT_DIR / "autostart" / "start_hidden.sh").read_text(
+        encoding="utf-8"
+    )
+    static_vbs = (PROJECT_DIR / "autostart" / "start_hidden.vbs").read_text(
+        encoding="utf-16"
+    )
+    assert "APP_DIR/python/bin/" not in static_sh
+    assert 'appDir & "\\\\python\\\\pythonw.exe"' not in static_vbs
+
+
 def test_windows_direct_has_no_vbs(monkeypatch):
     mgr = _mgr(monkeypatch, "windows")
     cmd = mgr.build_command()

@@ -1180,22 +1180,13 @@ class AutostartManager:
         if getattr(sys, "frozen", False):
             return str(sys.executable), ""
         script = str(main_pyw) if main_pyw.exists() else main_py
-        # Lokal python\ används om den finns. Annars system-Python
-        # som Installera senaste Python.bat lagt på datorn.
-        local = BASE_DIR / "python"
+        # Autostart använder alltid systemtolken som kör appen — en
+        # eventuell Python-kopia inne i appmappen ska aldrig väljas.
         if CURRENT_PLATFORM == "windows":
-            for name in ("pythonw.exe", "python.exe"):
-                candidate = local / name
-                if candidate.is_file():
-                    return str(candidate), script
             pythonw = Path(sys.executable).parent / "pythonw.exe"
             if pythonw.is_file():
                 return str(pythonw), script
             return str(sys.executable), script
-        for name in ("python", "python3"):
-            candidate = local / "bin" / name
-            if candidate.is_file():
-                return str(candidate), main_py
         return str(sys.executable), main_py
 
     def working_directory(self) -> Path:
@@ -1382,12 +1373,7 @@ class AutostartManager:
             "fi\n"
             "cd \"$APP_DIR\" || exit 1\n"
             "mkdir -p \"$APP_DIR/logs\"\n"
-            "PY=\"\"\n"
-            "if [ -x \"$APP_DIR/python/bin/python3\" ]; then\n"
-            "  PY=\"$APP_DIR/python/bin/python3\"\n"
-            "elif [ -x \"$APP_DIR/python/bin/python\" ]; then\n"
-            "  PY=\"$APP_DIR/python/bin/python\"\n"
-            "elif command -v python3 >/dev/null 2>&1; then\n"
+            "if command -v python3 >/dev/null 2>&1; then\n"
             "  PY=python3\n"
             "else\n"
             "  PY=python\n"
@@ -1397,13 +1383,13 @@ class AutostartManager:
         )
 
     def _vbs_text(self) -> str:
-        """VBS utan fast enhetsbeteckning. Hittar mappen via scriptet."""
+        """VBS utan fast enhetsbeteckning; använder bara installerad system-Python."""
         loops = self._WAIT_SECONDS // 2
         return (
             "' Fakturabunten — gömd autostart. PORTABEL.\n"
             "Option Explicit\n"
             "Dim fso, sh, appDir, autoDir, pythonw, script, logFile, i, ready, cmd, q\n"
-            "Dim localW, pyRoot, folder, name, candidate, ver, bestVer\n"
+            "Dim pyRoots, pyRoot, folder, name, candidate, ver, bestVer\n"
             "Set fso = CreateObject(\"Scripting.FileSystemObject\")\n"
             "Set sh = CreateObject(\"WScript.Shell\")\n"
             "autoDir = fso.GetParentFolderName(WScript.ScriptFullName)\n"
@@ -1444,26 +1430,31 @@ class AutostartManager:
             "script = appDir & \"\\main.pyw\"\n"
             "If Not fso.FileExists(script) Then script = appDir & \"\\main.py\"\n"
             "pythonw = \"\"\n"
-            "localW = appDir & \"\\python\\pythonw.exe\"\n"
-            "If fso.FileExists(localW) Then pythonw = localW\n"
             "If pythonw = \"\" Then\n"
             "    bestVer = 0\n"
-            "    pyRoot = sh.ExpandEnvironmentStrings(\"%LocalAppData%\") & \"\\Programs\\Python\"\n"
-            "    If fso.FolderExists(pyRoot) Then\n"
-            "        For Each folder In fso.GetFolder(pyRoot).SubFolders\n"
-            "            candidate = folder.Path & \"\\pythonw.exe\"\n"
-            "            If fso.FileExists(candidate) Then\n"
-            "                ver = 0\n"
-            "                On Error Resume Next\n"
-            "                ver = CLng(Replace(folder.Name, \"Python\", \"\"))\n"
-            "                On Error GoTo 0\n"
-            "                If ver > bestVer Then\n"
-            "                    bestVer = ver\n"
-            "                    pythonw = candidate\n"
+            "    pyRoots = Array( _\n"
+            "        sh.ExpandEnvironmentStrings(\"%LocalAppData%\") & \"\\Programs\\Python\", _\n"
+            "        sh.ExpandEnvironmentStrings(\"%ProgramFiles%\"), _\n"
+            "        sh.ExpandEnvironmentStrings(\"%ProgramFiles(x86)%\") _\n"
+            "    )\n"
+            "    For Each pyRoot In pyRoots\n"
+            "        If fso.FolderExists(pyRoot) Then\n"
+            "            For Each folder In fso.GetFolder(pyRoot).SubFolders\n"
+            "                candidate = folder.Path & \"\\pythonw.exe\"\n"
+            "                If fso.FileExists(candidate) Then\n"
+            "                    ver = 0\n"
+            "                    On Error Resume Next\n"
+            "                    name = Replace(Replace(Replace(folder.Name, \"Python\", \"\"), \" \", \"\"), \".\", \"\")\n"
+            "                    ver = CLng(name)\n"
+            "                    On Error GoTo 0\n"
+            "                    If ver > bestVer Then\n"
+            "                        bestVer = ver\n"
+            "                        pythonw = candidate\n"
+            "                    End If\n"
             "                End If\n"
-            "            End If\n"
-            "        Next\n"
-            "    End If\n"
+            "            Next\n"
+            "        End If\n"
+            "    Next\n"
             "End If\n"
             "\n"
             "sh.CurrentDirectory = appDir\n"
