@@ -66,6 +66,7 @@ class _FakeWatch:
     def __init__(self, parked):
         self.folders: list = []
         self.parked = list(parked)
+        self.last_scan_stats: dict = {}
         self.removed: list[str] = []
 
     def remove_parked(self, digest):
@@ -99,6 +100,20 @@ def _view(tmp_path, watch=None):
 
 
 # ── Osäkra parkerade hamnar i tabellen ──────────────────────
+
+def test_uncertain_watch_file_is_visible_before_notice_dialog(tmp_path):
+    _qapp()
+    watch = _FakeWatch([_parked_entry()])
+    view = _view(tmp_path, watch)
+    try:
+        info = watch.parked[0]
+        view._on_watch_parked(info)
+        assert len(view._rows) == 1
+        assert view._rows[0].get("match_uncertain") is True
+        view._parked_timer.stop()
+    finally:
+        view.close()
+
 
 def test_uncertain_parked_goes_to_table_and_unparks_on_match(
     tmp_path, monkeypatch
@@ -198,6 +213,25 @@ def test_uncertain_rows_never_duplicated(tmp_path):
         # Granska-knappen får inte heller lägga in den igen.
         view._review_parked()
         assert len(view._rows) == 1
+    finally:
+        view.close()
+
+
+def test_uncertain_files_with_same_hash_each_get_an_import_row(tmp_path):
+    _qapp()
+    first = _parked_entry()
+    second = _parked_entry(
+        path="/tmp/x/copy-osaker.pdf", file="copy-osaker.pdf",
+    )
+    watch = _FakeWatch([first, second])
+    view = _view(tmp_path, watch)
+    try:
+        added = view._add_parked_rows_to_table([first, second])
+        assert len(added) == 2
+        assert {row["_path"] for row in view._rows} == {
+            first["path"], second["path"],
+        }
+        assert all(row["match_uncertain"] for row in view._rows)
     finally:
         view.close()
 

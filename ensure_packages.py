@@ -31,6 +31,7 @@ _IMPORT_NAME = {
     "pypdf": "pypdf",
     "PyMuPDF": "pymupdf",
     "Pillow": "PIL",
+    "pytesseract": "pytesseract",
 }
 
 
@@ -147,6 +148,20 @@ class _Progress:
         self.root.title("Fakturabunten — tillbehör")
         self.root.configure(bg="#0c1218")
         self.root.resizable(False, False)
+        self._icon_photo = None
+        try:
+            ico = BASE_DIR / "app_icon.ico"
+            if ico.is_file():
+                self.root.iconbitmap(default=str(ico))
+        except Exception:
+            pass
+        try:
+            icon_png = BASE_DIR / "app_icon.png"
+            if icon_png.is_file():
+                self._icon_photo = tk.PhotoImage(file=str(icon_png))
+                self.root.iconphoto(True, self._icon_photo)
+        except Exception:
+            pass
         self.root.geometry("520x168")
         self._center()
         self.root.protocol("WM_DELETE_WINDOW", lambda: None)
@@ -338,6 +353,36 @@ def ensure_packages(*, force_console: bool = False) -> bool:
     return True
 
 
+def upgrade_all_packages(*, force_user: bool = False) -> int:
+    """Update every declared dependency in this interpreter's environment.
+
+    This is called only by the weekly worker, never by ordinary app startup.
+    ``_pip_base`` deliberately uses this script's running ``sys.executable``;
+    no virtual environment or second Python is created. ``force_user`` keeps
+    packages in the invoking user's site when the runtime installer had to
+    elevate to replace a machine-wide Python installation.
+    """
+    if not REQUIREMENTS.is_file():
+        message = f"WEEKLY_PACKAGE_UPDATE_FAIL: missing {REQUIREMENTS}"
+        log.error(message)
+        _append_log(message)
+        return 1
+    cmd = _pip_base()
+    if force_user and "--user" not in cmd:
+        cmd.append("--user")
+    cmd += ["-r", str(REQUIREMENTS)]
+    log.info("WEEKLY_PACKAGE_UPDATE_START: %s", " ".join(cmd))
+    _append_log("WEEKLY_PACKAGE_UPDATE_START: requirements.txt")
+    code = _run_pip(cmd, None, "Veckovis paketuppdatering")
+    message = (
+        "WEEKLY_PACKAGE_UPDATE_OK: requirements.txt"
+        if code == 0 else f"WEEKLY_PACKAGE_UPDATE_FAIL: pip exit {code}"
+    )
+    _append_log(message)
+    (log.info if code == 0 else log.error)(message)
+    return int(code)
+
+
 def _tell_user(title: str, text: str) -> None:
     try:
         import tkinter as tk
@@ -352,3 +397,9 @@ def _tell_user(title: str, text: str) -> None:
     print(f"{title}\n{text}", file=sys.stderr)
 
 
+if __name__ == "__main__" and sys.argv[1:2] == ["--upgrade-all"]:
+    extra = sys.argv[2:]
+    if any(arg != "--user" for arg in extra):
+        print("Usage: ensure_packages.py --upgrade-all [--user]", file=sys.stderr)
+        raise SystemExit(2)
+    raise SystemExit(upgrade_all_packages(force_user="--user" in extra))

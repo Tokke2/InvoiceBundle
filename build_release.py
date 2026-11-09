@@ -26,6 +26,7 @@ from pathlib import Path
 RELEASE_FILES: tuple[str, ...] = (
     "CHANGELOG.md",
     "README.md",
+    "Installera senaste Python.bat",
     "app.py",
     "app_icon.ico",
     "app_icon.png",
@@ -39,8 +40,11 @@ RELEASE_FILES: tuple[str, ...] = (
     "main.py",
     "main.pyw",
     "plugins/advanced_logger.py",
+    "plugins/error_collect.py",
+    "plugins/log_archive.py",
     "plugins/pdf_export.py",
     "plugins/pdf_export_helpers.py",
+    "plugins/python_update_scheduler.py",
     "plugins/scan_import.py",
     "plugins/updater.py",
     "requirements.txt",
@@ -62,6 +66,7 @@ RELEASE_FILES: tuple[str, ...] = (
     "ui/main_window.py",
     "ui/scan_import_view.py",
     "ui/suppliers_view.py",
+    "ui/typography.py",
     "ui/update_dialog.py",
     "ui/watch_folders.py",
 )
@@ -72,6 +77,7 @@ CRITICAL_FILES: tuple[str, ...] = (
     "ui/update_dialog.py",
     "ui/main_window.py",
     "ui/i18n.py",
+    "ui/typography.py",
 )
 
 BUILD_INFO_NAME = "build_info.json"

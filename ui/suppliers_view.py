@@ -64,6 +64,8 @@ try:
         ROLE_ROW_FG,
         ROLE_STRIPE,
         ROLE_ROW_BG_ODD,
+        make_tabular_font,
+        set_item_font,
     )
     from ui.i18n import tr, tr_list
 except ImportError:
@@ -78,6 +80,8 @@ except ImportError:
         ROLE_ROW_FG,
         ROLE_STRIPE,
         ROLE_ROW_BG_ODD,
+        make_tabular_font,
+        set_item_font,
     )
     from i18n import tr, tr_list  # type: ignore[no-redef]
 
@@ -127,7 +131,8 @@ NUMERIC_KEYS: set[str] = {"payment_terms"}
 
 #: Fält som sökningen omfattar.
 SEARCH_FIELDS: tuple[str, ...] = (
-    "name", "org_number", "email", "phone", "contact_person", "address",
+    "name", "aliases", "org_number", "email", "phone",
+    "contact_person", "address",
 )
 
 FONT_FAMILY: str = "Segoe UI"
@@ -205,12 +210,17 @@ def _cell(
     bold: bool = True,
     fg: str = "",
     numeric: bool = False,
+    tabular: bool = False,
 ) -> QTableWidgetItem:
     """Skapar en icke-redigerbar, fet tabellcell med valfri textfärg."""
     item = _NumericCell(str(text)) if numeric else QTableWidgetItem(str(text))
     item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
     item.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
-    item.setFont(_font(13, bold=bold))
+    base_font = (
+        make_tabular_font(13, bold=bold)
+        if tabular else _font(13, bold=bold)
+    )
+    set_item_font(item, base_font)
     if fg:
         item.setForeground(QBrush(QColor(fg)))
     return item
@@ -278,9 +288,15 @@ class SupplierDialog(QDialog):
         self.f_name.setFont(_font(13, bold=True))
         self.f_name.setMinimumHeight(40)
         self.f_org = _le("XXXXXXXXXX")
+        self.f_org.setFont(make_tabular_font(11))
+        self.f_aliases = QTextEdit()
+        self.f_aliases.setPlaceholderText(tr("supplierdlg.aliases_ph"))
+        self.f_aliases.setMaximumHeight(76)
+        self.f_aliases.setFont(_font(11))
 
         form.addRow("Namn *:", self.f_name)
         form.addRow("Org.nummer:", self.f_org)
+        form.addRow(tr("supplierdlg.aliases"), self.f_aliases)
         form.addRow(_h_line())
 
         # ── Bankuppgifter ──────────────────────────────────────────────
@@ -288,6 +304,8 @@ class SupplierDialog(QDialog):
         self.f_pg = _le("XXXXXXX-X")
         self.f_iban = _le("SEXX XXXX …")
         self.f_bic = _le("XXXXSESS")
+        for field in (self.f_bg, self.f_pg, self.f_iban, self.f_bic):
+            field.setFont(make_tabular_font(11))
 
         form.addRow(tr("supplierdlg.bg"), self.f_bg)
         form.addRow(tr("supplierdlg.pg"), self.f_pg)
@@ -301,7 +319,7 @@ class SupplierDialog(QDialog):
         self.f_terms.setSuffix("  dagar")
         self.f_terms.setValue(30)
         self.f_terms.setMinimumHeight(34)
-        self.f_terms.setFont(_font(11))
+        self.f_terms.setFont(make_tabular_font(11))
         form.addRow(tr("supplierdlg.terms"), self.f_terms)
 
         # Snabbvalsknappar för betalvillkor — färre klick i vardagen
@@ -377,6 +395,7 @@ class SupplierDialog(QDialog):
             [
                 self.f_name,
                 self.f_org,
+                self.f_aliases,
                 self.f_bg,
                 self.f_pg,
                 self.f_iban,
@@ -401,6 +420,17 @@ class SupplierDialog(QDialog):
         d = self._existing
         self.f_name.setText(d.get("name", ""))
         self.f_org.setText(d.get("org_number", ""))
+        raw_aliases = d.get("aliases", [])
+        if isinstance(raw_aliases, str):
+            aliases = raw_aliases.replace(";", "\n").splitlines()
+        elif isinstance(raw_aliases, (list, tuple, set)):
+            aliases = list(raw_aliases)
+        else:
+            aliases = []
+        self.f_aliases.setPlainText("\n".join(
+            str(alias).strip() for alias in aliases
+            if str(alias or "").strip()
+        ))
         self.f_bg.setText(d.get("bg", ""))
         self.f_pg.setText(d.get("pg", ""))
         self.f_iban.setText(d.get("iban", ""))
@@ -428,8 +458,17 @@ class SupplierDialog(QDialog):
 
     def get_data(self) -> dict:
         """Returnerar formulärets data som supplier-dict."""
+        aliases: list[str] = []
+        seen_aliases: set[str] = set()
+        for raw in self.f_aliases.toPlainText().splitlines():
+            alias = raw.strip()
+            key = alias.casefold()
+            if alias and key not in seen_aliases:
+                aliases.append(alias)
+                seen_aliases.add(key)
         return {
             "name":           self.f_name.text().strip(),
+            "aliases":        aliases,
             "org_number":     self.f_org.text().strip(),
             "bg":             self.f_bg.text().strip(),
             "pg":             self.f_pg.text().strip(),
@@ -774,6 +813,10 @@ class SuppliersView(QWidget):
                     bold=True,
                     fg=fg,
                     numeric=key in NUMERIC_KEYS,
+                    tabular=key in {
+                        "org_number", "bg", "pg", "iban", "bic",
+                        "payment_terms", "phone",
+                    },
                 )
                 item.setData(Qt.ItemDataRole.UserRole, supplier.get("id", ""))
                 item.setData(ROLE_ROW_BG, even)

@@ -207,6 +207,14 @@ _PARK_REASON_SV = {
         "osäker leverantörs- eller mallmatchning — appen frågar "
         "användaren i stället för att gissa"
     ),
+    "ocr-warning": (
+        "OCR saknas eller misslyckades på minst en sida — fakturan "
+        "parkeras för kontroll och registreras inte automatiskt"
+    ),
+    "payment-details": (
+        "Bankgiro, Plusgiro eller IBAN på fakturan avviker från "
+        "leverantörens sparade uppgifter — kontrollera mottagaren"
+    ),
 }
 
 
@@ -351,12 +359,12 @@ def watch_diagnostic_lines(
             "senaste skanning: {imported} nya fakturor, "
             "{duplicate} dubbletter (fanns redan — rördes inte), "
             "{parked} parkerade, {already} redan bearbetade, "
-            "{waiting} väntar i parkering".format(
+            "{waiting} väntar i parkering, {errors} läsfel".format(
                 **{
                     k: int((stats or {}).get(k, 0) or 0)
                     for k in (
                         "imported", "duplicate", "parked", "already",
-                        "waiting",
+                        "waiting", "errors",
                     )
                 }
             )
@@ -515,11 +523,15 @@ class WatchManager(QObject):
     Signaler:
       invoice_ready(parsed_row, källfil)  — komplett, kan skapas
       file_parked(info)                   — behöver granskning
+      file_error(info)                    — originalläsfel, visa i Import
+      file_recovered(path)                — tidigare läsfel löstes
       changed()                           — config/parkerade ändrats
     """
 
     invoice_ready = Signal(dict, str)
     file_parked = Signal(dict)
+    file_error = Signal(dict)
+    file_recovered = Signal(str)
     changed = Signal()
 
     def __init__(
@@ -541,11 +553,13 @@ class WatchManager(QObject):
         self._warned_missing: set[str] = set()
         self._scan_stats: dict[str, int] = {
             "imported": 0, "duplicate": 0, "parked": 0, "already": 0,
-            "waiting": 0, "changed": 0,
+            "waiting": 0, "changed": 0, "errors": 0,
         }
+        self._reported_file_errors: dict[str, tuple] = {}
         self._control_diffs: list[dict] = []
         self._waiting_reasons: dict[str, int] = {}
-        self._last_logged_waiting: int = -1
+        self._last_logged_scan_summary: tuple | None = None
+        self._last_logged_control_signature: tuple | None = None
         log.info(
             "SCAN_WATCH: bevakning startad — %d mapp(ar): %s",
             len(self._config.get("folders", [])),
@@ -778,10 +792,9 @@ class WatchManager(QObject):
 
     @property
     def last_scan_stats(self) -> dict[str, int]:
-        """Utfall av senaste skanning: nyregistrerade, dubblettar
-        (fanns redan i registret — rörs inte), parkerade och filer
-        som var bearbetade sedan tidigare. 'Bearbetad' ensamt säger
-        ingenting: en dubblett skapar ingen ny faktura."""
+        """Utfall av senaste skanning: registrerade, dubbletter,
+        parkerade, redan bearbetade och läsfel. Originalfiler som
+        ger fel markeras inte som bearbetade."""
         return dict(self._scan_stats)
 
     @property
@@ -793,9 +806,10 @@ class WatchManager(QObject):
         return [dict(d) for d in self._control_diffs]
 
     def scan_all(self, force: bool = False) -> None:
+        previous_errors = self._scan_stats.get("errors", 0)
         self._scan_stats = {
             "imported": 0, "duplicate": 0, "parked": 0, "already": 0,
-            "waiting": 0, "changed": 0,
+            "waiting": 0, "changed": 0, "errors": 0,
         }
         self._waiting_reasons = {}
         self._control_diffs = []
@@ -804,17 +818,28 @@ class WatchManager(QObject):
             try:
                 self.scan_folder(entry, force=force)
             except Exception as exc:
-                log.warning("SCAN_WATCH scan %s: %s", entry, exc)
-        # Sammanfattningen loggas när något hände — eller när
-        # antalet i parkering-väntar ändrats — så den aldrig är
-        # tyst om varför filer inte läses in, men inte heller
-        # loggar samma rad var 30:e sekund när inget ändrats.
-        active = any(
-            v for k, v in self._scan_stats.items() if k != "waiting"
-        )
+                self._record_scan_error(
+                    str(entry.get("path", "?")), "folder", "", exc
+                )
+        # Sammanfattningen loggas bara när själva utfallet ändras.
+        # "already" räknas om vid varje 30-sekunderspoll och får inte
+        # i sig göra att samma statusrad fylls på om och om igen.
         waiting = self._scan_stats.get("waiting", 0)
-        if active or waiting != self._last_logged_waiting:
-            self._last_logged_waiting = waiting
+        reason_signature = tuple(sorted(
+            (str(k), int(v)) for k, v in self._waiting_reasons.items()
+        ))
+        summary = (
+            self._scan_stats["imported"],
+            self._scan_stats["duplicate"],
+            self._scan_stats["parked"],
+            self._scan_stats["already"],
+            waiting,
+            self._scan_stats.get("errors", 0),
+            reason_signature,
+            bool(self.auto_create),
+        )
+        if summary != self._last_logged_scan_summary:
+            self._last_logged_scan_summary = summary
             reason_txt = ""
             if self._waiting_reasons:
                 reason_txt = " (" + ", ".join(
@@ -825,12 +850,13 @@ class WatchManager(QObject):
                 "SCAN_WATCH skanning: %d nya registrerade, %d "
                 "dubblett(er) (fanns redan i registret), %d "
                 "parkerade, %d redan bearbetade sedan tidigare, "
-                "%d väntar i parkering%s",
+                "%d väntar i parkering, %d läsfel%s",
                 self._scan_stats["imported"],
                 self._scan_stats["duplicate"],
                 self._scan_stats["parked"],
                 self._scan_stats["already"],
                 waiting,
+                self._scan_stats.get("errors", 0),
                 reason_txt,
             )
             if (
@@ -845,14 +871,81 @@ class WatchManager(QObject):
                 )
         changed = self._scan_stats.get("changed", 0)
         if changed:
-            log.warning(
-                "SCAN_WATCH kontroll: %d redan inläst(a) faktura/"
-                "fakturor avviker mot nytolkningen av "
-                "originalen — inget ändrades automatiskt; "
-                "rätta per faktura i Fakturor-fliken "
-                "(högerklicka → Skanna om faktura)",
-                changed,
+            control_signature = tuple(
+                (
+                    str(diff.get("file", "")),
+                    str(diff.get("invoice_number", "")),
+                    json.dumps(
+                        diff.get("changes", {}),
+                        ensure_ascii=False, sort_keys=True, default=str,
+                    ),
+                )
+                for diff in self._control_diffs
             )
+            if control_signature != self._last_logged_control_signature:
+                log.warning(
+                    "SCAN_WATCH kontroll: %d redan inläst(a) faktura/"
+                    "fakturor avviker mot nytolkningen av "
+                    "originalen — inget ändrades automatiskt; "
+                    "rätta per faktura i Fakturor-fliken "
+                    "(högerklicka → Skanna om faktura)",
+                    changed,
+                )
+            self._last_logged_control_signature = control_signature
+        else:
+            self._last_logged_control_signature = None
+        current_errors = self._scan_stats.get("errors", 0)
+        if current_errors or current_errors != previous_errors:
+            # Visa nya fel och rensa statusraden när en fil senare läses.
+            self.changed.emit()
+
+    def _record_scan_error(
+        self, path: str, stage: str, digest: str, exc: Exception,
+    ) -> None:
+        """Räkna fel per fil och logga traceback en gång per feltyp/hash."""
+        key = str(path or "?")
+        signature = (
+            str(stage), str(digest or ""), type(exc).__name__, str(exc)
+        )
+        self._scan_stats["errors"] = self._scan_stats.get("errors", 0) + 1
+        if stage in {"hasha", "läsa/tolka", "kontrolläsa"}:
+            try:
+                source = Path(key)
+                detail = str(exc)
+                parsed = {
+                    "file": source.name or key,
+                    "supplier": "", "invoice_number": "",
+                    "date": "", "due_date": "", "ocr": "",
+                    "total_amount": 0.0,
+                    "missing": [
+                        "belopp", "fakturanummer", "leverantör",
+                    ],
+                    "status": "scan_error",
+                    "method": f"läsfel ({stage})",
+                    "_path": key, "_text": "",
+                    "_scan_error": True,
+                    "error_detail": detail,
+                }
+                self.file_error.emit({
+                    "hash": str(digest or ""), "path": key,
+                    "file": source.name or key,
+                    "reason": "read-error", "stage": str(stage),
+                    "error": detail, "method": parsed["method"],
+                    "parsed": parsed,
+                })
+            except Exception as emit_exc:
+                log.debug(
+                    "SCAN_WATCH: kunde inte visa fellrad %s: %s",
+                    key, emit_exc,
+                )
+        if self._reported_file_errors.get(key) == signature:
+            return
+        self._reported_file_errors[key] = signature
+        log.error(
+            "SCAN_WATCH: kunde inte %s originalfil %s (hash=%s): %s",
+            stage, key, digest or "—", exc,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
 
     def _heal_missing_imports(self) -> None:
         """Självläkning: filer som står som importerade i
@@ -982,6 +1075,8 @@ class WatchManager(QObject):
             if not (
                 reason == "no-template"
                 or reason == "uncertain-supplier"
+                or reason == "ocr-warning"
+                or reason == "payment-details"
                 or reason.startswith("missing")
             ):
                 continue
@@ -1024,18 +1119,30 @@ class WatchManager(QObject):
                 continue
             try:
                 digest = file_hash(path)
-            except Exception:
+            except Exception as exc:
+                self._record_scan_error(str(path), "hasha", "", exc)
                 continue
             if digest in self._config["processed"]:
                 if force:
-                    if si is None:
-                        si = self._scan_module()
-                    if self._control_check_file(si, entry, path, digest):
+                    try:
+                        if si is None:
+                            si = self._scan_module()
+                        controlled = self._control_check_file(
+                            si, entry, path, digest
+                        )
+                    except Exception as exc:
+                        self._record_scan_error(
+                            str(path), "kontrolläsa", digest, exc
+                        )
+                        continue
+                    if controlled:
                         continue
                     # Ingen faktura i registret hör till filen
                     # längre — kontrollen tog bort markeringen,
                     # så filen läses in som ny nedan.
                 else:
+                    self._reported_file_errors.pop(str(path), None)
+                    self.file_recovered.emit(str(path))
                     self._scan_stats["already"] += 1
                     continue
             parked_entry = next(
@@ -1073,9 +1180,18 @@ class WatchManager(QObject):
                 )
                 self._config["parked"].remove(parked_entry)
                 self._save()
-            if si is None:
-                si = self._scan_module()
-            self._process_file(si, entry, path, digest)
+            try:
+                if si is None:
+                    si = self._scan_module()
+                self._process_file(si, entry, path, digest)
+            except Exception as exc:
+                # Ett trasigt/skyddat original får aldrig stoppa resten av
+                # mappen eller markeras som bearbetat. Nästa skanning prövar
+                # filen igen; övriga original fortsätter normalt.
+                self._record_scan_error(str(path), "läsa/tolka", digest, exc)
+                continue
+            self._reported_file_errors.pop(str(path), None)
+            self.file_recovered.emit(str(path))
 
     def _parse_file(
         self, si: Any, entry: dict, path: Path
@@ -1094,12 +1210,14 @@ class WatchManager(QObject):
                 templates = self._templates_provider() or {}
             except Exception:
                 templates = {}
-        learning = None
+        # Missing/corrupt learning memory means zero confirmations,
+        # never implicit trust in a saved custom template.
+        learning = {}
         if self._learning_provider is not None:
             try:
                 learning = self._learning_provider() or {}
             except Exception:
-                learning = None
+                learning = {}
         parse_file = getattr(si, "parse_invoice_file", None)
         if parse_file is not None:
             try:
@@ -1114,7 +1232,8 @@ class WatchManager(QObject):
                 )
         else:
             parsed = si.parse_invoice_text(
-                text or "", self._suppliers(), templates=templates
+                text or "", self._suppliers(), templates=templates,
+                match_learning=learning,
             )
         folder_supplier = str(entry.get("supplier", "")).strip()
         if folder_supplier:
@@ -1176,6 +1295,21 @@ class WatchManager(QObject):
                     m for m in parsed.get("missing", [])
                     if m != "leverantör"
                 ]
+        if "ocr-saknas" in str(method) or "ocr-fel" in str(method):
+            parsed["ocr_warning"] = str(method)
+        assessor = getattr(si, "assess_invoice_payment_details", None)
+        if callable(assessor):
+            parsed = assessor(
+                parsed, text or "", self._suppliers(),
+                details=parsed.get("invoice_payment_details"),
+            )
+        template_guard = getattr(
+            si, "require_template_confirmation", None
+        )
+        if callable(template_guard):
+            parsed = template_guard(
+                parsed, templates, learning, self._suppliers()
+            )
         return text, method, parsed
 
     def _find_invoice_for_file(
@@ -1241,14 +1375,13 @@ class WatchManager(QObject):
         try:
             _text, _method, parsed = self._parse_file(si, entry, path)
         except Exception as exc:
-            log.warning(
-                "SCAN_WATCH kontroll %s: %s", path.name, exc
-            )
-            self._scan_stats["already"] = (
-                self._scan_stats.get("already", 0) + 1
+            self._record_scan_error(
+                str(path), "kontrolläsa", digest, exc
             )
             return True
+        self._reported_file_errors.pop(str(path), None)
         changes = invoice_control_changes(inv, parsed)
+        self.file_recovered.emit(str(path))
         if not changes:
             self._scan_stats["already"] = (
                 self._scan_stats.get("already", 0) + 1
@@ -1371,12 +1504,18 @@ class WatchManager(QObject):
         # appen gissar aldrig och registrerar aldrig automatiskt.
         untaught = not parsed.get("template")
         uncertain = bool(parsed.get("match_uncertain"))
+        ocr_warning = bool(parsed.get("ocr_warning"))
+        payment_warning = bool(parsed.get("payment_details_warning"))
         if (
-            uncertain or parsed.get("missing") or possible_dup
-            or not self.auto_create or untaught
+            uncertain or ocr_warning or payment_warning or parsed.get("missing")
+            or possible_dup or not self.auto_create or untaught
         ):
             if uncertain:
                 reason = "uncertain-supplier"
+            elif payment_warning:
+                reason = "payment-details"
+            elif ocr_warning:
+                reason = "ocr-warning"
             elif parsed.get("missing"):
                 reason = "missing: " + ", ".join(
                     parsed.get("missing", [])

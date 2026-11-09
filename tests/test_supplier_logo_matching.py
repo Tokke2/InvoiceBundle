@@ -105,6 +105,235 @@ def test_logo_signature_and_matching_run_on_a_real_pdf_page(tmp_path):
     }]
 
 
+def test_pdf_logo_region_suggestions_find_embedded_images_and_vectors(
+    tmp_path,
+):
+    import fitz
+
+    png = _logo_png()
+    path = tmp_path / "embedded-logo.pdf"
+    document = fitz.open()
+    page = document.new_page(width=600, height=800)
+    page.insert_image(fitz.Rect(36, 28, 170, 112), stream=png)
+    # Vector artwork (as used by many PDF/SVG logos) is not a separate
+    # SVG file; it is drawn into the PDF page as paths.
+    page.draw_rect(
+        fitz.Rect(370, 34, 500, 105),
+        color=(0.05, 0.3, 0.5), fill=(0.05, 0.3, 0.5),
+    )
+    page.draw_circle(
+        (435, 69), 20, color=(1, 1, 1), fill=(1, 1, 1),
+    )
+    page.draw_line((420, 78), (435, 48), color=(0.9, 0.7, 0.1), width=5)
+    page.draw_line((435, 48), (450, 78), color=(0.9, 0.7, 0.1), width=5)
+    document.save(path)
+    document.close()
+
+    candidates = si.supplier_logo_region_candidates(path)
+    assert any(item["source"] == "embedded_image" for item in candidates)
+    assert any(item["source"] == "vector_art" for item in candidates)
+    assert all(
+        0 <= item["region"][0] < item["region"][2] <= 1
+        and 0 <= item["region"][1] < item["region"][3] <= 1
+        for item in candidates
+    )
+    assert si.supplier_logo_region_candidates(
+        tmp_path / "not-a-pdf.png"
+    ) == []
+
+
+def test_full_page_scan_only_suggests_header_areas_for_review(tmp_path):
+    import fitz
+
+    path = tmp_path / "scanned.pdf"
+    document = fitz.open()
+    page = document.new_page(width=600, height=800)
+    page.insert_image(page.rect, stream=_logo_png())
+    document.save(path)
+    document.close()
+
+    candidates = si.supplier_logo_region_candidates(path)
+    assert len(candidates) == 2
+    assert {item["source"] for item in candidates} == {"header_area"}
+    assert all(item["page"] == 0 for item in candidates)
+
+
+def test_template_dialog_previews_selected_pdf_logo_candidate_before_save(
+    tmp_path, monkeypatch,
+):
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import fitz
+    import ui.scan_import_view as scan_ui
+    from ui.scan_import_view import TemplateDialog
+
+    path = tmp_path / "invoice.pdf"
+    document = fitz.open()
+    page = document.new_page(width=600, height=800)
+    page.insert_image(fitz.Rect(36, 28, 170, 112), stream=_logo_png())
+    document.save(path)
+    document.close()
+
+    candidates = si.supplier_logo_region_candidates(path)
+    assert candidates
+    monkeypatch.setattr(
+        scan_ui.QInputDialog, "getItem",
+        lambda _parent, _title, _prompt, labels, *_args: (labels[0], True),
+    )
+    dialog = TemplateDialog(
+        None, "", supplier="Alpha AB", existing=None, path=path,
+        suppliers=[{"name": "Alpha AB"}], templates={},
+        logo_only=True, suggest_logo_match=False,
+    )
+    try:
+        dialog._suggest_logo_regions()
+        assert dialog._pending_logo_candidate is not None
+        assert dialog._logo_region == (
+            candidates[0]["page"], tuple(candidates[0]["region"])
+        )
+        # Merely selecting a suggestion neither saves a template nor
+        # confirms the invoice; the user still has to press Save.
+        assert dialog.result_template is None
+        dialog._save()
+        saved = si.supplier_logo_specs(dialog.result_template)
+        assert saved
+        assert saved[-1]["dhash"] == dialog._logo_hash
+    finally:
+        dialog.close()
+
+
+def test_logo_mark_dialog_exposes_an_explicit_supplier_dropdown():
+    from PySide6.QtWidgets import QApplication, QComboBox
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import TemplateDialog
+
+    dialog = TemplateDialog(
+        None, "", supplier="Alpha AB", path=None,
+        suppliers=[{"name": "Alpha AB"}, {"name": "Beta AB"}],
+        templates={"Alpha AB": {}, "Beta AB": {}},
+        logo_only=True, suggest_logo_match=False,
+    )
+    try:
+        assert isinstance(dialog._supplier_edit, QComboBox)
+        assert not dialog._supplier_edit.isEditable()
+        assert dialog._supplier_edit.currentText() == "Alpha AB"
+        beta_index = dialog._supplier_edit.findText("Beta AB")
+        assert beta_index >= 0
+        dialog._supplier_edit.setCurrentIndex(beta_index)
+        assert dialog._supplier_edit.currentText() == "Beta AB"
+    finally:
+        dialog.close()
+
+
+def test_marked_logo_dropdown_reassigns_candidate_and_preserves_variants(
+    tmp_path, monkeypatch,
+):
+    from PySide6.QtWidgets import (
+        QApplication, QComboBox, QDialog, QLabel, QPushButton, QWidget,
+    )
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as scan_ui
+
+    def logo_spec(hex_digit: str, page: int = 0) -> dict:
+        return {
+            "page": page,
+            "region": [0.1, 0.1, 0.4, 0.4],
+            "dhash": "dhash128-v1:" + hex_digit * 32,
+        }
+
+    alpha_logo = logo_spec("a")
+    beta_logo_1 = logo_spec("1")
+    beta_logo_2 = logo_spec("2", page=1)
+    new_beta_logo = logo_spec("b", page=2)
+    original_templates = {
+        "Alpha AB": {
+            "fields": {},
+            "supplier_logo": alpha_logo,
+        },
+        "Beta AB": {
+            "fields": {"due_date": {"label": "Förfallodatum"}},
+            "supplier_logo": beta_logo_1,
+            "supplier_logos": [beta_logo_1, beta_logo_2],
+        },
+    }
+    saved_path = tmp_path / "invoice_templates.json"
+
+    class FakeTemplateDialog:
+        def __init__(self, *_args, suppliers, **_kwargs):
+            self._supplier_edit = QComboBox()
+            self._supplier_edit.addItems([
+                str(item["name"]) for item in suppliers
+            ])
+            self._supplier_edit.setCurrentIndex(
+                self._supplier_edit.findText("Beta AB")
+            )
+            self._btn_match_bg = QPushButton()
+            self.result_template = {
+                "supplier": "Beta AB",
+                "fields": {},
+                "supplier_logo": new_beta_logo,
+                "supplier_logos": [new_beta_logo],
+            }
+
+        def setWindowTitle(self, _title):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    class ViewHarness:
+        _templates_cache = None
+
+        def _get_templates(self):
+            return original_templates
+
+        def _suppliers(self):
+            return [{"name": "Alpha AB"}, {"name": "Beta AB"}]
+
+        def _templates_file(self):
+            return saved_path
+
+        def _refresh_templates_btn(self):
+            self.refreshed = True
+
+    monkeypatch.setattr(scan_ui, "TemplateDialog", FakeTemplateDialog)
+    monkeypatch.setattr(scan_ui, "_scan_module", lambda: si)
+    monkeypatch.setattr(si, "page_image_count", lambda _path: 1)
+
+    match_combo = QComboBox()
+    match_combo.addItem("Alpha AB")
+    row = {
+        "_path": "invoice.pdf", "_text": "", "file": "invoice.pdf",
+        "match_uncertain": True,
+    }
+    row_before = dict(row)
+    parent = QWidget()
+    note = QLabel()
+    view = ViewHarness()
+    try:
+        assert scan_ui.ScanImportView._mark_supplier_logo_for_match(
+            view, row, match_combo, parent, note
+        )
+
+        saved = si.load_templates(saved_path)
+        beta_specs = si.supplier_logo_specs(saved["Beta AB"])
+        assert beta_specs == [beta_logo_1, beta_logo_2, new_beta_logo]
+        assert saved["Beta AB"]["fields"] == original_templates[
+            "Beta AB"
+        ]["fields"]
+        assert saved["Alpha AB"] == original_templates["Alpha AB"]
+        assert match_combo.currentText() == "Beta AB"
+        # Marking/saving the logo only changes supplier-template state;
+        # it does not apply or confirm the invoice row.
+        assert row == row_before
+        assert view.refreshed
+    finally:
+        parent.close()
+
+
 def test_multiple_saved_logo_variants_match_once_per_supplier(monkeypatch):
     png = _logo_png()
     region_a = (0.10, 0.15, 0.62, 0.85)
@@ -168,6 +397,29 @@ def test_confirmed_logo_signature_checks_all_saved_variants(monkeypatch):
     assert si.confirmed_supplier_logo_signature(
         "invoice.pdf", "Alpha AB", templates
     ) == second
+
+
+def test_confirmed_logo_signature_resolves_a_registered_alias(monkeypatch):
+    signature = LOGO_HASH
+    monkeypatch.setattr(
+        si, "supplier_logo_signature", lambda *_args: signature,
+    )
+    templates = {"Alpha Trading": {"supplier_logo": {
+        "page": 0, "region": [0.1, 0.1, 0.4, 0.4],
+        "dhash": signature,
+    }}}
+    suppliers = [{"name": "Alpha Holdings AB", "aliases": ["Alpha Trading"]}]
+    assert si.confirmed_supplier_logo_signature(
+        "invoice.pdf", "Alpha Holdings AB", templates,
+        suppliers=suppliers,
+    ) == signature
+    shared_alias_suppliers = suppliers + [{
+        "name": "Alpha Trading AB", "aliases": ["Alpha Trading"],
+    }]
+    assert si.confirmed_supplier_logo_signature(
+        "invoice.pdf", "Alpha Holdings AB", templates,
+        suppliers=shared_alias_suppliers,
+    ) == ""
 
 
 def test_confirmed_logo_signature_is_counted_only_for_its_supplier(

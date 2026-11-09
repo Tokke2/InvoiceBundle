@@ -432,7 +432,16 @@ def test_autostart_command_has_minimized() -> None:
     assert mgr.starts_minimized()
     assert "--minimized" in mgr._app_command()
     assert mgr.working_directory() == appmod.BASE_DIR.resolve()
-    assert "start_hidden" in mgr.build_command().replace("\\", "/")
+    # Standardmetoden är DIREKT (utan VBS/startfil) på alla OS
+    assert mgr.resolved_method() == "direct"
+    assert "start_hidden" not in mgr.build_command()
+    assert "--minimized" in mgr.build_command()
+    # Launcher-metoden pekar fortfarande på startfilen i appmappen
+    launcher_mgr = appmod.AutostartManager(method="launcher")
+    assert launcher_mgr.resolved_method() == "launcher"
+    assert "start_hidden" in launcher_mgr.build_command().replace(
+        "\\", "/"
+    )
 
 
 def test_autostart_launcher_pins_cwd() -> None:
@@ -442,8 +451,11 @@ def test_autostart_launcher_pins_cwd() -> None:
     assert path.parent.resolve() == (appmod.BASE_DIR / "autostart").resolve()
     text = path.read_text(encoding="utf-8")
     assert "--minimized" in text
-    assert str(appmod.BASE_DIR) in text
-    assert "cd " in text
+    # Startfilen är PORTABEL: den hittar appmappen själv ($APP_DIR)
+    # i stället för en inbakad absolut sökväg — därför får den
+    # fungera även efter att hela mappen flyttats.
+    assert "main.py" in text
+    assert "APP_DIR" in text or "cd " in text
 
 
 def test_confine_export_never_leaves_app(tmp_path: Path) -> None:
@@ -652,6 +664,7 @@ def test_supplier_defaults_roundtrip(tmp_path: Path) -> None:
 
 def test_invoice_dialog_smart_fill(tmp_path: Path) -> None:
     from types import SimpleNamespace
+
     from PySide6.QtWidgets import QApplication
     from ui.invoices_helpers import InvoiceDialog
 
@@ -708,9 +721,9 @@ def test_invoice_dialog_smart_fill(tmp_path: Path) -> None:
 
 
 def test_pdf_pro_design_multipage(tmp_path: Path) -> None:
-    try:
-        import reportlab  # noqa: F401
-    except ImportError:
+    import importlib.util as _ilu
+
+    if _ilu.find_spec("reportlab") is None:
         print("  (hoppar över: reportlab saknas)")
         return
     sys.path.insert(0, str(PROJECT_DIR / "plugins"))
@@ -946,7 +959,6 @@ def test_scan_extract_unknown_filetype(tmp_path: Path) -> None:
 
 
 def test_scan_view_builds(tmp_path: Path) -> None:
-    from types import SimpleNamespace
     from PySide6.QtWidgets import QApplication
     from ui.scan_import_view import ScanImportView, _fmt_amount
 
@@ -977,6 +989,29 @@ def test_scan_view_builds(tmp_path: Path) -> None:
 
     assert _fmt_amount(45546.0) == "45 546,00"
     assert _fmt_amount(0) == ""
+
+
+def test_legacy_startup_log_is_moved_under_app_logs(tmp_path: Path) -> None:
+    legacy = tmp_path / "startup_crash.log"
+    target = tmp_path / "logs" / "startup_crash.log"
+    archive = tmp_path / "logs" / "archive" / "app-2026-11-03.jsonl"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_text("keep daily archive\n", encoding="utf-8")
+    legacy.write_text("old crash entry\n", encoding="utf-8")
+
+    appmod.clean_legacy_logs(tmp_path)
+
+    assert not legacy.exists()
+    assert target.read_text(encoding="utf-8") == "old crash entry\n"
+    assert archive.read_text(encoding="utf-8") == "keep daily archive\n"
+
+    # If a canonical log already exists, preserve both contents in logs/.
+    legacy.write_text("another old crash entry\n", encoding="utf-8")
+    appmod.clean_legacy_logs(tmp_path)
+    assert not legacy.exists()
+    saved = target.read_text(encoding="utf-8")
+    assert "old crash entry" in saved
+    assert "another old crash entry" in saved
 
 
 if __name__ == "__main__":

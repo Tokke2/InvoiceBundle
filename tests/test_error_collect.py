@@ -82,7 +82,9 @@ def test_mirror_writes_errors_not_warnings(tmp_path):
 def test_mirror_never_writes_info(tmp_path):
     import error_collect as ec
 
-    assert ec.error_log_path(tmp_path).name == "felsamling.log"
+    assert ec.error_log_path(tmp_path) == (
+        tmp_path / "logs" / "felsamling.log"
+    )
     _drop_mirror_handlers()
     handler = ec.ErrorMirrorHandler(ec.error_log_path(tmp_path))
     assert handler.level == logging.ERROR
@@ -163,17 +165,83 @@ def test_collect_is_deduplicated(tmp_path):
     assert _read(tmp_path).count("PDF trasig") == 1
 
 
-def test_collect_trims_to_max_lines(tmp_path, monkeypatch):
+def test_collect_never_trims_unresolved_error_history(tmp_path):
     import error_collect as ec
 
-    monkeypatch.setattr(ec, "MAX_LINES", 6)
-    _seed_logs(tmp_path)
+    path = ec.error_log_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    history = [f"2026-10-30 | ERROR | legacy | unresolved-{i}" for i in range(5100)]
+    path.write_text("# persistent error history\n" + "\n".join(history) + "\n", encoding="utf-8")
+
+    report = ec.collect_errors(tmp_path)
+
+    lines = [ln for ln in _read(tmp_path).splitlines() if not ln.startswith("#")]
+    assert report["total"] == 5100
+    assert len(lines) == 5100
+    assert "unresolved-0" in lines[0]
+    assert "unresolved-5099" in lines[-1]
+
+
+def test_error_auto_resolves_after_72h_and_reopens_on_recurrence(tmp_path):
+    import datetime as dt
+    import error_collect as ec
+
+    first_seen = dt.datetime(2026, 11, 1, 8, 0, 0)
+    event = {
+        "timestamp": first_seen.isoformat(), "level": "ERROR",
+        "logger": "ScanImport", "message": "PDF-kunde-inte-lasas",
+        "exception_type": "ValueError", "location": "scan:42",
+    }
+    ec.register_error_events(tmp_path, [event])
+    state_path = ec.error_state_path(tmp_path)
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    issue = next(iter(state["issues"].values()))
+    assert issue["status"] == "open"
+    code = issue["code"]
+
+    assert ec.resolve_stale_error_issues(
+        tmp_path, now=first_seen + dt.timedelta(hours=71)
+    ) == 0
+    assert ec.resolve_stale_error_issues(
+        tmp_path, now=first_seen + dt.timedelta(hours=72)
+    ) == 1
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["issues"][issue["fingerprint"]]["status"] == "likely_resolved"
+
+    repeat = dict(event)
+    repeat["timestamp"] = (first_seen + dt.timedelta(hours=73)).isoformat()
+    ec.register_error_events(tmp_path, [repeat])
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    reopened = state["issues"][issue["fingerprint"]]
+    assert reopened["status"] == "open"
+    assert reopened["reopen_count"] == 1
+    text = _read(tmp_path)
+    assert f"TROLIGEN ÅTGÄRDAT (72 h utan ny träff) | {code}" in text
+    assert f"ÅTERÖPPNAT | {code}" in text
+
+
+def test_collect_harvests_errors_from_daily_archives(tmp_path):
+    import error_collect as ec
+
+    archive = tmp_path / "logs" / "archive"
+    archive.mkdir(parents=True)
+    (archive / "app-2026-11-03.jsonl").write_text(
+        json.dumps({
+            "ts": "2026-11-03T23:59:59", "level": "ERROR",
+            "logger": "ArchivedModule", "msg": "Gammalt appfel",
+            "loc": "archived:12",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    (archive / "autostart-2026-11-03.log").write_text(
+        "2026-11-03 23:58:00 ERROR gammalt startfel\n",
+        encoding="utf-8",
+    )
+
     ec.collect_errors(tmp_path)
-    lines = [
-        ln for ln in _read(tmp_path).splitlines()
-        if not ln.startswith("#")
-    ]
-    assert len(lines) <= 6
+    text = _read(tmp_path)
+    assert "Gammalt appfel" in text
+    assert "gammalt startfel" in text
 
 
 def test_collect_tolerates_missing_logs(tmp_path):

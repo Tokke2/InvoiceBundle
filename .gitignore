@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+bak/
+logs/
+exports/
+settings.json
+shortcuts.json
+InvoiceBundle-v*.zip

@@ -394,7 +394,7 @@ def test_import_manual_match_keeps_learning_logo_after_threshold(
 
     monkeypatch.setattr(
         si, "confirmed_supplier_logo_signature",
-        lambda path, supplier, templates: signature,
+        lambda path, supplier, templates, **kwargs: signature,
     )
     view = ScanImportView(
         app=FakeCore(), templates_path=templates_file,
@@ -707,6 +707,406 @@ def test_multipage_pdf_extract_covers_all_pages(tmp_path):
     )
     assert parsed["invoice_number"] == "9911"
     assert parsed["total_amount"] == 5000.0
+
+
+def test_ocr_falls_back_to_swedish_language_data(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+
+    def image_to_string(_image, *, lang):
+        calls.append(lang)
+        if lang != "swe":
+            raise RuntimeError("language data unavailable")
+        return "Faktura"
+
+    monkeypatch.setattr(si, "HAS_TESS", True)
+    monkeypatch.setattr(si, "tesseract_available", lambda: True)
+    monkeypatch.setattr(
+        si, "pytesseract", SimpleNamespace(image_to_string=image_to_string)
+    )
+    text, method = si._ocr_image_text(object())
+    assert text == "Faktura"
+    assert method == "ocr-tesseract"
+    assert calls == ["swe+eng", "eng", "swe"]
+
+
+def test_pdf_page_extraction_ocr_fills_thin_page_without_modifying_source(
+    tmp_path, monkeypatch,
+):
+    from types import SimpleNamespace
+
+    pdf = tmp_path / "mixed.pdf"
+    original = b"immutable original PDF bytes"
+    pdf.write_bytes(original)
+    monkeypatch.setattr(
+        si, "_extract_pdf_page_text_sources",
+        lambda _path: [(
+            [
+                "PILKINGTON GLAS AB\nFakturanr 9911\nAtt betala 100,00",
+                "2",
+            ],
+            "textlager-pypdf",
+        )],
+    )
+    monkeypatch.setattr(si, "HAS_FITZ", True)
+    monkeypatch.setattr(si, "tesseract_available", lambda: True)
+
+    class _Page:
+        def __init__(self, number):
+            self.number = number
+
+    class _Doc:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __len__(self):
+            return 2
+
+        def __getitem__(self, index):
+            return _Page(index)
+
+    monkeypatch.setattr(
+        si, "fitz", SimpleNamespace(open=lambda _path: _Doc())
+    )
+    monkeypatch.setattr(
+        si, "_ocr_pdf_page",
+        lambda page: (
+            ("Att betala 5 000,00 på sida två", "ocr-tesseract")
+            if page.number == 1 else ("", "ocr-tesseract")
+        ),
+    )
+
+    text, method = si.extract_pdf_pages(pdf)
+    assert "Att betala 5 000,00 på sida två" in text
+    assert "ocr-tesseract" in method
+    assert pdf.read_bytes() == original
+
+
+def test_multipage_tiff_ocr_and_render_cover_every_frame(
+    tmp_path, monkeypatch,
+):
+    from PIL import Image
+
+    first = Image.new("RGB", (12, 12), (255, 0, 0))
+    second = Image.new("RGB", (12, 12), (0, 0, 255))
+    path = tmp_path / "two-page.tiff"
+    first.save(path, save_all=True, append_images=[second])
+    first.close()
+    second.close()
+    original = path.read_bytes()
+
+    monkeypatch.setattr(si, "HAS_TESS", True)
+    monkeypatch.setattr(si, "Image", Image, raising=False)
+    monkeypatch.setattr(si, "tesseract_available", lambda: True)
+    monkeypatch.setattr(
+        si, "_ocr_image_text",
+        lambda image, **_kwargs: (
+            "page one" if image.getpixel((0, 0))[0] else "page two",
+            "ocr-tesseract",
+        ),
+    )
+
+    text, method = si.extract_image_text(path)
+    assert text == "page one\npage two"
+    assert method == "ocr-tesseract"
+    assert si.page_image_count(path) == 2
+    parsed = si.parse_invoice_file(
+        path,
+        "PILKINGTON GLAS AB\nFakturanr: 9911\nAtt betala: 1 250,00",
+        [{"name": "Pilkington"}],
+    )
+    assert parsed["pages"] == 2
+    assert parsed["match_uncertain"] is True
+    second_page = si.render_page_image(path, 1)
+    assert second_page
+    with Image.open(__import__("io").BytesIO(second_page)) as rendered:
+        assert rendered.getpixel((0, 0)) == (0, 0, 255)
+    assert path.read_bytes() == original
+
+
+def test_pdf_reports_missing_ocr_when_sparse_page_cannot_be_read(
+    tmp_path, monkeypatch,
+):
+    pdf = tmp_path / "mixed.pdf"
+    pdf.write_bytes(b"original")
+    monkeypatch.setattr(
+        si, "_extract_pdf_page_text_sources",
+        lambda _path: [(
+            ["Fakturanr 9911 och text från sidan", "2"],
+            "textlager-pypdf",
+        )],
+    )
+    monkeypatch.setattr(si, "HAS_FITZ", False)
+    monkeypatch.setattr(si, "tesseract_available", lambda: False)
+
+    _text, method = si.extract_pdf_pages(pdf)
+    assert "ocr-saknas" in method
+    assert pdf.read_bytes() == b"original"
+
+    from ui.scan_import_view import ScanImportView
+    status = ScanImportView._display_status({
+        "status": "redo", "method": method, "missing": [],
+        "_path": "", "total_amount": 100.0,
+    })
+    assert "OCR" in status or "Tesseract" in status
+
+
+def test_ocr_degraded_parked_invoice_is_visible_in_import(tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import ScanImportView
+
+    class FakeCore:
+        def get_suppliers(self):
+            return [{"name": "Alpha AB"}]
+
+        def get_setting(self, key, default=None):
+            return default
+
+    view = ScanImportView(
+        app=FakeCore(), templates_path=tmp_path / "invoice_templates.json",
+    )
+    info = {
+        "hash": "a" * 64, "path": str(tmp_path / "invoice.pdf"),
+        "file": "invoice.pdf", "text": "invoice text",
+        "method": "textlager-pypdf+ocr-saknas",
+        "parsed": {
+            "supplier": "Alpha AB", "template": "Alpha AB",
+            "invoice_number": "A-1", "total_amount": 100.0,
+            "missing": [], "ocr_warning": "textlager-pypdf+ocr-saknas",
+        },
+    }
+    try:
+        rows = view._add_parked_rows_to_table([info])
+        assert len(rows) == 1
+        assert rows[0]["_parked_hash"] == info["hash"]
+        assert "OCR" in ScanImportView._display_status(rows[0])
+    finally:
+        view.close()
+
+
+def test_create_with_ocr_warning_requires_explicit_confirmation(
+    tmp_path, monkeypatch,
+):
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as scan_ui
+    from ui.scan_import_view import ScanImportView
+
+    class FakeCore:
+        def get_suppliers(self):
+            return [{"name": "Alpha AB"}]
+
+        def get_setting(self, key, default=None):
+            return default
+
+    view = ScanImportView(
+        app=FakeCore(), templates_path=tmp_path / "invoice_templates.json",
+    )
+    row = {
+        "file": "ocr-warning.pdf", "_path": str(tmp_path / "ocr-warning.pdf"),
+        "supplier": "Alpha AB", "invoice_number": "A-1",
+        "total_amount": 100.0, "missing": [],
+        "ocr_warning": "textlager-pypdf+ocr-saknas",
+    }
+    view._rows = [row]
+    view._selected_rows = lambda: [0]
+    prompts = []
+    saved = []
+    monkeypatch.setattr(
+        scan_ui.QMessageBox, "question",
+        lambda *args, **kwargs: (
+            prompts.append(args) or QMessageBox.StandardButton.No
+        ),
+    )
+    view._save_invoice = lambda *args, **kwargs: saved.append(args) or True
+    try:
+        view._create_invoices()
+        assert len(prompts) == 1
+        assert not saved
+        assert view._rows == [row]
+    finally:
+        view.close()
+
+
+def test_scan_error_row_is_never_auto_registered_or_template_learned(
+    tmp_path, monkeypatch,
+):
+    import ui.scan_import_view as scan_ui
+    from ui.scan_import_view import ScanImportView
+
+    row = {
+        "_scan_error": True, "status": "scan_error", "missing": [],
+        "supplier": "Alpha AB", "invoice_number": "A-1",
+        "total_amount": 100.0, "_path": str(tmp_path / "bad.pdf"),
+    }
+    view = ScanImportView.__new__(ScanImportView)
+    view._rows = [row]
+    assert view._auto_register_matched_rows([row]) == 0
+    assert view._ask_user_for_match(row) is False
+    # Failed rows are explicitly excluded from automatic mallskapande.
+    view._open_template_for_unmatched([row])
+
+    shown = []
+    monkeypatch.setattr(
+        scan_ui.QMessageBox, "warning",
+        lambda *args: shown.append(args),
+    )
+    view._selected_rows = lambda: [0]
+    view._create_invoices()
+    assert len(shown) == 1
+
+
+def test_manual_import_isolates_file_errors_and_passes_match_learning(
+    tmp_path, monkeypatch,
+):
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as scan_ui
+    from ui.scan_import_view import ScanImportView
+
+    broken = tmp_path / "broken.pdf"
+    good = tmp_path / "good.pdf"
+    broken_bytes, good_bytes = b"broken original", b"good original"
+    broken.write_bytes(broken_bytes)
+    good.write_bytes(good_bytes)
+
+    class FakeCore:
+        def get_suppliers(self):
+            return [{"name": "Alpha AB"}]
+
+        def get_setting(self, key, default=None):
+            return default
+
+    def extract(path):
+        if path.name == broken.name:
+            raise OSError("simulated text-extraction failure")
+        return "invoice text", "test"
+
+    seen = []
+
+    def parse(path, text, suppliers, **kwargs):
+        seen.append((path.name, kwargs.get("match_learning")))
+        return {
+            "supplier": "Alpha AB", "invoice_number": path.stem,
+            "total_amount": 100.0, "missing": [], "template": "Alpha AB",
+        }
+
+    monkeypatch.setattr(si, "extract_text", extract)
+    monkeypatch.setattr(si, "parse_invoice_file", parse)
+    view = ScanImportView(
+        app=FakeCore(), templates_path=tmp_path / "invoice_templates.json",
+    )
+    view._learning_cache = {"Alpha AB": {"confirmed": 5}}
+    view._ask_uncertain_rows = lambda _rows: 0
+    view._open_template_for_unmatched = lambda _rows: None
+    view._txt_paths.setPlainText(f"{broken}\n{good}")
+    try:
+        view._scan_files()
+        assert len(view._rows) == 2
+        assert view._rows[0]["_scan_error"] is True
+        assert view._rows[0]["status"] == "scan_error"
+        assert view._rows[1]["status"] == "redo"
+        assert view._lbl_status.text().find("1") >= 0
+        assert [name for name, _learning in seen] == [
+            "broken.pdf", "good.pdf",
+        ]
+        assert all(
+            learning == {"Alpha AB": {"confirmed": 5}}
+            for _name, learning in seen
+        )
+        assert broken.read_bytes() == broken_bytes
+        assert good.read_bytes() == good_bytes
+    finally:
+        view.close()
+
+
+def test_watched_read_error_stays_visible_until_recovered(
+    tmp_path,
+):
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import COLUMNS, ScanImportView
+
+    class FakeCore:
+        def get_suppliers(self):
+            return [{"name": "Alpha AB"}]
+
+        def get_setting(self, key, default=None):
+            return default
+
+    path = tmp_path / "unreadable.pdf"
+    error_row = {
+        "file": path.name, "supplier": "", "invoice_number": "",
+        "date": "", "due_date": "", "ocr": "",
+        "total_amount": 0.0,
+        "missing": ["belopp", "fakturanummer", "leverantör"],
+        "status": "scan_error", "method": "läsfel (hasha)",
+        "_path": str(path), "_text": "", "_scan_error": True,
+        "error_detail": "simulated file access error",
+    }
+    info = {
+        "hash": "error-hash", "path": str(path), "file": path.name,
+        "reason": "read-error", "method": error_row["method"],
+        "parsed": error_row, "error": error_row["error_detail"],
+    }
+    view = ScanImportView(
+        app=FakeCore(), templates_path=tmp_path / "invoice_templates.json",
+    )
+    try:
+        # A previously uncertain Import row must be upgraded to a visible
+        # read-error row instead of being hidden by hash deduplication.
+        existing_uncertain = dict(error_row)
+        existing_uncertain.pop("_scan_error")
+        existing_uncertain["match_uncertain"] = True
+        existing_uncertain["status"] = "saknas: belopp"
+        view._rows.append(existing_uncertain)
+        view._on_watch_file_error(info)
+        assert len(view._rows) == 1
+        assert view._rows[0] is existing_uncertain
+        row = view._rows[0]
+        assert row["_scan_error"] is True
+        assert row["status"] == "scan_error"
+        status_column = next(
+            i for i, column in enumerate(COLUMNS)
+            if column[1] == "status"
+        )
+        assert view._tbl.item(0, status_column).text() == \
+            view._display_status(row)
+        assert view._auto_register_matched_rows([row]) == 0
+        # Repeated 30-second poll reports the error but does not duplicate it.
+        view._on_watch_file_error(info)
+        assert len(view._rows) == 1
+
+        # Identical bytes at a different path are still separate files and
+        # must each remain visible until that specific path is readable.
+        second_path = tmp_path / "same-content.pdf"
+        second_row = dict(error_row)
+        second_row["file"] = second_path.name
+        second_row["_path"] = str(second_path)
+        second_info = dict(info)
+        second_info["file"] = second_path.name
+        second_info["path"] = str(second_path)
+        second_info["parsed"] = second_row
+        view._on_watch_file_error(second_info)
+        assert len(view._rows) == 2
+        assert view._auto_register_matched_rows(view._rows) == 0
+
+        view._on_watch_file_recovered(str(path))
+        assert len(view._rows) == 1
+        assert view._rows[0]["_path"] == str(second_path)
+        view._on_watch_file_recovered(str(second_path))
+        assert view._rows == []
+    finally:
+        view.close()
 
 
 def test_parse_credit_note_gets_negative_total():
@@ -1488,6 +1888,54 @@ def test_suggest_template_repairs_from_invoice_text():
     assert si.suggest_template_repairs(
         MARTIN_G_PAIRED, region_only
     ) == []
+
+
+def test_template_field_suggestions_are_value_checked_and_conservative():
+    suggestions = si.suggest_template_fields(DRIFT_TEXT, {"fields": {}})
+    by_field = {item["field"]: item for item in suggestions}
+    assert set(by_field) == {"invoice_number", "total_amount", "date", "due_date"}
+    assert by_field["invoice_number"]["label"] == "Faktura nr"
+    assert by_field["invoice_number"]["value"] == "NL-2026-0771"
+    assert by_field["total_amount"]["value"] == 1125.0
+    assert by_field["date"]["value"] == "2026-09-01"
+    assert by_field["due_date"]["value"] == "2026-10-01"
+
+    # Fungerande fält bevaras, och bildregioner ersätts aldrig av
+    # automatiskt föreslagna etiketter.
+    existing = {"fields": {
+        "invoice_number": {"label": "Faktura nr"},
+        "total_amount": {"region": [0.1, 0.1, 0.3, 0.2]},
+    }}
+    kept = si.suggest_template_fields(DRIFT_TEXT, existing)
+    assert "invoice_number" not in {item["field"] for item in kept}
+    assert "total_amount" not in {item["field"] for item in kept}
+
+    ambiguous = (
+        "Fakturanr: A-1\nAtt betala: 100,00\nTotalt: 90,00\n"
+    )
+    ambiguous_fields = si.suggest_template_fields(
+        ambiguous, {"fields": {}}
+    )
+    assert "total_amount" not in {
+        item["field"] for item in ambiguous_fields
+    }
+    amount_candidates = si.template_field_label_candidates(
+        ambiguous, "total_amount"
+    )
+    assert {
+        (item["label"], item["value"])
+        for item in amount_candidates
+    } >= {("Att betala", 100.0), ("Totalt", 90.0)}
+
+    # En kolumnrubrik vars värde står på raden under sparar även den
+    # nödvändiga "below"-regeln, inte bara rubriktexten.
+    stacked = {
+        item["field"]: item
+        for item in si.suggest_template_fields(
+            MARTIN_G_ROW, {"fields": {}}
+        )
+    }
+    assert stacked["invoice_number"]["below"] is True
 
 
 def test_drift_offer_repairs_template_and_rereads_rows(
@@ -2326,6 +2774,42 @@ def test_template_lookup_name_variants_unambiguous():
     assert si.find_template(amb, "Martin G Anderson") is amb["Martin G Anderson"]
     assert si.find_template(amb, "Martin") is None
 
+    alias_template = {"Northwind Energy": {"fields": {}}}
+    supplier = {
+        "name": "Northwind Legal AB",
+        "aliases": ["Northwind Energy"],
+    }
+    assert si.find_template(
+        alias_template, "Northwind Legal AB", [supplier]
+    ) is alias_template["Northwind Energy"]
+    shared_alias_suppliers = [
+        supplier,
+        {"name": "Northwind Energy Inc", "aliases": ["Northwind Energy"]},
+    ]
+    assert si.find_template(
+        alias_template, "Northwind Legal AB", shared_alias_suppliers
+    ) is None
+    alias_overlaps_another_name = [
+        supplier, {"name": "Northwind Energy AB"},
+    ]
+    assert si.find_template(
+        alias_template, "Northwind Legal AB", alias_overlaps_another_name
+    ) is None
+    competing_aliases = {
+        **alias_template,
+        "Northwind Legal AB": {"fields": {"date": {"label": "Date"}}},
+    }
+    assert si.find_template(
+        competing_aliases, "Northwind Legal AB", [supplier]
+    ) is None
+    case_ambiguous = {
+        "Northwind Energy": {"fields": {}},
+        "northwind energy": {"fields": {"date": {"label": "Date"}}},
+    }
+    assert si.find_template(
+        case_ambiguous, "Northwind Legal AB", [supplier]
+    ) is None
+
 
 def test_number_and_total_label_variants():
     """Fler entydiga etiketter: 'Faktura nr', 'Invoice number',
@@ -2356,6 +2840,51 @@ def test_template_applies_for_register_name_variant():
     assert parsed["template"] == "AB Nordlys Energi"
     assert parsed["invoice_number"] == "NL-2026-0771"
     assert parsed["total_amount"] == 1125.0
+
+
+def test_registered_alias_resolves_its_template_without_false_conflict():
+    supplier = {
+        "name": "Northwind Legal AB",
+        "aliases": ["Northwind Energy"],
+    }
+    template = {"fields": {
+        "invoice_number": {"label": "Invoice number"},
+        "total_amount": {"label": "Amount due"},
+    }}
+    parsed = si.parse_invoice_text(
+        "NORTHWIND ENERGY\nInvoice number: NW-17\nAmount due: 123.45\n",
+        suppliers=[supplier],
+        templates={"Northwind Energy": template},
+    )
+    assert parsed["supplier"] == "Northwind Legal AB"
+    assert parsed["template"] == "Northwind Legal AB"
+    assert parsed["invoice_number"] == "NW-17"
+    assert parsed["total_amount"] == 123.45
+    assert not parsed.get("match_uncertain")
+
+
+def test_multiple_templates_for_registered_alias_remain_uncertain():
+    supplier = {
+        "name": "Northwind Legal AB",
+        "aliases": ["Northwind Energy"],
+    }
+    template = {"fields": {
+        "invoice_number": {"label": "Invoice number"},
+        "total_amount": {"label": "Amount due"},
+    }}
+    parsed = si.parse_invoice_text(
+        "NORTHWIND ENERGY\nInvoice number: NW-17\nAmount due: 123.45\n",
+        suppliers=[supplier],
+        templates={
+            "Northwind Legal AB": template,
+            "Northwind Energy": template,
+        },
+    )
+    assert parsed.get("match_uncertain") is True
+    assert parsed["match_reason"] == "template_ambiguous"
+    assert set(parsed["match_candidates"]) == {
+        "Northwind Legal AB", "Northwind Energy",
+    }
 
 
 def test_manual_create_warns_and_skips_possible_duplicate(

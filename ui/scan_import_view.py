@@ -26,6 +26,7 @@ Allt loggas som SCAN_IMPORT / SCAN_CREATE i logs/app.log.
 Copyright © dynamiskt år Rickard Längkvist
 """
 
+import copy
 import datetime
 import logging
 import re
@@ -64,6 +65,13 @@ except Exception:  # pragma: no cover - fristående körning
             return _QP()
 
 log = logging.getLogger("ScanImportView")
+
+try:
+    from ui.typography import make_tabular_font, set_item_font
+except ImportError:
+    from typography import (  # type: ignore[no-redef]
+        make_tabular_font, set_item_font,
+    )
 
 try:
     from ui.i18n import tr, tr_list, tr_missing
@@ -518,6 +526,16 @@ class _RegionImageView(QWidget):
         self.update()
 
 
+class _SupplierComboBox(QComboBox):
+    """Leverantörsväljare med ``text()``-kompatibilitet mot äldre vytester."""
+
+    def text(self) -> str:
+        return self.currentText()
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        self.setCurrentText(str(text or ""))
+
+
 class TemplateDialog(QDialog):
     """
     Skapa/redigera en leverantörsmall mot fakturans BILD.
@@ -603,6 +621,7 @@ class TemplateDialog(QDialog):
                     continue
         self._logo_specs = si.supplier_logo_specs(existing)
         self._logo_new_specs: list[dict] = []
+        self._pending_logo_candidate: dict | None = None
         self._logo_region: tuple[int, tuple] | None = None
         self._logo_hash = ""
         for logo_spec in self._logo_specs:
@@ -629,7 +648,37 @@ class TemplateDialog(QDialog):
 
         row_sup = QHBoxLayout()
         row_sup.addWidget(QLabel(tr("tmpl.supplier")))
-        self._supplier_edit = QLineEdit(supplier)
+        self._supplier_edit = _SupplierComboBox()
+        supplier_options: list[str] = []
+        supplier_seen: set[str] = set()
+        for record in self._suppliers:
+            name = str(record.get("name", "") or "").strip()
+            key = name.casefold()
+            if name and key not in supplier_seen:
+                supplier_options.append(name)
+                supplier_seen.add(key)
+        for name in sorted(self._templates, key=str.casefold):
+            value = str(name or "").strip()
+            key = value.casefold()
+            if value and key not in supplier_seen:
+                supplier_options.append(value)
+                supplier_seen.add(key)
+        initial_supplier = str(supplier or "").strip()
+        if initial_supplier and initial_supplier.casefold() not in supplier_seen:
+            supplier_options.append(initial_supplier)
+            supplier_seen.add(initial_supplier.casefold())
+        self._supplier_edit.addItems(supplier_options)
+        # Template creation may introduce a new supplier; logo-only marking
+        # must bind the real image to an explicit existing dropdown choice.
+        self._supplier_edit.setEditable(not self._logo_only)
+        self._supplier_edit.setCurrentIndex(-1)
+        if initial_supplier:
+            current_name = next(
+                (name for name in supplier_options
+                 if name.casefold() == initial_supplier.casefold()),
+                initial_supplier,
+            )
+            self._supplier_edit.setCurrentText(current_name)
         row_sup.addWidget(self._supplier_edit, stretch=1)
         self._btn_match_bg = QPushButton(tr("tmpl.match_bg"))
         self._btn_match_bg.clicked.connect(self._match_supplier_by_bankgiro)
@@ -735,6 +784,16 @@ class TemplateDialog(QDialog):
         self._logo_preview.setMinimumWidth(120)
         logo_texts.addWidget(self._logo_preview)
         logo_row.addLayout(logo_texts, stretch=1)
+        self._btn_suggest_logo = QPushButton(tr("tmpl.suggest_logo"))
+        self._btn_suggest_logo.setToolTip(tr("tmpl.logo_suggest_help"))
+        self._btn_suggest_logo.setEnabled(bool(
+            self._path and self._page_count
+            and self._path.suffix.casefold() == ".pdf"
+        ))
+        self._btn_suggest_logo.clicked.connect(
+            lambda _c=False: self._suggest_logo_regions()
+        )
+        logo_row.addWidget(self._btn_suggest_logo)
         self._btn_mark_logo = QPushButton(tr("tmpl.mark"))
         self._btn_mark_logo.setToolTip(tr("tmpl.logo_help"))
         self._btn_mark_logo.clicked.connect(
@@ -757,11 +816,17 @@ class TemplateDialog(QDialog):
         btn_test = QPushButton(tr("tmpl.test"))
         btn_test.clicked.connect(self._test_all)
         row_btn.addWidget(btn_test)
+        btn_suggest = QPushButton(tr("tmpl.suggest_fields"))
+        btn_suggest.setToolTip(tr("tmpl.suggest_fields_tip"))
+        btn_suggest.setEnabled(bool(self._text))
+        btn_suggest.clicked.connect(self._suggest_fields_from_text)
+        row_btn.addWidget(btn_suggest)
         if self._logo_only:
             for mark_button in self._mark_buttons.values():
                 mark_button.setEnabled(False)
             btn_clear.hide()
             btn_test.hide()
+            btn_suggest.hide()
         row_btn.addStretch()
         btn_cancel = QPushButton(f"✖  {tr('common.cancel')}")
         btn_cancel.clicked.connect(self.reject)
@@ -820,7 +885,12 @@ class TemplateDialog(QDialog):
         return regions
 
     def _set_logo_preview(self) -> None:
-        if self._logo_specs:
+        if self._pending_logo_candidate:
+            text = tr(
+                "tmpl.logo_candidate_selected",
+                page=int(self._pending_logo_candidate.get("page", 0)) + 1,
+            )
+        elif self._logo_specs:
             text = tr(
                 "tmpl.logo_variants_saved", n=len(self._logo_specs)
             )
@@ -829,6 +899,104 @@ class TemplateDialog(QDialog):
         else:
             text = tr("tmpl.logo_unusable")
         self._logo_preview.setText(text)
+
+    @staticmethod
+    def _logo_candidate_place(region: list[float] | tuple) -> str:
+        try:
+            x0, y0, x1, _y1 = (float(value) for value in region)
+        except (TypeError, ValueError):
+            return "tmpl.logo_place_unknown"
+        center_x = (x0 + x1) / 2.0
+        if y0 < 0.5:
+            return (
+                "tmpl.logo_place_top_left" if center_x < 0.5
+                else "tmpl.logo_place_top_right"
+            )
+        return (
+            "tmpl.logo_place_left" if center_x < 0.5
+            else "tmpl.logo_place_right"
+        )
+
+    def _suggest_logo_regions(self) -> None:
+        """Låt användaren granska PDF-baserade logoområdesförslag."""
+        if self._path is None:
+            self._lbl_hint.setText(tr("tmpl.logo_candidates_none"))
+            return
+        si = _scan_module()
+        try:
+            candidates = si.supplier_logo_region_candidates(self._path)
+        except Exception as exc:
+            log.debug("supplier logo region suggestions: %s", exc)
+            candidates = []
+        if not candidates:
+            self._lbl_hint.setText(tr("tmpl.logo_candidates_none"))
+            return
+        labels: list[str] = []
+        source_keys = {
+            "embedded_image": "tmpl.logo_source_image",
+            "vector_art": "tmpl.logo_source_vector",
+            "header_area": "tmpl.logo_source_header",
+        }
+        for index, candidate in enumerate(candidates, start=1):
+            source_key = source_keys.get(
+                str(candidate.get("source", "")),
+                "tmpl.logo_source_unknown",
+            )
+            labels.append(tr(
+                "tmpl.logo_candidate_choice",
+                n=index,
+                page=int(candidate.get("page", 0) or 0) + 1,
+                source=tr(source_key),
+                place=tr(self._logo_candidate_place(
+                    candidate.get("region", [])
+                )),
+                score=int(candidate.get("score", 0) or 0),
+            ))
+        choice, accepted = QInputDialog.getItem(
+            self, tr("tmpl.suggest_logo"),
+            tr("tmpl.logo_candidates_prompt"), labels, 0, False,
+        )
+        if not accepted or choice not in labels:
+            return
+        self._use_logo_region_candidate(candidates[labels.index(choice)])
+
+    def _use_logo_region_candidate(self, candidate: dict) -> bool:
+        """Preview one suggested PDF region; saving remains a separate act."""
+        if self._path is None or not isinstance(candidate, dict):
+            return False
+        try:
+            page = int(candidate.get("page", 0))
+            region = tuple(float(value) for value in candidate["region"])
+            if (
+                page < 0 or page >= max(self._page_count, 1)
+                or len(region) != 4
+                or not (0 <= region[0] < region[2] <= 1)
+                or not (0 <= region[1] < region[3] <= 1)
+            ):
+                return False
+        except (KeyError, TypeError, ValueError):
+            return False
+        self._pending_logo_candidate = None
+        self._goto_page(page)
+        self._logo_region = (page, region)
+        self._logo_hash = _scan_module().supplier_logo_signature(
+            self._path, page, region
+        )
+        if self._logo_hash:
+            self._pending_logo_candidate = {
+                "page": page,
+                "region": [round(value, 4) for value in region],
+                "dhash": self._logo_hash,
+            }
+            self._lbl_hint.setText(tr(
+                "tmpl.logo_candidate_selected_hint", page=page + 1
+            ))
+        else:
+            self._lbl_hint.setText(tr("tmpl.logo_unusable"))
+        self._set_active("supplier_logo")
+        self._view.set_regions(self._all_regions())
+        self._set_logo_preview()
+        return bool(self._logo_hash)
 
     def _match_supplier_by_bankgiro(self) -> None:
         """Låt användaren matcha med exakt BG ur fakturatexten."""
@@ -970,6 +1138,8 @@ class TemplateDialog(QDialog):
     ) -> None:
         if field == "supplier_logo":
             si = _scan_module()
+            # A deliberate manual redraw replaces the unsaved suggestion.
+            self._pending_logo_candidate = None
             self._logo_region = (page, tuple(rect))
             self._logo_hash = si.supplier_logo_signature(
                 self._path, page, rect
@@ -1035,6 +1205,7 @@ class TemplateDialog(QDialog):
         self._regions = {}
         self._logo_specs = []
         self._logo_new_specs = []
+        self._pending_logo_candidate = None
         self._logo_region = None
         self._logo_hash = ""
         self._view.set_regions(self._all_regions())
@@ -1060,9 +1231,10 @@ class TemplateDialog(QDialog):
                     isinstance(spec, dict)
                     and str(spec.get("label", "")).strip()
                 ):
-                    rules[field] = {
-                        "label": str(spec["label"]).strip()
-                    }
+                    rule = {"label": str(spec["label"]).strip()}
+                    if spec.get("below"):
+                        rule["below"] = True
+                    rules[field] = rule
         return rules
 
     def _preview_field(self, field: str) -> None:
@@ -1092,6 +1264,106 @@ class TemplateDialog(QDialog):
     def _test_all(self) -> None:
         for field in _TEMPLATE_FIELDS:
             self._preview_field(field)
+
+    def _suggest_fields_from_text(self) -> None:
+        """Föreslå fält; olika värden kräver ett uttryckligt val."""
+        if not self._text:
+            self._lbl_hint.setText(tr("tmpl.suggest_fields_none"))
+            return
+        si = _scan_module()
+        existing_rules = {"fields": self._rules()}
+        current_values = si.apply_template(self._text, existing_rules)
+        suggestions = si.suggest_template_fields(
+            self._text, existing_rules
+        )
+        summary: list[str] = []
+        applied: set[str] = set()
+
+        def _apply_suggestion(suggestion: dict) -> None:
+            field = str(suggestion.get("field", "") or "")
+            if field not in _TEMPLATE_FIELDS or field in self._regions:
+                return
+            spec = {"label": str(suggestion.get("label", "") or "")}
+            if suggestion.get("below"):
+                spec["below"] = True
+            self._existing_fields[field] = spec
+            applied.add(field)
+            value = suggestion.get("value", "")
+            shown = (
+                _fmt_amount(float(value))
+                if field == "total_amount"
+                else str(value)
+            )
+            summary.append(
+                f"{tr(f'tmpl.field_{field}')}: "
+                f"{spec['label']} → {shown}"
+            )
+
+        for suggestion in suggestions:
+            _apply_suggestion(suggestion)
+
+        # When known labels point to different values, let the user choose
+        # explicitly. The first option is always Skip, never a default guess.
+        for field in _TEMPLATE_FIELDS:
+            if field in applied or field in self._regions \
+                    or field in current_values:
+                continue
+            candidates = si.template_field_label_candidates(
+                self._text, field
+            )
+            value_keys = {
+                (
+                    f"{float(item['value']):.2f}"
+                    if field == "total_amount"
+                    else str(item["value"]).strip().casefold()
+                )
+                for item in candidates
+            }
+            if len(value_keys) <= 1:
+                continue
+            skip = tr("tmpl.suggest_skip")
+            choices = [skip]
+            by_choice: dict[str, dict] = {}
+            for index, candidate in enumerate(candidates, start=1):
+                value = candidate.get("value", "")
+                shown = (
+                    _fmt_amount(float(value))
+                    if field == "total_amount"
+                    else str(value)
+                )
+                below = f" · {tr('tmpl.below_label')}" \
+                    if candidate.get("below") else ""
+                choice = (
+                    f"{candidate['label']} → {shown}{below} "
+                    f"[{index}]"
+                )
+                choices.append(choice)
+                by_choice[choice] = candidate
+            choice, ok = QInputDialog.getItem(
+                self,
+                tr("tmpl.suggest_choose_title"),
+                tr(
+                    "tmpl.suggest_choose_body",
+                    field=tr(f"tmpl.field_{field}"),
+                ),
+                choices,
+                0,
+                False,
+            )
+            if not ok:
+                break
+            candidate = by_choice.get(choice)
+            if candidate is not None:
+                _apply_suggestion(candidate)
+
+        if not summary:
+            self._lbl_hint.setText(tr("tmpl.suggest_fields_none"))
+            return
+        self._test_all()
+        self._lbl_hint.setText(tr(
+            "tmpl.suggest_fields_applied",
+            fields="; ".join(summary),
+        ))
 
     def _set_preview(
         self, field: str, value: Any, page: int | None = None
@@ -1132,6 +1404,25 @@ class TemplateDialog(QDialog):
             list(self._logo_specs) if same_supplier
             else list(self._logo_new_specs)
         )
+        pending = self._pending_logo_candidate
+        if isinstance(pending, dict) and pending.get("dhash"):
+            pending_identity = (
+                int(pending.get("page", 0) or 0),
+                tuple(round(float(v), 4) for v in pending.get("region", [])),
+                str(pending.get("dhash", "")),
+            )
+            known = set()
+            for spec in logo_specs:
+                try:
+                    known.add((
+                        int(spec.get("page", 0) or 0),
+                        tuple(round(float(v), 4) for v in spec.get("region", [])),
+                        str(spec.get("dhash", "")),
+                    ))
+                except (TypeError, ValueError):
+                    continue
+            if pending_identity not in known:
+                logo_specs.append(dict(pending))
         has_logo = bool(logo_specs)
         if self._logo_only and not has_logo:
             self._lbl_hint.setText(tr("tmpl.need_logo"))
@@ -1265,6 +1556,7 @@ class ScanImportView(QWidget):
         )
         self._templates_cache: dict | None = None
         self._learning_cache: dict | None = None
+        self._automatic_registering = False
         self._watch = None
         self._build_ui()
         self._init_watch()
@@ -1576,6 +1868,7 @@ class ScanImportView(QWidget):
                 cfg,
                 app=self._app,
                 templates_provider=self._get_templates,
+                learning_provider=self._get_match_learning,
                 parent=self,
             )
             # Parkerade filer samlas och meddelas i EN dialog
@@ -1587,6 +1880,10 @@ class ScanImportView(QWidget):
             self._parked_timer.timeout.connect(self._show_parked_dialog)
             self._watch.invoice_ready.connect(self._on_watch_invoice)
             self._watch.file_parked.connect(self._on_watch_parked)
+            self._watch.file_error.connect(self._on_watch_file_error)
+            self._watch.file_recovered.connect(
+                self._on_watch_file_recovered
+            )
             self._watch.changed.connect(self._refresh_watch_ui)
             self._chk_auto_watch.setChecked(self._watch.auto_create)
             self._refresh_watch_ui()
@@ -1601,10 +1898,78 @@ class ScanImportView(QWidget):
         gemensam informationsdialog (startar om nedräkningen
         så en skanningsrunda ger exakt en dialog)."""
         self._refresh_watch_ui()
+        # Import-raden ska finnas direkt, inte först när den samlade
+        # informationsdialogen visas några sekunder senare.
+        self._add_parked_rows_to_table([dict(info or {})])
         if not hasattr(self, "_parked_notify"):
             return
         self._parked_notify.append(dict(info or {}))
         self._parked_timer.start(2500)
+
+    def _on_watch_file_error(self, info: dict) -> None:
+        """Visar varje bevakat originalfel som ej registrerbar Import-rad."""
+        payload = dict(info or {})
+        raw_parsed = payload.get("parsed", {})
+        parsed = dict(raw_parsed) if isinstance(raw_parsed, dict) else {}
+        path = str(payload.get("path", "") or parsed.get("_path", ""))
+        parsed["_path"] = path
+        parsed["_scan_error"] = True
+        parsed["status"] = "scan_error"
+        if not parsed.get("error_detail"):
+            parsed["error_detail"] = str(payload.get("error", "") or "")
+        payload["parsed"] = parsed
+        payload["path"] = path
+        payload.setdefault("file", parsed.get("file", "") or Path(path).name)
+
+        # Om raden redan fanns som osäker import ska den nu tydligt visa
+        # läsfelet, i stället för att hash-dedupliceringen döljer felet.
+        try:
+            from ui.watch_folders import _norm_path_key
+            normalize = _norm_path_key
+        except Exception:
+            normalize = lambda value: str(value or "").casefold()
+        target = normalize(path)
+        rows = []
+        for row in self._rows:
+            if target and normalize(row.get("_path", "")) == target:
+                row.update(parsed)
+                row["file"] = payload.get("file") or Path(path).name
+                rows = [row]
+                self._refresh_table()
+                break
+        if not rows:
+            rows = self._add_parked_rows_to_table([payload])
+        self._refresh_watch_ui()
+        if rows:
+            self._lbl_status.setText(tr(
+                "scan.watch_file_error_added",
+                file=rows[0].get("file", ""),
+            ))
+
+    def _on_watch_file_recovered(self, path: str) -> None:
+        """Tar bort den gamla felraden först efter lyckad omläsning."""
+        try:
+            from ui.watch_folders import _norm_path_key
+            target = _norm_path_key(str(path or ""))
+            same_path = lambda row: (
+                _norm_path_key(str(row.get("_path", "") or "")) == target
+            )
+        except Exception:
+            target = str(path or "")
+            same_path = lambda row: str(row.get("_path", "") or "") == target
+        if not target:
+            return
+        before = len(self._rows)
+        self._rows = [
+            row for row in self._rows
+            if not (row.get("_scan_error") and same_path(row))
+        ]
+        if len(self._rows) != before:
+            self._refresh_table()
+            self._lbl_status.setText(tr(
+                "scan.watch_file_recovered",
+                file=Path(str(path or "")).name,
+            ))
 
     def _show_parked_dialog(self) -> None:
         """Dialog: de här filerna kunde inte tolkas.
@@ -1623,9 +1988,13 @@ class ScanImportView(QWidget):
             name = info.get("file") or Path(
                 str(info.get("path", ""))
             ).name
-            lines.append(
-                f"• {name} — {_park_reason_sv(info.get('reason', ''))}"
+            reason = str(info.get("reason", "") or "")
+            reason_text = (
+                tr("watch.payment_details_parked")
+                if reason == "payment-details"
+                else _park_reason_sv(reason)
             )
+            lines.append(f"• {name} — {reason_text}")
         if len(infos) > 8:
             lines.append(
                 tr("watch.parked_dialog_more", n=len(infos) - 8)
@@ -1644,17 +2013,51 @@ class ScanImportView(QWidget):
         # stället för att bara ligga gömd i parkeringen. Appen
         # gissar aldrig och parkerar aldrig tyst.
         added = self._add_parked_rows_to_table(infos)
-        self._ask_uncertain_rows(added)
+        # Osäkra rader kan redan ha lagts in direkt i Import när
+        # parkeringseventet kom. Ta med även de befintliga raderna så
+        # batchdialogen fortfarande frågar användaren en gång.
+        review_rows = list(added)
+        try:
+            from ui.watch_folders import _norm_path_key
+            normalize_path = _norm_path_key
+        except Exception:
+            normalize_path = lambda value: str(value or "").casefold()
+        for info in infos:
+            if not isinstance(info, dict):
+                continue
+            path = str(info.get("path", "") or "")
+            digest = str(info.get("hash", "") or "")
+            for row in self._rows:
+                if not row.get("match_uncertain"):
+                    continue
+                same_path = bool(
+                    path and normalize_path(row.get("_path", ""))
+                    == normalize_path(path)
+                )
+                same_hash = bool(
+                    not path and digest
+                    and str(row.get("_parked_hash", "")) == digest
+                )
+                if (same_path or same_hash) and not any(
+                    current is row for current in review_rows
+                ):
+                    review_rows.append(row)
+        self._ask_uncertain_rows(review_rows)
         # En bekräftad men ofullständig rad lämnas synlig i Import,
         # men behöver inte längre ligga kvar i parkeringen. Rader som
         # redan registrerats togs bort och avparkerades av skapaflödet.
-        for row in added:
-            if row.get("match_uncertain"):
+        for row in review_rows:
+            if (
+                row.get("match_uncertain") or row.get("ocr_warning")
+                or row.get("payment_details_warning")
+            ):
+                # Behåll osäkra/OCR-degraderade/betalningsavvikande
+                # original i parkeringen tills de faktiskt är granskade.
                 continue
             if any(current is row for current in self._rows):
                 self._unpark_row(row)
         remaining = [
-            row for row in added
+            row for row in review_rows
             if any(current is row for current in self._rows)
         ]
         if remaining:
@@ -1671,10 +2074,13 @@ class ScanImportView(QWidget):
                 )
         # Parkeringar som inte kunde läggas i tabellen (t.ex.
         # saknad tolkning) frågas det om på den äldre vägen.
-        added_paths = {str(r.get("_path", "")) for r in added}
+        reviewed_paths = {
+            normalize_path(r.get("_path", ""))
+            for r in review_rows if r.get("_path")
+        }
         leftover = [
             i for i in infos
-            if str(i.get("path", "")) not in added_paths
+            if normalize_path(i.get("path", "")) not in reviewed_paths
             and isinstance(i.get("parsed"), dict)
             and i["parsed"].get("match_uncertain")
         ]
@@ -1774,9 +2180,15 @@ class ScanImportView(QWidget):
                        path=f.get("path", ""))
                 )
         n = len(watch.parked) if watch else 0
-        self._lbl_watch_parked.setText(
-            tr("watch.parked", n=n) if n else ""
+        errors = (
+            watch.last_scan_stats.get("errors", 0) if watch else 0
         )
+        labels = []
+        if n:
+            labels.append(tr("watch.parked", n=n))
+        if errors:
+            labels.append(tr("watch.scan_errors_status", n=errors))
+        self._lbl_watch_parked.setText("  ·  ".join(labels))
         self._btn_review_parked.setEnabled(bool(n))
 
     def _add_watch_folder(self) -> None:
@@ -1825,6 +2237,7 @@ class ScanImportView(QWidget):
                 duplicate=stats.get("duplicate", 0),
                 parked=stats.get("parked", 0),
                 already=stats.get("already", 0),
+                errors=stats.get("errors", 0),
             )
         )
         log.info(
@@ -1857,6 +2270,7 @@ class ScanImportView(QWidget):
                 parked=stats.get("parked", 0),
                 already=stats.get("already", 0),
                 changed=stats.get("changed", 0),
+                errors=stats.get("errors", 0),
             )
         )
         log.info(
@@ -1877,10 +2291,65 @@ class ScanImportView(QWidget):
         data/attachments/). Flyttas filen före export varnar
         exporten att originalet saknas.
         """
+        if row.get("payment_details_warning"):
+            watch = getattr(self, "_watch", None)
+            if watch is not None and row.get("_hash"):
+                watch.unprocess(str(row["_hash"]))
+            existing_rows = getattr(self, "_rows", None)
+            if isinstance(existing_rows, list) and not any(
+                str(current.get("_path", "")) == str(path or "")
+                for current in existing_rows
+            ):
+                visible = dict(row)
+                visible["_path"] = str(path or "")
+                visible["_parked_hash"] = str(row.get("_hash", "") or "")
+                self._rows.append(visible)
+                if hasattr(self, "_tbl"):
+                    self._refresh_table()
+            if hasattr(self, "_lbl_status"):
+                self._lbl_status.setText(
+                    tr("watch.payment_details_parked")
+                )
+            log.error(
+                "SCAN_WATCH: %s hade betalningsavvikelse vid "
+                "invoice_ready — automatregistrering stoppades",
+                row.get("file", path),
+            )
+            return
         data = self._invoice_data_from_row(row, attachment=str(path))
         if self._save_invoice(
             data, source=row.get("file", ""), silent=True
         ):
+            target_path = str(path or "")
+            digest = str(row.get("_hash", "") or "")
+            existing_rows = getattr(self, "_rows", None)
+            if isinstance(existing_rows, list) and existing_rows:
+                try:
+                    from ui.watch_folders import _norm_path_key
+                    normalize_path = _norm_path_key
+                except Exception:
+                    normalize_path = lambda value: str(value or "").casefold()
+                target_key = normalize_path(target_path)
+                kept = []
+                removed = False
+                for current in existing_rows:
+                    same_path = bool(
+                        target_key
+                        and normalize_path(current.get("_path", ""))
+                        == target_key
+                    )
+                    same_hash = bool(
+                        digest
+                        and str(current.get("_parked_hash", "")) == digest
+                    )
+                    if same_path or same_hash:
+                        self._unpark_row(current)
+                        removed = True
+                    else:
+                        kept.append(current)
+                if removed:
+                    self._rows = kept
+                    self._refresh_table()
             self._lbl_status.setText(
                 tr("watch.imported", file=row.get("file", ""))
             )
@@ -1935,7 +2404,9 @@ class ScanImportView(QWidget):
             if not supported_invoice_files(entry.get("path", "")):
                 return
             si = _scan_module()
-            if si.find_template(self._get_templates(), supplier):
+            if si.find_template(
+                self._get_templates(), supplier, self._suppliers()
+            ):
                 return  # mallen finns redan
             if si.has_builtin_format(supplier):
                 return  # inbyggt verifierat format — inget att lära
@@ -1966,21 +2437,42 @@ class ScanImportView(QWidget):
                 log.warning("verify extract %s: %s", fp, exc)
                 text = ""
             try:
-                parsed = si.parse_invoice_file(
-                    fp, text or "", self._suppliers(),
-                    templates={supplier: template},
-                )
+                # Verify the template itself, not whether a separate
+                # supplier-name heuristic happens to identify this file.
+                values = si.template_values(str(fp), text or "", template)
+                invoice_number = str(
+                    values.get("invoice_number", "") or ""
+                ).strip()
+                try:
+                    amount = float(values.get("total_amount") or 0)
+                except (TypeError, ValueError):
+                    amount = 0.0
+                if amount and si.is_credit_note(text or ""):
+                    amount = -abs(amount)
+                missing = []
+                if not invoice_number:
+                    missing.append("fakturanummer")
+                if amount == 0:
+                    missing.append("belopp")
+                rows.append({
+                    "file": fp.name, "path": str(fp),
+                    "invoice_number": invoice_number,
+                    "total_amount": amount,
+                    "date": str(values.get("date", "") or ""),
+                    "due_date": str(values.get("due_date", "") or ""),
+                    "ocr": str(values.get("ocr", "") or ""),
+                    "template_fields": list(values),
+                    "missing": missing,
+                })
             except Exception as exc:
                 log.warning("verify parse %s: %s", fp, exc)
-                continue
-            rows.append({
-                "file": fp.name, "path": str(fp),
-                "invoice_number": parsed.get("invoice_number", ""),
-                "total_amount": parsed.get("total_amount", 0),
-                "date": parsed.get("date", ""),
-                "due_date": parsed.get("due_date", ""),
-                "missing": list(parsed.get("missing", []) or []),
-            })
+                rows.append({
+                    "file": fp.name, "path": str(fp),
+                    "invoice_number": "", "total_amount": 0.0,
+                    "date": "", "due_date": "", "ocr": "",
+                    "template_fields": [],
+                    "missing": ["fakturanummer", "belopp"],
+                })
         return rows
 
     def _verify_template(
@@ -1995,9 +2487,16 @@ class ScanImportView(QWidget):
         sägs det rakt ut högst upp.
         """
         rows = self._verification_rows(supplier, template, files)
+        self._last_template_verification = {
+            "supplier": supplier,
+            "signature": _scan_module().template_confirmation_signature(
+                template
+            ),
+            "rows": copy.deepcopy(rows),
+        }
         ok = sum(1 for r in rows if not r["missing"])
         lines = [tr("tmpl.verify_intro", supplier=supplier), ""]
-        if rows and ok == 0:
+        if ok == 0:
             lines.append(tr("tmpl.verify_none"))
             lines.append("")
         lines.append(
@@ -2016,6 +2515,7 @@ class ScanImportView(QWidget):
                     amount=_fmt_amount(float(r["total_amount"] or 0)),
                     date=r["date"] or "—",
                     due=r["due_date"] or "—",
+                    ocr=r.get("ocr") or "—",
                 ))
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Information)
@@ -2024,6 +2524,7 @@ class ScanImportView(QWidget):
         btn_ok = box.addButton(
             tr("tmpl.verify_ok"), QMessageBox.ButtonRole.AcceptRole
         )
+        btn_ok.setEnabled(ok > 0)
         btn_adjust = box.addButton(
             tr("tmpl.verify_adjust"),
             QMessageBox.ButtonRole.ActionRole,
@@ -2039,6 +2540,67 @@ class ScanImportView(QWidget):
         if clicked is btn_adjust:
             return "justera"
         return "senare"
+
+    def _record_template_verification(
+        self, supplier: str, template_name: str, template: dict,
+        rows: list[dict],
+    ) -> int:
+        """Lagrar endast kompletta rader från ett uttryckligt ja.
+
+        Säkerhetskontrollen räknar som mallbekräftelse, men inte som
+        leverantörsmatchning. En mall med noll kompletta exempel kan
+        därför aldrig bli automatiskt betrodd genom att bara sparas.
+        """
+        si = _scan_module()
+        learning = self._get_match_learning()
+        before_learning = copy.deepcopy(learning)
+        accepted = 0
+        changed = False
+        for row in list(rows or []):
+            if not isinstance(row, dict) or row.get("missing"):
+                continue
+            path = str(row.get("path", "") or "")
+            confirmation_id = si.match_confirmation_id(
+                supplier, str(row.get("invoice_number", "") or ""),
+                path=path,
+                invoice_date=str(row.get("date", "") or ""),
+            )
+            if not confirmation_id:
+                continue
+            before = si.template_confirmation_entry(
+                learning, supplier, template
+            )
+            try:
+                before_count = int(before.get("confirmed", 0) or 0)
+            except (TypeError, ValueError):
+                before_count = 0
+            si.record_template_confirmation(
+                learning, supplier, template_name, template,
+                confirmation_id=confirmation_id, source_path=path,
+                template_fields=row.get("template_fields", []),
+            )
+            after = si.template_confirmation_entry(
+                learning, supplier, template
+            )
+            try:
+                after_count = int(after.get("confirmed", 0) or 0)
+            except (TypeError, ValueError):
+                after_count = 0
+            accepted += 1
+            changed = changed or after_count > before_count
+
+        if not accepted:
+            return 0
+        if changed and not self._save_match_learning():
+            # Do not let an unsaved confirmation authorize auto-matching
+            # for the remainder of this run.
+            self._learning_cache = before_learning
+            log.error(
+                "SCAN_TEMPLATE: kunde inte spara verifieringen för %s",
+                supplier,
+            )
+            return 0
+        return accepted
 
     def _teach_from_folder(
         self, entry: dict, example: Any = None, force: bool = False
@@ -2089,7 +2651,8 @@ class ScanImportView(QWidget):
         supplier = str(entry.get("supplier", "") or "")
         templates = self._get_templates()
         existing = (
-            si.find_template(templates, supplier) if supplier else None
+            si.find_template(templates, supplier, self._suppliers())
+            if supplier else None
         )
         dlg = TemplateDialog(
             self, "", supplier=supplier, existing=existing,
@@ -2102,7 +2665,11 @@ class ScanImportView(QWidget):
             key: value for key, value in dlg.result_template.items()
             if key != "supplier"
         }
-        self._save_templates_file()
+        if not self._save_templates_file():
+            self._lbl_status.setText(
+                tr("tmpl.save_failed", supplier=name)
+            )
+            return False
         log.info(
             "SCAN_TEMPLATE: mall inlärd från mapp %s → %s",
             entry.get("path", ""), name,
@@ -2129,25 +2696,77 @@ class ScanImportView(QWidget):
                 key: value for key, value in dlg2.result_template.items()
                 if key != "supplier"
             }
-            self._save_templates_file()
+            if not self._save_templates_file():
+                self._lbl_status.setText(
+                    tr("tmpl.save_failed", supplier=name)
+                )
+                return False
             action = self._verify_template(
                 name, templates[name],
                 self._pending_verification_files(name, chosen),
             )
 
-        # Minne: mallen ligger i invoice_templates.json och
-        # används av både bevakning och manuell import på alla
-        # kommande fakturor — det sägs rakt ut i statusraden.
-        self._lbl_status.setText(tr("tmpl.remembered", supplier=name))
-        # Den nya mallen prövas direkt på mappens parkerade
-        # fakturor: de läses om NU ifall de kan använda samma
-        # mall. (Vanliga skanningar läser aldrig om parkerade
-        # tolkningsfiler — de ligger still tills en mall sparas.)
-        if self._watch is not None:
+        confirmed_rows = 0
+        if action == "bekrafta":
+            # Säkerhetskontrollens ja är en explicit granskning av
+            # varje komplett rad som visades. Spara den som mallminne
+            # innan bevakningen får försöka automatregistrera filerna.
+            verification = getattr(
+                self, "_last_template_verification", {}
+            ) or {}
+            current_signature = si.template_confirmation_signature(
+                templates[name]
+            )
+            if (
+                verification.get("supplier") == name
+                and verification.get("signature") == current_signature
+                and isinstance(verification.get("rows"), list)
+            ):
+                # Record exactly the rows the user just reviewed, not a
+                # second extraction that might have changed meanwhile.
+                verification_rows = verification["rows"]
+            else:
+                verification_files = self._pending_verification_files(
+                    name, chosen
+                )
+                verification_rows = self._verification_rows(
+                    name, templates[name], verification_files
+                )
+            confirmed_rows = self._record_template_verification(
+                name, name, templates[name], verification_rows
+            )
+
+        if confirmed_rows:
+            status = tr("tmpl.remembered", supplier=name)
+            # Först efter en sparad, uttrycklig bekräftelse prövas
+            # parkerade fakturor på nytt. En uppskjuten/avbruten
+            # kontroll lämnar dem orörda och synliga i Import.
+            if self._watch is not None:
+                try:
+                    self._watch.reprocess_parked(entry)
+                except Exception as exc:
+                    log.warning("teach rescan: %s", exc)
             try:
-                self._watch.reprocess_parked(entry)
+                reread_count, ready_count = (
+                    self._reread_rows_after_manual_match()
+                )
+                if reread_count:
+                    status += "  ·  " + tr(
+                        "scan.learning_reread",
+                        n=reread_count, ready=ready_count,
+                    )
             except Exception as exc:
-                log.warning("teach rescan: %s", exc)
+                log.warning("template confirmation reread: %s", exc)
+            self._lbl_status.setText(status)
+        else:
+            self._lbl_status.setText(
+                tr("tmpl.saved_unconfirmed", supplier=name)
+            )
+            log.info(
+                "SCAN_TEMPLATE: mall %s sparad men inte bekräftad; "
+                "automatisk omläsning av parkerade filer avvaktar",
+                name,
+            )
         return True
 
     def _pending_verification_files(
@@ -2348,7 +2967,9 @@ class ScanImportView(QWidget):
             return False
 
         current_templates = self._get_templates()
-        existing = si.find_template(current_templates, chosen)
+        existing = si.find_template(
+            current_templates, chosen, self._suppliers()
+        )
         try:
             logo_dlg = TemplateDialog(
                 parent,
@@ -2364,10 +2985,25 @@ class ScanImportView(QWidget):
             logo_dlg.setWindowTitle(
                 tr("scan.match_logo_dialog_title", supplier=chosen)
             )
-            logo_dlg._supplier_edit.setReadOnly(True)
+            logo_dlg._supplier_edit.currentTextChanged.connect(
+                lambda name: logo_dlg.setWindowTitle(tr(
+                    "scan.match_logo_dialog_title",
+                    supplier=str(name or "").strip() or "…",
+                ))
+            )
             logo_dlg._btn_match_bg.setEnabled(False)
             if logo_dlg.exec() != QDialog.DialogCode.Accepted:
                 return False
+            selected_supplier = str(
+                logo_dlg._supplier_edit.currentText() or ""
+            ).strip()
+            if (
+                logo_dlg._supplier_edit.currentIndex() < 0
+                or not selected_supplier
+            ):
+                note_label.setText(tr("scan.match_logo_pick_supplier"))
+                return False
+            chosen = selected_supplier
             result = logo_dlg.result_template
         except Exception as exc:
             log.warning("mark supplier logo in match prompt: %s", exc)
@@ -2380,8 +3016,8 @@ class ScanImportView(QWidget):
             note_label.setText(tr("tmpl.logo_unusable"))
             return False
 
-        template_names = si.template_candidate_names(
-            current_templates, chosen
+        template_names = si.supplier_template_candidate_names(
+            current_templates, chosen, self._suppliers()
         )
         template_name = (
             template_names[0] if len(template_names) == 1 else chosen
@@ -2393,10 +3029,22 @@ class ScanImportView(QWidget):
         )
         if not isinstance(merged_template.get("fields"), dict):
             merged_template["fields"] = {}
+        # The dialog was opened with the matching candidate initially
+        # selected, but the user may choose another supplier in its
+        # dropdown. Merge against that supplier's currently stored logos,
+        # so changing the association never discards its prior variants.
+        preserved_specs = si.supplier_logo_specs(old_template)
+        merged_specs = si.supplier_logo_specs({
+            "supplier_logos": [
+                *preserved_specs,
+                *(dict(spec) for spec in logo_specs),
+            ],
+        })
+        merged_template["supplier"] = chosen
         merged_template["supplier_logos"] = [
-            dict(spec) for spec in logo_specs
+            dict(spec) for spec in merged_specs
         ]
-        merged_template["supplier_logo"] = dict(logo_specs[0])
+        merged_template["supplier_logo"] = dict(merged_specs[0])
         updated_templates[template_name] = merged_template
         if not si.save_templates(
             self._templates_file(), updated_templates
@@ -2405,6 +3053,16 @@ class ScanImportView(QWidget):
             return False
         self._templates_cache = updated_templates
         self._refresh_templates_btn()
+        combo_index = next(
+            (index for index in range(combo.count())
+             if combo.itemText(index).strip().casefold()
+             == chosen.casefold()),
+            -1,
+        )
+        if combo_index < 0:
+            combo.addItem(chosen)
+            combo_index = combo.count() - 1
+        combo.setCurrentIndex(combo_index)
         note_label.setText(tr(
             "scan.match_logo_saved", supplier=chosen
         ))
@@ -2422,6 +3080,8 @@ class ScanImportView(QWidget):
         användaren själv valt ett alternativ; vid Avbryt förblir
         raden osäker och kan inte registreras automatiskt.
         """
+        if row.get("_scan_error"):
+            return False
         if not row.get("match_uncertain"):
             return True
         kind = str(row.get("match_kind") or "supplier").strip()
@@ -2475,6 +3135,7 @@ class ScanImportView(QWidget):
             "template_ambiguous": "scan.match_reason_template",
             "region_ambiguous": "scan.match_reason_template",
             "builtin_ambiguous": "scan.match_reason_template",
+            "template_unconfirmed": "scan.match_reason_template_unconfirmed",
             "multipage": "scan.match_reason_multipage",
             "learned_ambiguous": "scan.match_reason_learned",
             "supplier_logo": "scan.match_reason_supplier_logo",
@@ -2483,6 +3144,30 @@ class ScanImportView(QWidget):
         reason_lbl = QLabel(tr(reason_key))
         reason_lbl.setWordWrap(True)
         layout.addWidget(reason_lbl)
+        template_match = row.get("template_match", {}) or {}
+        template_unconfirmed = bool(
+            isinstance(template_match, dict)
+            and template_match.get("unconfirmed")
+        )
+        if template_unconfirmed and reason != "template_unconfirmed":
+            template_warning = QLabel(tr(
+                "scan.match_reason_template_unconfirmed"
+            ))
+            template_warning.setWordWrap(True)
+            layout.addWidget(template_warning)
+        if template_unconfirmed or reason == "template_unconfirmed":
+            preview = QLabel(tr(
+                "scan.match_template_preview",
+                file=str(row.get("file", "") or "—"),
+                nr=str(row.get("invoice_number", "") or "—"),
+                date=str(row.get("date", "") or "—"),
+                due=str(row.get("due_date", "") or "—"),
+                ocr=str(row.get("ocr", "") or "—"),
+                amount=amount_text,
+            ))
+            preview.setWordWrap(True)
+            preview.setObjectName("unconfirmedTemplatePreview")
+            layout.addWidget(preview)
         layout.addWidget(QLabel(tr(
             "scan.match_ask_template_label"
             if kind == "template" else "scan.match_ask_supplier_label"
@@ -2558,18 +3243,46 @@ class ScanImportView(QWidget):
         candidates = list(candidates or [])
         text = str(row.get("_text", "") or "")
         row["supplier"] = chosen
+        # Do not keep a template from the previous, rejected match.
+        row.pop("template", None)
+        row.pop("template_match", None)
         self._apply_template_to_row(row, text)
         if amount is not None and amount > 0:
             # Användarens bekräftade slutsumma vinner alltid över
             # den avlästa (som kan vara en delsumma på sida 1).
             row["total_amount"] = float(amount)
-        if kind == "template" or chosen in self._get_templates():
-            if chosen in self._get_templates():
-                row["template"] = chosen
+        templates = self._get_templates()
+        if kind == "template" and chosen in templates:
+            row["template"] = chosen
+        template_name = str(row.get("template", "") or "").strip()
+        template = templates.get(template_name)
+        if not isinstance(template, dict) and template_name:
+            try:
+                template = _scan_module().find_template(
+                    templates, template_name, self._suppliers()
+                )
+            except Exception:
+                template = None
+        if isinstance(template, dict):
+            try:
+                confirmation = _scan_module().template_confirmation_entry(
+                    self._get_match_learning(), chosen, template
+                )
+                if not confirmation:
+                    confirmation = _scan_module().template_confirmation_entry(
+                        self._get_match_learning(), template_name, template
+                    )
+                template_confirmed = int(
+                    confirmation.get("confirmed", 0) or 0
+                )
+            except Exception:
+                template_confirmed = 0
             row["template_match"] = {
-                "status": "matched", "template": chosen,
+                "status": "matched", "template": template_name,
                 "candidates": candidates, "uncertain": False,
                 "reason": "user_choice",
+                "confirmed": template_confirmed,
+                "unconfirmed": template_confirmed <= 0,
             }
         row["supplier_match"] = {
             "status": "matched", "supplier": chosen,
@@ -2581,6 +3294,9 @@ class ScanImportView(QWidget):
             "match_reason", "match_kind",
         ):
             row.pop(key, None)
+        self._refresh_payment_details(
+            row, text=text, supplier_name=chosen
+        )
         self._recalc_missing(row)
         row["status"] = self._compute_status(
             row, bool(text or row.get("_path"))
@@ -2592,20 +3308,12 @@ class ScanImportView(QWidget):
         return self._learn_from_match(row, chosen)
 
     def _learn_from_match(self, row: dict, chosen: str) -> str:
-        """Appen lär sig av användarens matchning — varje gång.
+        """Lär leverantörskännetecken efter användarens manuella val.
 
-        Två saker lärs, båda ur användarens eget bekräftade val
-        (aldrig ur appens automatiska träffar):
-
-        1. Inlärningsminnet räknar bekräftelsen. Flersidiga
-           bekräftelser för samma leverantör bygger mot att den
-           leverantörens flersidiga fakturor till slut får
-           passera utan fråga — men bara med avstämning mot
-           texten (tolkarens flersidighetsvakt avgör).
-        2. Saknar leverantören både mall och inbyggt format
-           härleds en mall ur de just bekräftade värdena: bara
-           etiketter som läser tillbaka EXAKT dem sparas, och
-           övriga rader i listan läses genast om mot mallen.
+        Mallvärden lärs inte av själva leverantörsvalet: de registreras
+        separat i ``_record_confirmed_template_row`` först när fakturan
+        faktiskt har sparats efter användarens granskning. Automatiskt
+        registrerade rader hoppar över det steget.
 
         Inlärningen får aldrig fälla matchningen — fel loggas
         och tystas. Returnerar en kort notis för statusraden.
@@ -2627,7 +3335,7 @@ class ScanImportView(QWidget):
             path = str(row.get("_path", "") or "")
             try:
                 logo_signature = si.confirmed_supplier_logo_signature(
-                    path, chosen, templates
+                    path, chosen, templates, suppliers=self._suppliers()
                 )
                 if logo_signature:
                     logo_count_before = int(
@@ -2637,11 +3345,18 @@ class ScanImportView(QWidget):
                     )
             except Exception as exc:
                 log.debug("confirm supplier logo: %s", exc)
+            confirmation_id = si.match_confirmation_id(
+                chosen, str(row.get("invoice_number", "") or ""),
+                path=path,
+                invoice_date=str(row.get("date", "") or ""),
+            )
             entry = si.record_match_confirmation(
                 learning, chosen, multipage=pages >= 2,
                 text=str(row.get("_text", "") or ""),
                 logo_signature=logo_signature,
+                confirmation_id=confirmation_id, source_path=path,
             )
+            row["_supplier_learning_recorded"] = True
             notes: list[str] = []
             if pages >= 2:
                 notes.append(tr(
@@ -2653,8 +3368,10 @@ class ScanImportView(QWidget):
             notes.append(tr(
                 "scan.learning_count", supplier=chosen, n=confirmed
             ))
-            if confirmed >= si.LEARNED_SUPPLIER_CONFIRMATIONS \
-                    and confirmed - 1 < si.LEARNED_SUPPLIER_CONFIRMATIONS:
+            if (
+                confirmations_before < si.LEARNED_SUPPLIER_CONFIRMATIONS
+                <= confirmed
+            ):
                 # Tröskeln passerad med den här matchningen:
                 # från och med nu kopplar appen leverantörens
                 # fakturor själv på sina inlärda kännetecken.
@@ -2675,20 +3392,6 @@ class ScanImportView(QWidget):
                 notes.append(tr(
                     "scan.learned_auto_logo", supplier=chosen
                 ))
-            if not si.find_template(templates, chosen) \
-                    and not si.has_builtin_format(chosen):
-                tmpl = si.derive_template_from_confirmation(
-                    str(row.get("_text", "") or ""),
-                    str(row.get("invoice_number", "") or ""),
-                    row.get("total_amount"),
-                )
-                if tmpl:
-                    templates[chosen] = tmpl
-                    self._save_templates_file()
-                    entry["template_learned"] = True
-                    notes.append(tr(
-                        "scan.learned_template", supplier=chosen
-                    ))
             self._save_match_learning()
             reread_count, ready_count = self._reread_rows_after_manual_match(
                 exclude=row
@@ -2701,6 +3404,106 @@ class ScanImportView(QWidget):
             return " ".join(notes)
         except Exception as exc:
             log.warning("learn from match: %s", exc)
+            return ""
+
+    def _record_confirmed_template_row(self, row: dict) -> str:
+        """Tränar på en mallrad först när användaren registrerar den.
+
+        Att parsern själv träffar en mall räknas aldrig som bekräftelse;
+        klicket på Skapa efter att värdena visats är den manuella signalen.
+        """
+        if (
+            not isinstance(row, dict)
+            or row.get("_match_learning_recorded")
+        ):
+            return ""
+        try:
+            si = _scan_module()
+            supplier = str(row.get("supplier", "") or "").strip()
+            template_name = str(row.get("template", "") or supplier)
+            templates = self._get_templates()
+            template = si.find_template(
+                templates, template_name, self._suppliers()
+            )
+            if not supplier:
+                return ""
+            path = str(row.get("_path", "") or "")
+            text = str(row.get("_text", "") or "")
+            derived_template = False
+            if not template and not si.has_builtin_format(supplier):
+                candidate = si.derive_template_from_confirmation(
+                    text, str(row.get("invoice_number", "") or ""),
+                    row.get("total_amount"),
+                )
+                if candidate:
+                    templates[supplier] = candidate
+                    if si.save_templates(self._templates_file(), templates):
+                        template = candidate
+                        template_name = supplier
+                        row["template"] = supplier
+                        row["template_match"] = {
+                            "status": "matched", "template": supplier,
+                            "candidates": [], "uncertain": False,
+                            "reason": "user_confirmation",
+                        }
+                        self._refresh_templates_btn()
+                        derived_template = True
+                    else:
+                        templates.pop(supplier, None)
+            if not template:
+                return ""
+            notes: list[str] = []
+            if derived_template:
+                notes.append(tr("scan.learned_template", supplier=supplier))
+            try:
+                found = si.template_values(path or None, text, template)
+                accepted_fields = si.confirmed_template_fields(
+                    template, found, row
+                )
+            except Exception:
+                accepted_fields = []
+            logo_signature = si.confirmed_supplier_logo_signature(
+                path, supplier, templates, suppliers=self._suppliers()
+            )
+            confirmation_id = si.match_confirmation_id(
+                supplier, str(row.get("invoice_number", "") or ""),
+                path=path, invoice_date=str(row.get("date", "") or ""),
+            )
+            learning = self._get_match_learning()
+            before_entry = si.template_confirmation_entry(
+                learning, supplier, template
+            )
+            try:
+                before_count = int(before_entry.get("confirmed", 0) or 0)
+            except (TypeError, ValueError):
+                before_count = 0
+            entry = si.record_match_confirmation(
+                learning, supplier, multipage=self._row_pages(row) >= 2,
+                text=text, logo_signature=logo_signature,
+                confirmation_id=confirmation_id, source_path=path,
+                template_name=template_name, template=template,
+                template_fields=accepted_fields,
+            )
+            if derived_template and isinstance(entry, dict):
+                entry["template_learned"] = True
+            self._save_match_learning()
+            row["_match_learning_recorded"] = True
+            template_entry = si.template_confirmation_entry(
+                learning, supplier, template
+            )
+            try:
+                count = int(template_entry.get("confirmed", 0) or 0)
+            except (TypeError, ValueError):
+                count = 0
+            match = row.get("template_match")
+            if count and isinstance(match, dict):
+                match["confirmed"] = count
+            if count <= before_count:
+                return " ".join(notes)
+            notes.append(tr("scan.template_confirmation_count", n=count))
+            return " ".join(notes)
+        except Exception as exc:
+            log.warning("confirm template row: %s", exc)
             return ""
 
     def _reread_rows_after_manual_match(
@@ -2724,7 +3527,10 @@ class ScanImportView(QWidget):
             "match_reason", "match_kind",
         )
         for other in list(self._rows):
-            if other is exclude or not isinstance(other, dict):
+            if (
+                other is exclude or not isinstance(other, dict)
+                or other.get("_scan_error")
+            ):
                 continue
             previous_match = other.get("supplier_match", {}) or {}
             if (
@@ -2780,8 +3586,20 @@ class ScanImportView(QWidget):
                 continue
             if not isinstance(parsed, dict):
                 continue
+            try:
+                parsed = si.require_template_confirmation(
+                    parsed, templates, learning, suppliers
+                )
+            except Exception as exc:
+                log.warning(
+                    "reread template confirmation %s: %s",
+                    other.get("file", ""), exc,
+                )
 
             other.update(parsed)
+            self._refresh_payment_details(
+                other, text=text, source=parsed
+            )
             for key in uncertain_keys:
                 if key not in parsed:
                     other.pop(key, None)
@@ -2842,6 +3660,9 @@ class ScanImportView(QWidget):
             self._lbl_status.setText(tr("scan.select_row"))
             return
         row = self._rows[idxs[0]]
+        if row.get("_scan_error"):
+            self._lbl_status.setText(tr("scan.file_read_error"))
+            return
         options: list[str] = []
         seen: set[str] = set()
 
@@ -2882,6 +3703,28 @@ class ScanImportView(QWidget):
         ))
         intro.setWordWrap(True)
         layout.addWidget(intro)
+        template_match = row.get("template_match", {}) or {}
+        if (
+            isinstance(template_match, dict)
+            and template_match.get("unconfirmed")
+        ):
+            warning = QLabel(tr(
+                "scan.match_reason_template_unconfirmed"
+            ))
+            warning.setWordWrap(True)
+            layout.addWidget(warning)
+            preview = QLabel(tr(
+                "scan.match_template_preview",
+                file=str(row.get("file", "") or "—"),
+                nr=str(row.get("invoice_number", "") or "—"),
+                date=str(row.get("date", "") or "—"),
+                due=str(row.get("due_date", "") or "—"),
+                ocr=str(row.get("ocr", "") or "—"),
+                amount=amount_text,
+            ))
+            preview.setWordWrap(True)
+            preview.setObjectName("unconfirmedTemplatePreview")
+            layout.addWidget(preview)
         layout.addWidget(QLabel(tr("scan.match_ask_supplier_label")))
         combo = QComboBox(dlg)
         combo.addItems(options)
@@ -2938,13 +3781,18 @@ class ScanImportView(QWidget):
                 self._lbl_status.setText(
                     self._lbl_status.text() + "  ·  " + note
                 )
+            if row.get("ocr_warning"):
+                self._lbl_status.setText(
+                    self._lbl_status.text() + "  ·  "
+                    + tr("scan.ocr_review_after_match")
+                )
             return
 
         # Ett uttryckligt leverantörsval i Tolkade fakturor räcker
         # för att registrera en komplett faktura. Dubblettkontrollen,
         # leverantörskontrollen och sparvägen är samma som vid
         # knappen Skapa fakturor.
-        self._auto_register_matched_rows([row])
+        self._auto_register_matched_rows([row], user_confirmed=True)
         still_present = any(candidate is row for candidate in self._rows)
         if not still_present:
             status = tr(
@@ -2955,6 +3803,10 @@ class ScanImportView(QWidget):
             if note:
                 status += "  ·  " + note
             self._lbl_status.setText(status)
+        elif row.get("ocr_warning"):
+            self._lbl_status.setText(
+                tr("scan.ocr_review_after_match")
+            )
         elif note:
             self._lbl_status.setText(
                 self._lbl_status.text() + "  ·  " + note
@@ -2965,23 +3817,61 @@ class ScanImportView(QWidget):
         när användaren uttryckligen har bekräftat matchningen."""
         resolved_rows: list[dict] = []
         for row in list(rows or []):
-            if isinstance(row, dict) and row.get("match_uncertain"):
+            if (
+                isinstance(row, dict)
+                and row.get("match_uncertain")
+                and not row.get("_scan_error")
+            ):
                 if self._ask_user_for_match(row):
                     resolved_rows.append(row)
         if resolved_rows:
             self._refresh_table()
-            self._auto_register_matched_rows(resolved_rows)
+            self._auto_register_matched_rows(
+                resolved_rows, user_confirmed=True
+            )
+            if any(
+                row.get("ocr_warning")
+                and any(current is row for current in self._rows)
+                for row in resolved_rows
+            ):
+                self._lbl_status.setText(
+                    tr("scan.ocr_review_after_match")
+                )
         return len(resolved_rows)
 
-    def _auto_register_matched_rows(self, rows: list[dict]) -> int:
-        """Registrerar kompletta rader efter ett uttryckligt
-        manuellt leverantörs-/mallval; osäkra/ofullständiga rader
-        lämnas kvar i Tolkade fakturor."""
+    def _auto_register_matched_rows(
+        self, rows: list[dict], *, user_confirmed: bool = False,
+    ) -> int:
+        """Registrerar kompletta, säkra rader.
+
+        Bara rader som följer direkt på en uttrycklig användaråtgärd
+        får bidra till lärandet. Rader som blir kompletta vid en tyst
+        omläsning registreras utan att räknas som en ny bekräftelse.
+        Den centrala vakten stoppar dessutom en oprövad egen mall
+        även om någon anropare råkat missa att flagga den tidigare.
+        """
         indexes: list[int] = []
         for row in list(rows or []):
+            if not isinstance(row, dict):
+                continue
+            if not user_confirmed:
+                try:
+                    si = _scan_module()
+                    row = si.require_template_confirmation(
+                        row, self._get_templates(),
+                        self._get_match_learning(), self._suppliers(),
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "auto-register template guard %s: %s",
+                        row.get("file", ""), exc,
+                    )
+                    continue
             if (
-                not isinstance(row, dict)
+                row.get("_scan_error")
+                or row.get("ocr_warning")
                 or row.get("match_uncertain")
+                or row.get("payment_details_warning")
                 or row.get("missing")
             ):
                 continue
@@ -2997,20 +3887,44 @@ class ScanImportView(QWidget):
         self._tbl.clearSelection()
         for index in indexes:
             self._tbl.selectRow(index)
-        self._create_invoices()
+        previous_mode = bool(
+            getattr(self, "_automatic_registering", False)
+        )
+        self._automatic_registering = previous_mode or not user_confirmed
+        try:
+            self._create_invoices()
+        finally:
+            self._automatic_registering = previous_mode
         return len(indexes)
 
     def _parked_entry_for(self, info: dict) -> dict | None:
         """Parkerade posten som hör till ett parkeringsevent."""
+        if (
+            isinstance(info, dict)
+            and isinstance(info.get("parsed"), dict)
+            and info["parsed"].get("_scan_error")
+        ):
+            return info
         watch = getattr(self, "_watch", None)
         if watch is not None:
-            for entry in list(getattr(watch, "parked", []) or []):
-                if info.get("hash") and str(entry.get("hash", "")) \
-                        == str(info.get("hash", "")):
-                    return entry
-                if str(entry.get("path", "")) \
-                        == str(info.get("path", "")):
-                    return entry
+            entries = list(getattr(watch, "parked", []) or [])
+            path = str(info.get("path", "") or "")
+            if path:
+                try:
+                    from ui.watch_folders import _norm_path_key
+                    normalize_path = _norm_path_key
+                except Exception:
+                    normalize_path = lambda value: str(value or "").casefold()
+                target = normalize_path(path)
+                for entry in entries:
+                    if normalize_path(entry.get("path", "")) == target:
+                        return entry
+            else:
+                digest = str(info.get("hash", "") or "")
+                if digest:
+                    for entry in entries:
+                        if str(entry.get("hash", "")) == digest:
+                            return entry
         if isinstance(info, dict) and info.get("parsed"):
             return info
         return None
@@ -3018,16 +3932,20 @@ class ScanImportView(QWidget):
     def _add_parked_rows_to_table(
         self, infos: list[dict]
     ) -> list[dict]:
-        """Lägger OSÄKRA parkerade fakturor direkt i Import-tabellen.
+        """Lägger osäkra, OCR-degraderade och oläsliga original i Import.
 
-        Alla fakturor vars matchning är osäker (leverantör/mall/
-        flersidor) ska ligga i Import-tabellen — inte bara gömda
-        i bevakningens parkering. Raderna kommer dit röda
-        (osäkra) och stannar tills användaren matchat dem, skapat
-        fakturor av dem eller tagit bort dem; samma fil läggs
+        Osäker matchning, OCR-varning eller läsfel ska alltid ha en
+        synlig rad — inte bara finnas i parkeringen/felloggen. Hårda
+        felrader behålls som ej registrerbara, och samma fil läggs
         aldrig in två gånger. Returnerar de NYA raderna.
         """
         added: list[dict] = []
+        updated_existing = False
+        try:
+            from ui.watch_folders import _norm_path_key
+            normalize_path = _norm_path_key
+        except Exception:
+            normalize_path = lambda value: str(value or "").casefold()
         for info in infos or []:
             if not isinstance(info, dict):
                 continue
@@ -3035,51 +3953,95 @@ class ScanImportView(QWidget):
             if not isinstance(source, dict):
                 continue
             parsed = dict(source.get("parsed", {}) or {})
-            if not parsed.get("match_uncertain"):
-                continue
+            method = str(source.get("method", "") or parsed.get("method", ""))
+            if "ocr-saknas" in method or "ocr-fel" in method:
+                parsed.setdefault("ocr_warning", method)
             digest = str(
                 source.get("hash", "") or info.get("hash", "") or ""
             )
             path = str(
                 source.get("path", "") or info.get("path", "") or ""
             )
-            if any(
-                (digest and str(r.get("_parked_hash", "")) == digest)
-                or (path and str(r.get("_path", "")) == path)
-                for r in self._rows
+            text = str(source.get("text", "") or "")
+            existing = next((
+                current for current in self._rows
+                if (
+                    path
+                    and normalize_path(current.get("_path", ""))
+                    == normalize_path(path)
+                )
+                or (
+                    not path and digest
+                    and str(current.get("_parked_hash", "")) == digest
+                )
+            ), None)
+            if existing is not None:
+                previous_match = existing.get("supplier_match", {}) or {}
+                chosen = (
+                    str(existing.get("supplier", "") or "")
+                    if isinstance(previous_match, dict)
+                    and previous_match.get("reason") == "user_choice"
+                    else None
+                )
+                self._refresh_payment_details(
+                    existing, text=text, supplier_name=chosen,
+                    source=parsed,
+                )
+                if digest:
+                    existing.setdefault("_parked_hash", digest)
+                if text:
+                    existing["_text"] = text
+                existing["status"] = self._compute_status(
+                    existing, bool(text)
+                )
+                updated_existing = True
+                continue
+            if not (
+                parsed.get("match_uncertain")
+                or parsed.get("ocr_warning")
+                or parsed.get("payment_details_warning")
+                or parsed.get("_scan_error")
             ):
                 continue
-            text = str(source.get("text", "") or "")
             parsed["file"] = source.get("file", "") or Path(path).name
             parsed["_path"] = path
-            parsed["method"] = source.get("method", "")
+            parsed["method"] = method
             parsed["_text"] = text
             if digest:
                 parsed["_parked_hash"] = digest
-            parsed = self._apply_template_to_row(parsed, text)
-            try:
-                si = _scan_module()
-                if "math_check" not in parsed:
-                    parsed["math_check"] = si.invoice_math_check(
-                        text, float(parsed.get("total_amount") or 0)
-                    )
-                if "date_check" not in parsed:
-                    parsed["date_check"] = si.invoice_date_check(
-                        parsed.get("date", ""),
-                        parsed.get("due_date", ""),
-                    )
-            except Exception:
-                pass
-            parsed["status"] = self._compute_status(
-                parsed, bool(text)
-            )
+            if parsed.get("_scan_error"):
+                # Ett rent läsfel får aldrig trigga mallextraktion eller
+                # ändras till en säker/registreringsbar rad i efterhand.
+                parsed["status"] = "scan_error"
+            else:
+                parsed = self._apply_template_to_row(parsed, text)
+                try:
+                    si = _scan_module()
+                    if "math_check" not in parsed:
+                        parsed["math_check"] = si.invoice_math_check(
+                            text, float(parsed.get("total_amount") or 0)
+                        )
+                    if "date_check" not in parsed:
+                        parsed["date_check"] = si.invoice_date_check(
+                            parsed.get("date", ""),
+                            parsed.get("due_date", ""),
+                        )
+                except Exception:
+                    pass
+                self._refresh_payment_details(
+                    parsed, text=text, source=parsed
+                )
+                parsed["status"] = self._compute_status(
+                    parsed, bool(text)
+                )
             self._rows.append(parsed)
             added.append(parsed)
-        if added:
+        if added or updated_existing:
             self._refresh_table()
+        if added:
             log.info(
-                "SCAN_IMPORT: %d osäkra parkerade fakturor lades "
-                "direkt i Import-tabellen för manuell matchning",
+                "SCAN_IMPORT: %d osäkra/OCR-degraderade/betalningsavvikande/"
+                "oläsliga bevakade original lades direkt i Import-tabellen",
                 len(added),
             )
         return added
@@ -3153,19 +4115,24 @@ class ScanImportView(QWidget):
             parsed["_path"] = source.get("path", "")
             parsed["method"] = source.get("method", "")
             parsed["_text"] = source.get("text", "")
+            parsed["_parked_hash"] = str(
+                source.get("hash", "") or info.get("hash", "") or ""
+            )
             if not self._ask_user_for_match(parsed):
                 continue
             parsed["status"] = self._compute_status(
                 parsed, bool(source.get("text"))
             )
             self._rows.append(parsed)
-            if parked is not None:
+            if parked is not None and not parsed.get("payment_details_warning"):
                 watch.remove_parked(parked.get("hash", ""))
             matched_rows.append(parsed)
             moved = True
         if moved:
             self._refresh_table()
-            self._auto_register_matched_rows(matched_rows)
+            self._auto_register_matched_rows(
+                matched_rows, user_confirmed=True
+            )
             self._refresh_watch_ui()
 
     def _apply_template_to_row(self, parsed: dict, text: str) -> dict:
@@ -3180,7 +4147,9 @@ class ScanImportView(QWidget):
             return parsed
         try:
             si = _scan_module()
-            tmpl = si.find_template(self._get_templates(), supplier)
+            tmpl = si.find_template(
+                self._get_templates(), supplier, self._suppliers()
+            )
             if not tmpl:
                 builtin = si.builtin_template_for(text)
                 tmpl = builtin[1] if builtin else None
@@ -3223,18 +4192,44 @@ class ScanImportView(QWidget):
         start = len(self._rows)
         for parked in list(self._watch.parked):
             digest = str(parked.get("hash", "") or "")
-            if digest and any(
-                str(r.get("_parked_hash", "")) == digest
-                for r in self._rows
-            ):
-                # Redan i Import-tabellen (osäker parkering som
-                # lades dit automatiskt) — lägg aldrig in samma
-                # faktura två gånger.
+            existing = next((
+                r for r in self._rows
+                if digest and str(r.get("_parked_hash", "")) == digest
+            ), None)
+            if existing is not None:
+                previous_match = existing.get("supplier_match", {}) or {}
+                chosen = (
+                    str(existing.get("supplier", "") or "")
+                    if isinstance(previous_match, dict)
+                    and previous_match.get("reason") == "user_choice"
+                    else None
+                )
+                parked_text = str(parked.get("text", "") or "")
+                self._refresh_payment_details(
+                    existing, text=parked_text,
+                    supplier_name=chosen,
+                    source=dict(parked.get("parsed", {}) or {}),
+                )
+                existing["status"] = self._compute_status(
+                    existing, bool(parked_text)
+                )
+                if (
+                    not existing.get("payment_details_warning")
+                    and not existing.get("match_uncertain")
+                    and not existing.get("ocr_warning")
+                ):
+                    self._watch.remove_parked(digest)
+                # Redan i Import-tabellen: uppdatera varningen men
+                # lägg aldrig in samma original två gånger.
                 continue
             parsed = dict(parked.get("parsed", {}))
             parsed["file"] = parked.get("file", "")
             parsed["_path"] = parked.get("path", "")
-            parsed["method"] = parked.get("method", "")
+            parsed["_parked_hash"] = digest
+            method = str(parked.get("method", "") or parsed.get("method", ""))
+            parsed["method"] = method
+            if "ocr-saknas" in method or "ocr-fel" in method:
+                parsed.setdefault("ocr_warning", method)
             parsed["_text"] = parked.get("text", "")
             parsed = self._apply_template_to_row(
                 parsed, str(parked.get("text", "") or "")
@@ -3256,11 +4251,21 @@ class ScanImportView(QWidget):
                     )
             except Exception:
                 pass
+            self._refresh_payment_details(
+                parsed,
+                text=str(parked.get("text", "") or ""),
+                source=parsed,
+            )
             parsed["status"] = self._compute_status(
                 parsed, bool(parked.get("text"))
             )
             self._rows.append(parsed)
-            self._watch.remove_parked(parked.get("hash", ""))
+            if not (
+                parsed.get("ocr_warning")
+                or parsed.get("payment_details_warning")
+                or parsed.get("match_uncertain")
+            ):
+                self._watch.remove_parked(parked.get("hash", ""))
         self._refresh_table()
         # Behåll objektreferenserna: kompletta, manuellt bekräftade
         # rader kan registreras och tas bort ur tabellen direkt.
@@ -3268,6 +4273,16 @@ class ScanImportView(QWidget):
         # Osäkra matchningar som följt med till tabellen avgörs
         # av användaren här — aldrig av en gissning i bakgrunden.
         self._ask_uncertain_rows(added_rows)
+        # En manuellt löst matchning lämnar parkeringen bara om
+        # ingen separat OCR-/betalningsvarning återstår.
+        for row in added_rows:
+            if (
+                any(current is row for current in self._rows)
+                and not row.get("match_uncertain")
+                and not row.get("ocr_warning")
+                and not row.get("payment_details_warning")
+            ):
+                self._unpark_row(row)
         pending_rows = [
             row for row in added_rows
             if any(current is row for current in self._rows)
@@ -3283,6 +4298,12 @@ class ScanImportView(QWidget):
         Användaren bekräftar alltid; först därefter uppdateras
         mallen, sparas och prövas på raderna igen.
         """
+        rows = [
+            row for row in (rows or [])
+            if isinstance(row, dict)
+            and not row.get("_scan_error")
+            and not row.get("ocr_warning")
+        ]
         if not rows:
             return
         try:
@@ -3311,7 +4332,9 @@ class ScanImportView(QWidget):
 
         for supplier, supplier_rows in by_supplier.items():
             try:
-                template = si.find_template(templates, supplier)
+                template = si.find_template(
+                    templates, supplier, self._suppliers()
+                )
                 if not template:
                     continue
                 template_name = supplier
@@ -3461,13 +4484,14 @@ class ScanImportView(QWidget):
                 stöd.append("pypdf")
             if si.HAS_FITZ:
                 stöd.append("PyMuPDF")
-            if si.HAS_TESS:
+            if si.tesseract_available():
                 stöd.append("Tesseract OCR")
+            else:
+                stöd.append(tr("scan.ocr_engine_missing"))
             txt = (
-                "Textkällor: " + ", ".join(stöd)
-                if stöd
-                else "Ingen PDF/OCR-modul hittad — klistra in fakturatexten "
-                     "i ruta 2 (fungerar alltid)"
+                tr("scan.text_sources", sources=", ".join(stöd))
+                if si.HAS_PYPDF or si.HAS_FITZ or si.HAS_TESS
+                else tr("scan.no_text_modules")
             )
             self._lbl_log.setText(txt)
         except Exception as exc:
@@ -3540,10 +4564,10 @@ class ScanImportView(QWidget):
             )
         return self._learning_cache
 
-    def _save_match_learning(self) -> None:
-        _scan_module().save_match_learning(
+    def _save_match_learning(self) -> bool:
+        return bool(_scan_module().save_match_learning(
             self._learning_file(), self._get_match_learning()
-        )
+        ))
 
     def _row_pages(self, row: dict) -> int:
         """Radens sidantal (tolkningens värde, annars filen)."""
@@ -3568,12 +4592,13 @@ class ScanImportView(QWidget):
             )
         return self._templates_cache
 
-    def _save_templates_file(self) -> None:
+    def _save_templates_file(self) -> bool:
         si = _scan_module()
-        si.save_templates(
+        saved = bool(si.save_templates(
             self._templates_file(), self._get_templates()
-        )
+        ))
         self._refresh_templates_btn()
+        return saved
 
     def _refresh_templates_btn(self) -> None:
         try:
@@ -3628,6 +4653,9 @@ class ScanImportView(QWidget):
                 other[field] = value
             other["supplier"] = supplier
             other["template"] = supplier
+            self._refresh_payment_details(
+                other, text=text, supplier_name=supplier
+            )
             miss: list[str] = []
             try:
                 amount_ok = float(other.get("total_amount") or 0) > 0
@@ -3666,9 +4694,22 @@ class ScanImportView(QWidget):
             self._lbl_status.setText(tr("tmpl.need_image"))
             return
         templates = self._get_templates()
-        existing = si.find_template(
-            templates, str(row.get("supplier", "") or "")
-        )
+        row_supplier = str(row.get("supplier", "") or "")
+        template_names = si.supplier_template_candidate_names(
+            templates, row_supplier, self._suppliers()
+        ) if row_supplier else []
+        if len(template_names) > 1:
+            QMessageBox.warning(
+                self,
+                tr("tmpl.alias_template_ambiguous_title"),
+                tr(
+                    "tmpl.alias_template_ambiguous_body",
+                    names=", ".join(template_names),
+                ),
+            )
+            return
+        existing_name = template_names[0] if template_names else ""
+        existing = templates.get(existing_name) if existing_name else None
         dlg = TemplateDialog(
             self, text,
             supplier=str(row.get("supplier", "") or ""),
@@ -3678,11 +4719,17 @@ class ScanImportView(QWidget):
         if not dlg.exec() or not dlg.result_template:
             return
         supplier = dlg.result_template["supplier"]
+        if existing_name and existing_name != supplier:
+            templates.pop(existing_name, None)
         templates[supplier] = {
             key: value for key, value in dlg.result_template.items()
             if key != "supplier"
         }
-        self._save_templates_file()
+        if not self._save_templates_file():
+            self._lbl_status.setText(
+                tr("tmpl.save_failed", supplier=supplier)
+            )
+            return
 
         # Spara mall är också användarens uttryckliga leverantörsval.
         # Applicera mallen på originalet, lär av bekräftelsen och gå
@@ -3700,7 +4747,9 @@ class ScanImportView(QWidget):
             supplier, list(dlg.result_template["fields"]),
         )
         if not row.get("missing"):
-            self._auto_register_matched_rows([row])
+            self._auto_register_matched_rows(
+                [row], user_confirmed=True
+            )
 
     def _example_row_for_template(self, name: str) -> dict | None:
         """Tolkad rad vars fil kan visa mallens fakturabild."""
@@ -3739,7 +4788,11 @@ class ScanImportView(QWidget):
             key: value for key, value in dlg.result_template.items()
             if key != "supplier"
         }
-        self._save_templates_file()
+        if not self._save_templates_file():
+            self._lbl_status.setText(
+                tr("tmpl.save_failed", supplier=supplier)
+            )
+            return
         self._lbl_status.setText(tr("tmpl.saved", supplier=supplier))
         log.info("SCAN_TEMPLATE: mall redigerad för %s", supplier)
 
@@ -3789,6 +4842,131 @@ class ScanImportView(QWidget):
         except Exception:
             return []
 
+    @staticmethod
+    def _payment_warning_key(row: dict) -> tuple:
+        warnings = []
+        for item in row.get("payment_details_warning", []) or []:
+            if not isinstance(item, dict):
+                continue
+            warnings.append((
+                str(item.get("field", "")),
+                str(item.get("registered", "")),
+                tuple(sorted(str(v) for v in item.get("invoice_values", []) or [])),
+            ))
+        return (
+            str(row.get("supplier", "") or "").strip().casefold(),
+            tuple(sorted(warnings)),
+        )
+
+    def _refresh_payment_details(
+        self,
+        row: dict,
+        *,
+        text: str | None = None,
+        supplier_name: str | None = None,
+        source: dict | None = None,
+    ) -> list[dict]:
+        """Räkna om betalningsvarningen utan att skriva till leverantören."""
+        parsed = dict(source if isinstance(source, dict) else row)
+        if supplier_name is not None:
+            parsed["supplier"] = supplier_name
+        source_text = str(
+            row.get("_text", "") if text is None else text
+        )
+        try:
+            si = _scan_module()
+            assessor = getattr(si, "assess_invoice_payment_details", None)
+            if not callable(assessor):
+                return list(row.get("payment_details_warning", []) or [])
+            assessed = assessor(
+                parsed, source_text, self._suppliers(),
+                supplier_name=supplier_name,
+                details=parsed.get("invoice_payment_details"),
+            )
+        except Exception as exc:
+            log.warning("payment details assessment failed: %s", exc)
+            return list(row.get("payment_details_warning", []) or [])
+        row["invoice_payment_details"] = assessed.get(
+            "invoice_payment_details", {}
+        )
+        warnings = list(assessed.get("payment_details_warning", []) or [])
+        if warnings:
+            row["payment_details_warning"] = warnings
+        else:
+            row.pop("payment_details_warning", None)
+        previous_key = row.get("_payment_warning_confirmed")
+        if previous_key is not None and previous_key != self._payment_warning_key(row):
+            row.pop("_payment_warning_confirmed", None)
+        return warnings
+
+    def _confirm_payment_warnings(self, rows: list[dict]) -> bool:
+        """Kräver ett separat Ja innan en avvikande betalning registreras."""
+        pending = [
+            row for row in rows or []
+            if isinstance(row, dict)
+            and row.get("payment_details_warning")
+            and row.get("_payment_warning_confirmed")
+            != self._payment_warning_key(row)
+        ]
+        if not pending:
+            return True
+        if getattr(self, "_automatic_registering", False):
+            return False
+
+        field_keys = {
+            "bg": "scan.payment_field_bg",
+            "pg": "scan.payment_field_pg",
+            "iban": "scan.payment_field_iban",
+        }
+
+        def _display_value(field: str, value: Any) -> str:
+            raw = str(value or "")
+            if field == "iban":
+                return " ".join(
+                    raw[index:index + 4]
+                    for index in range(0, len(raw), 4)
+                )
+            if field == "bg" and len(raw) in (7, 8):
+                split = 3 if len(raw) == 7 else 4
+                return raw[:split] + "-" + raw[split:]
+            return raw or "—"
+
+        lines: list[str] = []
+        for row in pending:
+            for item in row.get("payment_details_warning", []) or []:
+                if not isinstance(item, dict):
+                    continue
+                field_code = str(item.get("field", ""))
+                field = tr(field_keys.get(
+                    field_code, "scan.payment_field_other"
+                ))
+                invoice_values = ", ".join(
+                    _display_value(field_code, value)
+                    for value in item.get("invoice_values", []) or []
+                ) or "—"
+                lines.append(tr(
+                    "scan.payment_review_line",
+                    file=str(row.get("file", "—") or "—"),
+                    supplier=str(row.get("supplier", "—") or "—"),
+                    field=field,
+                    invoice=invoice_values,
+                    registered=_display_value(
+                        field_code, item.get("registered", "—")
+                    ),
+                ))
+        answer = QMessageBox.warning(
+            self,
+            tr("scan.payment_review_title"),
+            tr("scan.payment_review_body", lines="\n".join(lines)),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        for row in pending:
+            row["_payment_warning_confirmed"] = self._payment_warning_key(row)
+        return True
+
     def _open_template_for_unmatched(self, rows: list[dict]) -> None:
         """Öppnar mallskapandet för rader utan matchande mall.
 
@@ -3806,7 +4984,10 @@ class ScanImportView(QWidget):
                 continue
             if not any(current is row for current in self._rows):
                 continue
-            if row.get("template") or row.get("match_uncertain"):
+            if (
+                row.get("template") or row.get("match_uncertain")
+                or row.get("_scan_error") or row.get("ocr_warning")
+            ):
                 continue
             path = str(row.get("_path", "") or "")
             if not path or si.page_image_count(path) <= 0:
@@ -3827,17 +5008,20 @@ class ScanImportView(QWidget):
         sys.path.insert(0, str(Path(__file__).parent.parent / "plugins"))
         import scan_import as si
 
-        # Tolerera inklistrade sökvägar i textrutan
-        if self._txt_paths.toPlainText().strip():
-            pasted = [
+        # Textrutan är den uttryckliga källan när den innehåller sökvägar.
+        # En felaktig/otillgänglig sökväg får aldrig falla tillbaka till
+        # en gammal markering och skanna en annan originalfaktura i tysthet.
+        path_text = self._txt_paths.toPlainText().strip()
+        if path_text:
+            raw_paths = [
                 Path(line.strip())
-                for line in self._txt_paths.toPlainText().splitlines()
+                for line in path_text.splitlines()
                 if line.strip()
             ]
-            if pasted:
-                self._paths = [p for p in pasted if p.exists()] or self._paths
+        else:
+            raw_paths = list(self._paths)
 
-        if not self._paths:
+        if not raw_paths:
             QMessageBox.information(
                 self, "Import",
                 "Välj en eller flera filer först (ruta 1).",
@@ -3845,34 +5029,138 @@ class ScanImportView(QWidget):
             return
 
         suppliers = self._suppliers()
+        try:
+            templates = self._get_templates()
+        except Exception:
+            log.exception("SCAN_IMPORT: kunde inte läsa leverantörsmallar")
+            templates = {}
+        try:
+            learning = self._get_match_learning()
+        except Exception:
+            log.exception("SCAN_IMPORT: kunde inte läsa inlärningsminnet")
+            learning = {}
+
         new_rows: list[dict] = []
-        for path in self._paths:
+        error_files: set[str] = set()
+        for path in raw_paths:
+            text = ""
+            method = ""
+            extraction_failed = False
             try:
-                text, method = si.extract_text(path)
-            except Exception as exc:
-                log.error("extract %s: %s", path.name, exc)
-                text, method = "", "fel"
-            parsed = si.parse_invoice_file(
-                path, text, suppliers,
-                templates=self._get_templates(),
-            )
-            parsed["file"] = path.name
-            parsed["_path"] = str(path)
-            parsed["method"] = method
-            parsed["_text"] = (text or "")[:30_000]
-            status = (
-                "redo" if not parsed["missing"]
-                else "saknas: " + ", ".join(parsed["missing"])
-            )
-            if not text:
-                status = "ingen text hittad"
-            parsed["status"] = status
-            new_rows.append(parsed)
-            log.info(
-                "SCAN_IMPORT: %s → metod=%s belopp=%s fakturanr=%s status=%s",
-                path.name, method, parsed["total_amount"],
-                parsed["invoice_number"] or "-", status,
-            )
+                if not path.exists():
+                    row = self._scan_error_row(
+                        path, status="scan_invalid", method="saknas"
+                    )
+                    error_files.add(str(path))
+                    new_rows.append(row)
+                    continue
+                if not path.is_file() or path.suffix.lower() not in si.SCAN_EXTENSIONS:
+                    row = self._scan_error_row(
+                        path, status="scan_invalid", method="filtyp"
+                    )
+                    error_files.add(str(path))
+                    new_rows.append(row)
+                    continue
+
+                try:
+                    text, method = si.extract_text(path)
+                except Exception:
+                    # Tolka ändå med eventuella regionsmallar; ett fel i
+                    # textuttaget ska inte stoppa nästa originalfil.
+                    log.exception(
+                        "SCAN_IMPORT: textuttag misslyckades för %s", path
+                    )
+                    method = "extract-fel"
+                    extraction_failed = True
+                    error_files.add(str(path))
+
+                try:
+                    parsed = si.parse_invoice_file(
+                        path, text or "", suppliers,
+                        templates=templates,
+                        match_learning=learning,
+                    )
+                    if not isinstance(parsed, dict):
+                        raise TypeError("parse_invoice_file returnerade inte dict")
+                except Exception:
+                    log.exception(
+                        "SCAN_IMPORT: kunde inte tolka originalfilen %s", path
+                    )
+                    parsed = self._scan_error_row(
+                        path, status="scan_error", method="tolkningsfel"
+                    )
+                    error_files.add(str(path))
+
+                try:
+                    parsed = si.require_template_confirmation(
+                        parsed, templates, learning, suppliers
+                    )
+                except Exception as exc:
+                    # En säkerhetsvakt får inte göra att filen försvinner;
+                    # parsningen ligger kvar synlig om vakten själv fallerar.
+                    log.warning(
+                        "SCAN_IMPORT: mallbekräftelse kunde inte kontrolleras "
+                        "för %s: %s", path, exc,
+                    )
+                if extraction_failed:
+                    parsed["_scan_error"] = True
+                parsed.setdefault("total_amount", 0.0)
+                parsed.setdefault("invoice_number", "")
+                parsed.setdefault("supplier", "")
+                parsed.setdefault("date", "")
+                parsed.setdefault("due_date", "")
+                parsed.setdefault("ocr", "")
+                missing = parsed.get("missing")
+                if not isinstance(missing, list):
+                    missing = []
+                required = []
+                try:
+                    if float(parsed.get("total_amount") or 0) == 0:
+                        required.append("belopp")
+                except (TypeError, ValueError):
+                    required.append("belopp")
+                if not str(parsed.get("invoice_number") or "").strip():
+                    required.append("fakturanummer")
+                if not str(parsed.get("supplier") or "").strip():
+                    required.append("leverantör")
+                parsed["missing"] = list(dict.fromkeys(missing + required))
+                parsed["file"] = path.name
+                parsed["_path"] = str(path)
+                parsed["method"] = method or parsed.get("method") or "—"
+                if "ocr-saknas" in parsed["method"] \
+                        or "ocr-fel" in parsed["method"]:
+                    parsed["ocr_warning"] = parsed["method"]
+                parsed["_text"] = (text or "")[:30_000]
+
+                if parsed.get("_scan_error"):
+                    status = "scan_error"
+                elif not text and not parsed.get("total_amount") \
+                        and not parsed.get("invoice_number"):
+                    status = "ingen text hittad"
+                else:
+                    status = (
+                        "redo" if not parsed["missing"]
+                        else "saknas: " + ", ".join(parsed["missing"])
+                    )
+                parsed["status"] = status
+                new_rows.append(parsed)
+                log.info(
+                    "SCAN_IMPORT: %s → metod=%s belopp=%s "
+                    "fakturanr=%s status=%s",
+                    path.name, parsed.get("method"),
+                    parsed.get("total_amount"),
+                    parsed.get("invoice_number") or "-", status,
+                )
+            except Exception:
+                # En ogiltig path eller oväntat filfel blir en synlig rad;
+                # resten av den valda batchen fortsätter att läsas.
+                log.exception(
+                    "SCAN_IMPORT: oväntat fel vid inläsning av %s", path
+                )
+                error_files.add(str(path))
+                new_rows.append(self._scan_error_row(
+                    path, status="scan_error", method="inläsningsfel"
+                ))
 
         self._rows.extend(new_rows)
         self._refresh_table()
@@ -3883,7 +5171,10 @@ class ScanImportView(QWidget):
         # mallskapandet direkt för den — användaren ska inte
         # behöva leta fram rätt knapp själv.
         self._open_template_for_unmatched(new_rows)
-        ok = sum(1 for r in new_rows if not r["missing"])
+        ok = sum(
+            1 for r in new_rows
+            if not r.get("missing") and not r.get("_scan_error")
+        )
         registered = sum(
             not any(current is row for current in self._rows)
             for row in new_rows
@@ -3894,7 +5185,25 @@ class ScanImportView(QWidget):
         )
         if registered:
             summary += " · " + tr("scan.auto_registered", n=registered)
+        if error_files:
+            summary += " · " + tr(
+                "scan.file_error_count", n=len(error_files)
+            )
         self._lbl_status.setText(summary)
+
+    @staticmethod
+    def _scan_error_row(
+        path: Path, *, status: str, method: str,
+    ) -> dict:
+        """Synlig, ej registrerbar tabellrad för fil-/tolkningsfel."""
+        return {
+            "file": path.name or str(path),
+            "supplier": "", "invoice_number": "", "date": "",
+            "due_date": "", "ocr": "", "total_amount": 0.0,
+            "missing": ["belopp", "fakturanummer", "leverantör"],
+            "status": status, "method": method,
+            "_path": str(path), "_text": "", "_scan_error": True,
+        }
 
     def _scan_pasted(self) -> None:
         """Tolkar inklistrad fakturatext (fallback utan OCR)."""
@@ -3910,9 +5219,15 @@ class ScanImportView(QWidget):
             )
             return
 
+        suppliers = self._suppliers()
+        templates = self._get_templates()
+        learning = self._get_match_learning()
         parsed = si.parse_invoice_text(
-            text, self._suppliers(),
-            templates=self._get_templates(),
+            text, suppliers, templates=templates,
+            match_learning=learning,
+        )
+        parsed = si.require_template_confirmation(
+            parsed, templates, learning, suppliers
         )
         parsed["file"] = "(inklistrad text)"
         parsed["_path"] = ""
@@ -3976,7 +5291,14 @@ class ScanImportView(QWidget):
                 item.setTextAlignment(
                     align | Qt.AlignmentFlag.AlignVCenter
                 )
+                if key in {
+                    "invoice_number", "date", "due_date", "ocr",
+                    "total_amount",
+                }:
+                    set_item_font(item, make_tabular_font(12))
                 if key == "status":
+                    if row.get("_scan_error") and row.get("error_detail"):
+                        item.setToolTip(str(row.get("error_detail")))
                     if self._ocr_check_bad(row) \
                             or self._check_warnings(row):
                         item.setForeground(QColor("#ef6c00"))
@@ -4009,6 +5331,11 @@ class ScanImportView(QWidget):
                     if _state == "uncertain"
                     else tr("scan.match_secure_tip")
                 )
+                _status_col = next(
+                    (i for i, column in enumerate(COLUMNS)
+                     if column[1] == "status"),
+                    -1,
+                )
                 for _c in range(len(COLUMNS)):
                     _cell = self._tbl.item(r, _c)
                     if _cell is not None:
@@ -4018,6 +5345,13 @@ class ScanImportView(QWidget):
                         # båda temana (aldrig palettens textfärg).
                         _cell.setForeground(_fg)
                         _cell.setToolTip(_tip)
+                        if (
+                            _c == _status_col
+                            and row.get("payment_details_warning")
+                        ):
+                            _cell.setForeground(QColor(
+                                "#ffd166" if self._dark else "#9a3412"
+                            ))
         self._update_sum()
         self._tbl.resizeRowsToContents()
         self._tbl.resizeRowsToContents()
@@ -4059,6 +5393,21 @@ class ScanImportView(QWidget):
                 key = keys.get(str(prob))
                 if key:
                     warns.append(tr(key))
+        payment_warnings = row.get("payment_details_warning") or []
+        if payment_warnings:
+            field_keys = {
+                "bg": "scan.payment_field_bg",
+                "pg": "scan.payment_field_pg",
+                "iban": "scan.payment_field_iban",
+            }
+            fields = ", ".join(dict.fromkeys(
+                tr(field_keys.get(str(item.get("field", "")),
+                                  "scan.payment_field_other"))
+                for item in payment_warnings if isinstance(item, dict)
+            ))
+            warns.append(tr(
+                "scan.payment_details_warning_short", fields=fields
+            ))
         return warns
 
     @staticmethod
@@ -4075,9 +5424,43 @@ class ScanImportView(QWidget):
                 fields=tr_missing(list(row.get("missing") or [])),
             )
         elif raw == "ingen text hittad":
-            text = tr("scan.no_text")
+            method = str(row.get("method", "") or "")
+            if "ocr-saknas" in method:
+                text = tr("scan.ocr_unavailable_status")
+            elif "ocr-fel" in method:
+                text = tr("scan.ocr_failed_status")
+            else:
+                text = tr("scan.no_text")
+        elif raw == "scan_error":
+            text = tr("scan.file_read_error")
+        elif raw == "scan_invalid":
+            text = tr("scan.file_invalid")
         else:
             text = raw
+        method = str(row.get("method", "") or "")
+        if raw.startswith("saknas:") and "ocr-saknas" in method:
+            text += "  ·  " + tr("scan.ocr_unavailable_short")
+        elif raw.startswith("saknas:") and "ocr-fel" in method:
+            text += "  ·  " + tr("scan.ocr_failed_short")
+        elif raw != "ingen text hittad" and "ocr-saknas" in method:
+            # En digital flersidig PDF kan ha komplett text på en sida
+            # men sakna OCR på en skannad sida; varna även om övriga
+            # fält råkar se kompletta ut.
+            text += "  ·  " + tr("scan.ocr_unavailable_short")
+        elif raw != "ingen text hittad" and "ocr-fel" in method:
+            text += "  ·  " + tr("scan.ocr_failed_short")
+        template_match = row.get("template_match", {}) or {}
+        try:
+            confirmed_templates = int(
+                template_match.get("confirmed", 0) or 0
+            ) if isinstance(template_match, dict) else 0
+        except (TypeError, ValueError):
+            confirmed_templates = 0
+        if row.get("template") and confirmed_templates:
+            text += "  ·  " + tr(
+                "scan.template_confirmation_count",
+                n=confirmed_templates,
+            )
         if row.get("match_uncertain"):
             text += "  ·  " + tr("scan.match_uncertain_status")
         # Flersidiga fakturor syns direkt: totalen står ofta på
@@ -4239,6 +5622,9 @@ class ScanImportView(QWidget):
             QMessageBox.information(self, "Import", "Markera en rad först.")
             return
         row = self._rows[idxs[0]]
+        if row.get("_scan_error"):
+            self._lbl_status.setText(tr("scan.file_read_error"))
+            return
         try:
             from ui.invoices_helpers import InvoiceDialog
 
@@ -4270,6 +5656,18 @@ class ScanImportView(QWidget):
 
             if dlg.exec() == QDialogAccepted:
                 data = dlg.get_data()
+                payment_row = dict(row)
+                payment_supplier = str(
+                    data.get("supplier", "") or row.get("supplier", "")
+                ).strip()
+                self._refresh_payment_details(
+                    payment_row,
+                    text=str(row.get("_text", "") or ""),
+                    supplier_name=payment_supplier,
+                    source=row,
+                )
+                if not self._confirm_payment_warnings([payment_row]):
+                    return
                 if row.get("_path"):
                     # Originalet flyttas ALDRIG — det ligger kvar
                     # exakt där det ligger (även i bevakad mapp)
@@ -4278,9 +5676,18 @@ class ScanImportView(QWidget):
                 if self._save_invoice(
                     data, source=row.get("file", "")
                 ):
+                    training_row = dict(row)
+                    training_row.update(data)
+                    learned_note = self._record_confirmed_template_row(
+                        training_row
+                    )
+                    if learned_note:
+                        row["_match_learning_recorded"] = True
                     self._unpark_row(row)
                     self._rows.pop(idxs[0])
                     self._refresh_table()
+                    if learned_note:
+                        self._reread_rows_after_manual_match()
                     self._show_invoices_tab()
         except Exception as exc:
             log.error("SCAN_OPEN_DIALOG: %s", exc, exc_info=True)
@@ -4364,6 +5771,43 @@ class ScanImportView(QWidget):
             QMessageBox.information(self, "Import", "Markera rader först.")
             return
 
+        error_rows = {
+            i for i in idxs if self._rows[i].get("_scan_error")
+        }
+        if error_rows:
+            QMessageBox.warning(
+                self, tr("scan.file_read_error_title"),
+                tr(
+                    "scan.error_rows_unreadable",
+                    files="\n".join(
+                        f"• {self._rows[i].get('file', '')}"
+                        for i in sorted(error_rows)
+                    ),
+                ),
+            )
+            idxs = [i for i in idxs if i not in error_rows]
+        ocr_rows = {
+            i for i in idxs if self._rows[i].get("ocr_warning")
+        }
+        if ocr_rows:
+            answer = QMessageBox.question(
+                self, tr("scan.ocr_review_title"),
+                tr(
+                    "scan.ocr_review_body",
+                    files="\n".join(
+                        f"• {self._rows[i].get('file', '')}"
+                        for i in sorted(ocr_rows)
+                    ),
+                ),
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                idxs = [i for i in idxs if i not in ocr_rows]
+        if not idxs:
+            return
+
         # En rad med osäker leverantörs-/mallmatchning får aldrig
         # registreras på en gissning — fråga först, och avbryter
         # användaren registreras den inte alls.
@@ -4405,6 +5849,21 @@ class ScanImportView(QWidget):
                 )
                 + "\n\nAnvänd 'Öppna i fakturadialogen' för att komplettera.",
             )
+        for i in ready:
+            row = self._rows[i]
+            self._refresh_payment_details(
+                row, text=str(row.get("_text", "") or ""), source=row
+            )
+        pending_payment = {
+            i for i in ready
+            if self._rows[i].get("payment_details_warning")
+            and self._rows[i].get("_payment_warning_confirmed")
+            != self._payment_warning_key(self._rows[i])
+        }
+        if pending_payment and not self._confirm_payment_warnings(
+            [self._rows[i] for i in sorted(pending_payment)]
+        ):
+            ready = [i for i in ready if i not in pending_payment]
         if not ready:
             return
 
@@ -4436,6 +5895,8 @@ class ScanImportView(QWidget):
                 ))
 
         created = 0
+        template_learning_notes: list[str] = []
+        template_confirmation_recorded = False
         for i in sorted(ready, reverse=True):
             if i in skip_idxs:
                 continue
@@ -4455,14 +5916,33 @@ class ScanImportView(QWidget):
             data = self._invoice_data_from_row(row)
             if self._save_invoice(data, source=row.get("file", "")):
                 created += 1
+                if not getattr(self, "_automatic_registering", False):
+                    learned_note = self._record_confirmed_template_row(row)
+                    if learned_note:
+                        template_learning_notes.append(learned_note)
+                        template_confirmation_recorded = True
                 # Registrerad = avgjord: den parkerade posten
                 # (om raden kom från parkeringen) tas bort.
                 self._unpark_row(row)
                 self._rows.pop(i)
 
         self._refresh_table()
+        reread_note = ""
+        if template_confirmation_recorded:
+            reread_count, ready_count = self._reread_rows_after_manual_match()
+            if reread_count:
+                reread_note = tr(
+                    "scan.learning_reread",
+                    n=reread_count, ready=ready_count,
+                )
         if created:
-            self._lbl_status.setText(f"{created} faktura(or) registrerade")
+            status = f"{created} faktura(or) registrerade"
+            learning_notes = template_learning_notes[:]
+            if reread_note:
+                learning_notes.append(reread_note)
+            if learning_notes:
+                status += "  ·  " + "  ·  ".join(learning_notes)
+            self._lbl_status.setText(status)
             QMessageBox.information(
                 self, "Import",
                 f"✅  {created} faktura{'r' if created != 1 else ''} "

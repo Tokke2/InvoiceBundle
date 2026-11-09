@@ -32,8 +32,12 @@ Copyright © dynamiskt år Rickard Längkvist
 """
 
 import datetime
+import hashlib
+import json
 import logging
+import os
 import re
+import shutil
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -79,6 +83,61 @@ SCAN_EXTENSIONS: tuple[str, ...] = (
 # ═════════════════════════════════════════════════════════════════════
 
 
+def _page_text_quality(text: str) -> int:
+    """Ungefärligt innehållsmått: sidnummer ensamt räcker inte som OCR."""
+    return len(re.findall(r"[^\W_]", str(text or ""), flags=re.UNICODE))
+
+
+def _extract_pdf_page_text_sources(
+    path: Path, *, include_all: bool = False,
+) -> list[tuple[list[str], str]]:
+    """Text per sida från PDF-läsarna; sidfel isoleras till just den sidan."""
+    sources: list[tuple[list[str], str]] = []
+    if HAS_PYPDF:
+        try:
+            reader = PdfReader(str(path), strict=False)
+            pages: list[str] = []
+            for index, page in enumerate(reader.pages):
+                try:
+                    pages.append(page.extract_text() or "")
+                except Exception as exc:
+                    log.warning("pypdf sida %d i %s: %s", index + 1, path, exc)
+                    pages.append("")
+            if any(text.strip() for text in pages):
+                sources.append((pages, "textlager-pypdf"))
+        except Exception as exc:
+            log.warning("pypdf: %s", exc)
+
+    # Normala, helt textbaserade PDF:er läses bara en gång. PyMuPDF
+    # kompletterar vid tomma/tunna sidor och när pypdf inte kunde läsa.
+    needs_fitz = (
+        include_all
+        or not sources
+        or any(
+            _page_text_quality(text) < 12
+            for text in sources[0][0]
+        )
+    )
+    if HAS_FITZ and needs_fitz:
+        try:
+            with fitz.open(str(path)) as doc:
+                pages = []
+                for index, page in enumerate(doc):
+                    try:
+                        pages.append(page.get_text() or "")
+                    except Exception as exc:
+                        log.warning(
+                            "pymupdf sida %d i %s: %s",
+                            index + 1, path, exc,
+                        )
+                        pages.append("")
+            if any(text.strip() for text in pages):
+                sources.append((pages, "textlager-pymupdf"))
+        except Exception as exc:
+            log.warning("pymupdf: %s", exc)
+    return sources
+
+
 def extract_pdf_texts(path: Path) -> list[tuple[str, str]]:
     """
     Alla tillgängliga PDF-textuttag, i prioritetsordning.
@@ -90,25 +149,12 @@ def extract_pdf_texts(path: Path) -> list[tuple[str, str]]:
     alternativen innan en fil parkeras (se parse_invoice_file).
     """
     out: list[tuple[str, str]] = []
-    if HAS_PYPDF:
-        try:
-            reader = PdfReader(str(path))
-            parts = [p.extract_text() or "" for p in reader.pages]
-            text = "\n".join(parts).strip()
-            if text:
-                out.append((text, "textlager-pypdf"))
-        except Exception as exc:
-            log.warning("pypdf: %s", exc)
-    if HAS_FITZ:
-        try:
-            with fitz.open(str(path)) as doc:
-                text = "\n".join(
-                    p.get_text() for p in doc  # type: ignore
-                ).strip()
-            if text:
-                out.append((text, "textlager-pymupdf"))
-        except Exception as exc:
-            log.warning("pymupdf: %s", exc)
+    for pages, method in _extract_pdf_page_text_sources(
+        path, include_all=True
+    ):
+        text = "\n".join(pages).strip()
+        if text:
+            out.append((text, method))
     return out
 
 
@@ -123,41 +169,202 @@ def extract_pdf_text(path: Path) -> tuple[str, str]:
     return texts[0] if texts else ("", "ingen-pdf-läsare")
 
 
-def extract_image_text(path: Path) -> tuple[str, str]:
-    """OCR av bild via Tesseract (swe+eng). ('', 'ocr-saknas') vid fel."""
+def _configure_tesseract_binary() -> bool:
+    """Hittar standardinstallationer även om Tesseract saknas i PATH."""
+    if not HAS_TESS:
+        return False
+    engine = getattr(pytesseract, "pytesseract", None)
+    command = str(getattr(engine, "tesseract_cmd", "tesseract") or "")
+    if command and (shutil.which(command) or Path(command).is_file()):
+        return True
+
+    candidates: list[Path] = []
+    if os.name == "nt":
+        for variable in ("ProgramFiles", "ProgramFiles(x86)"):
+            root = os.environ.get(variable, "")
+            if root:
+                candidates.append(
+                    Path(root) / "Tesseract-OCR" / "tesseract.exe"
+                )
+        candidates.append(Path("C:/Program Files/Tesseract-OCR/tesseract.exe"))
+    else:
+        candidates.extend((
+            Path("/opt/homebrew/bin/tesseract"),
+            Path("/usr/local/bin/tesseract"),
+            Path("/usr/bin/tesseract"),
+            Path("/opt/local/bin/tesseract"),
+        ))
+    for candidate in candidates:
+        if candidate.is_file():
+            if engine is not None:
+                engine.tesseract_cmd = str(candidate)
+            return True
+    return False
+
+
+def tesseract_available() -> bool:
+    """True bara när både pytesseract och själva Tesseract-programmet finns."""
+    if not _configure_tesseract_binary():
+        return False
+    try:
+        return bool(pytesseract.get_tesseract_version())
+    except Exception:
+        return False
+
+
+def _ocr_image_text(image, *, engine_checked: bool = False) -> tuple[str, str]:
+    """OCR:a en bild; prova vanliga språkdata utan att tappa sidan."""
     if not HAS_TESS:
         return "", "ocr-saknas"
+    if not engine_checked and not tesseract_available():
+        return "", "ocr-saknas"
+    last_exc: Exception | None = None
+    for language in ("swe+eng", "eng", "swe"):
+        try:
+            text = pytesseract.image_to_string(
+                image, lang=language
+            ) or ""
+            return text.strip(), "ocr-tesseract"
+        except Exception as exc:
+            last_exc = exc
+            log.debug("Tesseract %s misslyckades: %s", language, exc)
+    if last_exc is not None:
+        log.warning("tesseract: %s", last_exc)
+    return "", "ocr-fel"
+
+
+def extract_image_text(path: Path) -> tuple[str, str]:
+    """OCR av bild via Tesseract (swe+eng, därefter eng)."""
+    if not HAS_TESS or not tesseract_available():
+        return "", "ocr-saknas"
     try:
-        img = Image.open(str(path))
-        text = pytesseract.image_to_string(img, lang="swe+eng")
-        return (text or "").strip(), "ocr-tesseract"
+        with Image.open(str(path)) as img:
+            page_count = max(1, int(getattr(img, "n_frames", 1) or 1))
+            texts: list[str] = []
+            failed = False
+            for index in range(page_count):
+                try:
+                    img.seek(index)
+                    frame = img.copy()
+                    try:
+                        text, method = _ocr_image_text(
+                            frame, engine_checked=True
+                        )
+                    finally:
+                        frame.close()
+                except Exception as exc:
+                    log.warning(
+                        "tesseract/bild %s sida %d: %s",
+                        path, index + 1, exc,
+                    )
+                    text, method = "", "ocr-fel"
+                texts.append(text)
+                failed = failed or method == "ocr-fel"
+            method = "ocr-tesseract"
+            if failed:
+                method += "+ocr-fel"
+            return "\n".join(texts).strip(), method
     except Exception as exc:
-        log.warning("tesseract: %s", exc)
+        log.warning("tesseract/bild %s: %s", path, exc)
+        return "", "ocr-fel"
+
+
+def _ocr_pdf_page(page) -> tuple[str, str]:
+    """Rendera och OCR:a en sida; fel i en sida påverkar inte resten."""
+    try:
+        import io
+
+        pix = page.get_pixmap(dpi=300)
+        with Image.open(io.BytesIO(pix.tobytes("png"))) as img:
+            return _ocr_image_text(img, engine_checked=True)
+    except Exception as exc:
+        log.warning("scannad pdf-sida: %s", exc)
         return "", "ocr-fel"
 
 
 def extract_scanned_pdf_pages(path: Path) -> tuple[str, str]:
     """
-    OCR av skannad PDF (inga textlager): renderar sidor till bild
-    via PyMuPDF och OCR:ar dem med Tesseract.
+    OCR av skannad PDF (inga textlager): renderar och OCR:ar varje
+    sida för sig, så en trasig sida inte tyst tar bort de andra.
     """
-    if not (HAS_FITZ and HAS_TESS):
+    if not HAS_FITZ or not tesseract_available():
         return "", "ocr-saknas"
+    texts: list[str] = []
+    failed = False
     try:
-        texts: list[str] = []
         with fitz.open(str(path)) as doc:
             for page in doc:
-                pix = page.get_pixmap(dpi=300)
-                img = Image.open(
-                    __import__("io").BytesIO(pix.tobytes("png"))
-                )
-                texts.append(
-                    pytesseract.image_to_string(img, lang="swe+eng")
-                )
-        return "\n".join(texts).strip(), "ocr-tesseract-pdf"
+                text, method = _ocr_pdf_page(page)
+                texts.append(text)
+                failed = failed or method == "ocr-fel"
     except Exception as exc:
-        log.warning("scannad pdf-ocr: %s", exc)
+        log.warning("scannad pdf-ocr %s: %s", path, exc)
         return "", "ocr-fel"
+    method = "ocr-tesseract-pdf"
+    if failed:
+        method += "+ocr-fel"
+    return "\n".join(texts).strip(), method
+
+
+def extract_pdf_pages(path: Path) -> tuple[str, str]:
+    """Läs PDF sida för sida och OCR:a tomma eller mycket tunna sidor.
+
+    Digitala sidor behåller textlagrets extraktion. I blandade PDF:er
+    (text + skannade sidor) kompletteras bara de sidor som saknar
+    användbar text; originalfilen öppnas endast för läsning.
+    """
+    sources = _extract_pdf_page_text_sources(path)
+    if not sources:
+        return extract_scanned_pdf_pages(path)
+
+    page_count = max(len(pages) for pages, _method in sources)
+    selected: list[tuple[str, str]] = []
+    for index in range(page_count):
+        candidates = [
+            (pages[index].strip(), method)
+            for pages, method in sources
+            if index < len(pages) and pages[index].strip()
+        ]
+        selected.append(
+            max(candidates, key=lambda item: _page_text_quality(item[0]))
+            if candidates else ("", "")
+        )
+
+    needs_ocr = [
+        index for index, (text, _method) in enumerate(selected)
+        if _page_text_quality(text) < 12
+    ]
+    ocr_missing = False
+    ocr_failed = False
+    if needs_ocr:
+        if HAS_FITZ and tesseract_available():
+            try:
+                with fitz.open(str(path)) as doc:
+                    for index in needs_ocr:
+                        if index >= len(doc):
+                            ocr_failed = True
+                            continue
+                        text, method = _ocr_pdf_page(doc[index])
+                        old_text, old_method = selected[index]
+                        if _page_text_quality(text) > _page_text_quality(old_text):
+                            selected[index] = (text, method)
+                        ocr_failed = ocr_failed or method == "ocr-fel"
+            except Exception as exc:
+                log.warning("blandad pdf-ocr %s: %s", path, exc)
+                ocr_failed = True
+        else:
+            ocr_missing = True
+
+    used_methods: list[str] = []
+    for _text, method in selected:
+        if method and method not in used_methods:
+            used_methods.append(method)
+    if ocr_missing:
+        used_methods.append("ocr-saknas")
+    if ocr_failed:
+        used_methods.append("ocr-fel")
+    text = "\n".join(page_text for page_text, _method in selected).strip()
+    return text, "+".join(used_methods) or "ingen-pdf-läsare"
 
 
 def extract_text(path: Path) -> tuple[str, str]:
@@ -170,10 +377,7 @@ def extract_text(path: Path) -> tuple[str, str]:
     p = Path(path)
     suffix = p.suffix.lower()
     if suffix == ".pdf":
-        text, method = extract_pdf_text(p)
-        if text:
-            return text, method
-        return extract_scanned_pdf_pages(p)
+        return extract_pdf_pages(p)
     if suffix in SCAN_EXTENSIONS:
         return extract_image_text(p)
     return "", "okänd-filtyp"
@@ -380,6 +584,11 @@ def parse_dates(text: str) -> tuple[str, str]:
 _NAME_DROP_TOKENS = frozenset({
     "ab", "aktiebolag", "hb", "kb", "ek", "bolag",
     "och", "and", "the",
+    # Fältetiketter som ofta förekommer på fakturor och därför inte
+    # ensamma bör räcka som leverantörsnamn.
+    "bg", "pg", "iban", "bic", "swift", "bankgiro", "plusgiro",
+    "org", "orgnr", "organisationsnummer", "invoice", "faktura",
+    "datum", "date", "total", "amount", "att", "betala",
 })
 
 
@@ -429,10 +638,126 @@ def _names_match(left: Any, right: Any) -> bool:
 
 
 #: Registerfält som kan identifiera en leverantör på fakturan.
-_SUPPLIER_ID_KEYS = (
-    "org_number", "orgnr", "org",
-    "bankgiro", "bg", "plusgiro", "pg",
-)
+_SUPPLIER_ID_PROFILE_KEYS: dict[str, tuple[str, ...]] = {
+    "org": ("org_number", "orgnr", "org"),
+    "bg": ("bankgiro", "bg"),
+    "pg": ("plusgiro", "pg"),
+    "iban": ("iban",),
+}
+
+
+def _supplier_aliases(supplier: dict) -> list[str]:
+    """Normaliserar manuellt angivna leverantörsnamn/handelsnamn.
+
+    Äldre eller handredigerade JSON-poster kan ha alias som en
+    semikolonseparerad sträng; det stöds utan att dela på kommatecken,
+    som kan ingå i ett företagsnamn.
+    """
+    raw = supplier.get("aliases", [])
+    if isinstance(raw, str):
+        values = re.split(r"[\r\n;]+", raw)
+    elif isinstance(raw, (list, tuple, set)):
+        values = list(raw)
+    else:
+        values = []
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        alias = str(value or "").strip()
+        key = _fold_text(alias)
+        if alias and key and key not in seen:
+            aliases.append(alias)
+            seen.add(key)
+    return aliases
+
+
+def _registered_supplier_aliases(
+    supplier_name: str, suppliers: list[dict] | None
+) -> list[str]:
+    """Entydiga alias för en registerpost, aldrig delade namn."""
+    folded = _fold_text(supplier_name)
+    if not folded:
+        return []
+    records = [
+        supplier for supplier in (suppliers or [])
+        if isinstance(supplier, dict)
+        and _fold_text(supplier.get("name", "")) == folded
+    ]
+    if len(records) != 1:
+        return []
+    aliases = _supplier_aliases(records[0])
+    other_names: list[str] = []
+    for other in suppliers or []:
+        if not isinstance(other, dict) or other is records[0]:
+            continue
+        other_name = str(other.get("name", "") or "").strip()
+        if other_name:
+            other_names.append(other_name)
+        other_names.extend(_supplier_aliases(other))
+    return [
+        alias for alias in aliases
+        if not any(_names_match(alias, other) for other in other_names)
+    ]
+
+
+def _same_registered_supplier_name(
+    left: str, right: str, suppliers: list[dict] | None
+) -> bool:
+    """Samma registerleverantör via namnvariant eller manuellt alias."""
+    if _names_match(left, right):
+        return True
+    return any(
+        _names_match(alias, right)
+        for alias in _registered_supplier_aliases(left, suppliers)
+    )
+
+
+def _normalize_supplier_identifier(field: str, value: Any) -> str:
+    """Kanonisk nyckel för ett registrerat starkt kännetecken."""
+    raw = str(value or "").upper()
+    if field == "iban":
+        normalized = re.sub(r"[^A-Z0-9]", "", raw)
+        return normalized if _valid_iban_checksum(normalized) else ""
+    digits = re.sub(r"\D", "", raw)
+    if field == "org":
+        # Svenska organisationsnummer lagras normalt med tio siffror;
+        # tillåt även det vanliga 16-prefixet för juridiska personer.
+        if len(digits) == 12 and digits.startswith("16"):
+            digits = digits[2:]
+        return (
+            digits
+            if len(digits) == 10 and _org_nr_checksum_ok(digits)
+            else ""
+        )
+    if field == "bg":
+        return digits if len(digits) in (7, 8) else ""
+    if field == "pg":
+        return digits if 2 <= len(digits) <= 10 else ""
+    return ""
+
+
+def _supplier_invoice_identifiers(text: str) -> dict[str, set[str]]:
+    """Starka ID:n som faktiskt hittats i rätt fakturakontaktfält.
+
+    Org.nr kräver giltig kontrollsiffra. BG/PG/IBAN måste stå efter sin
+    egen etikett; ett likadant sifferblock i OCR-text eller fakturanummer
+    räcker inte för att koppla en leverantör.
+    """
+    org_ids = _invoice_identifiers(text).get("org", set())
+    details = extract_invoice_payment_details(text)
+    values: dict[str, set[str]] = {
+        "org": set(), "bg": set(), "pg": set(), "iban": set(),
+    }
+    for value in org_ids:
+        normalized = _normalize_supplier_identifier("org", value)
+        if normalized:
+            values["org"].add(normalized)
+    for field in ("bg", "pg", "iban"):
+        for value in details.get(field, []):
+            normalized = _normalize_supplier_identifier(field, value)
+            if normalized:
+                values[field].add(normalized)
+    return values
 
 
 def _supplier_match_candidates(
@@ -445,9 +770,9 @@ def _supplier_match_candidates(
     användaren vid svaga eller konkurrerande träffar — appen ska
     aldrig behöva dölja att flera alternativ var möjliga.
     """
-    digits = re.sub(r"\D", "", text or "")
     folded = _fold_text(text)
     folded_tokens = set(folded.split())
+    invoice_ids = _supplier_invoice_identifiers(text or "")
     by_key: dict[str, dict[str, Any]] = {}
     for sup in suppliers or []:
         if not isinstance(sup, dict):
@@ -460,7 +785,7 @@ def _supplier_match_candidates(
         name_fold = _fold_text(name)
         tokens = _name_tokens(name)
         token_set = set(tokens)
-        if name_fold and name_fold in folded:
+        if name_fold and f" {name_fold} " in f" {folded} ":
             score += 6
             signals.append("full_name")
         elif token_set and token_set <= folded_tokens and (
@@ -476,12 +801,39 @@ def _supplier_match_candidates(
             # Det är en ledtråd, inte ett säkert val.
             score += 3
             signals.append("first_name_only")
-        for key in _SUPPLIER_ID_KEYS:
-            num = re.sub(r"\D", "", str(sup.get(key, "") or ""))
-            if len(num) >= 6 and num in digits:
+        for alias in _supplier_aliases(sup):
+            alias_fold = _fold_text(alias)
+            alias_tokens = set(_name_tokens(alias))
+            if alias_fold and f" {alias_fold} " in f" {folded} ":
+                score += 6
+                if "alias_full_name" not in signals:
+                    signals.append("alias_full_name")
+            elif alias_tokens and alias_tokens <= folded_tokens and (
+                len(alias_tokens) >= 2
+                or (
+                    len(alias_tokens) == 1
+                    and len(next(iter(alias_tokens))) >= 5
+                )
+            ):
                 score += 5
-                signals.append(key)
-                break
+                if "alias_words" not in signals:
+                    signals.append("alias_words")
+        for field, keys in _SUPPLIER_ID_PROFILE_KEYS.items():
+            expected = {
+                normalized
+                for key in keys
+                if (normalized := _normalize_supplier_identifier(
+                    field, sup.get(key, "")
+                ))
+            }
+            if expected.intersection(invoice_ids.get(field, set())):
+                score += 5
+                signals.append({
+                    "org": "org_number",
+                    "bg": "bankgiro",
+                    "pg": "plusgiro",
+                    "iban": "iban",
+                }[field])
         if score <= 0:
             continue
         key = _fold_text(name)
@@ -602,8 +954,11 @@ def _assess_supplier_and_templates(
     )
     if registry["status"] == "matched":
         accepted = str(registry["supplier"])
-        if template_match["status"] == "matched" and not _names_match(
-            accepted, str(template_match["supplier"])
+        if (
+            template_match["status"] == "matched"
+            and not _same_registered_supplier_name(
+                accepted, str(template_match["supplier"]), suppliers
+            )
         ):
             return {
                 "status": "uncertain",
@@ -617,7 +972,9 @@ def _assess_supplier_and_templates(
         if template_match["status"] == "uncertain":
             rivals = [
                 cand for cand in template_match["candidates"]
-                if not _names_match(accepted, str(cand.get("name", "")))
+                if not _same_registered_supplier_name(
+                    accepted, str(cand.get("name", "")), suppliers
+                )
             ]
             if rivals:
                 return {
@@ -666,8 +1023,9 @@ def match_supplier(text: str, suppliers: list[dict]) -> str:
     Matchar texten mot kända leverantörer och returnerar namnet
     eller "" (inget gissas vid tvetydighet eller svag träff).
 
-    Starka träffar: org.nr/bankgiro/plusgiro i texten, eller
-    leverantörens namn — vikt så att "AB Martin G Anderson",
+    Starka träffar: giltigt org.nr eller etiketterat BG/PG/IBAN,
+    leverantörens namn eller manuellt registrerat alias — vikt så
+    att "AB Martin G Anderson",
     "Martin G. Anderson" och OCR-varianten utan prickar är samma
     leverantör. Ordmängden räcker också (alla betydelsebärande
     ord på fakturan), vilket klarar bolagsform före/efter namnet
@@ -690,7 +1048,12 @@ def template_candidate_names(
     if not templates or not supplier:
         return []
     if supplier in templates:
-        return [supplier]
+        folded = _fold_text(supplier)
+        case_variants = [
+            str(name) for name in templates
+            if name != supplier and _fold_text(name) == folded
+        ]
+        return [supplier, *case_variants]
     folded = _fold_text(supplier)
     exact = [
         str(name) for name in templates.keys()
@@ -702,6 +1065,33 @@ def template_candidate_names(
         str(name) for name in templates.keys()
         if _names_match(name, supplier)
     ]
+
+
+def supplier_template_candidate_names(
+    templates: dict | None,
+    supplier: str,
+    suppliers: list[dict] | None = None,
+) -> list[str]:
+    """Mallnycklar för registerleverantören och dess sparade alias.
+
+    En aliasnyckel är inte ett konkurrerande företag när den uttryckligen
+    finns på samma entydiga registerpost. Om flera mallar (t.ex. både
+    juridiskt namn och handelsnamn) matchar returneras samtliga så att
+    anroparen kan fråga i stället för att välja en layout på måfå.
+    """
+    if not templates or not supplier:
+        return []
+    candidates = template_candidate_names(templates, supplier)
+    for alias in _registered_supplier_aliases(supplier, suppliers):
+        candidates.extend(template_candidate_names(templates, alias))
+    unique: list[str] = []
+    seen: set[str] = set()
+    for name in candidates:
+        key = str(name)
+        if key and key not in seen:
+            unique.append(key)
+            seen.add(key)
+    return unique
 
 
 def _math_line_amount(text: str, label: str) -> float | None:
@@ -920,8 +1310,8 @@ def parse_invoice_text(
         template = None
         selected_region_texts = region_texts
         if supplier and not match_uncertain:
-            candidate_names = template_candidate_names(
-                templates, supplier
+            candidate_names = supplier_template_candidate_names(
+                templates, supplier, suppliers
             )
             if len(candidate_names) > 1:
                 match_uncertain = True
@@ -979,7 +1369,9 @@ def parse_invoice_text(
                 claim_name, claim_template, _found, claim_texts = (
                     region_claims[0]
                 )
-                if supplier and not _names_match(claim_name, supplier):
+                if supplier and not _same_registered_supplier_name(
+                    supplier, claim_name, suppliers
+                ):
                     match_uncertain = True
                     match_candidates = [supplier, claim_name]
                     match_reason = "competing"
@@ -1174,6 +1566,22 @@ def parse_invoice_text(
         "uncertain": bool(match_uncertain and match_kind != "supplier"),
         "reason": match_reason if match_kind != "supplier" else "",
     }
+    if match_learning and template_name:
+        try:
+            confirmed_template = (
+                (templates or {}).get(template_key)
+                if template_key
+                else find_template(templates or {}, template_name, suppliers)
+            )
+            confirmations = template_confirmation_entry(
+                match_learning, template_name, confirmed_template
+            )
+            if confirmed_template and confirmations:
+                result["template_match"]["confirmed"] = int(
+                    confirmations.get("confirmed", 0) or 0
+                )
+        except Exception:
+            pass
     if match_uncertain:
         result["match_uncertain"] = True
         result["match_candidates"] = match_candidates
@@ -1183,7 +1591,7 @@ def parse_invoice_text(
     # men flaggar räkne-/datumfel för granskning och logg.
     result["math_check"] = invoice_math_check(text or "", total)
     result["date_check"] = invoice_date_check(date, due)
-    return result
+    return assess_invoice_payment_details(result, text or "", suppliers)
 
 
 def _apply_supplier_logo_match(
@@ -1397,8 +1805,12 @@ def parse_invoice_file(
         result = _apply_supplier_logo_match(
             result, path, text, tpl, match_learning
         )
-        return _apply_multipage_guard(
+        result = _apply_multipage_guard(
             result, path, text, match_learning
+        )
+        return assess_invoice_payment_details(
+            result, text, suppliers,
+            details=result.get("invoice_payment_details"),
         )
     result = _parse_with_reader_fallback(
         path, text, suppliers, tpl, match_learning=match_learning
@@ -1406,7 +1818,11 @@ def parse_invoice_file(
     result = _apply_supplier_logo_match(
         result, path, text, tpl, match_learning
     )
-    return _apply_multipage_guard(result, path, text, match_learning)
+    result = _apply_multipage_guard(result, path, text, match_learning)
+    return assess_invoice_payment_details(
+        result, text, suppliers,
+        details=result.get("invoice_payment_details"),
+    )
 
 
 def _parse_with_reader_fallback(
@@ -1648,7 +2064,7 @@ def diagnose_invoice_file(
                     if not isinstance(val, dict):
                         continue
                     try:
-                        if find_template({key: val}, sup) is val:
+                        if find_template({key: val}, sup, suppliers) is val:
                             cand_name, cand_tpl = str(key), val
                             break
                     except Exception:
@@ -1790,6 +2206,96 @@ def suggest_template_repairs(
                 "below": below,
             })
             break
+    return suggestions
+
+
+def template_field_label_candidates(
+    text: str, field: str
+) -> list[dict[str, Any]]:
+    """Alla etikett/värde-kandidater för ett fält, utan att välja åt användaren."""
+    kind = TEMPLATE_FIELD_KINDS.get(field)
+    if not text or kind is None:
+        return []
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for label in _REPAIR_LABELS.get(field, ()):
+        # "Referens" kan avse kundens beställningsreferens, inte OCR.
+        if field == "ocr" and _fold_text(label) == "referens":
+            continue
+        raw = extract_with_label(text, label, kind)
+        below = False
+        if not raw:
+            raw = _extract_below_label(text, label, kind)
+            below = bool(raw)
+        if not raw:
+            continue
+        value: Any = float(raw) if field == "total_amount" else raw
+        value_key = (
+            f"{float(value):.2f}"
+            if field == "total_amount"
+            else str(value).strip().casefold()
+        )
+        identity = (_fold_text(label), value_key)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        candidates.append({
+            "field": field,
+            "label": label,
+            "value": value,
+            "below": below,
+        })
+    return candidates
+
+
+def suggest_template_fields(
+    text: str, template: dict | None = None
+) -> list[dict[str, Any]]:
+    """Föreslå etikettregler när kandidaterna ger samma lästa värde.
+
+    Fungerande fält och bildregioner lämnas orörda. Om olika etiketter
+    ger olika värden returneras inget automatiskt för fältet; anroparen
+    kan visa kandidaterna för ett uttryckligt användarval. Förslag sparas
+    aldrig här.
+    """
+    if not text:
+        return []
+    raw_fields = (
+        (template or {}).get("fields", {})
+        if isinstance(template, dict) else {}
+    )
+    fields = raw_fields if isinstance(raw_fields, dict) else {}
+    working = {"fields": fields}
+    found = apply_template(text, working) if fields else {}
+    suggestions: list[dict[str, Any]] = []
+
+    for field in TEMPLATE_FIELD_KINDS:
+        spec = fields.get(field, {})
+        if isinstance(spec, dict) and spec.get("region"):
+            continue
+        if field in found:
+            continue
+        candidates = template_field_label_candidates(text, field)
+        if not candidates:
+            continue
+        value_keys = {
+            (
+                f"{float(candidate['value']):.2f}"
+                if field == "total_amount"
+                else str(candidate["value"]).strip().casefold()
+            )
+            for candidate in candidates
+        }
+        if len(value_keys) != 1:
+            continue
+        # Likvärdiga träffar: välj den mest särskiljande etiketten.
+        chosen = max(
+            enumerate(candidates),
+            key=lambda item: (
+                len(_fold_text(item[1]["label"])), -item[0]
+            ),
+        )[1]
+        suggestions.append(dict(chosen))
     return suggestions
 
 
@@ -2416,7 +2922,19 @@ def page_image_count(path: Any) -> int:
         except Exception as exc:
             log.warning("sidor %s: %s", p, exc)
         return 0
-    return 1 if p.suffix.lower() in SCAN_EXTENSIONS else 0
+    if p.suffix.lower() not in SCAN_EXTENSIONS:
+        return 0
+    try:
+        from PIL import Image as PILImage
+
+        with PILImage.open(str(p)) as image:
+            return max(1, int(getattr(image, "n_frames", 1) or 1))
+    except ImportError:
+        # Bildvisning kan fortfarande fungera via Qt när Pillow saknas.
+        return 1
+    except Exception as exc:
+        log.warning("bildsidor %s: %s", p, exc)
+        return 0
 
 
 def render_page_image(
@@ -2441,9 +2959,38 @@ def render_page_image(
             return None
     if p.suffix.lower() in SCAN_EXTENSIONS:
         try:
-            return p.read_bytes()
+            import io
+            from PIL import Image as PILImage
+
+            with PILImage.open(str(p)) as source:
+                count = max(1, int(getattr(source, "n_frames", 1) or 1))
+                source.seek(min(max(int(page_index), 0), count - 1))
+                frame = source.copy()
+            try:
+                if "A" in frame.getbands():
+                    rgba = frame.convert("RGBA")
+                    background = PILImage.new(
+                        "RGBA", rgba.size, (255, 255, 255, 255)
+                    )
+                    background.alpha_composite(rgba)
+                    rendered = background.convert("RGB")
+                    rgba.close()
+                    background.close()
+                else:
+                    rendered = frame.convert("RGB")
+                buffer = io.BytesIO()
+                rendered.save(buffer, format="PNG")
+                rendered.close()
+                return buffer.getvalue()
+            finally:
+                frame.close()
+        except ImportError:
+            try:
+                return p.read_bytes()
+            except Exception as exc:
+                log.warning("bild %s: %s", p, exc)
         except Exception as exc:
-            log.warning("bild %s: %s", p, exc)
+            log.warning("rendera bild %s: %s", p, exc)
     return None
 
 
@@ -2514,6 +3061,285 @@ def supplier_logo_signature(
     """Hashar den användarmarkerade logoytan på en PDF-/bildsida."""
     png = render_page_image(path, page_index, dpi=150)
     return _supplier_logo_hash_from_png(png, region) if png else ""
+
+
+def supplier_logo_region_candidates(
+    path: Any, *, max_candidates: int = 12, max_pages: int = 5,
+) -> list[dict[str, Any]]:
+    """Hitta möjliga logoområden i PDF:en för användarens granskning.
+
+    Rasterbilder och kompakta vektorgrafikgrupper prioriteras. En
+    helsideskannad PDF får bara två tydligt märkta header-områden som
+    manuella ledtrådar. Inget väljs automatiskt, sparas eller kopplas
+    till en leverantör här; UI:t visar varje ruta innan användaren
+    eventuellt bekräftar den.
+    """
+    if not HAS_FITZ or not path:
+        return []
+    pdf_path = Path(path)
+    if pdf_path.suffix.casefold() != ".pdf":
+        return []
+    candidates: list[dict[str, Any]] = []
+    try:
+        document = fitz.open(str(pdf_path))
+    except Exception as exc:
+        log.debug("supplier logo regions open %s: %s", pdf_path, exc)
+        return []
+
+    def _add_candidate(
+        page_index: int, page_rect, source: str, box,
+        base_score: int, *, header_fallback: bool = False,
+    ) -> None:
+        try:
+            rect = fitz.Rect(box) & page_rect
+            page_width = float(page_rect.width)
+            page_height = float(page_rect.height)
+            width = float(rect.width)
+            height = float(rect.height)
+            page_area = page_width * page_height
+            if (
+                page_area <= 0 or width < 8 or height < 6
+                or rect.is_empty or rect.is_infinite
+            ):
+                return
+            area_ratio = (width * height) / page_area
+            if not header_fallback and (
+                area_ratio < 0.00025 or area_ratio > 0.22
+            ):
+                return
+            aspect = width / max(height, 0.01)
+            if not header_fallback and not 0.08 <= aspect <= 16:
+                return
+            # A few points of margin protect anti-aliased edges without
+            # turning a small logo candidate into a large page region.
+            pad_x = min(7.0, max(1.0, width * 0.035))
+            pad_y = min(7.0, max(1.0, height * 0.035))
+            rect = fitz.Rect(
+                max(page_rect.x0, rect.x0 - pad_x),
+                max(page_rect.y0, rect.y0 - pad_y),
+                min(page_rect.x1, rect.x1 + pad_x),
+                min(page_rect.y1, rect.y1 + pad_y),
+            )
+            region = [
+                round((float(rect.x0) - float(page_rect.x0)) / page_width, 4),
+                round((float(rect.y0) - float(page_rect.y0)) / page_height, 4),
+                round((float(rect.x1) - float(page_rect.x0)) / page_width, 4),
+                round((float(rect.y1) - float(page_rect.y0)) / page_height, 4),
+            ]
+            if not (
+                0.0 <= region[0] < region[2] <= 1.0
+                and 0.0 <= region[1] < region[3] <= 1.0
+            ):
+                return
+            y_top = region[1]
+            score = int(base_score)
+            score += max(0, 12 - int(page_index) * 3)
+            score += 18 if y_top < 0.28 else 9 if y_top < 0.48 else -10
+            score += 8 if 0.35 <= aspect <= 5.5 else 0
+            if not header_fallback:
+                score += 8 if area_ratio <= 0.08 else -8
+            candidate = {
+                "page": int(page_index), "region": region,
+                "source": str(source), "score": score,
+            }
+            candidate_area = max(
+                1e-9,
+                (region[2] - region[0]) * (region[3] - region[1]),
+            )
+            for index, old in enumerate(candidates):
+                if old["page"] != candidate["page"]:
+                    continue
+                old_region = old["region"]
+                intersection = max(
+                    0.0, min(region[2], old_region[2])
+                    - max(region[0], old_region[0]),
+                ) * max(
+                    0.0, min(region[3], old_region[3])
+                    - max(region[1], old_region[1]),
+                )
+                old_area = max(
+                    1e-9,
+                    (old_region[2] - old_region[0])
+                    * (old_region[3] - old_region[1]),
+                )
+                if intersection / min(candidate_area, old_area) >= 0.82:
+                    if candidate["score"] > old["score"]:
+                        candidates[index] = candidate
+                    return
+            candidates.append(candidate)
+        except Exception:
+            return
+
+    try:
+        page_limit = min(len(document), max(1, int(max_pages)))
+        for page_index in range(page_limit):
+            page = document[page_index]
+            page_rect = fitz.Rect(page.rect)
+            before_page = len(candidates)
+            page_width = float(page_rect.width)
+            page_height = float(page_rect.height)
+
+            # XObject-/imagebaserade loggor finns som separata bildrutor
+            # i PDF:en. Helsidesbilder (vanlig skannad faktura) filtreras
+            # här bort och hanteras med header-förslag nedan.
+            image_infos: list[dict] = []
+            try:
+                image_infos = list(page.get_image_info(xrefs=True) or [])
+            except Exception:
+                try:
+                    for image in page.get_images(full=True) or []:
+                        xref = int(image[0])
+                        image_width = int(image[2])
+                        image_height = int(image[3])
+                        for image_rect in page.get_image_rects(xref) or []:
+                            image_infos.append({
+                                "bbox": image_rect, "width": image_width,
+                                "height": image_height,
+                            })
+                except Exception as exc:
+                    log.debug("supplier logo image info: %s", exc)
+            for info in image_infos:
+                bbox = info.get("bbox") if isinstance(info, dict) else None
+                if bbox is None:
+                    continue
+                try:
+                    box = fitz.Rect(bbox)
+                    source_width = float(info.get("width", 0) or 0)
+                    source_height = float(info.get("height", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if source_width and source_height:
+                    # Ignore tiny tracking marks and low-resolution
+                    # artifacts while allowing a printed small logo.
+                    if source_width < 20 or source_height < 12:
+                        continue
+                _add_candidate(
+                    page_index, page_rect, "embedded_image", box, 62
+                )
+
+            # Vector/SVG artwork is represented by drawing paths instead
+            # of image XObjects. Cluster nearby compact paths into one
+            # inspectable region rather than offering every tiny path.
+            drawings: list[tuple[Any, int]] = []
+            try:
+                for drawing in page.get_drawings() or []:
+                    try:
+                        rect = fitz.Rect(drawing.get("rect"))
+                        item_count = len(drawing.get("items", []) or [])
+                    except Exception:
+                        continue
+                    area_ratio = (
+                        float(rect.width) * float(rect.height)
+                        / max(1.0, page_width * page_height)
+                    )
+                    if (
+                        rect.is_empty or rect.width < 2 or rect.height < 2
+                        or rect.width > page_width * 0.72
+                        or rect.height > page_height * 0.32
+                        or area_ratio > 0.055
+                        or rect.width / max(float(rect.height), 0.01) > 18
+                        or rect.height / max(float(rect.width), 0.01) > 18
+                    ):
+                        continue
+                    drawings.append((rect, item_count))
+            except Exception as exc:
+                log.debug("supplier logo vector info: %s", exc)
+
+            # Bound worst-case work on pages with thousands of PDF paths.
+            drawings = drawings[:500]
+            parents = list(range(len(drawings)))
+
+            def _find(index: int) -> int:
+                while parents[index] != index:
+                    parents[index] = parents[parents[index]]
+                    index = parents[index]
+                return index
+
+            def _union(left: int, right: int) -> None:
+                root_left, root_right = _find(left), _find(right)
+                if root_left != root_right:
+                    parents[root_right] = root_left
+
+            gap_x = max(5.0, page_width * 0.018)
+            gap_y = max(5.0, page_height * 0.012)
+            for left in range(len(drawings)):
+                a = drawings[left][0]
+                for right in range(left + 1, len(drawings)):
+                    b = drawings[right][0]
+                    dx = max(0.0, max(a.x0, b.x0) - min(a.x1, b.x1))
+                    dy = max(0.0, max(a.y0, b.y0) - min(a.y1, b.y1))
+                    if dx <= gap_x and dy <= gap_y:
+                        _union(left, right)
+            groups: dict[int, list[int]] = {}
+            for index in range(len(drawings)):
+                groups.setdefault(_find(index), []).append(index)
+            for indexes in groups.values():
+                rect = fitz.Rect(drawings[indexes[0]][0])
+                total_items = 0
+                for index in indexes:
+                    rect |= drawings[index][0]
+                    total_items += drawings[index][1]
+                if len(indexes) < 2 and total_items < 4:
+                    continue
+                if (
+                    rect.width > page_width * 0.78
+                    or rect.height > page_height * 0.36
+                ):
+                    continue
+                _add_candidate(
+                    page_index, page_rect, "vector_art", rect, 48
+                )
+
+            page_candidates = [
+                item for item in candidates[before_page:]
+                if item["page"] == page_index
+                and item["source"] != "header_area"
+            ]
+            has_upper_candidate = any(
+                item["region"][1] < 0.52 for item in page_candidates
+            )
+            if page_index == 0 and not has_upper_candidate:
+                try:
+                    has_content = bool(
+                        page.get_text("text").strip()
+                        or page.get_images(full=True)
+                        or page.get_drawings()
+                    )
+                except Exception:
+                    has_content = True
+                if has_content:
+                    # This is a clearly labelled navigation aid for
+                    # scanned/vector layouts, not an asserted logo crop.
+                    top = page_rect.y0 + page_height * 0.025
+                    bottom = page_rect.y0 + page_height * 0.23
+                    _add_candidate(
+                        page_index, page_rect, "header_area",
+                        fitz.Rect(
+                            page_rect.x0 + page_width * 0.025, top,
+                            page_rect.x0 + page_width * 0.46, bottom,
+                        ), 18, header_fallback=True,
+                    )
+                    _add_candidate(
+                        page_index, page_rect, "header_area",
+                        fitz.Rect(
+                            page_rect.x0 + page_width * 0.54, top,
+                            page_rect.x0 + page_width * 0.975, bottom,
+                        ), 18, header_fallback=True,
+                    )
+    except Exception as exc:
+        log.debug("supplier logo region candidates %s: %s", pdf_path, exc)
+    finally:
+        try:
+            document.close()
+        except Exception:
+            pass
+    return sorted(
+        candidates,
+        key=lambda item: (
+            -int(item["score"]), int(item["page"]),
+            float(item["region"][1]), float(item["region"][0]),
+        ),
+    )[:max(1, int(max_candidates))]
 
 
 def supplier_logo_distance(left: str, right: str) -> int | None:
@@ -2631,20 +3457,35 @@ def supplier_logo_match_candidates(
     )
 
 
-def find_template(templates: dict, supplier: str) -> dict | None:
-    """Mall för leverantörsnamn: exakt först, annars vikt
-    namnmatchning ("AB Nordlys Energi" hittar mallen för
-    "Nordlys Energi AB"). Tvetydighet ger None — fel leverantörs
-    mall får aldrig användas av misstag."""
-    names = template_candidate_names(templates, supplier)
+def find_template(
+    templates: dict,
+    supplier: str,
+    suppliers: list[dict] | None = None,
+) -> dict | None:
+    """Hitta mallen med registernamn/alias; tvetydighet ger None.
+
+    Utan *suppliers* behålls den äldre namnvariantmatchningen.
+    Med registret kan en mall sparad under ett manuellt angivet alias
+    användas för samma leverantör, men flera aliasmallar väljs aldrig
+    automatiskt.
+    """
+    names = (
+        supplier_template_candidate_names(templates, supplier, suppliers)
+        if suppliers is not None
+        else template_candidate_names(templates, supplier)
+    )
     if len(names) != 1:
         return None
     return templates.get(names[0])
 
 
 def confirmed_supplier_logo_signature(
-    path: Any, supplier: str, templates: dict | None,
+    path: Any,
+    supplier: str,
+    templates: dict | None,
     max_distance: int = SUPPLIER_LOGO_CANDIDATE_MAX_DISTANCE,
+    *,
+    suppliers: list[dict] | None = None,
 ) -> str:
     """Logosignatur som får räknas efter att användaren bekräftat raden.
 
@@ -2655,7 +3496,7 @@ def confirmed_supplier_logo_signature(
     """
     if not path or not supplier:
         return ""
-    template = find_template(templates or {}, supplier)
+    template = find_template(templates or {}, supplier, suppliers)
     best: tuple[int, str] | None = None
     for spec in supplier_logo_specs(template):
         signature = str(spec.get("dhash", "") or "")
@@ -2977,7 +3818,219 @@ def _invoice_identifiers(text: str) -> dict[str, set[str]]:
 
 def invoice_bankgiro_values(text: str) -> list[str]:
     """Bankgironummer som hittats vid en uttrycklig BG-etikett."""
-    return sorted(_invoice_identifiers(text).get("bg", set()))
+    return sorted(_supplier_invoice_identifiers(text).get("bg", set()))
+
+
+_PAYMENT_DETAIL_LABELS = {
+    "bg": re.compile(
+        r"\b(?:bank[\s-]*giro(?:t)?|bg)"
+        r"(?:[\s-]*(?:nr\.?|nummer|konto))?\b",
+        re.IGNORECASE,
+    ),
+    "pg": re.compile(
+        r"\b(?:plus[\s-]*giro(?:t)?|pg)"
+        r"(?:[\s-]*(?:nr\.?|nummer|konto))?\b",
+        re.IGNORECASE,
+    ),
+    "iban": re.compile(r"\bIBAN\b", re.IGNORECASE),
+}
+
+_IBAN_LENGTHS = {
+    "AT": 20, "BE": 16, "CH": 21, "CZ": 24, "DE": 22,
+    "DK": 18, "EE": 20, "ES": 24, "FI": 18, "FR": 27,
+    "GB": 22, "GR": 27, "IE": 22, "IS": 26, "IT": 27,
+    "LI": 21, "LT": 20, "LU": 20, "LV": 21, "MC": 27,
+    "MT": 31, "NL": 18, "NO": 15, "PL": 28, "PT": 25,
+    "RO": 24, "SE": 24, "SI": 19, "SK": 24, "TR": 26,
+}
+
+
+def _valid_iban_checksum(value: str) -> bool:
+    """Kontrollerar IBAN:s mod-97-summa utan stora heltal."""
+    iban = re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+    if not (15 <= len(iban) <= 34 and re.fullmatch(r"[A-Z]{2}\d{2}[A-Z0-9]+", iban)):
+        return False
+    rearranged = iban[4:] + iban[:4]
+    remainder = 0
+    for char in rearranged:
+        token = str(ord(char) - 55) if char.isalpha() else char
+        for digit in token:
+            remainder = (remainder * 10 + int(digit)) % 97
+    return remainder == 1
+
+
+def _iban_after_label(fragment: str) -> str:
+    """Hämtar ett IBAN efter etiketten; föredrar giltig kontrollsumma."""
+    match = re.search(
+        r"(?<![A-Z0-9])([A-Z]{2}\s*\d{2}[A-Z0-9\s-]{10,40})",
+        str(fragment or ""), re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    compact = re.sub(r"[^A-Z0-9]", "", match.group(1).upper())
+    country_length = _IBAN_LENGTHS.get(compact[:2])
+    candidate_lengths = []
+    if country_length:
+        candidate_lengths.append(country_length)
+    candidate_lengths.extend(
+        length for length in range(min(34, len(compact)), 14, -1)
+        if length not in candidate_lengths
+    )
+    for length in candidate_lengths:
+        if length <= len(compact):
+            candidate = compact[:length]
+            if _valid_iban_checksum(candidate):
+                return candidate
+    # OCR kan förvanska en kontrollsiffra. Behåll ändå ett tydligt,
+    # landskodat IBAN-värde så det visas för manuell kontroll.
+    if country_length and len(compact) >= country_length:
+        return compact[:country_length]
+    if 15 <= len(compact) <= 34:
+        return compact
+    return ""
+
+
+def extract_invoice_payment_details(text: str) -> dict[str, list[str]]:
+    """Extraherar BG/PG/IBAN enbart vid motsvarande fakturaetikett.
+
+    Värdena normaliseras för jämförelse men sparas inte automatiskt i
+    leverantörsregistret. En avvikelse är endast en varning till användaren.
+    """
+    result: dict[str, set[str]] = {"bg": set(), "pg": set(), "iban": set()}
+    lines = str(text or "").splitlines()
+    for field, label_re in _PAYMENT_DETAIL_LABELS.items():
+        for index, line in enumerate(lines):
+            for label in label_re.finditer(line):
+                fragments = [line[label.end():]]
+                if index + 1 < len(lines):
+                    fragments.append(lines[index + 1])
+                for fragment in fragments:
+                    value = ""
+                    if field == "iban":
+                        value = _iban_after_label(fragment)
+                    else:
+                        cleaned = re.sub(
+                            r"^\s*(?:nr\.?|nummer|konto|no\.?|account(?:\s+number)?)"
+                            r"\s*[:#.-]?\s*",
+                            "", fragment, flags=re.IGNORECASE,
+                        )
+                        number_match = re.match(
+                            r"\s*[:#=]?\s*(\d[\d\s\u00a0-]{1,20}\d)",
+                            cleaned,
+                        )
+                        if number_match:
+                            value = re.sub(r"\D", "", number_match.group(1))
+                            minimum, maximum = (7, 8) if field == "bg" else (2, 10)
+                            if not minimum <= len(value) <= maximum:
+                                value = ""
+                    if value:
+                        result[field].add(value)
+                        break
+    return {field: sorted(values) for field, values in result.items()}
+
+
+def _normalize_payment_value(field: str, value: Any) -> str:
+    raw = str(value or "").upper()
+    if field == "iban":
+        return re.sub(r"[^A-Z0-9]", "", raw)
+    return re.sub(r"\D", "", raw)
+
+
+def payment_detail_warnings(
+    text: str,
+    supplier_name: str,
+    suppliers: list[dict] | None,
+    *,
+    observed: dict[str, list[str]] | None = None,
+) -> list[dict[str, Any]]:
+    """Compare invoice-labelled account details with the saved supplier.
+
+    Blank saved fields are not treated as a change. Supplier names must match
+    exactly (case-insensitively); an uncertain supplier match is never guessed.
+    """
+    supplier_key = str(supplier_name or "").strip().casefold()
+    if not supplier_key:
+        return []
+    records = [
+        item for item in (suppliers or [])
+        if isinstance(item, dict)
+        and str(item.get("name", "") or "").strip().casefold() == supplier_key
+    ]
+    if len(records) != 1:
+        return []
+    supplier = records[0]
+    observed = (
+        observed if isinstance(observed, dict)
+        else extract_invoice_payment_details(text)
+    )
+    warnings: list[dict[str, Any]] = []
+    profile_keys = {"bg": ("bg", "bankgiro"), "pg": ("pg", "plusgiro"), "iban": ("iban",)}
+    for field, keys in profile_keys.items():
+        expected = next(
+            (
+                _normalize_payment_value(field, supplier.get(key))
+                for key in keys
+                if str(supplier.get(key, "") or "").strip()
+            ),
+            "",
+        )
+        raw_values = observed.get(field, [])
+        values = (
+            [str(value) for value in raw_values]
+            if isinstance(raw_values, (list, tuple, set)) else []
+        )
+        if expected and values and any(value != expected for value in values):
+            warnings.append({
+                "field": field,
+                "registered": expected,
+                "invoice_values": list(values),
+            })
+    return warnings
+
+
+def assess_invoice_payment_details(
+    parsed: dict[str, Any],
+    text: str,
+    suppliers: list[dict] | None,
+    *,
+    supplier_name: str | None = None,
+    details: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    """Attach detected account values and a non-destructive mismatch warning."""
+    result = dict(parsed or {})
+    observed = (
+        details if isinstance(details, dict)
+        else extract_invoice_payment_details(text)
+    )
+    result["invoice_payment_details"] = observed
+    supplier = str(
+        supplier_name if supplier_name is not None else result.get("supplier", "")
+    ).strip()
+    supplier_match = result.get("supplier_match")
+    supplier_uncertain = bool(
+        result.get("match_kind") == "supplier"
+        or (
+            isinstance(supplier_match, dict)
+            and (
+                (
+                    supplier_match.get("uncertain")
+                    or supplier_match.get("status") == "uncertain"
+                )
+                and supplier_match.get("reason") != "multipage"
+            )
+        )
+    )
+    if supplier_uncertain and supplier_name is None:
+        warnings: list[dict[str, Any]] = []
+    else:
+        warnings = payment_detail_warnings(
+            text, supplier, suppliers, observed=observed
+        )
+    if warnings:
+        result["payment_details_warning"] = warnings
+    else:
+        result.pop("payment_details_warning", None)
+    return result
 
 
 def suppliers_matching_bankgiro(
@@ -3053,9 +4106,245 @@ def learning_entry(learning: dict | None, supplier: str) -> dict:
     return {}
 
 
+def _confirmation_path_key(path: str) -> str:
+    """Normaliserar en källsökväg för stabila bekräftelse-ID:n."""
+    try:
+        return str(Path(path).resolve(strict=False)).casefold()
+    except Exception:
+        return str(path).replace("\\\\", "/").casefold()
+
+
+def _legacy_path_confirmation_id(supplier: str, path: str) -> str:
+    """Äldre leverantörsbundet ID, för deduplicering efter uppgradering."""
+    source = _confirmation_path_key(path)
+    if not source:
+        return ""
+    identity = f"{_fold_text(str(supplier or ''))}|path:{source}"
+    return "match-v1:" + hashlib.sha256(
+        identity.encode("utf-8", errors="replace")
+    ).hexdigest()
+
+
+def match_confirmation_id(
+    supplier: str, invoice_number: str = "", *, path: str = "",
+    invoice_date: str = "",
+) -> str:
+    """Stabilt ID så samma faktura inte räknas som flera träningsprov."""
+    supplier_key = _fold_text(str(supplier or ""))
+    number = _fold_text(str(invoice_number or ""))
+    date = _fold_text(str(invoice_date or ""))
+    if path:
+        # A physical source file is the identity, not the current supplier
+        # choice: changing the supplier must not turn one invoice into a new
+        # training sample. The learning store deduplicates this ID across
+        # suppliers as well as within one supplier. v2 avoids colliding with
+        # legacy, supplier-bound path IDs in existing learning files.
+        source = _confirmation_path_key(path)
+        identity = f"path:{source}"
+        version = "match-v2"
+    elif number:
+        # Without a source path, include supplier to avoid treating two
+        # suppliers' commonly reused invoice numbers as the same document.
+        identity = f"{supplier_key}|{number}|{date}"
+        version = "match-v1"
+    else:
+        return ""
+    return version + ":" + hashlib.sha256(
+        identity.encode("utf-8", errors="replace")
+    ).hexdigest()
+
+
+def template_confirmation_signature(template: dict | None) -> str:
+    """Fingerprint för exakt version av en mall; logotyper hålls isär."""
+    fields = (template or {}).get("fields", {}) or {}
+    if not isinstance(fields, dict) or not fields:
+        return ""
+    try:
+        payload = json.dumps(
+            fields, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), default=str,
+        )
+    except Exception:
+        return ""
+    return "template-v1:" + hashlib.sha256(
+        payload.encode("utf-8", errors="replace")
+    ).hexdigest()
+
+
+def template_confirmation_entry(
+    learning: dict | None, supplier: str, template: dict | None
+) -> dict:
+    """Bekräftelser för den exakta sparade mallversionen."""
+    signature = template_confirmation_signature(template)
+    entry = learning_entry(learning, supplier)
+    templates = entry.get("templates", {}) if isinstance(entry, dict) else {}
+    if not signature or not isinstance(templates, dict):
+        return {}
+    confirmed = templates.get(signature, {})
+    return confirmed if isinstance(confirmed, dict) else {}
+
+
+def confirmed_template_fields(
+    template: dict | None, extracted: dict | None,
+    confirmed_values: dict | None,
+) -> list[str]:
+    """Fält vars mallavläsning stämmer exakt med användarens bekräftelse."""
+    template_fields = (template or {}).get("fields", {}) or {}
+    if not isinstance(template_fields, dict):
+        return []
+    found = extracted or {}
+    confirmed = confirmed_values or {}
+    if not isinstance(found, dict) or not isinstance(confirmed, dict):
+        return []
+    accepted: list[str] = []
+    for field, value in found.items():
+        if field not in template_fields or field not in confirmed:
+            continue
+        expected = confirmed.get(field)
+        if value in (None, "", 0, 0.0) or expected in (None, "", 0, 0.0):
+            continue
+        if field == "total_amount":
+            try:
+                matches = abs(float(value) - float(expected)) <= 0.005
+            except (TypeError, ValueError):
+                matches = False
+        else:
+            matches = str(value).strip() == str(expected).strip()
+        if matches:
+            accepted.append(str(field))
+    return accepted
+
+
+def _remember_confirmation_id(entry: dict, confirmation_id: str) -> bool:
+    """True för ett nytt manuellt prov; behåll ett begränsat ID-fönster."""
+    identity = str(confirmation_id or "").strip()
+    if not identity:
+        return True
+    ids = entry.get("confirmation_ids", [])
+    if not isinstance(ids, list):
+        ids = []
+    entry["confirmation_ids"] = ids
+    if identity in ids:
+        return False
+    ids.append(identity)
+    if len(ids) > 1000:
+        del ids[:-1000]
+    return True
+
+
+def _confirmation_owner(
+    learning: dict, confirmation_id: str, source_path: str = "",
+) -> str:
+    """Leverantören som redan tränats på samma stabila faktura-ID.
+
+    Vid uppgradering jämförs även det tidigare leverantörsbundna
+    path-ID:t, så en gammal bekräftelse inte räknas en gång till.
+    """
+    identity = str(confirmation_id or "").strip()
+    if not identity and not source_path:
+        return ""
+    for name, entry in learning.items():
+        if not isinstance(entry, dict):
+            continue
+        ids = entry.get("confirmation_ids", [])
+        if not isinstance(ids, list):
+            continue
+        if identity and identity in ids:
+            return str(name)
+        if source_path:
+            legacy_id = _legacy_path_confirmation_id(
+                str(name), source_path
+            )
+            if legacy_id and legacy_id in ids:
+                return str(name)
+    return ""
+
+
+def record_template_confirmation(
+    learning: dict, supplier: str, template_name: str,
+    template: dict | None, *, confirmation_id: str = "",
+    source_path: str = "",
+    template_fields: list[str] | tuple[str, ...] | None = None,
+) -> dict:
+    """Sparar en uttrycklig granskning av en viss mallversion.
+
+    Används bland annat av den separata säkerhetskontrollen när
+    användaren väljer "Ser rätt ut". Den räknar inte i sig som en
+    ny leverantörsmatchning; automatiska leverantörströsklar ändras
+    bara av den vanliga manuella matchningsvägen.
+    """
+    name = str(supplier or "").strip()
+    signature = template_confirmation_signature(template)
+    if not name or not signature:
+        return {}
+    key = name
+    entry = learning.get(key)
+    if not isinstance(entry, dict):
+        for existing, candidate in learning.items():
+            if isinstance(candidate, dict) and _names_match(
+                name, str(existing)
+            ):
+                key = str(existing)
+                entry = candidate
+                break
+    if not isinstance(entry, dict):
+        entry = {}
+        learning[key] = entry
+
+    template_entries = entry.setdefault("templates", {})
+    if not isinstance(template_entries, dict):
+        template_entries = {}
+        entry["templates"] = template_entries
+    template_entry = template_entries.get(signature)
+    if not isinstance(template_entry, dict):
+        template_entry = {}
+        template_entries[signature] = template_entry
+    ids = template_entry.get("confirmation_ids", [])
+    legacy_ids = {
+        _legacy_path_confirmation_id(candidate, source_path)
+        for candidate in (name, key)
+        if source_path
+    }
+    legacy_seen = bool(
+        isinstance(ids, list) and any(legacy_id in ids for legacy_id in legacy_ids)
+    )
+    new_template_confirmation = _remember_confirmation_id(
+        template_entry, confirmation_id
+    )
+    if legacy_seen:
+        # Migrate the new source-only ID into the existing list without
+        # counting the same file again under this template version.
+        new_template_confirmation = False
+    if new_template_confirmation:
+        template_entry["name"] = str(template_name or name)
+        template_entry["confirmed"] = int(
+            template_entry.get("confirmed", 0) or 0
+        ) + 1
+        fields = (template or {}).get("fields", {}) or {}
+        accepted_fields = template_fields or []
+        if isinstance(fields, dict) and accepted_fields:
+            counts = template_entry.setdefault("fields", {})
+            if not isinstance(counts, dict):
+                counts = {}
+                template_entry["fields"] = counts
+            for field in accepted_fields:
+                field_name = str(field)
+                if field_name in fields:
+                    counts[field_name] = int(
+                        counts.get(field_name, 0) or 0
+                    ) + 1
+        template_entry["last_confirmed"] = (
+            datetime.datetime.now().isoformat(timespec="seconds")
+        )
+    return template_entry
+
+
 def record_match_confirmation(
     learning: dict, supplier: str, *, multipage: bool = False,
     text: str = "", logo_signature: str = "",
+    confirmation_id: str = "", source_path: str = "",
+    template_name: str = "", template: dict | None = None,
+    template_fields: list[str] | tuple[str, ...] | None = None,
 ) -> dict:
     """Noterar att användaren bekräftat en matchning.
 
@@ -3079,34 +4368,113 @@ def record_match_confirmation(
     if not isinstance(entry, dict):
         entry = {}
         learning[key] = entry
-    entry["confirmed"] = int(entry.get("confirmed", 0) or 0) + 1
-    if multipage:
-        entry["multipage_confirmed"] = (
-            int(entry.get("multipage_confirmed", 0) or 0) + 1
-        )
-    if text:
-        identifiers = entry.setdefault("identifiers", {})
-        if not isinstance(identifiers, dict):
-            identifiers = {}
-            entry["identifiers"] = identifiers
-        for kind, values in _invoice_identifiers(text).items():
-            bucket = identifiers.setdefault(kind, {})
-            if not isinstance(bucket, dict):
-                bucket = {}
-                identifiers[kind] = bucket
-            for value in values:
-                bucket[value] = int(bucket.get(value, 0) or 0) + 1
-    signature = str(logo_signature or "").strip()
-    if signature.startswith(_SUPPLIER_LOGO_HASH_PREFIX):
-        logos = entry.setdefault("logos", {})
-        if not isinstance(logos, dict):
-            logos = {}
-            entry["logos"] = logos
-        logos[signature] = int(logos.get(signature, 0) or 0) + 1
-    entry["last_confirmed"] = datetime.datetime.now().isoformat(
-        timespec="seconds"
+    owner = _confirmation_owner(
+        learning, confirmation_id, source_path=source_path
     )
+    same_owner = bool(
+        owner and (owner == key or _names_match(name, owner))
+    )
+    reassigned_source = bool(owner and not same_owner)
+    new_confirmation = not owner
+    if new_confirmation:
+        _remember_confirmation_id(entry, confirmation_id)
+    elif same_owner:
+        # When the same supplier's old path ID was found, remember the new
+        # source-only ID too, but do not count the invoice a second time.
+        _remember_confirmation_id(entry, confirmation_id)
+    if new_confirmation:
+        entry["confirmed"] = int(entry.get("confirmed", 0) or 0) + 1
+        if multipage:
+            entry["multipage_confirmed"] = (
+                int(entry.get("multipage_confirmed", 0) or 0) + 1
+            )
+        if text:
+            identifiers = entry.setdefault("identifiers", {})
+            if not isinstance(identifiers, dict):
+                identifiers = {}
+                entry["identifiers"] = identifiers
+            for kind, values in _invoice_identifiers(text).items():
+                bucket = identifiers.setdefault(kind, {})
+                if not isinstance(bucket, dict):
+                    bucket = {}
+                    identifiers[kind] = bucket
+                for value in values:
+                    bucket[value] = int(bucket.get(value, 0) or 0) + 1
+        signature = str(logo_signature or "").strip()
+        if signature.startswith(_SUPPLIER_LOGO_HASH_PREFIX):
+            logos = entry.setdefault("logos", {})
+            if not isinstance(logos, dict):
+                logos = {}
+                entry["logos"] = logos
+            logos[signature] = int(logos.get(signature, 0) or 0) + 1
+        entry["last_confirmed"] = datetime.datetime.now().isoformat(
+            timespec="seconds"
+        )
+
+    if not reassigned_source:
+        record_template_confirmation(
+            learning, name, template_name or name, template,
+            confirmation_id=confirmation_id, source_path=source_path,
+            template_fields=template_fields,
+        )
     return entry
+
+
+def require_template_confirmation(
+    parsed: dict, templates: dict | None, learning: dict | None,
+    suppliers: list[dict] | None = None,
+) -> dict:
+    """Gör en oprövad egen mall till en synlig, osäker matchning.
+
+    En sparad mall får inte i sig räknas som bekräftelse. Tills minst
+    en explicit granskning av just den här mallversionen finns, måste
+    Import/bevakningen lämna raden för kontroll. Inbyggda verifierade
+    format påverkas inte eftersom de inte finns i användarens mallfil.
+    """
+    if not isinstance(parsed, dict):
+        return parsed
+    template_name = str(parsed.get("template", "") or "").strip()
+    if not template_name:
+        return parsed
+    templates = templates if isinstance(templates, dict) else {}
+    template = templates.get(template_name)
+    if not isinstance(template, dict):
+        template = find_template(templates, template_name, suppliers)
+    if not isinstance(template, dict):
+        return parsed
+
+    supplier = str(parsed.get("supplier", "") or template_name).strip()
+    confirmation = template_confirmation_entry(
+        learning or {}, supplier, template
+    )
+    if not confirmation and supplier.casefold() != template_name.casefold():
+        confirmation = template_confirmation_entry(
+            learning or {}, template_name, template
+        )
+    try:
+        confirmed = int(confirmation.get("confirmed", 0) or 0)
+    except (TypeError, ValueError):
+        confirmed = 0
+
+    match = parsed.get("template_match")
+    if not isinstance(match, dict):
+        match = {}
+        parsed["template_match"] = match
+    match["confirmed"] = confirmed
+    match["unconfirmed"] = confirmed <= 0
+    if confirmed > 0 or parsed.get("match_uncertain"):
+        return parsed
+
+    match.update({
+        "status": "uncertain", "template": template_name,
+        "candidates": [template_name], "uncertain": True,
+        "reason": "template_unconfirmed",
+    })
+    parsed["match_uncertain"] = True
+    parsed["match_candidates"] = [template_name]
+    parsed["match_reason"] = "template_unconfirmed"
+    parsed["match_kind"] = "template"
+    return parsed
 
 
 def learning_graduated(learning: dict | None, supplier: str) -> bool:

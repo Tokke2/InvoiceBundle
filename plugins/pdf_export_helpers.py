@@ -1876,7 +1876,7 @@ class PDFExporter:
         lines += [
             sep,
             "",
-            f"  (c) {COPYRIGHT_YEAR} Rickard Langkvist"
+            f"  (c) {COPYRIGHT_YEAR} Rickard Längkvist"
             f"  |  FakturaRäknaren",
         ]
         file_path.write_text("\n".join(lines), encoding="utf-8")
@@ -1982,7 +1982,7 @@ class PDFExporter:
         lines += [
             "",
             sep,
-            f"  (c) {COPYRIGHT_YEAR} Rickard Langkvist"
+            f"  (c) {COPYRIGHT_YEAR} Rickard Längkvist"
             f"  |  FakturaRäknaren",
         ]
         fp.write_text("\n".join(lines), encoding="utf-8")

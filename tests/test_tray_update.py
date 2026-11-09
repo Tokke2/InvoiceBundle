@@ -61,6 +61,9 @@ def _tray_menu_with_spy():
         def _open_export_folder(self):
             pass
 
+        def _open_app_folder(self):
+            called.append("app-folder")
+
         def _force_exit(self):
             pass
 
@@ -91,6 +94,17 @@ def test_tray_update_brings_window_front_then_opens_dialog():
     # Fönstret fram FÖRST (dialogen behöver synlig förälder),
     # sedan samma uppdateringsflöde som Hjälp-menyn.
     assert called == ["front", "check"]
+
+
+def test_tray_menu_opens_the_app_folder():
+    menu, called = _tray_menu_with_spy()
+    act = [
+        a for a in menu.actions()
+        if "appmapp" in (a.text() or "").lower()
+        or "app folder" in (a.text() or "").lower()
+    ][0]
+    act.trigger()
+    assert called == ["app-folder"]
 
 
 def test_applied_update_schedules_silent_restart(tmp_path, monkeypatch):

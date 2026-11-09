@@ -71,6 +71,19 @@ FONT_FAMILY: str = "Segoe UI"
 
 log = logging.getLogger("MainWindow")
 
+try:
+    from ui.typography import (
+        FONT_SIZE_CHOICES,
+        apply_font_size,
+        normalize_font_size,
+    )
+except ImportError:
+    from typography import (  # type: ignore[no-redef]
+        FONT_SIZE_CHOICES,
+        apply_font_size,
+        normalize_font_size,
+    )
+
 # Språk (sv/en) + donationsdialog. Mjuka importer så att filen även
 # fungerar fristående (python ui/main_window.py).
 try:
@@ -892,30 +905,12 @@ def _font(size: int = 11, bold: bool = False) -> QFont:
 
 
 def _load_app_icon() -> QIcon | None:
-    """
-    Laddar app_icon.png/.ico/.svg och registrerar flera storlekar
-    så aktivitetsfält och tray blir skarpa.
-    """
-    icon = QIcon()
-    png = PROJECT_DIR / "app_icon.png"
-    if png.exists():
-        pix = QPixmap(str(png))
-        if not pix.isNull():
-            for size in (16, 20, 24, 32, 48, 64, 128, 256):
-                icon.addPixmap(
-                    pix.scaled(
-                        size, size,
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                )
-    for name in ("app_icon.ico", "app_icon.svg", "icon.ico", "icon.png"):
-        p = PROJECT_DIR / name
-        if p.exists():
-            icon.addFile(str(p))
-    if icon.isNull():
-        return None
-    return icon
+    """Använder den gemensamma flerupplösta appikonen."""
+    try:
+        from ui.design import load_app_icon
+    except ImportError:
+        from design import load_app_icon  # type: ignore[no-redef]
+    return load_app_icon()
 
 
 def _make_tray_icon(color: str = "#e8b030") -> QIcon:
@@ -1350,6 +1345,11 @@ class MainWindow(QMainWindow):
         # ── Konfigurerbara kortkommandon (shortcuts.json) ────────────
         self._shortcut_objects: list = []
         self._build_shortcut_actions()
+        app_qt = QApplication.instance()
+        if app_qt is not None:
+            apply_font_size(
+                app_qt, self._settings.get("font_size", 13)
+            )
 
         # ── GUI-frysningsvakt (heartbeat var 5:e sekund) ─────────────
         self._watchdog = None
@@ -1778,21 +1778,6 @@ class MainWindow(QMainWindow):
             _method_group.addAction(_act)
             self._m_autostart_method.addAction(_act)
             self._autostart_method_actions[_method] = _act
-
-        self._act_start_minimized = QAction(
-            tr("menu.start_minimized"), self
-        )
-        self._act_start_minimized.setCheckable(True)
-        self._act_start_minimized.setChecked(
-            bool(self._settings.get("start_minimized", True))
-        )
-        self._act_start_minimized.setToolTip(
-            tr("menu.start_minimized_tip")
-        )
-        self._act_start_minimized.triggered.connect(
-            self._toggle_start_minimized
-        )
-        m_set.addAction(self._act_start_minimized)
 
         self._act_close_to_tray = QAction(
             tr("menu.close_to_tray"), self
@@ -2702,24 +2687,6 @@ class MainWindow(QMainWindow):
         )
         log.info("close_to_tray → %s", checked)
 
-    def _toggle_start_minimized(self, checked: bool) -> None:
-        """Kryssruta: starta gömd i systemfältet vid autostart.
-
-        Styr `start_minimized`-inställningen som main.py:s
-        startlogik läser: vid OS-autostart (--minimized) lägger
-        sig appen i tray i stället för att visa fönstret.
-        Manuell start (dubbelklick) visar alltid fönstret.
-        """
-        self._settings.set("start_minimized", checked)
-        self.set_status(
-            tr(
-                "main.start_min_status",
-                state=tr("main.on") if checked else tr("main.off_state"),
-            ),
-            4000,
-        )
-        log.info("start_minimized → %s", checked)
-
     def _toggle_minimize_to_tray(self, checked: bool) -> None:
         """Kryssruta: göm till tray även vid minimering."""
         self._settings.set("minimize_to_tray", checked)
@@ -2863,6 +2830,11 @@ class MainWindow(QMainWindow):
         # Tray-menyn på nya språket
         if hasattr(self, "tray"):
             self.tray.setContextMenu(self._build_tray_menu())
+        app_qt = QApplication.instance()
+        if app_qt is not None:
+            apply_font_size(
+                app_qt, self._settings.get("font_size", 13)
+            )
 
     # ══════════════════════════════════════════════════════════════════
     #  TEMA-MOTOR
@@ -2896,6 +2868,10 @@ class MainWindow(QMainWindow):
                 )
 
         self.theme_changed.emit(theme)
+        if inst is not None:
+            apply_font_size(
+                inst, self._settings.get("font_size", 13)
+            )
         log.info("Tema → %s", name)
 
     def _refresh_auto_theme(self) -> None:
@@ -2988,6 +2964,10 @@ class MainWindow(QMainWindow):
         a_exports.triggered.connect(self._open_export_folder)
         m.addAction(a_exports)
 
+        a_app_folder = QAction(tr("tray.app_folder"), self)
+        a_app_folder.triggered.connect(self._open_app_folder)
+        m.addAction(a_app_folder)
+
         a_update_tray = QAction(tr("menu.update"), self)
         a_update_tray.triggered.connect(self._tray_check_updates)
         m.addAction(a_update_tray)
@@ -3038,6 +3018,7 @@ class MainWindow(QMainWindow):
 
     def _bring_to_front(self) -> None:
         """Visar och fokuserar fönstret."""
+        self._startup_hide_guard_active = False
         if self.isMinimized():
             self.showNormal()
         elif not self.isVisible():
@@ -3210,6 +3191,13 @@ class MainWindow(QMainWindow):
         _open_path(export_path)
         self.set_status(tr("main.opening", path=export_path), 3000)
 
+    def _open_app_folder(self) -> None:
+        """Öppnar programmets rotmapp i filhanteraren."""
+        _open_path(PROJECT_DIR)
+        self.set_status(
+            tr("main.opening", path=str(PROJECT_DIR)), 3000
+        )
+
     def _open_log_file(self) -> None:
         """Öppnar app.log i OS:ets standardprogram."""
         for name in ("logs/app.log", "app.log"):
@@ -3346,6 +3334,7 @@ class MainWindow(QMainWindow):
         """
         Bygger Inställningar-flikens innehåll:
 
+        • Textstorlek    — direkt skalning med rad-/kontrollhöjder
         • Kortkommandon  — redigerbar tabell, sparas i shortcuts.json
         • Plugins        — status + återställning av 3-strikes-spärrade
 
@@ -3383,6 +3372,33 @@ class MainWindow(QMainWindow):
         v_lang.addWidget(lbl_lang_hint)
         v_lang.addStretch(1)
         root.addWidget(box_lang)
+
+        # ── Textstorlek ───────────────────────────────────────────────
+        box_text = QGroupBox(tr("settings.text_size"))
+        v_text = QHBoxLayout(box_text)
+        self._font_size_combo = QComboBox()
+        size_labels = {
+            11: "settings.text_size_small",
+            13: "settings.text_size_standard",
+            15: "settings.text_size_large",
+            17: "settings.text_size_extra_large",
+        }
+        for size in FONT_SIZE_CHOICES:
+            self._font_size_combo.addItem(tr(size_labels[size]), size)
+        current_size = normalize_font_size(
+            self._settings.get("font_size", 13)
+        )
+        current_index = self._font_size_combo.findData(current_size)
+        self._font_size_combo.setCurrentIndex(max(0, current_index))
+        self._font_size_combo.currentIndexChanged.connect(
+            self._font_size_changed
+        )
+        v_text.addWidget(self._font_size_combo)
+        lbl_text_hint = QLabel(tr("settings.text_size_hint"))
+        lbl_text_hint.setWordWrap(True)
+        lbl_text_hint.setStyleSheet("color:#8b949e; background:transparent;")
+        v_text.addWidget(lbl_text_hint, stretch=1)
+        root.addWidget(box_text)
 
         # ── Donation (frivilligt stöd) ────────────────────────────────
         box_donate = QGroupBox(tr("settings.donate_group"))
@@ -3511,6 +3527,22 @@ class MainWindow(QMainWindow):
         root.addStretch(1)
 
         self.replace_tab_content("settings_tab", panel)
+
+    def _font_size_changed(self, index: int) -> None:
+        """Sparar och applicerar textstorleken direkt i alla öppna vyer."""
+        combo = getattr(self, "_font_size_combo", None)
+        if combo is None or index < 0:
+            return
+        size = normalize_font_size(combo.itemData(index))
+        try:
+            self._settings.set("font_size", size)
+        except Exception as exc:
+            log.warning("Spara textstorlek misslyckades: %s", exc)
+        app_qt = QApplication.instance()
+        if app_qt is not None:
+            apply_font_size(app_qt, size)
+        self.set_status(tr("settings.text_size_applied"), 5000)
+        log.info("Textstorlek → %d%%", round(size * 100 / 13))
 
     def _refresh_plugin_status_label(self) -> None:
         """Uppdaterar plugin-status-texten i Inställningar-fliken."""
@@ -3838,6 +3870,12 @@ if __name__ == "__main__":
     _ensure_paths()
     try:
         from app import FakturaApp  # type: ignore
+        from main import (
+            _acquire_single_instance_lock,
+            _release_single_instance_lock,
+            _request_focus_existing,
+            _start_focus_server,
+        )
 
         QApplication.setHighDpiScaleFactorRoundingPolicy(
             Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
@@ -3854,18 +3892,60 @@ if __name__ == "__main__":
         qt.setStyle("Fusion")
         qt.setQuitOnLastWindowClosed(False)
 
-        fa = FakturaApp()
-        theme = resolve_theme(fa.settings.get("theme", "dark"))
-        apply_app_palette(theme)
-        qt.setStyleSheet(build_stylesheet(theme))
+        if not _acquire_single_instance_lock():
+            if _request_focus_existing():
+                sys.exit(0)
+            QMessageBox.critical(
+                None,
+                "Fakturabunten körs redan",
+                "En annan instans är låst, men kunde inte kontaktas. "
+                "Ingen extra kopia startas.",
+            )
+            sys.exit(1)
 
-        w = MainWindow(app=fa)
-        if fa.settings.get("startup", False):
-            w.set_autostart(True)
+        holder = {
+            "window": None,
+            "focus_pending": False,
+            "ready": False,
+        }
 
-        w.show()
-        log.info("Standalone-läge: MainWindow startad")
-        sys.exit(qt.exec())
+        def _focus_existing() -> None:
+            existing = holder.get("window")
+            if holder.get("ready") and existing is not None:
+                existing._bring_to_front()
+            else:
+                holder["focus_pending"] = True
+
+        try:
+            server_state = _start_focus_server(_focus_existing)
+            if server_state == "existing":
+                _release_single_instance_lock()
+                sys.exit(0)
+            if server_state != "started":
+                raise RuntimeError("Fokuskanalen kunde inte startas")
+
+            fa = FakturaApp()
+            theme = resolve_theme(fa.settings.get("theme", "dark"))
+            apply_app_palette(theme)
+            qt.setStyleSheet(build_stylesheet(theme))
+
+            w = MainWindow(app=fa)
+            holder["window"] = w
+            if fa.settings.get("startup", False):
+                w.set_autostart(True)
+
+            from main import _start_minimized_or_show
+            _start_minimized_or_show(
+                w, fa, autostart_launch=("--minimized" in sys.argv)
+            )
+            holder["ready"] = True
+            if holder.pop("focus_pending", False):
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, w._bring_to_front)
+            log.info("Standalone-läge: MainWindow startad minimerad")
+            sys.exit(qt.exec())
+        finally:
+            _release_single_instance_lock()
     except ImportError as exc:
         print(f"Kan inte ladda FakturaApp: {exc}")
         print("Kör programmet via main.py istället.")

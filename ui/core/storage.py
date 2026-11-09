@@ -36,7 +36,7 @@ Datafält som stöds
                 date, due_date, payment_date, total_amount, vat_percent,
                 vat_amount, amount_ex_vat, currency, status, category,
                 reference, note, attachment, created_at, updated_at
-• suppliers   – id, name, org_number, bg, pg, iban, bic,
+• suppliers   – id, name, aliases, org_number, bg, pg, iban, bic,
                 payment_terms, contact_person, email, phone,
                 address, note, created_at, updated_at
 • payments    – id, invoice_ids, payment_date, total_amount,
@@ -237,6 +237,7 @@ _SCHEMAS: dict[str, dict] = {
     "suppliers": {
         "id":             "",
         "name":           "",
+        "aliases":        [],
         "org_number":     "",
         "bg":             "",
         "pg":             "",

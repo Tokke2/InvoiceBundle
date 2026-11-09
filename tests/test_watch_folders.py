@@ -9,6 +9,7 @@ Vid PDF-export kan originalfakturorna läggas efter betal-listan.
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -57,14 +58,22 @@ class FakeApp:
 
 
 def _manager(tmp_path, invoices=None, auto=True, text=TEXT):
+    import scan_import as si
     from ui.watch_folders import WatchManager
     folder = tmp_path / "PilkingtonIn"
     folder.mkdir(parents=True, exist_ok=True)
+    learning = {}
+    si.record_template_confirmation(
+        learning, "Pilkington", "Pilkington", TEMPLATES["Pilkington"],
+        confirmation_id="test-watch-template-confirmed",
+        template_fields=list(TEMPLATES["Pilkington"]["fields"]),
+    )
     mgr = WatchManager(
         tmp_path / "watch_folders.json",
         app=FakeApp(invoices),
         extract_fn=lambda path: (text, "test"),
         templates_provider=lambda: TEMPLATES,
+        learning_provider=lambda: learning,
     )
     mgr.set_folders([{"supplier": "Pilkington", "path": str(folder)}])
     if not auto:
@@ -85,6 +94,47 @@ def _persist_emitted(mgr):
             "status": "Obetald",
         })
     mgr.invoice_ready.connect(_save)
+
+
+def test_watch_summary_not_repeated_for_unchanged_poll(tmp_path, caplog):
+    """A 30-second poll must not repeat an unchanged parked-file summary."""
+    _qapp()
+    mgr, _folder = _manager(tmp_path)
+    state = {
+        "waiting": 203,
+        "already": 35,
+        "reasons": {"missing": 88, "unknown-format": 8, "uncertain-match": 107},
+    }
+
+    def fake_scan(_entry, force=False):
+        mgr._scan_stats.update(
+            imported=0, duplicate=0, parked=0,
+            already=state["already"], waiting=state["waiting"],
+            errors=0, changed=0,
+        )
+        mgr._waiting_reasons.update(state["reasons"])
+
+    mgr.scan_folder = fake_scan
+    with caplog.at_level(logging.INFO, logger="WatchFolders"):
+        caplog.clear()
+        mgr.scan_all()
+        mgr.scan_all()
+        summaries = [
+            record for record in caplog.records
+            if record.getMessage().startswith("SCAN_WATCH skanning:")
+        ]
+        assert len(summaries) == 1
+        assert "203 väntar i parkering" in summaries[0].getMessage()
+
+        state["waiting"] = 204
+        state["reasons"]["missing"] = 89
+        mgr.scan_all()
+        summaries = [
+            record for record in caplog.records
+            if record.getMessage().startswith("SCAN_WATCH skanning:")
+        ]
+        assert len(summaries) == 2
+        assert "204 väntar i parkering" in summaries[-1].getMessage()
 
 
 def test_watch_complete_invoice_ready_once(tmp_path):
@@ -283,7 +333,9 @@ def test_watch_untaught_supplier_parked_until_taught(tmp_path):
     _qapp()
     from ui.watch_folders import WatchManager
 
+    import scan_import as si
     holder = {"templates": {}}
+    learning = {}
     folder = tmp_path / "PilkingtonIn"
     folder.mkdir(parents=True, exist_ok=True)
     mgr = WatchManager(
@@ -291,6 +343,7 @@ def test_watch_untaught_supplier_parked_until_taught(tmp_path):
         app=FakeApp(),
         extract_fn=lambda path: (TEXT, "test"),
         templates_provider=lambda: holder["templates"],
+        learning_provider=lambda: learning,
     )
     mgr.set_folders([{"supplier": "Pilkington", "path": str(folder)}])
     ready, parked = [], []
@@ -314,10 +367,23 @@ def test_watch_untaught_supplier_parked_until_taught(tmp_path):
     assert not ready
     assert len(mgr.parked) == 1
 
-    # Först när parkerade läses om uttryckligen (det mall-
-    # sparandet gör, krav 3) prövas filen mot nya mallen och
-    # registreras; nya filer går direkt
+    # Att spara mallen räcker inte: första omläsningen ska visa
+    # raden i Import som osäker, inte registrera den automatiskt.
     entry = {"supplier": "Pilkington", "path": str(folder)}
+    assert mgr.reprocess_parked(entry) == 1
+    assert not ready
+    assert len(mgr.parked) == 1
+    assert mgr.parked[0]["parsed"]["match_reason"] == (
+        "template_unconfirmed"
+    )
+
+    # Först en uttrycklig verifiering gör att samma mallversion får
+    # registrera kompletta kommande fakturor automatiskt.
+    si.record_template_confirmation(
+        learning, "Pilkington", "Pilkington", TEMPLATES["Pilkington"],
+        confirmation_id="user-verified-pilkington-template",
+        template_fields=list(TEMPLATES["Pilkington"]["fields"]),
+    )
     assert mgr.reprocess_parked(entry) == 1
     assert len(ready) == 1
     assert ready[0]["template"] == "Pilkington"
@@ -454,8 +520,15 @@ SUMMA 1 250,00
 
 
 def _year_manager(tmp_path, app):
+    import scan_import as si
     from ui.watch_folders import WatchManager
 
+    learning = {}
+    si.record_template_confirmation(
+        learning, "Pilkington", "Pilkington", TEMPLATES["Pilkington"],
+        confirmation_id="test-year-template-confirmed",
+        template_fields=list(TEMPLATES["Pilkington"]["fields"]),
+    )
     folder = tmp_path / "PilkingtonIn"
     folder.mkdir(parents=True, exist_ok=True)
     mgr = WatchManager(
@@ -463,6 +536,7 @@ def _year_manager(tmp_path, app):
         app=app,
         extract_fn=lambda path: (YEAR_TEXT, "test"),
         templates_provider=lambda: TEMPLATES,
+        learning_provider=lambda: learning,
     )
     mgr.set_folders([{"supplier": "Pilkington", "path": str(folder)}])
     return mgr, folder
@@ -707,6 +781,148 @@ def test_watch_scan_stats_distinguishes_new_from_duplicates(tmp_path):
     stats2 = mgr2.last_scan_stats
     assert stats2["imported"] == 1
     assert stats2["duplicate"] == 0
+
+
+def test_watch_file_read_error_does_not_stop_batch_or_touch_original(tmp_path):
+    """One unreadable source is reported and retried; later files in the
+    same watched folder still register and all source bytes stay intact."""
+    _qapp()
+    mgr, folder = _manager(tmp_path)
+    broken = folder / "broken.pdf"
+    good = folder / "good.pdf"
+    broken_bytes = b"%PDF-broken-original"
+    good_bytes = b"%PDF-good-original"
+    broken.write_bytes(broken_bytes)
+    good.write_bytes(good_bytes)
+
+    unreadable = {broken.name}
+
+    def extract(path):
+        if path.name in unreadable:
+            raise OSError("simulated unreadable PDF")
+        return TEXT, "test"
+
+    mgr._extract_fn = extract
+    changes = []
+    recovered = []
+    mgr.changed.connect(lambda: changes.append(True))
+    ready = []
+    file_errors = []
+    mgr.invoice_ready.connect(lambda row, path: ready.append((row, path)))
+    mgr.file_error.connect(file_errors.append)
+    mgr.file_recovered.connect(recovered.append)
+    _persist_emitted(mgr)
+
+    mgr.scan_all()
+    stats = mgr.last_scan_stats
+    assert stats["errors"] == 1
+    assert stats["imported"] == 1
+    assert len(file_errors) == 1
+    assert file_errors[0]["parsed"]["_scan_error"] is True
+    assert [row["invoice_number"] for row, _path in ready] == ["9911"]
+    assert Path(ready[0][1]) == good
+    assert broken.read_bytes() == broken_bytes
+    assert good.read_bytes() == good_bytes
+    assert all(
+        info.get("path") != str(broken)
+        for info in mgr.processed.values()
+    )
+
+    # The bad source is not marked processed and is retried next time.
+    # Once it becomes readable, the error status is cleared; because its
+    # invoice already exists, it is safely recorded as a duplicate.
+    unreadable.clear()
+    mgr.scan_all()
+    assert mgr.last_scan_stats["errors"] == 0
+    assert mgr.last_scan_stats["already"] == 1
+    assert mgr.last_scan_stats["duplicate"] == 1
+    assert len(ready) == 1
+    assert str(broken) in recovered
+    assert len(changes) >= 2
+
+
+def test_watch_hash_error_isolated_from_later_files(tmp_path, monkeypatch):
+    _qapp()
+    import ui.watch_folders as watch_ui
+
+    mgr, folder = _manager(tmp_path)
+    broken = folder / "broken.pdf"
+    good = folder / "good.pdf"
+    original = b"%PDF-hash-error-original"
+    broken.write_bytes(original)
+    good.write_bytes(b"%PDF-good-after-hash-error")
+    real_hash = watch_ui.file_hash
+
+    def flaky_hash(path):
+        if Path(path).name == broken.name:
+            raise OSError("simulated hash read error")
+        return real_hash(path)
+
+    monkeypatch.setattr(watch_ui, "file_hash", flaky_hash)
+    _persist_emitted(mgr)
+    mgr.scan_all()
+    assert mgr.last_scan_stats["errors"] == 1
+    assert mgr.last_scan_stats["imported"] == 1
+    assert broken.read_bytes() == original
+    assert all(
+        info.get("path") != str(broken)
+        for info in mgr.processed.values()
+    )
+
+
+def test_watch_ocr_degraded_invoice_is_parked_not_auto_registered(tmp_path):
+    _qapp()
+    mgr, folder = _manager(tmp_path)
+    source = folder / "ocr-warning.pdf"
+    original = b"%PDF-ocr-warning-original"
+    source.write_bytes(original)
+    calls = []
+
+    def extract(path):
+        calls.append(path)
+        return TEXT, "textlager-pypdf+ocr-saknas"
+
+    mgr._extract_fn = extract
+    ready, parked = [], []
+    mgr.invoice_ready.connect(lambda row, path: ready.append(row))
+    mgr.file_parked.connect(parked.append)
+
+    mgr.scan_all()
+    assert not ready
+    assert len(parked) == 1
+    assert parked[0]["reason"] == "ocr-warning"
+    assert "ocr-saknas" in parked[0]["parsed"]["ocr_warning"]
+    assert mgr.last_scan_stats["parked"] == 1
+    assert source.read_bytes() == original
+
+    # Ordinary scans do not OCR-loop a parked invoice.
+    mgr.scan_all()
+    assert mgr.last_scan_stats["waiting"] == 1
+    assert len(calls) == 1
+
+
+def test_watch_control_read_error_is_counted_without_changing_invoice(
+    tmp_path,
+):
+    _qapp()
+    mgr, folder = _manager(tmp_path)
+    source = folder / "invoice.pdf"
+    original = b"%PDF-control-original"
+    source.write_bytes(original)
+    _persist_emitted(mgr)
+    mgr.scan_all()
+    assert mgr.last_scan_stats["imported"] == 1
+    before = list(mgr._app.get_invoices())
+
+    def fail_extract(_path):
+        raise OSError("simulated control read failure")
+
+    mgr._extract_fn = fail_extract
+    mgr.scan_all(force=True)
+    assert mgr.last_scan_stats["errors"] == 1
+    assert mgr._app.get_invoices() == before
+    assert source.read_bytes() == original
+    assert mgr.processed
 
 
 def test_overdue_chip_shows_unpaid_overdue_only(tmp_path):

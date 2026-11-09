@@ -23,7 +23,7 @@ A local app that totals supplier invoices and credit notes into one amount to pa
 - Import av skannade fakturor (PDF/bild) med tolkning av belopp, OCR och datum.
 - Exporterar en betallista som PDF med betalningsdatum och bankgiro.
   - Betalningsdatumet väljs **vid varje export** i en kalender med snabbval (Idag, +7, +14, +30 dagar, månadsslut) — och nollställs efteråt.
-- Fyra teman (mörkt, ljust, auto, system), systemfältsikon, autostart och automatisk backup.
+- Fyra teman (mörkt, ljust, auto, system), systemfältsikon, autostart och automatisk backup. Högerklicka på tray-ikonen för att bland annat öppna appmappen.
 - All data lagras lokalt som JSON i programmappen (`data/`). Ingenting skickas över nätet.
 
 ## Språk
@@ -33,7 +33,7 @@ Byt i menyn **🌐 Språk → Svenska / English** eller på fliken **Inställnin
 
 ## Plattformar
 
-Appen körs på **Windows, macOS och Linux** (Python + PySide6). **Autostart** väljer du i Inställningar-menyn med två metoder: **Direkt** (standard — operativsystemet startar Python direkt, helt utan VBS/startfil; Windows: register + pythonw, Linux: XDG `.desktop`, macOS: LaunchAgent) eller **Startfil** (en `start_hidden`-fil i appmappen som väntar tills disken är redo — bra för portabla USB-installationer). Båda startar appen gömd i systemfältet med arbetsmappen satt till appmappen.
+Appen körs på **Windows, macOS och Linux** (Python + PySide6). Varje normal start börjar minimerad i systemfältet; om systemfält saknas visas fönstret så att appen inte blir oåtkomlig. **Autostart** väljer du i Inställningar-menyn med två metoder: **Direkt** (standard — Windows använder en ikonbärande genväg i Autostart-mappen, Linux XDG `.desktop`, macOS LaunchAgent) eller **Startfil** (en `start_hidden`-fil i appmappen som väntar tills disken är redo — bra för portabla USB-installationer). Båda behåller arbetsmappen satt till appmappen.
 
 ## Gratis — med frivillig donation
 
@@ -51,10 +51,12 @@ Betalningen sker hos PayPal/Ko-fi. Programmet ser inga betalningsuppgifter.
 ## Kom igång (Windows)
 
 1. Lägg hela mappen där du vill, till exempel `D:\Program\Fakturabunten`. Sökvägen spelar ingen roll.
-2. Saknas Python: kör `Installera senaste Python.bat` en gång. Den installerar senaste stabila Python på datorn.
-3. Starta `main.pyw`, eller genvägen `Fakturabunten.lnk` som skapas vid första starten.
+2. Kör `Installera senaste Python.bat` för att kontrollera Python. En igenkänd Python-installation uppdateras till senaste stabila versionen; vid byte av minorversion ersätts den gamla först efter att den nya verifierats. Om Python redan är aktuell görs inget, och Python installeras bara när ingen körbar installation hittas. Okända installationstyper lämnas orörda och skriptet avbryts i stället för att lägga till en parallell Python.
+3. Starta `main.pyw` eller genvägen `Fakturabunten.lnk`; appen börjar minimerad i systemfältet. Öppna den från tray-ikonen.
 
-Saknade Python-paket (`PySide6`, `reportlab`, `pypdf`) hämtas automatiskt vid start, bara om de behövs.
+Saknade Python-paket (`PySide6`, `reportlab`, `pypdf`, `pytesseract`) hämtas automatiskt vid start, bara om de behövs. `pytesseract` är Python-gränssnittet; för OCR av skannade PDF:er och bilder krävs dessutom Tesseract-programmet (med svensk eller engelsk språkdata). Om OCR-motorn saknas visas en varning i Import — fakturan registreras inte tyst med påhittade uppgifter.
+
+**Veckovis uppdatering:** appen gör en kontroll måndag kl. 08 lokal tid. Om appen är öppen då köas uppdateringen och körs först när appen stängts; om den är stängd körs den vid nästa start. Python och paketen uppdateras i samma befintliga miljö — ingen virtuell miljö eller separat OS-schemalagd uppgift skapas. På Windows kan den igenkända Python.org-tolken och `requirements.txt` uppdateras. På macOS/Linux uppdateras paketen i appens aktiva Python; själva OS-/pakethanterarstyrda Python-tolken lämnas orörd. Veckostatus sparas i `data/python_update_state.json`.
 
 Utvecklare startar med:
 
@@ -95,7 +97,7 @@ Ingen öppen licens är vald. Fritt att använda. Inte fritt att kopiera, ändra
 - Imports scanned invoices (PDF/image), reading amounts, OCR references and dates.
 - Exports a payment list as PDF with payment date and bankgiro details.
   - The payment date is chosen **at every export** in a calendar with quick picks (Today, +7, +14, +30 days, end of month) — and reset afterwards.
-- Four themes (dark, light, auto, system), system tray icon, autostart and automatic backups.
+- Four themes (dark, light, auto, system), system tray icon, autostart and automatic backups. Right-click the tray icon for options including opening the app folder.
 - All data is stored locally as JSON in the app folder (`data/`). Nothing is sent over the network.
 
 ## Language
@@ -105,7 +107,7 @@ Switch via the **🌐 Language** menu or the **Settings** tab — the change app
 
 ## Platforms
 
-The app runs on **Windows, macOS and Linux** (Python + PySide6). **Autostart** is chosen in the Settings menu with two methods: **Direct** (default — the operating system starts Python directly, with no VBS/launcher file at all; Windows: registry + pythonw, Linux: XDG `.desktop`, macOS: LaunchAgent) or **Launcher file** (a `start_hidden` file in the app folder that waits until the disk is ready — good for portable USB installs). Both start the app hidden in the system tray with the working folder set to the app folder.
+The app runs on **Windows, macOS and Linux** (Python + PySide6). Every normal launch starts minimized to the system tray; if no tray is available, the window stays visible so the app cannot become inaccessible. **Autostart** is chosen in the Settings menu with two methods: **Direct** (default — Windows uses an icon-bearing shortcut in the Startup folder, Linux uses XDG `.desktop`, macOS uses a LaunchAgent) or **Launcher file** (a `start_hidden` file in the app folder that waits until the disk is ready — good for portable USB installs). Both keep the working folder set to the app folder.
 
 ## Free — with a voluntary donation
 
@@ -123,10 +125,12 @@ Payment takes place at PayPal/Ko-fi. The app never sees any payment details.
 ## Getting started (Windows)
 
 1. Put the whole folder wherever you like, e.g. `D:\Program\InvoiceBundle`. The path does not matter.
-2. If Python is missing: run `Installera senaste Python.bat` once. It installs the latest stable Python. *(Installer script name is in Swedish.)*
-3. Start `main.pyw`, or the `Fakturabunten.lnk` shortcut created on first launch.
+2. Run `Installera senaste Python.bat` to check Python. A recognized Python installation is updated to the latest stable version; when changing minor versions, the old runtime is removed only after the new one has been verified. If Python is already current, nothing is changed. Python is installed only if no runnable interpreter is found. Unknown installation types are left untouched and the script stops rather than adding a parallel Python. *(Installer script name is in Swedish.)*
+3. Start `main.pyw` or the `Fakturabunten.lnk` shortcut; the app starts minimized in the system tray. Open it from the tray icon.
 
-Missing Python packages (`PySide6`, `reportlab`, `pypdf`) are fetched automatically at startup, only if needed.
+Missing Python packages (`PySide6`, `reportlab`, `pypdf`, `pytesseract`) are fetched automatically at startup, only if needed. `pytesseract` is the Python interface; OCR for scanned PDFs and images also requires the native Tesseract program and Swedish or English language data. If the OCR engine is missing, Import shows a warning instead of silently inventing invoice values.
+
+**Weekly update:** the app checks on Monday at 08:00 local time. If the app is open then, it queues the update and waits until the app closes; if it is closed, the update runs at the next launch. Python and packages stay in the same existing environment—no virtual environment or separate OS scheduled task is created. On Windows, the recognized Python.org interpreter and `requirements.txt` can be updated. On macOS/Linux, packages are updated in the app's active Python; the OS/package-manager-managed interpreter is left untouched. Weekly status is stored in `data/python_update_state.json`.
 
 Developers start with:
 

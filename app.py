@@ -734,14 +734,43 @@ LEGACY_LOG_FILES: tuple[str, ...] = (
 )
 
 
+def _move_legacy_startup_log(root: Path) -> bool:
+    """Flyttar en gammal rotbaserad startup_crash.log till logs/."""
+    source = root / "startup_crash.log"
+    target = root / "logs" / "startup_crash.log"
+    if not source.is_file():
+        return False
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            text = source.read_text(encoding="utf-8", errors="replace")
+            if text:
+                with target.open("a", encoding="utf-8") as fh:
+                    if target.stat().st_size:
+                        fh.write("\n")
+                    fh.write(text)
+            source.unlink()
+        else:
+            source.replace(target)
+        log.info(
+            "LEGACY_LOG flyttad: startup_crash.log → logs/startup_crash.log"
+        )
+        return True
+    except OSError as exc:
+        log.warning("LEGACY_LOG kunde inte flyttas (%s): %s", source, exc)
+        return False
+
+
 def clean_legacy_logs(root: Path | None = None) -> int:
     """
-    Tar bort legacy-loggfiler från äldre versioner (EN-fil-principen).
+    Håller runtime-loggar i logs/ och städar gamla loggfiler.
 
-    Rör ALDRIG logs/app.log (den aktuenda enda loggen) eller logs/archive/.
-    Returnerar antal borttagna filer. Fail-safe: kastar aldrig.
+    Äldre startup_crash.log i approten flyttas in i logs/ innan
+    legacy-rensning. logs/app.log, logs/felsamling.log och logs/archive/
+    bevaras. Returnerar antal borttagna filer. Fail-safe: kastar aldrig.
     """
-    root = root or BASE_DIR
+    root = Path(root or BASE_DIR)
+    _move_legacy_startup_log(root)
     removed = 0
     for rel in LEGACY_LOG_FILES:
         p = root / rel
@@ -755,19 +784,6 @@ def clean_legacy_logs(root: Path | None = None) -> int:
                 log.info("LEGACY_LOG borttagen: %s", rel)
         except OSError:
             pass  # låst fil — hoppa över tyst
-    # Töm logs/archive/ (gamla roterade filer) men behåll mappen
-    archive_dir = root / "logs" / "archive"
-    if archive_dir.exists():
-        try:
-            for f in archive_dir.iterdir():
-                try:
-                    if f.is_file():
-                        f.unlink()
-                        removed += 1
-                except OSError:
-                    pass
-        except OSError:
-            pass
     if removed:
         log.info("LEGACY_CLEAN: %d gamla loggfiler borttagna", removed)
     return removed
@@ -1128,10 +1144,9 @@ class AutostartManager:
 
     Båda metoderna startar gömt (--minimized → pythonw på Windows).
 
-    Windows : Autostart-mappens genväg Fakturabunten.lnk med
-              app_icon.ico (aldrig pythonw:s Python-ikon i Start-
-              listan). Run-nyckeln används bara som reserv och
-              rensas när genvägen finns.
+    Windows : Endast Autostart-mappens genväg Fakturabunten.lnk med
+              app_icon.ico godtas. Ingen pythonw-post i Run-nyckeln
+              skrivs; om genvägen misslyckas nekas autostart.
     Linux   : ~/.config/autostart/Fakturabunten.desktop (Path=)
     macOS   : ~/Library/LaunchAgents/com.fakturabunten.plist
               (WorkingDirectory)
@@ -1309,7 +1324,8 @@ class AutostartManager:
             "OS-posten pekar bara hit. Logg: logs/autostart.log\n"
             "Exporter och data skrivs aldrig här.\n"
             "Startfilen hittar appmappen själv (ingen fast sökväg).\n"
-            "Saknas Python: kör Installera senaste Python.bat.\n",
+            "Python saknas eller behöver uppdateras: kör Installera senaste Python.bat.\n"
+            "Skriptet kontrollerar först och lägger inte till en parallell version.\n",
             encoding="utf-8",
         )
         log.info("AUTOSTART_LAUNCHER: %s", path)
@@ -1649,23 +1665,9 @@ class AutostartManager:
             self._write_launcher()
 
         if CURRENT_PLATFORM == "windows":
-            # Gammal registerpost (pythonw/Python-ikonen) flyttas till
-            # genvägen med appens egen ikon vid första kontrollen.
-            if not self._startup_shortcut_path().exists():
-                log.info(
-                    "AUTOSTART: flyttar posten till genväg med appens ikon"
-                )
-                return self._win_set(True)
-            expected = self.build_command()
-            current = self.get_registered_command()
-            if current != expected:
-                log.info(
-                    "AUTOSTART: register pekar fel\n  Nuvarande: %s\n  Korrekt  : %s",
-                    current,
-                    expected,
-                )
-                return self._win_set(True)
-            log.debug("AUTOSTART: register OK %s", expected)
+            # Rebuild the link on startup: the icon and target are
+            # always current, and any legacy Python Run entry is removed.
+            return self._win_set(True)
 
         if CURRENT_PLATFORM == "linux":
             p = self._linux_path()
@@ -1771,13 +1773,37 @@ class AutostartManager:
             "$s.Save()"
         )
 
+    @staticmethod
+    def _vbs_quote(value: object) -> str:
+        """Citerar en sträng säkert som VBScript-literal."""
+        return '"' + str(value).replace('"', '""') + '"'
+
+    def _shortcut_vbscript(self) -> str:
+        """COM-reservväg utan PowerShell; genvägen får fortfarande appikonen."""
+        target, args = self._shortcut_target()
+        lnk = self._startup_shortcut_path()
+        ico = BASE_DIR / "app_icon.ico"
+        q = self._vbs_quote
+        return "\r\n".join((
+            'Set shell = CreateObject("WScript.Shell")',
+            f"Set shortcut = shell.CreateShortcut({q(lnk)})",
+            f"shortcut.TargetPath = {q(target)}",
+            f"shortcut.Arguments = {q(args)}",
+            f"shortcut.WorkingDirectory = {q(BASE_DIR)}",
+            f"shortcut.IconLocation = {q(str(ico) + ',0')}",
+            "shortcut.WindowStyle = 7",
+            f"shortcut.Description = {q(self._app_name)}",
+            "shortcut.Save",
+        ))
+
     def _write_startup_shortcut(self) -> bool:
-        """Skapar genvägen. True bara om .lnk verkligen finns efteråt."""
+        """Skapar en appikon-genväg; skriver aldrig en Python-Run-post."""
         lnk = self._startup_shortcut_path()
         try:
             _ensure_dir(lnk.parent)
-            import subprocess
-
+            # Ta bort en gammal länk först: filens blotta existens får
+            # aldrig misstas för att den redan bär appens ikon.
+            lnk.unlink(missing_ok=True)
             subprocess.run(
                 [
                     "powershell", "-NoProfile", "-ExecutionPolicy",
@@ -1787,15 +1813,51 @@ class AutostartManager:
                 check=False,
                 timeout=30,
                 capture_output=True,
-                # PowerShell är ett konsolprogram — inget blinkande fönster.
                 creationflags=getattr(
                     subprocess, "CREATE_NO_WINDOW", 0
                 ),
+            )
+            if lnk.exists():
+                return True
+        except Exception as exc:
+            log.debug("PowerShell-genväg misslyckades: %s", exc)
+
+        # Windows Script Host finns även på system där PowerShell är avstängt.
+        # Tillfälliga VBS-filen tas bort direkt efter COM-anropet.
+        script_path: Path | None = None
+        try:
+            _ensure_dir(lnk.parent)
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-16",
+                suffix=".vbs",
+                prefix=f".{self._app_name}-",
+                dir=str(lnk.parent),
+                delete=False,
+            ) as script:
+                script.write(self._shortcut_vbscript())
+                script_path = Path(script.name)
+            wscript = shutil.which("wscript.exe") or "wscript.exe"
+            subprocess.run(
+                [wscript, "//B", str(script_path)],
+                cwd=str(BASE_DIR),
+                check=False,
+                timeout=20,
+                capture_output=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             return lnk.exists()
         except Exception as exc:
             log.warning("Autostart-genväg kunde inte skapas: %s", exc)
             return False
+        finally:
+            if script_path is not None:
+                try:
+                    script_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _remove_startup_shortcut(self) -> None:
         try:
@@ -1830,16 +1892,18 @@ class AutostartManager:
                             self._startup_shortcut_path(),
                         )
                         return True
-                    # Reservväg (t.ex. miljö utan PowerShell): Run-nyckeln.
-                    cmd = self.build_command()
-                    winreg.SetValueEx(
-                        key, self._app_name, 0, winreg.REG_SZ, cmd
+                    # Windows Run-posten pekar på pythonw.exe och visar
+                    # Python-ikonen. Om .lnk inte kan skapas ska autostart
+                    # nekas i stället för att registrera en Python-post.
+                    try:
+                        winreg.DeleteValue(key, self._app_name)
+                    except Exception:
+                        pass
+                    log.error(
+                        "Windows autostart nekad: genväg med appikon kunde "
+                        "inte skapas; ingen Python/Run-post skrivs."
                     )
-                    log.info(
-                        "Windows registry SET:\n  Nyckel: %s\n  Värde : %s",
-                        self._app_name,
-                        cmd,
-                    )
+                    return False
                 else:
                     # Bort med BÅDA: genvägen och ett eventuellt Run-värde.
                     self._remove_startup_shortcut()
@@ -4041,8 +4105,8 @@ class FakturaApp:
             self.maybe_daily_cache_clean()
         except Exception as exc:
             log.warning("dygnsrensning av cache: %s", exc)
-        # Legacy-loggar från äldre versioner (audit/errors/performance/
-        # structured + lös app.log i roten) — en-fil-principen.
+        # Legacy-loggar från äldre versioner: root-startup-loggen flyttas
+        # till logs/ och gamla splittrade loggar städas bort.
         try:
             clean_legacy_logs()
         except Exception as exc:

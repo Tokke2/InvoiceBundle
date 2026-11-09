@@ -40,8 +40,12 @@ except ImportError:  # fristående körning av filen
 
 try:
     from ui.invoices_helpers import COLUMNS, fmt_amount, make_font
+    from ui.typography import make_tabular_font, set_item_font
 except ImportError:  # pragma: no cover
     from invoices_helpers import COLUMNS, fmt_amount, make_font  # type: ignore[no-redef]
+    from typography import (  # type: ignore[no-redef]
+        make_tabular_font, set_item_font,
+    )
 
 log = logging.getLogger("HistoryView")
 
@@ -213,8 +217,14 @@ class HistoryView(QWidget):
                     text = str(value or "")
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(align)
-                if key == "total_amount":
-                    item.setFont(make_font(11, bold=True))
+                if key in {
+                    "invoice_number", "ocr", "date", "due_date",
+                    "payment_date", "total_amount",
+                }:
+                    set_item_font(
+                        item,
+                        make_tabular_font(11, bold=(key == "total_amount")),
+                    )
                 self._table.setItem(row_idx, col_idx, item)
 
     # ── Arkivmapp ──────────────────────────────────────────────────

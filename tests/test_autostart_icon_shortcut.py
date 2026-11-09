@@ -11,10 +11,9 @@ Lösning som prövas här:
   fönster/tray/dialoger hämtar dem via _load_app_icon.
 * Windows-autostarten registreras som en genväg (Fakturabunten.lnk)
   i Autostart-mappen med app_icon.ico som IconLocation — Start-listan
-  visar då "Fakturabunten" med appens ikon, inte "Python". Run-
-  registerposten används bara som reserv och rensas när genvägen
-  finns, så appen aldrig startar dubbelt. Gamla registerposter
-  migreras av verify_and_update.
+  visar då "Fakturabunten" med appens ikon, inte "Python". Gamla
+  Run-registerposter migreras till genvägen. Om en ikonbärande genväg
+  inte kan skapas skrivs ingen Python-post som reserv.
 """
 from __future__ import annotations
 
@@ -71,6 +70,22 @@ def test_svg_fallback_matches_new_design():
     assert "#16305a" in svg           # marinblå bakgrund
     assert "#e8a91c" in svg           # guldbandet
     assert "circle" in svg            # bock-badgen
+
+
+def test_bootstrap_progress_uses_app_icon():
+    source = (PROJECT_DIR / "ensure_packages.py").read_text(encoding="utf-8")
+    assert "self.root.iconbitmap(default=str(ico))" in source
+    assert "self.root.iconphoto(True, self._icon_photo)" in source
+
+
+def test_python_updater_migrates_legacy_run_entry_to_icon_shortcut():
+    script = (
+        PROJECT_DIR / "autostart" / "install_python.ps1"
+    ).read_text(encoding="utf-8")
+    assert "Set-ItemProperty -LiteralPath $runKey" not in script
+    assert "Remove-ItemProperty -LiteralPath $runKey" in script
+    assert "app_icon.ico" in script
+    assert "CreateShortcut($linkPath)" in script
 
 
 # ── Autostart-genvägen ──────────────────────────────────────────────
@@ -148,6 +163,29 @@ def test_powershell_script_carries_app_icon_not_python(monkeypatch, tmp_path):
     assert "Startup" in str(mgr._startup_shortcut_path())
 
 
+def test_wscript_fallback_keeps_the_app_icon(monkeypatch, tmp_path):
+    appmod, mgr = _win_mgr(monkeypatch, tmp_path)
+    commands = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        if command[0] == "powershell":
+            raise FileNotFoundError("PowerShell disabled")
+        if command[0] == "wscript.exe":
+            vbs = Path(command[-1])
+            content = vbs.read_text(encoding="utf-16")
+            assert "app_icon.ico,0" in content
+            mgr._startup_shortcut_path().write_bytes(b"LNK")
+
+    monkeypatch.setattr(appmod.subprocess, "run", fake_run)
+    monkeypatch.setattr(appmod.shutil, "which", lambda _name: "wscript.exe")
+    assert mgr._write_startup_shortcut() is True
+    assert [command[0] for command in commands] == [
+        "powershell", "wscript.exe",
+    ]
+    assert not list(mgr._startup_folder().glob("*.vbs"))
+
+
 def test_enable_prefers_shortcut_and_clears_registry(
     monkeypatch, tmp_path
 ):
@@ -165,7 +203,7 @@ def test_enable_prefers_shortcut_and_clears_registry(
     assert mgr.is_enabled() is False
 
 
-def test_enable_falls_back_to_registry_without_powershell(
+def test_enable_refuses_python_registry_fallback_without_shortcut(
     monkeypatch, tmp_path
 ):
     store = _fake_winreg(monkeypatch)
@@ -173,12 +211,12 @@ def test_enable_falls_back_to_registry_without_powershell(
     monkeypatch.setattr(
         type(mgr), "_write_startup_shortcut", lambda self: False
     )
-    assert mgr.set_enabled(True) is True
-    # Reservvägen: Run-posten (funktionen går före ikonrenheten
-    # i miljöer där genvägen inte kan skapas).
-    assert "--minimized" in store["Fakturabunten"]
-    assert mgr.is_enabled() is True
-    assert mgr.get_registered_command() == store["Fakturabunten"]
+    store["Fakturabunten"] = '"pythonw.exe" "main.pyw" --minimized'
+    assert mgr.set_enabled(True) is False
+    # Ingen Run-post får lämnas kvar med Python-ikonen.
+    assert "Fakturabunten" not in store
+    assert not mgr._startup_shortcut_path().exists()
+    assert mgr.is_enabled() is False
 
 
 def test_verify_migrates_registry_entry_to_shortcut(

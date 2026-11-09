@@ -52,12 +52,18 @@ except Exception:  # pragma: no cover
 
 try:
     from ui.invoices_helpers import fmt_amount
+    from ui.typography import make_tabular_font, set_item_font
 except Exception:  # pragma: no cover
     try:
         from invoices_helpers import fmt_amount  # type: ignore[no-redef]
+        from typography import (  # type: ignore[no-redef]
+            make_tabular_font, set_item_font,
+        )
     except Exception:
         def fmt_amount(value: float, currency: str = "SEK") -> str:  # type: ignore[no-redef]
             return f"{value:,.2f} {currency}"
+        make_tabular_font = None  # type: ignore[no-redef]
+        set_item_font = None  # type: ignore[no-redef]
 
 log = logging.getLogger("DashboardView")
 
@@ -349,6 +355,14 @@ class DashboardView(QWidget):
                     item.setTextAlignment(
                         Qt.AlignmentFlag.AlignRight
                         | Qt.AlignmentFlag.AlignVCenter
+                    )
+                if (
+                    c in (0, 2, 3)
+                    and callable(set_item_font)
+                    and callable(make_tabular_font)
+                ):
+                    set_item_font(
+                        item, make_tabular_font(11, bold=(c == 3))
                     )
                 self._table.setItem(r, c, item)
         self._lbl_hint.setText(

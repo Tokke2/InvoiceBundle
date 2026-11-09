@@ -7,23 +7,22 @@ Fil    : Fakturabunten_/plugins/advanced_logger.py
 Författare : Rickard Längkvist
 År     : Dynamiskt (auto)
 
-ENDA LOGGFILEN: logs/app.log (JSONL — en JSON-rad per händelse).
+AKTIV HUVUDLOGG: logs/app.log (JSONL — en JSON-rad per händelse).
+Äldre dygn och stora dagssegment sparas i logs/archive/. Feljournalen
+logs/felsamling.log hålls separat och roteras inte automatiskt.
 
 Designmål
 ─────────
-• EN loggfil, inget annat. Ingen rotation till .1/.2, inget archive/,
-  ingen errors/audit/perf/structured-split.
-• Loggar PRECIS ALLT: start/stopp, lås, tema, flikbyten, fönster
-  visas/döljs, tray-klick, CRUD, settings, export, session-datum,
-  fel + tracebacks.
-• 100 % AI-chatt-förståeligt: varje rad är ett JSON-objekt med fast
-  schema — ts/level/logger/action/msg/loc/thread + ctx{} + exc.
-  En AI (eller människa) ser direkt vad som hänt och vad som är fel.
+• Logga viktiga start/stopp-, lås-, tema-, fönster-, CRUD-, export- och
+  skanningshändelser med tid, logger, åtgärd och fel/traceback.
+• JSONL-schema med ts/level/logger/action/msg/loc/thread + ctx{} + exc.
 • Köbaserad skrivning (QueueHandler + QueueListener) — UI-tråden
   blockerar aldrig på disk.
-• Filen trimmas vid 25 MB → senaste 5 MB behålls (fortfarande 1 fil).
+• Vid dygnsskifte arkiveras föregående dags app- och autostartloggar;
+  en dagsfil över 25 MB arkiveras som numrerad del i stället för att
+  gamla loggrader trimmas bort.
 • UI-panel (LoggerView) i Inställningar-fliken: live-logg, filter,
-  sök, export, systeminfo.
+  sök, export och systeminfo.
 
 Schema per rad (exempel)
 ────────────────────────
@@ -68,12 +67,12 @@ COPYRIGHT_YEAR: int = datetime.date.today().year
 BASE_DIR: Path = Path(__file__).parent.parent.resolve()
 LOG_DIR: Path = BASE_DIR / "logs"
 
-#: ENDA loggfilen.
+#: Aktiv huvudlogg; äldre dygn och fulla segment finns i logs/archive/.
 LOG_FILE: Path = LOG_DIR / "app.log"
 
-#: Vid denna storlek trimmas filen till KEEP_BYTES (fortfarande 1 fil).
+#: Vid denna storlek arkiveras den aktiva dagsfilen som en del.
+#: Rulla en dagslogg till en delarkivfil i stället för att kasta rader.
 MAX_LOG_BYTES: int = 25 * 1024 * 1024
-KEEP_BYTES: int = 5 * 1024 * 1024
 
 UI_MAX_ROWS: int = 500
 
@@ -172,16 +171,19 @@ def alog(
 
 class SingleFileJsonlHandler(logging.Handler):
     """
-    Skriver ALLA loggposter som JSON-rader till EN fil: logs/app.log.
+    Skriver dagens JSONL-poster till logs/app.log.
 
-    Trimmad vid 25 MB (senaste 5 MB behålls) — alltid exakt 1 fil.
+    Vid dygnsskifte flyttas äldre dagar till logs/archive/. Om dagens
+    aktiva fil når 25 MB flyttas den till en numrerad del i samma arkiv;
+    loggrader kastas inte bort.
     """
 
     def __init__(self, path: Path) -> None:
         super().__init__()
-        self._path = path
+        self._path = Path(path)
         self._lock = threading.Lock()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        self._archive_checked_day: datetime.date | None = None
+        self._path.parent.mkdir(parents=True, exist_ok=True)
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -189,24 +191,32 @@ class SingleFileJsonlHandler(logging.Handler):
                 _record_to_entry(record), ensure_ascii=False
             )
             with self._lock:
+                today = datetime.date.today()
+                if today != self._archive_checked_day:
+                    try:
+                        from log_archive import archive_previous_day_logs
+
+                        archive_previous_day_logs(
+                            self._path.parent, today=today
+                        )
+                    except Exception:
+                        pass  # arkivering får aldrig stoppa loggningen
+                    self._archive_checked_day = today
                 with open(self._path, "a", encoding="utf-8") as fh:
                     fh.write(line + "\n")
                 if self._path.stat().st_size > MAX_LOG_BYTES:
-                    self._trim()
+                    try:
+                        from log_archive import archive_active_app_log
+
+                        archive_active_app_log(
+                            self._path,
+                            self._path.parent / "archive",
+                            day=today,
+                        )
+                    except Exception:
+                        pass  # behåll aktiv fil om arkivering misslyckas
         except Exception:
             self.handleError(record)
-
-    def _trim(self) -> None:
-        """Behåller senaste KEEP_BYTES — filen förblir EN fil."""
-        try:
-            data = self._path.read_bytes()
-            tail = data[-KEEP_BYTES:]
-            nl = tail.find(b"\n")
-            if nl != -1:
-                tail = tail[nl + 1:]
-            self._path.write_bytes(tail)
-        except OSError:
-            pass
 
 
 class MemoryHandler(logging.Handler):
@@ -269,7 +279,7 @@ class MemoryHandler(logging.Handler):
 
 
 # ═════════════════════════════════════════════════════════════════════
-#  GLOBAL SETUP — EN fil, köbaserad, DEBUG-nivå (allt loggas)
+#  GLOBAL SETUP — köbaserad loggning med dagsarkiv
 # ═════════════════════════════════════════════════════════════════════
 
 _memory_handler: MemoryHandler | None = None
@@ -293,7 +303,7 @@ def setup_logging(trace_on: bool = True) -> MemoryHandler:
     """
     Sätter upp hela loggningen:
 
-    • logs/app.log (JSONL, EN fil) bakom QueueListener i egen tråd
+    • dagens logs/app.log bakom QueueListener; äldre dygn arkiveras
     • MemoryHandler direkt på root (UI-panel, omedelbar)
     • Konsol endast om en terminal finns
     • Nivå: TRACE (5) som standard — PRECIS ALLT loggas, inklusive
@@ -369,7 +379,7 @@ def setup_logging(trace_on: bool = True) -> MemoryHandler:
 
     alog(
         "SESSION_START",
-        "Ny loggsession — en fil, JSONL, PRECIS ALLT loggas",
+        "Ny loggsession — JSONL med dagsarkiv; feljournalen bevaras",
         logger="AdvancedLogger",
         version=os.environ.get("FBP_VERSION", ""),
         platform=platform.system(),
@@ -1010,7 +1020,7 @@ class PerfTimer:
 
 
 def log_system_info() -> None:
-    """Systeminfo → en strukturerad rad i den enda loggfilen."""
+    """Systeminfo → en strukturerad rad i den aktiva dagsloggen."""
     try:
         import importlib.metadata as meta
         pyside = meta.version("PySide6")
@@ -1065,7 +1075,7 @@ class LoggerView(QWidget):
         root.setContentsMargins(14, 14, 14, 10)
         root.setSpacing(10)
 
-        hdr = QLabel("🔍  Systemlogg — en fil, allt loggas (JSONL)")
+        hdr = QLabel("🔍  Systemlogg — dagsarkiv, allt loggas (JSONL)")
         hdr.setFont(QFont("Segoe UI", 17, QFont.Bold))
         root.addWidget(hdr)
         root.addWidget(self._separator())
@@ -1465,7 +1475,7 @@ _app_ref: Any = None
 
 
 def register(app: Any) -> None:
-    """Phase-1: en fil, kölogg, hooks, watchers, systeminfo, Qt-brygga."""
+    """Phase-1: kölogg med dagsarkiv, hooks, watchers och Qt-brygga."""
     global _memory_handler_global, _app_ref
     _app_ref = app
 

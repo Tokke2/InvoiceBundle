@@ -208,6 +208,17 @@ def test_manual_match_rereads_with_chosen_template(tmp_path):
             (tmp_path / "match_memory.json").read_text("utf-8")
         )
         assert learning["Testbolaget AB"]["multipage_confirmed"] == 1
+        template = si.find_template(
+            si.load_templates(tmp_path / "invoice_templates.json"),
+            "Testbolaget AB",
+        )
+        template_learning = si.template_confirmation_entry(
+            learning, "Testbolaget AB", template
+        )
+        assert template_learning["confirmed"] == 1
+        assert template_learning["fields"] == {
+            "invoice_number": 1, "total_amount": 1,
+        }
     finally:
         view.close()
 
@@ -240,7 +251,7 @@ def test_manual_match_invoices_view_keeps_learning_the_logo(
     si.save_match_learning(tmp_path / "match_memory.json", learning)
     monkeypatch.setattr(
         si, "confirmed_supplier_logo_signature",
-        lambda path, supplier, templates: signature,
+        lambda path, supplier, templates, **kwargs: signature,
     )
 
     app = _FakeApp([_invoice(pdf)], [], tmp_path)

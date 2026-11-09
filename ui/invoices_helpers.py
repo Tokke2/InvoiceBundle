@@ -87,6 +87,15 @@ from PySide6.QtGui import (
     QPalette,
 )
 
+try:
+    from ui.typography import (
+        font_scale, make_tabular_font, set_item_font,
+    )
+except ImportError:
+    from typography import (  # type: ignore[no-redef]
+        font_scale, make_tabular_font, set_item_font,
+    )
+
 log = logging.getLogger("InvoicesHelpers")
 
 try:
@@ -1134,10 +1143,11 @@ def fg_on_row(
 
 
 def ensure_row_height(table: QTableWidget, min_px: int = 40) -> None:
-    """Ser till att ingen rad är lägre än ``min_px`` pixlar."""
+    """Ser till att raderna lämnar plats för vald textstorlek."""
+    scaled_min = max(min_px, int(round(min_px * font_scale())))
     for row in range(table.rowCount()):
-        if table.rowHeight(row) < min_px:
-            table.setRowHeight(row, min_px)
+        if table.rowHeight(row) < scaled_min:
+            table.setRowHeight(row, scaled_min)
 
 
 class VisibleRowsDelegate(QStyledItemDelegate):
@@ -1260,11 +1270,13 @@ def make_cell(
     bold: bool = True,
     fg: str = "",
     numeric: bool = False,
+    tabular: bool = False,
 ) -> QTableWidgetItem:
     """
     Skapar en QTableWidgetItem med enhetlig stil.
 
     numeric=True → cellen sorteras numeriskt (för beloppskolumner).
+    tabular=True → siffror ligger i jämnbreda teckenpositioner.
     """
     if numeric:
         item = _NumericCell(str(text))
@@ -1274,7 +1286,11 @@ def make_cell(
     item.setTextAlignment(
         int(align) | int(Qt.AlignmentFlag.AlignVCenter)
     )
-    item.setFont(make_font(12, bold=bold))
+    base_font = (
+        make_tabular_font(12, bold=bold)
+        if tabular else make_font(12, bold=bold)
+    )
+    set_item_font(item, base_font)
     if fg:
         item.setForeground(QBrush(QColor(fg)))
     return item
@@ -2359,7 +2375,7 @@ class InvoiceDialog(QDialog):
 
         # Fakturanummer
         self.f_inv_nr = make_line_edit("ex. 2025-001 / INV-001")
-        self.f_inv_nr.setFont(make_font(14, True))
+        self.f_inv_nr.setFont(make_tabular_font(14, True))
         self.f_inv_nr.setMinimumHeight(44)
         pf.addRow(tr("invdialog.invoice_number"), self.f_inv_nr)
 
@@ -2376,7 +2392,7 @@ class InvoiceDialog(QDialog):
         # Belopp — AmountLineEdit: bättre textfält, svenskt format,
         # ALLTID helmarkerat tills man skriver något.
         self.f_total = AmountLineEdit(placeholder="0,00")
-        self.f_total.setFont(make_font(14, True))
+        self.f_total.setFont(make_tabular_font(14, True))
         self.f_total.setMinimumHeight(44)
         self.f_total.setToolTip(
             "Belopp i kronor.\n"
@@ -2428,6 +2444,7 @@ class InvoiceDialog(QDialog):
         )
 
         self.f_ocr = make_line_edit("OCR-nummer")
+        self.f_ocr.setFont(make_tabular_font(12))
         self.f_ref = make_line_edit(tr("invdialog.ref_ph"))
         self.f_category = make_line_edit(tr("invdialog.category_ph"))
         self.f_date = make_date_edit(today=True)

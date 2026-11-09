@@ -1462,6 +1462,10 @@ class InvoicesView(QWidget):
                     bold=True,
                     fg=fg,
                     numeric=key == "total_amount",
+                    tabular=key in {
+                        "invoice_number", "ocr", "date", "due_date",
+                        "payment_date", "total_amount", "pages",
+                    },
                 )
                 item.setData(Qt.ItemDataRole.UserRole, inv.get("id", ""))
                 if text:
@@ -2887,7 +2891,7 @@ class InvoicesView(QWidget):
         def _template_for(name: str):
             """Mallen för ett valt namn — egen mall först, annars
             det inbyggda formatets etikettskarta. None = ingen mall."""
-            tmpl = si.find_template(templates, name)
+            tmpl = si.find_template(templates, name, suppliers)
             if tmpl is not None:
                 return tmpl
             for fmt in getattr(si, "BUILTIN_FORMATS", []) or []:
@@ -2900,7 +2904,7 @@ class InvoicesView(QWidget):
                     return {"fields": dict(fmt.get("fields", {}) or {})}
             return None
 
-        def _read(name: str) -> tuple[Any, dict]:
+        def _read(name: str) -> tuple[Any, dict, list[str]]:
             """Läser om fakturans fält med vald mall; generisk
             läsning fyller fält mallen inte träffar."""
             tmpl = _template_for(name)
@@ -2944,7 +2948,7 @@ class InvoicesView(QWidget):
                 after["total_amount"] = float(total or 0)
             except (TypeError, ValueError):
                 after["total_amount"] = 0.0
-            return tmpl, after
+            return tmpl, after, list(found)
 
         def _parse_sv_amount(raw: str) -> float:
             """'13 480,00 SEK' → 13480.0 (tål valuta + tusental)."""
@@ -3017,7 +3021,15 @@ class InvoicesView(QWidget):
         buttons.addWidget(btn_save)
         layout.addLayout(buttons)
 
-        state: dict[str, Any] = {"after": {}, "template": None}
+        state: dict[str, Any] = {
+            "after": {}, "template": None, "template_fields": [],
+        }
+        try:
+            template_learning = si.load_match_learning(
+                self._scan_data_dir() / "match_memory.json"
+            )
+        except Exception:
+            template_learning = {}
 
         def _refresh_preview() -> None:
             name = combo.currentText().strip()
@@ -3027,14 +3039,36 @@ class InvoicesView(QWidget):
                 amount_edit.setText("")
                 state["after"] = {}
                 state["template"] = None
+                state["template_fields"] = []
                 return
-            tmpl, after = _read(name)
+            tmpl, after, template_fields = _read(name)
             state["after"] = after
             state["template"] = tmpl
-            tmpl_lbl.setText(
+            state["template_fields"] = template_fields
+            template_label = (
                 tr("invoices.manual_match_template_used", template=name)
                 if tmpl else tr("invoices.manual_match_template_none")
             )
+            if tmpl:
+                template_entry = si.template_confirmation_entry(
+                    template_learning, name, tmpl
+                )
+                try:
+                    template_count = int(
+                        template_entry.get("confirmed", 0) or 0
+                    )
+                except (TypeError, ValueError):
+                    template_count = 0
+                if template_count:
+                    template_label += " · " + tr(
+                        "scan.template_confirmation_count",
+                        n=template_count,
+                    )
+                else:
+                    template_label += tr(
+                        "invoices.manual_match_template_unconfirmed"
+                    )
+            tmpl_lbl.setText(template_label)
             lines = []
             for field in (
                 "invoice_number", "date", "due_date", "ocr",
@@ -3129,8 +3163,15 @@ class InvoicesView(QWidget):
                 self._status(tr("invoices.rescan_failed", nr=nr))
                 return
             self._do_refresh()
+        confirmed_values = dict(after or {})
+        confirmed_values["invoice_number"] = final_nr
+        confirmed_values["total_amount"] = final_total
         learned = self._learn_manual_match(
-            si, resolved, text, final_nr, final_total, pages, path
+            si, resolved, text, final_nr, final_total, pages, path,
+            template=state.get("template"),
+            template_fields=state.get("template_fields", []),
+            template_name=combo.currentText().strip(),
+            confirmed_values=confirmed_values,
         )
         log.info(
             "SCAN_MATCH: faktura %s matchad manuellt mot %s "
@@ -3152,7 +3193,10 @@ class InvoicesView(QWidget):
     def _learn_manual_match(
         self, si: Any, supplier: str, text: str,
         invoice_number: str, total: float, pages: int,
-        path: str = "",
+        path: str = "", template: dict | None = None,
+        template_fields: list[str] | None = None,
+        template_name: str = "",
+        confirmed_values: dict | None = None,
     ) -> str:
         """Inlärning ur en manuell matchning i Fakturor-fliken —
         samma regler som i Import: bekräftelsen räknas i
@@ -3162,10 +3206,62 @@ class InvoicesView(QWidget):
         Returnerar en statusnotis (eller "")."""
         try:
             data_dir = self._scan_data_dir()
-            learning = si.load_match_learning(
-                data_dir / "match_memory.json"
-            )
+            learning_path = data_dir / "match_memory.json"
+            learning = si.load_match_learning(learning_path)
             templates = self._load_scan_templates(si)
+            try:
+                suppliers = list(self._app.get_suppliers() or [])
+            except Exception:
+                suppliers = []
+            template_name = str(template_name or supplier).strip()
+            confirmed = dict(confirmed_values or {})
+            confirmed["invoice_number"] = str(invoice_number or "")
+            confirmed["total_amount"] = total
+            matched_template = (
+                template if isinstance(template, dict)
+                else si.find_template(templates, template_name, suppliers)
+            )
+            notes: list[str] = []
+            if (
+                not matched_template
+                and not si.find_template(templates, supplier, suppliers)
+                and not si.has_builtin_format(supplier)
+            ):
+                candidate = si.derive_template_from_confirmation(
+                    text, invoice_number, total
+                )
+                if candidate:
+                    templates[supplier] = candidate
+                    if si.save_templates(
+                        data_dir / "invoice_templates.json", templates
+                    ):
+                        matched_template = candidate
+                        template_name = supplier
+                        notes.append(tr(
+                            "invoices.manual_match_learned",
+                            supplier=supplier,
+                        ))
+            found: dict = {}
+            if matched_template:
+                try:
+                    found = si.template_values(
+                        path or None, text, matched_template
+                    )
+                except Exception:
+                    found = {}
+            if template_fields:
+                allowed_fields = {str(field) for field in template_fields}
+                found = {
+                    field: value for field, value in found.items()
+                    if field in allowed_fields
+                }
+            accepted_fields = si.confirmed_template_fields(
+                matched_template, found, confirmed
+            ) if matched_template else []
+            confirmation_id = si.match_confirmation_id(
+                supplier, invoice_number, path=path,
+                invoice_date=str(confirmed.get("date", "") or ""),
+            )
             entry_before = si.learning_entry(learning, supplier)
             try:
                 confirmations_before = int(
@@ -3174,7 +3270,7 @@ class InvoicesView(QWidget):
             except (TypeError, ValueError):
                 confirmations_before = 0
             logo_signature = si.confirmed_supplier_logo_signature(
-                path, supplier, templates
+                path, supplier, templates, suppliers=suppliers
             )
             logo_count_before = int(
                 (entry_before.get("logos", {}) or {}).get(
@@ -3185,17 +3281,21 @@ class InvoicesView(QWidget):
                 learning, supplier,
                 multipage=int(pages or 0) >= 2, text=text,
                 logo_signature=logo_signature,
+                confirmation_id=confirmation_id, source_path=path,
+                template_name=template_name,
+                template=matched_template,
+                template_fields=accepted_fields,
             )
-            si.save_match_learning(
-                data_dir / "match_memory.json", learning
-            )
-            notes: list[str] = []
-            confirmed = int(entry.get("confirmed", 0) or 0)
+            si.save_match_learning(learning_path, learning)
+            confirmed_count = int(entry.get("confirmed", 0) or 0)
             notes.append(tr(
-                "scan.learning_count", supplier=supplier, n=confirmed
+                "scan.learning_count", supplier=supplier,
+                n=confirmed_count,
             ))
-            if confirmed >= si.LEARNED_SUPPLIER_CONFIRMATIONS \
-                    and confirmed - 1 < si.LEARNED_SUPPLIER_CONFIRMATIONS:
+            if (
+                confirmations_before < si.LEARNED_SUPPLIER_CONFIRMATIONS
+                <= confirmed_count
+            ):
                 notes.append(tr(
                     "scan.learned_auto_supplier", supplier=supplier
                 ))
@@ -3203,7 +3303,7 @@ class InvoicesView(QWidget):
                 (entry.get("logos", {}) or {}).get(logo_signature, 0) or 0
             ) if logo_signature else 0
             if (
-                confirmed >= si.LEARNED_SUPPLIER_CONFIRMATIONS
+                confirmed_count >= si.LEARNED_SUPPLIER_CONFIRMATIONS
                 and logo_count >= si.LEARNED_IDENTIFIER_CONFIRMATIONS
                 and not (
                     confirmations_before >= si.LEARNED_SUPPLIER_CONFIRMATIONS
@@ -3213,20 +3313,21 @@ class InvoicesView(QWidget):
                 notes.append(tr(
                     "scan.learned_auto_logo", supplier=supplier
                 ))
-            if not si.find_template(templates, supplier) and \
-                    not si.has_builtin_format(supplier):
-                tmpl = si.derive_template_from_confirmation(
-                    text, invoice_number, total
+            if matched_template:
+                template_entry = si.template_confirmation_entry(
+                    learning, supplier, matched_template
                 )
-                if tmpl:
-                    templates[supplier] = tmpl
-                    if si.save_templates(
-                        data_dir / "invoice_templates.json", templates
-                    ):
-                        notes.append(tr(
-                            "invoices.manual_match_learned",
-                            supplier=supplier,
-                        ))
+                try:
+                    template_count = int(
+                        template_entry.get("confirmed", 0) or 0
+                    )
+                except (TypeError, ValueError):
+                    template_count = 0
+                if template_count:
+                    notes.append(tr(
+                        "scan.template_confirmation_count",
+                        n=template_count,
+                    ))
             return " ".join(notes)
         except Exception as exc:
             log.warning("learn manual match: %s", exc)
