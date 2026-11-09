@@ -30,3 +30,31 @@ jobs:
           tests/test_updater.py
           tests/test_release_integrity.py
           -q
+
+  build-release-package:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build the versioned program package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_PATH="${RUNNER_TEMP}/InvoiceBundle-v${VERSION}.zip"
+          python build_release.py \
+            --root . \
+            --out "$PACKAGE_PATH" \
+            --version "$VERSION" \
+            --sha "$(git rev-parse HEAD)"
+      - name: Attach package to the existing GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release upload "$GITHUB_REF_NAME" \
+            "${RUNNER_TEMP}/InvoiceBundle-v${VERSION}.zip" \
+            --clobber

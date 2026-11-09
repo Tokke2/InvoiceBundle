@@ -43,6 +43,19 @@ def test_all_release_files_exist_in_repo():
     assert br.validate_release_files(PROJECT_DIR) == []
 
 
+def test_tag_workflow_builds_and_attaches_the_release_package():
+    workflow = (
+        PROJECT_DIR / ".github" / "workflows" / "release-integrity.yml"
+    ).read_text(encoding="utf-8")
+    assert "build-release-package:" in workflow
+    assert "startsWith(github.ref, 'refs/tags/v')" in workflow
+    assert "contents: write" in workflow
+    assert "python build_release.py" in workflow
+    assert "gh release upload" in workflow
+    assert "--clobber" in workflow
+    assert 'VERSION="${GITHUB_REF_NAME#v}"' in workflow
+
+
 def test_runtime_helper_modules_are_in_the_release_manifest():
     for rel in (
         "plugins/error_collect.py",
