@@ -3,6 +3,7 @@
 ## Ej släppt / Unreleased
 
 ### Svenska
+- **Tillförlitligare systray-start** — om systemfältet inte är redo när appen startar försöker appen registrera ikonen igen i upp till en minut. Utan en synlig ikon hålls fönstret åtkomligt i stället för att döljas.
 - **Bevakade original årsarkiveras vid lyckad registrering** — efter att fakturan faktiskt sparats flyttas filen till `<bevakad mapp>/<fakturans år>/`; både fakturans attachment-sökväg och bevakningens register uppdateras. Ofullständiga eller osäkra filer lämnas kvar för granskning. Om fakturadatum saknas eller är ogiltigt frågar importen efter ett årtal; Avbryt lämnar originalet på källplatsen. En redan registrerad fil back-sorteras bara när registerposten pekar exakt på just den filen. Export/betalning flyttar inte originalet igen.
 - **Valbart originalinnehåll i PDF-exporten** — välj i Fakturor-fliken att bifoga alla originalsidor, bara första sidan av PDF-originalet eller inga original. Valet sparas och gäller både manuell export och autoexport; standardläget är alla sidor. Att välja bort original påverkar inte importens eller fakturans sökväg.
 - **Manuell fakturaregistrering fungerar utan toppfilter** — välj leverantör direkt i Ny faktura-dialogen när leverantörslistan ovanför fakturatabellen är tom; toppens leverantörsfilter fortsätter att filtrera listan som förut.
@@ -19,6 +20,7 @@
 - **Bättre leverantörsmatchning via fakturalogotyp** — sparade logotyper kan hittas även när de flyttats på PDF-sidan. Matchningsdialogen visar verkliga, beskurna logotyper från originalfakturan (inga monogram) och rankar den starkaste träffen först. Manuell matchning kan också öppna originalet för att markera logotypen; osäkra träffar kräver fortfarande användarens val.
 
 ### English
+- **More reliable system-tray startup** — if the desktop tray is not ready when the app starts, it retries icon registration for up to one minute. Without a visible tray icon, the window stays accessible instead of being hidden.
 - **Watched originals are sorted into invoice-year folders after successful registration** — once an invoice is actually saved, its file moves to `<watched folder>/<invoice year>/`; the invoice attachment path and watched-file registry are updated together. Incomplete or uncertain files stay put for review. If the invoice date is missing or invalid, import asks for an archive year; Cancel leaves the original at its source path. An already registered file is back-sorted only when its invoice record points to that exact file. Export/payment does not move it again.
 - **Choose how much of each original goes into exported PDFs** — select all original pages, only the first page of PDF originals, or no originals in the Invoices tab. The saved choice applies to manual and automatic exports; all pages is the default. Excluding originals does not change import or attachment paths.
 - **Manual invoice entry no longer requires a top-level supplier filter** — choose the supplier in the New Invoice dialog when the supplier dropdown above the table is blank; the top dropdown continues to filter the invoice list as before.

@@ -2913,23 +2913,82 @@ class MainWindow(QMainWindow):
     #  SYSTEM TRAY
     # ══════════════════════════════════════════════════════════════════
 
+    def _schedule_tray_setup_retry(self, reason: str) -> None:
+        """Retry tray registration while Windows/the desktop is starting."""
+        attempts = int(getattr(self, "_tray_setup_retries", 0))
+        if attempts >= 60:
+            log.error(
+                "SYSTEM_TRAY_SETUP_GAVE_UP: %s after %d retries",
+                reason, attempts,
+            )
+            return
+        attempts += 1
+        self._tray_setup_retries = attempts
+        if attempts in (1, 10, 30):
+            log.warning(
+                "SYSTEM_TRAY_NOT_READY: %s; retry %d/60",
+                reason, attempts,
+            )
+        timer = getattr(self, "_tray_retry_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._setup_tray)
+            self._tray_retry_timer = timer
+        timer.start(1000)
+
     def _setup_tray(self) -> None:
-        """Skapar tray-ikon med meny. Exakt EN ikon i processen."""
-        if not QSystemTrayIcon.isSystemTrayAvailable():
-            log.warning("System tray ej tillgängligt")
+        """Create exactly one tray icon, retrying if the shell is not ready."""
+        tray = getattr(self, "tray", None)
+        if tray is not None:
+            try:
+                if tray.isVisible():
+                    self._tray_setup_retries = 0
+                    timer = getattr(self, "_tray_retry_timer", None)
+                    if timer is not None:
+                        timer.stop()
+                    return
+            except Exception:
+                pass
+
+        try:
+            tray_available = QSystemTrayIcon.isSystemTrayAvailable()
+        except Exception as exc:
+            tray_available = False
+            log.warning("Systemtraystatus kunde inte läsas: %s", exc)
+        if not tray_available:
+            self._schedule_tray_setup_retry("system tray is not available")
             return
 
         theme = resolve_theme(self._settings.get("theme", "dark"))
-        tray_icon = (
-            self._custom_icon
-            if getattr(self, "_custom_icon", None) is not None
-            else _make_tray_icon(theme.get("tray_icon_color", "#58a6ff"))
-        )
-        self.tray = QSystemTrayIcon(tray_icon, self)
-        self.tray.setToolTip(tr("tray.tooltip", app=APP_NAME))
-        self.tray.setContextMenu(self._build_tray_menu())
-        self.tray.activated.connect(self._tray_activated)
-        self.tray.show()
+        tray_icon = getattr(self, "_custom_icon", None)
+        if tray_icon is None or tray_icon.isNull():
+            tray_icon = _make_tray_icon(
+                theme.get("tray_icon_color", "#58a6ff")
+            )
+        if tray is None:
+            tray = QSystemTrayIcon(tray_icon, self)
+            self.tray = tray
+            tray.activated.connect(self._tray_activated)
+        else:
+            tray.setIcon(tray_icon)
+        tray.setToolTip(tr("tray.tooltip", app=APP_NAME))
+        tray.setContextMenu(self._build_tray_menu())
+        tray.show()
+        try:
+            visible = bool(tray.isVisible())
+        except Exception:
+            visible = False
+        if visible:
+            self._tray_setup_retries = 0
+            timer = getattr(self, "_tray_retry_timer", None)
+            if timer is not None:
+                timer.stop()
+            log.info("SYSTEM_TRAY_ICON_SHOWN: app icon registered")
+        else:
+            self._schedule_tray_setup_retry(
+                "Qt did not report the tray icon visible after show()"
+            )
 
     def _build_tray_menu(self) -> QMenu:
         """Systemfältsmenyn — byggs om vid språkbyte."""

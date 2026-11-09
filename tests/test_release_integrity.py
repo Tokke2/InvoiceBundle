@@ -81,6 +81,18 @@ def test_python_runtime_and_autostart_use_system_interpreters_only():
     assert "system-Python" in app or "systemtolk" in app
 
 
+def test_system_tray_registration_retries_when_desktop_is_not_ready():
+    main_window = (
+        PROJECT_DIR / "ui" / "main_window.py"
+    ).read_text(encoding="utf-8")
+    main = (PROJECT_DIR / "main.py").read_text(encoding="utf-8")
+    assert "def _schedule_tray_setup_retry" in main_window
+    assert "timer.start(1000)" in main_window
+    assert "SYSTEM_TRAY_SETUP_GAVE_UP" in main_window
+    assert "if tray_ready:" in main
+    assert "Utan tray får appen inte försvinna från användaren" in main
+
+
 def test_runtime_helper_modules_are_in_the_release_manifest():
     for rel in (
         "plugins/error_collect.py",

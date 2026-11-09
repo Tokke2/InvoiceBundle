@@ -54,7 +54,7 @@ Betalningen sker hos PayPal/Ko-fi. Programmet ser inga betalningsuppgifter.
 
 1. Lägg hela mappen där du vill, till exempel `D:\Program\Fakturabunten`. Sökvägen spelar ingen roll.
 2. Kör `Installera senaste Python.bat` för att kontrollera Python. Appen använder en systeminstallerad Python (per användare eller dator), aldrig en Python-kopia i appmappen. Den provar installerade tolkar i versionsordning med appens beroenden och Qt-runtime, väljer den första som fungerar och sparar sökväg/version i `data/python_runtime_selection.json`. Vid senare starter återtestas det sparade valet; nyare installerade tolkar provas också, och om valet inte längre fungerar väljs nästa godkända systemtolk. Installationsskriptet verifierar en ersättare innan en tidigare minorversion tas bort; om ingen kompatibel systemtolk finns installeras Python 3.14.8 på användarnivå. Okända installationstyper lämnas orörda.
-3. Starta `main.pyw` eller genvägen `Fakturabunten.lnk`; appen börjar minimerad i systemfältet. Öppna den från tray-ikonen.
+3. Starta `main.pyw` eller genvägen `Fakturabunten.lnk`; appen börjar minimerad i systemfältet. Öppna den från tray-ikonen. Om ikonen inte syns direkt, kontrollera Windows dolda ikoner (`^`) vid klockan; Windows kan lägga den där.
 
 Saknade Python-paket (`PySide6`, `reportlab`, `pypdf`, `pytesseract`) hämtas automatiskt vid start, bara om de behövs. `pytesseract` är Python-gränssnittet; för OCR av skannade PDF:er och bilder krävs dessutom Tesseract-programmet (med svensk eller engelsk språkdata). Om OCR-motorn saknas visas en varning i Import — fakturan registreras inte tyst med påhittade uppgifter.
 
@@ -130,7 +130,7 @@ Payment takes place at PayPal/Ko-fi. The app never sees any payment details.
 
 1. Put the whole folder wherever you like, e.g. `D:\Program\InvoiceBundle`. The path does not matter.
 2. Run `Installera senaste Python.bat` to check Python. The app uses a system-installed interpreter (per-user or machine-wide), never a Python copy inside the app folder. It probes installed interpreters in version order against the app dependencies and Qt runtime, selects the first working one, and remembers its path/version in `data/python_runtime_selection.json`. On later starts it retests the saved choice and also tests newly installed newer interpreters; if the saved choice stops working, it selects the next passing system interpreter. The installer verifies a replacement before removing an older minor version; if no compatible system interpreter exists, it installs Python 3.14.8 per-user. Unknown installation types are left untouched. *(Installer script name is in Swedish.)*
-3. Start `main.pyw` or the `Fakturabunten.lnk` shortcut; the app starts minimized in the system tray. Open it from the tray icon.
+3. Start `main.pyw` or the `Fakturabunten.lnk` shortcut; the app starts minimized in the system tray. Open it from the tray icon. If it is not immediately visible, check Windows' hidden tray icons (`^`) by the clock; Windows may place it there.
 
 Missing Python packages (`PySide6`, `reportlab`, `pypdf`, `pytesseract`) are fetched automatically at startup, only if needed. `pytesseract` is the Python interface; OCR for scanned PDFs and images also requires the native Tesseract program and Swedish or English language data. If the OCR engine is missing, Import shows a warning instead of silently inventing invoice values.
 
