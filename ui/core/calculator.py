@@ -910,6 +910,7 @@ def validate_invoice(inv: dict) -> list[str]:
     Regler
     ──────
     • vat_percent valideras INTE mot KNOWN_VAT_RATES (moms valfri).
+    • OCR-numret är valfritt; det ger ingen varning om det saknas.
     • total_amount == 0 är fel, men negativt är tillåtet (krediter).
     • invoice_type valideras om det finns.
     • "Arkiverad" är giltig status — ger ingen varning.
@@ -973,12 +974,6 @@ def validate_invoice(inv: dict) -> list[str]:
     status = inv.get("status", "")
     if status and status not in VALID_STATUSES:
         warnings.append(f"Okänd status: '{status}'.")
-
-    # ── OCR ────────────────────────────────────────────────────────────
-    if not str(inv.get("ocr", "")).strip():
-        warnings.append(
-            "OCR-nummer saknas — kan orsaka problem vid betalning."
-        )
 
     # ── Bankgiro / Plusgiro-format ─────────────────────────────────────
     bg = str(inv.get("bg", "")).strip()
@@ -1444,9 +1439,12 @@ if __name__ == "__main__":
         ), "SORTERINGSFEL i overdue!"
         print("  ✅ Overdue: senast ändrad sist")
 
-    print("\n  Validering (faktura 2 — saknar OCR):")
-    for w in validate_invoice(_sample[1]):
-        print(f"    ⚠  {w}")
+    print("\n  Validering (faktura 2 — OCR är frivilligt):")
+    ocr_missing_warnings = [
+        w for w in validate_invoice(_sample[1])
+        if "ocr" in w.casefold()
+    ]
+    assert not ocr_missing_warnings, "Frivilligt OCR ska inte ge varning"
 
     print("\n  Validering (kredit med positivt belopp):")
     bad_credit = {

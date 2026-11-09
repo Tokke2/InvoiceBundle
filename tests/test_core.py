@@ -916,6 +916,7 @@ def test_scan_parse_invoice_text_missing_fields() -> None:
     assert "belopp" in tom["missing"]
     assert "fakturanummer" in tom["missing"]
     assert "leverantör" in tom["missing"]
+    assert "ocr" not in tom["missing"]
 
 
 def test_scan_extract_text_from_pdf(tmp_path: Path) -> None:

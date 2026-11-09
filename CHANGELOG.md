@@ -4,9 +4,11 @@
 
 ### Svenska
 - **Fakturamallens bilddialog anpassar sig till skärmen** — dialogen ryms inom arbetsytan, bild/fält kan rullas när skärmen är låg, och på smala skärmar läggs panelerna under varandra. Åtgärdsknapparna ligger kvar synliga längst ned och flyttas till två rader vid smal bredd.
+- **OCR-nummer är frivilligt** — tomt OCR-nummer ger varken valideringsvarning eller hinder vid registrering. Fältet märks som valfritt; kontrollsifferavvikelse varnas fortfarande om OCR har fyllts i.
 
 ### English
 - **Invoice-template editor adapts to the screen** — the dialog fits the available work area, the image/fields can scroll on short screens, and the panels stack on narrow displays. Action buttons stay visible in the footer and wrap to two rows when needed.
+- **OCR number is optional** — an empty OCR number no longer produces a validation warning or blocks registration. The field is labelled optional; an invalid check digit is still flagged when an OCR number is entered.
 
 ## v1.0.0 — uppdatering / update
 

@@ -2495,14 +2495,8 @@ class InvoiceDialog(QDialog):
         scroll.setWidget(inner)
         root.addWidget(scroll, stretch=1)
 
-        # ── OCR-varning ────────────────────────────────────────────────
-        self._warn_ocr = QLabel(tr("invdialog.ocr_warning"))
-        self._warn_ocr.setStyleSheet(
-            "color:#ff9800;font-weight:700;background:transparent;"
-        )
-        self._warn_ocr.setVisible(False)
-        root.addWidget(self._warn_ocr)
-
+        # OCR-numret är valfritt; varna bara om ett angivet nummer
+        # har en ogiltig kontrollsiffra.
         self._warn_ocr_check = QLabel(tr("invdialog.ocr_check_warning"))
         self._warn_ocr_check.setStyleSheet(
             "color:#ff9800;font-weight:700;background:transparent;"
@@ -2570,9 +2564,8 @@ class InvoiceDialog(QDialog):
     # ── Live-varningar: OCR-kontrollsiffra + dubblett ────────────────
 
     def _refresh_ocr_warnings(self) -> None:
-        """Visar OCR-varningar medan man skriver (saknas/kontrollsiffra)."""
+        """Varnar bara om ett ifyllt OCR-nummer har fel kontrollsiffra."""
         text = self.f_ocr.text().strip()
-        self._warn_ocr.setVisible(not text)
         self._warn_ocr_check.setVisible(
             ocr_luhn_status(text) == "bad_check"
         )

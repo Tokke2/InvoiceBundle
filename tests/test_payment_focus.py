@@ -74,6 +74,19 @@ def test_ocr_luhn_uncheckable_inputs():
     assert ocr_luhn_status("REF-123") == "invalid_format"  # referens, ej OCR
 
 
+def test_invoice_validation_allows_missing_optional_ocr():
+    from ui.core.calculator import validate_invoice
+
+    warnings = validate_invoice({
+        "supplier": "Pilkington",
+        "invoice_number": "F-100",
+        "due_date": "2099-12-31",
+        "total_amount": 100.0,
+        "ocr": "",
+    })
+    assert not any("ocr" in warning.casefold() for warning in warnings)
+
+
 # ── Dubblettkoll ─────────────────────────────────────────────────────
 
 ROWS = [
@@ -274,6 +287,7 @@ def test_undo_restores_status_and_payment_date(tmp_path):
 
 def test_dialog_live_warnings_luhn_and_duplicate(tmp_path):
     _qapp()
+    from PySide6.QtWidgets import QLabel
     from ui.invoices_helpers import InvoiceDialog
 
     app = _fake_app(
@@ -286,6 +300,13 @@ def test_dialog_live_warnings_luhn_and_duplicate(tmp_path):
         supplier_names=["Pilkington"], app_core=app,
     )
     dlg.show()
+
+    labels = [label.text() for label in dlg.findChildren(QLabel)]
+    assert i18n.tr("invdialog.ocr") in labels
+    assert "valfritt" in i18n.tr("invdialog.ocr").casefold()
+    assert "valfritt" in i18n.tr("tmpl.field_ocr").casefold()
+    assert not any("OCR saknas" in text for text in labels)
+    assert not dlg._warn_ocr_check.isVisible()
 
     dlg.f_ocr.setText("79927398710")   # fel kontrollsiffra
     assert dlg._warn_ocr_check.isVisible()

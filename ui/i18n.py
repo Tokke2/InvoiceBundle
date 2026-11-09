@@ -346,7 +346,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "invdialog.type_invoice": {"sv": "🧾  FAKTURA – läggs till ATT BETALA", "en": "🧾  INVOICE – added to TO PAY"},
     "invdialog.type_credit": {"sv": "📋  KREDITFAKTURA – dras av från ATT BETALA", "en": "📋  CREDIT NOTE – deducted from TO PAY"},
     "invdialog.other": {"sv": "📋  Övriga uppgifter  (valfritt)", "en": "📋  Other details  (optional)"},
-    "invdialog.ocr": {"sv": "OCR :", "en": "OCR :"},
+    "invdialog.ocr": {"sv": "OCR-nummer (valfritt):", "en": "OCR number (optional):"},
     "invdialog.reference": {"sv": "Referens :", "en": "Reference :"},
     "invdialog.category": {"sv": "Kategori :", "en": "Category :"},
     "invdialog.category_ph": {"sv": "ex. IT, Kontorsmaterial, Hyra", "en": "e.g. IT, Office supplies, Rent"},
@@ -359,7 +359,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "invdialog.note": {"sv": "Anteckning :", "en": "Note :"},
     "invdialog.note_ph": {"sv": "Fritext anteckning …", "en": "Free-text note …"},
     "invdialog.no_date": {"sv": "(ej angivet)", "en": "(not set)"},
-    "invdialog.ocr_warning": {"sv": "⚠️  OCR saknas – kontrollera om det behövs.", "en": "⚠️  OCR missing – check if it is needed."},
+    "invdialog.ocr_warning": {"sv": "OCR-numret är frivilligt.", "en": "The OCR number is optional."},
     "invdialog.ocr_check_warning": {"sv": "⚠️  OCR-numrets kontrollsiffra stämmer inte – dubbelkolla siffrorna.", "en": "⚠️  The OCR check digit does not match – double-check the digits."},
     "invdialog.ocr_check_title": {"sv": "Kontrollsiffran stämmer inte", "en": "Check digit mismatch"},
     "invdialog.ocr_check_body": {"sv": "OCR-numret {ocr} klarar inte kontrollsiffertestet.\nTroligen är en siffra felskriven – då hittar banken inte fakturan.\n\nSpara ändå?", "en": "The OCR number {ocr} fails the check digit test.\nA digit is probably wrong – the bank would not find the invoice.\n\nSave anyway?"},
@@ -834,7 +834,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "tmpl.field_total_amount": {"sv": "Belopp (att betala)", "en": "Amount (total due)"},
     "tmpl.field_date": {"sv": "Fakturadatum", "en": "Invoice date"},
     "tmpl.field_due_date": {"sv": "Förfallodatum", "en": "Due date"},
-    "tmpl.field_ocr": {"sv": "OCR-nummer", "en": "OCR number"},
+    "tmpl.field_ocr": {"sv": "OCR-nummer (valfritt)", "en": "OCR number (optional)"},
     "tmpl.field_supplier_logo": {"sv": "Leverantörens logotyp (i fakturan)", "en": "Supplier's logo (in invoice)"},
 
     # ── PDF-export ────────────────────────────────────────────────────
