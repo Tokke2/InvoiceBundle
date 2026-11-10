@@ -24,7 +24,7 @@ A local app that totals supplier invoices and credit notes into one amount to pa
 - Exporterar en betallista som PDF med betalningsdatum och bankgiro.
   - Betalningsdatumet väljs **vid varje export** i en kalender med snabbval (Idag, +7, +14, +30 dagar, månadsslut) — och nollställs efteråt.
   - Välj om PDF:en ska innehålla alla originalsidor, bara första PDF-sidan eller inga original; valet sparas och gäller även autoexport.
-- Bevakade fakturor sorteras efter lyckad registrering i `<bevakad mapp>/<fakturans år>/`; ofullständiga och osäkra filer ligger kvar för granskning. Saknat/ogiltigt fakturadatum ger en fråga om år vid import; Avbryt lämnar originalet kvar på källplatsen.
+- Bevakade fakturamappar skannas rekursivt vid start och återkommande, även när filer lagts till medan appen varit stängd. Rotmappar och undermappar bevakas; nya/ändrade filer måste vara oförändrade i två sekunder innan de öppnas. Import-vyn visar senaste kontroll, filer som fortfarande skrivs, saknade mappar och läsfel; **Skanna nu / försök igen** startar en ny kontroll direkt. Efter lyckad registrering flyttas originalet till `<bevakad mapp>/<fakturans år>/`; ofullständiga och osäkra filer ligger kvar för granskning. Saknat/ogiltigt fakturadatum ger en fråga om år vid import; Avbryt lämnar originalet kvar på källplatsen.
 - Fyra teman (mörkt, ljust, auto, system), systemfältsikon, autostart och automatisk backup. Högerklicka på tray-ikonen för att bland annat öppna appmappen.
 - All data lagras lokalt som JSON i programmappen (`data/`). Ingenting skickas över nätet.
 
@@ -100,7 +100,7 @@ Ingen öppen licens är vald. Fritt att använda. Inte fritt att kopiera, ändra
 - Exports a payment list as PDF with payment date and bankgiro details.
   - The payment date is chosen **at every export** in a calendar with quick picks (Today, +7, +14, +30 days, end of month) — and reset afterwards.
   - Choose whether PDFs include every original page, only the first PDF page, or no originals; the saved choice also applies to automatic exports.
-- Watched invoices move into `<watched folder>/<invoice year>/` after successful registration; incomplete and uncertain files stay for review. If the invoice date is missing or invalid, import asks for an archive year; Cancel leaves the original at its source path.
+- Watched invoice folders are scanned recursively at startup and on a schedule, including files added while the app was closed. Root folders and subfolders are monitored; new/changed files must remain unchanged for two seconds before they are opened. The Import view shows the last check, files still being written, missing folders and read errors; **Scan now / retry** starts an immediate rescan. After successful registration, originals move into `<watched folder>/<invoice year>/`; incomplete and uncertain files stay for review. If the invoice date is missing or invalid, import asks for an archive year; Cancel leaves the original at its source path.
 - Four themes (dark, light, auto, system), system tray icon, autostart and automatic backups. Right-click the tray icon for options including opening the app folder.
 - All data is stored locally as JSON in the app folder (`data/`). Nothing is sent over the network.
 

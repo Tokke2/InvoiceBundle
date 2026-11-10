@@ -2204,27 +2204,65 @@ class ScanImportView(QWidget):
         if not hasattr(self, "_lst_watch"):
             return
         watch = self._watch
+        selected_row = self._lst_watch.currentRow()
+        scroll_position = self._lst_watch.verticalScrollBar().value()
         self._lst_watch.clear()
         if not watch or not watch.folders:
             self._lst_watch.addItem(tr("watch.no_folders"))
         else:
-            for f in watch.folders:
+            statuses = watch.folder_watch_statuses
+            for index, f in enumerate(watch.folders):
                 sup = f.get("supplier") or tr("watch.folder_no_supplier")
-                self._lst_watch.addItem(
-                    tr("watch.folder_entry", supplier=sup,
-                       path=f.get("path", ""))
+                path = str(f.get("path", ""))
+                text = tr(
+                    "watch.folder_entry", supplier=sup, path=path
                 )
+                status = statuses[index] if index < len(statuses) else {}
+                if not status.get("exists", Path(path).is_dir()):
+                    text += "  ·  " + tr("watch.folder_missing")
+                    tooltip = tr("watch.folder_missing_tooltip", path=path)
+                else:
+                    subfolders = max(
+                        0, int(status.get("directories", 1)) - 1
+                    )
+                    text += "  ·  " + tr(
+                        "watch.folder_subfolders", n=subfolders
+                    )
+                    fallback = int(status.get("fallback", 0))
+                    if fallback:
+                        text += "  ·  " + tr(
+                            "watch.folder_fallback", n=fallback
+                        )
+                    tooltip = tr(
+                        "watch.folder_watch_tooltip",
+                        watched=status.get("watched", 0),
+                        total=status.get("directories", 0),
+                    )
+                self._lst_watch.addItem(text)
+                item = self._lst_watch.item(self._lst_watch.count() - 1)
+                item.setToolTip(tooltip)
         n = len(watch.parked) if watch else 0
-        errors = (
-            watch.last_scan_stats.get("errors", 0) if watch else 0
-        )
+        stats = watch.last_scan_stats if watch else {}
+        settling = stats.get("settling", 0)
+        errors = watch.active_error_count if watch else 0
         labels = []
         if n:
             labels.append(tr("watch.parked", n=n))
+        if settling:
+            labels.append(tr("watch.settling", n=settling))
         if errors:
             labels.append(tr("watch.scan_errors_status", n=errors))
+        if watch and watch.last_scan_at:
+            labels.append(tr(
+                "watch.last_scan", time=watch.last_scan_at.split()[-1]
+            ))
+        elif watch and watch.folders:
+            labels.append(tr("watch.waiting_first_scan"))
         self._lbl_watch_parked.setText("  ·  ".join(labels))
         self._btn_review_parked.setEnabled(bool(n))
+        if 0 <= selected_row < self._lst_watch.count():
+            self._lst_watch.setCurrentRow(selected_row)
+        self._lst_watch.verticalScrollBar().setValue(scroll_position)
 
     def _add_watch_folder(self) -> None:
         if not self._watch:
@@ -2272,7 +2310,10 @@ class ScanImportView(QWidget):
                 duplicate=stats.get("duplicate", 0),
                 parked=stats.get("parked", 0),
                 already=stats.get("already", 0),
-                errors=stats.get("errors", 0),
+                settling=stats.get("settling", 0),
+                errors=max(
+                    stats.get("errors", 0), self._watch.active_error_count
+                ),
             )
         )
         log.info(
@@ -2305,7 +2346,10 @@ class ScanImportView(QWidget):
                 parked=stats.get("parked", 0),
                 already=stats.get("already", 0),
                 changed=stats.get("changed", 0),
-                errors=stats.get("errors", 0),
+                settling=stats.get("settling", 0),
+                errors=max(
+                    stats.get("errors", 0), self._watch.active_error_count
+                ),
             )
         )
         log.info(

@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -857,6 +858,52 @@ def test_watch_recursive_scan_and_arkiv_skipped(tmp_path):
     )
     mgr.scan_all()
     assert len(ready) == 1
+
+
+def test_watch_waits_for_file_writes_to_finish(tmp_path, monkeypatch):
+    """Growing/replaced files are retried only after a quiet interval."""
+    _qapp()
+    import ui.watch_folders as watch_ui
+
+    monkeypatch.setattr(watch_ui, "FILE_STABILITY_SECONDS", 0.05)
+    mgr, folder = _manager(tmp_path)
+    ready = []
+    mgr.invoice_ready.connect(lambda row, path: ready.append((row, path)))
+    source = folder / "still-copying.pdf"
+
+    source.write_bytes(b"%PDF-partial")
+    mgr.scan_all()
+    assert ready == []
+    assert mgr.last_scan_stats["settling"] == 1
+
+    # A change starts a fresh quiet window; no partial version is parsed.
+    source.write_bytes(b"%PDF-complete-invoice")
+    mgr.scan_all()
+    assert ready == []
+    assert mgr.last_scan_stats["settling"] == 1
+
+    time.sleep(0.06)
+    mgr.scan_all()
+    assert len(ready) == 1
+    assert mgr.last_scan_stats["settling"] == 0
+    assert mgr.last_scan_at
+
+
+def test_watch_recursively_registers_subfolder_watchers(tmp_path):
+    """New nested folders get event watchers as well as recursive polling."""
+    _qapp()
+    mgr, folder = _manager(tmp_path)
+    nested = folder / "incoming" / "2026"
+    nested.mkdir(parents=True)
+
+    mgr._rewatch()
+    watched = {Path(path) for path in mgr._watcher.directories()}
+    assert folder in watched
+    assert nested in watched
+    status = mgr.folder_watch_statuses[0]
+    assert status["exists"] is True
+    assert status["directories"] == 3
+    assert status["watched"] == 3
 
 
 def test_watch_no_date_stays_top(tmp_path):

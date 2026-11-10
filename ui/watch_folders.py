@@ -63,6 +63,13 @@ log = logging.getLogger("WatchFolders")
 
 import os
 import re
+import time
+
+#: Hur länge en fil måste ha varit oförändrad mellan två kontroller innan
+#: bevakningen öppnar och tolkar den. Nya filer får en separat, snabb
+#: omkontroll i stället för att vänta på den ordinarie 30-sekunderspollningen.
+FILE_STABILITY_SECONDS = 2.0
+FILE_STABILITY_RECHECK_MS = 1500
 
 #: Filtyper som bevakningen tar (PDF/bilder — .txt räknas inte,
 #: extraktorn känner inte igen den).
@@ -361,12 +368,13 @@ def watch_diagnostic_lines(
             "{duplicate} dubbletter (redan registrerade; exakta original "
             "kan årsarkiveras), "
             "{parked} parkerade, {already} redan bearbetade, "
-            "{waiting} väntar i parkering, {errors} läsfel".format(
+            "{waiting} väntar i parkering, {settling} skrivs ännu, "
+            "{errors} läsfel".format(
                 **{
                     k: int((stats or {}).get(k, 0) or 0)
                     for k in (
                         "imported", "duplicate", "parked", "already",
-                        "waiting", "errors",
+                        "waiting", "settling", "errors",
                     )
                 }
             )
@@ -555,13 +563,19 @@ class WatchManager(QObject):
         self._warned_missing: set[str] = set()
         self._scan_stats: dict[str, int] = {
             "imported": 0, "duplicate": 0, "parked": 0, "already": 0,
-            "waiting": 0, "changed": 0, "errors": 0,
+            "waiting": 0, "settling": 0, "changed": 0, "errors": 0,
         }
         self._reported_file_errors: dict[str, tuple] = {}
         self._control_diffs: list[dict] = []
         self._waiting_reasons: dict[str, int] = {}
         self._last_logged_scan_summary: tuple | None = None
         self._last_logged_control_signature: tuple | None = None
+        self._last_scan_at = ""
+        self._stability_samples: dict[
+            str, tuple[tuple[int, int, int], float]
+        ] = {}
+        self._stable_signatures: dict[str, tuple[int, int, int]] = {}
+        self._watch_targets_by_root: dict[str, set[str]] = {}
         log.info(
             "SCAN_WATCH: bevakning startad — %d mapp(ar): %s",
             len(self._config.get("folders", [])),
@@ -581,6 +595,14 @@ class WatchManager(QObject):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(1200)
         self._debounce.timeout.connect(self.scan_all)
+
+        # Om en fil fortfarande växer görs en riktad snabb kontroll.
+        # Vi blockerar aldrig GUI-tråden med sleep och behöver därför
+        # inte invänta säkerhetspollningen på 30 sekunder.
+        self._settle_timer = QTimer(self)
+        self._settle_timer.setSingleShot(True)
+        self._settle_timer.setInterval(FILE_STABILITY_RECHECK_MS)
+        self._settle_timer.timeout.connect(self.scan_all)
 
         # Säkerhetspoll (nätverksdiskar missar ibland watcher-events)
         self._poll = QTimer(self)
@@ -921,15 +943,41 @@ class WatchManager(QObject):
         self.changed.emit()
 
     def _rewatch(self) -> None:
+        """Bevaka rotmappar och befintliga undermappar.
+
+        Nya undermappar kopplas in efter nästa skanning. QFileSystemWatcher
+        kan ha operativsystemsgränser eller saknas på nätverksdiskar; den
+        återkommande rekursiva pollningen är därför alltid reservvägen.
+        """
         current = set(self._watcher.directories())
-        wanted = {
-            f["path"] for f in self.folders
-            if Path(f["path"]).is_dir()
-        }
+        targets_by_root: dict[str, set[str]] = {}
+        wanted: set[str] = set()
+        for entry in self.folders:
+            root = Path(str(entry.get("path", "")))
+            root_key = _norm_path_key(str(root))
+            targets: set[str] = set()
+            if root.is_dir():
+                for dirpath, dirs, _names in os.walk(root):
+                    dirs[:] = [d for d in dirs if d.lower() != "arkiv"]
+                    targets.add(str(Path(dirpath)))
+                wanted.update(targets)
+            targets_by_root[root_key] = targets
+
         for gone in current - wanted:
             self._watcher.removePath(gone)
-        for new in wanted - current:
-            self._watcher.addPath(new)
+        # Lägg till föräldrar först, så en systemgräns aldrig lämnar roten
+        # obeakad till förmån för ett stort antal djupa undermappar.
+        for new in sorted(
+            wanted - current,
+            key=lambda path: (path.count(os.sep), path.casefold()),
+        ):
+            if not self._watcher.addPath(new):
+                log.debug(
+                    "SCAN_WATCH: katalogbevakning misslyckades för %s; "
+                    "säkerhetspollningen täcker katalogen ändå",
+                    new,
+                )
+        self._watch_targets_by_root = targets_by_root
 
     # ── Tolkning ──────────────────────────────────────────────────────
 
@@ -1000,10 +1048,46 @@ class WatchManager(QObject):
 
     @property
     def last_scan_stats(self) -> dict[str, int]:
-        """Utfall av senaste skanning: registrerade, dubbletter,
-        parkerade, redan bearbetade och läsfel. Originalfiler som
-        ger fel markeras inte som bearbetade."""
+        """Utfall av senaste skanning, inklusive filer som väntar på
+        att skrivningen ska bli klar. Läsfel lämnar originalen orörda."""
         return dict(self._scan_stats)
+
+    @property
+    def last_scan_at(self) -> str:
+        """Lokal tid för när den senaste kontrollomgången avslutades."""
+        return self._last_scan_at
+
+    @property
+    def active_error_count(self) -> int:
+        """Antal felvägar som ännu inte har lästs in korrekt."""
+        return len(self._reported_file_errors)
+
+    @property
+    def folder_watch_statuses(self) -> list[dict[str, Any]]:
+        """Status per rotmapp, inklusive rekursiva watcher-kataloger.
+
+        Säkerhetspollningen skannar alltid hela trädet även om ett
+        operativsystem eller en nätverksdisk inte kan bevaka varje katalog.
+        """
+        current = {
+            _norm_path_key(path) for path in self._watcher.directories()
+        }
+        statuses = []
+        for entry in self.folders:
+            root = Path(str(entry.get("path", "")))
+            key = _norm_path_key(str(root))
+            targets = self._watch_targets_by_root.get(key, set())
+            watched = len({
+                _norm_path_key(path) for path in targets
+            } & current)
+            statuses.append({
+                "path": str(root),
+                "exists": root.is_dir(),
+                "directories": len(targets),
+                "watched": watched,
+                "fallback": max(0, len(targets) - watched),
+            })
+        return statuses
 
     @property
     def last_control_diffs(self) -> list[dict]:
@@ -1014,10 +1098,9 @@ class WatchManager(QObject):
         return [dict(d) for d in self._control_diffs]
 
     def scan_all(self, force: bool = False) -> None:
-        previous_errors = self._scan_stats.get("errors", 0)
         self._scan_stats = {
             "imported": 0, "duplicate": 0, "parked": 0, "already": 0,
-            "waiting": 0, "changed": 0, "errors": 0,
+            "waiting": 0, "settling": 0, "changed": 0, "errors": 0,
         }
         self._waiting_reasons = {}
         self._control_diffs = []
@@ -1042,6 +1125,7 @@ class WatchManager(QObject):
             self._scan_stats["parked"],
             self._scan_stats["already"],
             waiting,
+            self._scan_stats.get("settling", 0),
             self._scan_stats.get("errors", 0),
             reason_signature,
             bool(self.auto_create),
@@ -1058,12 +1142,14 @@ class WatchManager(QObject):
                 "SCAN_WATCH skanning: %d nya registrerade, %d "
                 "dubblett(er) (fanns redan i registret), %d "
                 "parkerade, %d redan bearbetade sedan tidigare, "
-                "%d väntar i parkering, %d läsfel%s",
+                "%d väntar i parkering, %d filer väntar på skrivslut, "
+                "%d läsfel%s",
                 self._scan_stats["imported"],
                 self._scan_stats["duplicate"],
                 self._scan_stats["parked"],
                 self._scan_stats["already"],
                 waiting,
+                self._scan_stats.get("settling", 0),
                 self._scan_stats.get("errors", 0),
                 reason_txt,
             )
@@ -1102,10 +1188,22 @@ class WatchManager(QObject):
             self._last_logged_control_signature = control_signature
         else:
             self._last_logged_control_signature = None
-        current_errors = self._scan_stats.get("errors", 0)
-        if current_errors or current_errors != previous_errors:
-            # Visa nya fel och rensa statusraden när en fil senare läses.
-            self.changed.emit()
+        self._last_scan_at = datetime.now().astimezone().strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        try:
+            # En nyskapad undermapp får en QFileSystemWatcher när
+            # efterföljande rekursiv skanning har upptäckt den. Pollningen
+            # täcker fortfarande hela trädet om katalogbevakning saknas.
+            self._rewatch()
+        except Exception as exc:
+            log.debug(
+                "SCAN_WATCH: kunde inte uppdatera katalogbevakning: %s",
+                exc,
+            )
+        # Uppdatera senast kontrollerad tid och fel-/väntestatus även när
+        # skanningen inte hittade någon ny faktura.
+        self.changed.emit()
 
     def _record_scan_error(
         self, path: str, stage: str, digest: str, exc: Exception,
@@ -1309,6 +1407,43 @@ class WatchManager(QObject):
             self.scan_all()
         return len(targets)
 
+    def _schedule_stability_check(self) -> None:
+        if not self._settle_timer.isActive():
+            self._settle_timer.start(FILE_STABILITY_RECHECK_MS)
+
+    def _file_is_stable(
+        self, path: Path, signature: tuple[int, int, int]
+    ) -> bool:
+        """Require an unchanged size/time signature over a quiet interval.
+
+        Samples are cached after a successful stability check, so regular
+        polls do not add a delay to files already known to be unchanged.
+        A changed signature invalidates that cache and starts a fresh wait.
+        """
+        key = _norm_path_key(str(path))
+        if self._stable_signatures.get(key) == signature:
+            return True
+        if FILE_STABILITY_SECONDS <= 0:
+            self._stability_samples.pop(key, None)
+            self._stable_signatures[key] = signature
+            return True
+
+        now = time.monotonic()
+        previous = self._stability_samples.get(key)
+        if previous and previous[0] == signature:
+            if now - previous[1] >= FILE_STABILITY_SECONDS:
+                self._stability_samples.pop(key, None)
+                self._stable_signatures[key] = signature
+                return True
+        else:
+            self._stability_samples[key] = (signature, now)
+
+        self._scan_stats["settling"] = (
+            self._scan_stats.get("settling", 0) + 1
+        )
+        self._schedule_stability_check()
+        return False
+
     def scan_folder(self, entry: dict, force: bool = False) -> None:
         folder = Path(str(entry.get("path", "")))
         if not folder.is_dir():
@@ -1326,9 +1461,46 @@ class WatchManager(QObject):
             if not path.is_file():
                 continue
             try:
+                before = path.stat()
+            except FileNotFoundError:
+                # En fil kan försvinna mellan os.walk och stat.
+                continue
+            except OSError as exc:
+                self._record_scan_error(str(path), "hasha", "", exc)
+                continue
+            signature = (
+                int(before.st_size),
+                int(before.st_mtime_ns),
+                int(before.st_ctime_ns),
+            )
+            path_key = _norm_path_key(str(path))
+            if not self._file_is_stable(path, signature):
+                continue
+            try:
                 digest = file_hash(path)
+                after = path.stat()
+            except FileNotFoundError:
+                self._stable_signatures.pop(path_key, None)
+                continue
             except Exception as exc:
                 self._record_scan_error(str(path), "hasha", "", exc)
+                continue
+            after_signature = (
+                int(after.st_size),
+                int(after.st_mtime_ns),
+                int(after.st_ctime_ns),
+            )
+            if after_signature != signature:
+                # Filen började ändras medan hashen lästes. Kasta resultatet
+                # och starta om stabilitetsfönstret med den nya versionen.
+                self._stable_signatures.pop(path_key, None)
+                self._stability_samples[path_key] = (
+                    after_signature, time.monotonic()
+                )
+                self._scan_stats["settling"] = (
+                    self._scan_stats.get("settling", 0) + 1
+                )
+                self._schedule_stability_check()
                 continue
             if digest in self._config["processed"]:
                 if force:
