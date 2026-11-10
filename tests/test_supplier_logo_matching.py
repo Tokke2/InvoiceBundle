@@ -49,6 +49,40 @@ def test_bankgiro_conflicts_are_returned_as_multiple_choices():
     ]
 
 
+def test_template_supplier_identifiers_match_org_number_and_bankgiro():
+    # Both stored and printed org numbers are normalized; a valid
+    # Swedish checksum and an exact identifier match are required.
+    org_number = "5566778899"
+    text = "Org.nr: 556677-8899\nBankgiro: 123-4567"
+    suppliers = [
+        {
+            "name": "Alpha AB", "org_number": "16" + org_number,
+            "bankgiro": "1234567",
+        },
+        {"name": "Beta AB", "org_number": "5566778890", "bg": "1234567"},
+    ]
+
+    assert si.invoice_org_number_values(text) == [org_number]
+    assert si.suppliers_matching_org_number(text, suppliers) == [
+        {"name": "Alpha AB", "org_number": org_number},
+    ]
+    assert si.suppliers_matching_identifiers(text, suppliers) == [
+        {
+            "name": "Alpha AB", "org_number": org_number,
+            "bankgiro": "1234567",
+        },
+        {"name": "Beta AB", "org_number": "", "bankgiro": "1234567"},
+    ]
+
+    invalid_org = "5566778890"
+    assert si.invoice_org_number_values(
+        f"Org.nr: {invalid_org[:6]}-{invalid_org[6:]}"
+    ) == []
+    assert si.suppliers_matching_org_number(
+        f"Org.nr: {invalid_org[:6]}-{invalid_org[6:]}", suppliers
+    ) == []
+
+
 def _logo_png() -> bytes:
     from PIL import Image, ImageDraw
 

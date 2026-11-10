@@ -20,7 +20,8 @@ A local app that totals supplier invoices and credit notes into one amount to pa
 - Registrerar leverantörsfakturor och kreditfakturor.
 - Leverantörsregister med live-sökning, favoriter (★), betalvillkor och export till CSV/JSON.
 - Räknar ihop **Fakturor (+)**, **Krediter (−)** och **ATT BETALA**.
-- Import av skannade fakturor (PDF/bild) med tolkning av belopp, OCR och datum.
+- Import av skannade fakturor (PDF/bild) med tolkning av belopp, OCR-referens och datum.
+- Mall-/leverantörsmatchning kan använda giltigt organisationsnummer eller exakt etiketterat BG/bankgiro; OCR-numret är frivilligt och behövs inte för matchning eller registrering. Appen lär fortlöpande av dina uttryckligt bekräftade matchningar, men automatisk koppling kräver minst fem bekräftelser och ett återkommande, unikt kännetecken. Tvetydiga eller motstridiga träffar lämnas alltid för ditt val.
 - Exporterar en betallista som PDF med betalningsdatum och bankgiro.
   - Betalningsdatumet väljs **vid varje export** i en kalender med snabbval (Idag, +7, +14, +30 dagar, månadsslut) — och nollställs efteråt.
   - Välj om PDF:en ska innehålla alla originalsidor, bara första PDF-sidan eller inga original; valet sparas och gäller även autoexport.
@@ -97,6 +98,7 @@ Ingen öppen licens är vald. Fritt att använda. Inte fritt att kopiera, ändra
 - Supplier register with live search, favourites (★), payment terms and CSV/JSON export.
 - Totals **Invoices (+)**, **Credits (−)** and **TO PAY**.
 - Imports scanned invoices (PDF/image), reading amounts, OCR references and dates.
+- Template/supplier matching can use a valid organization number or an exact, labelled BG/bankgiro; the invoice OCR reference is optional and is not required for matching or registration. The app keeps learning from your explicitly confirmed matches, but automatic linking requires at least five confirmations and a recurring, unique identifier. Ambiguous or conflicting matches are always left for you to choose.
 - Exports a payment list as PDF with payment date and bankgiro details.
   - The payment date is chosen **at every export** in a calendar with quick picks (Today, +7, +14, +30 days, end of month) — and reset afterwards.
   - Choose whether PDFs include every original page, only the first PDF page, or no originals; the saved choice also applies to automatic exports.

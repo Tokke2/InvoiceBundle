@@ -261,6 +261,25 @@ def test_template_dialog_matches_unique_bankgiro():
         dlg.close()
 
 
+def test_template_dialog_matches_supplier_by_org_number():
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from ui.scan_import_view import TemplateDialog
+
+    dlg = TemplateDialog(
+        None, "Org.nr: 556677-8899", supplier="",
+        suppliers=[{"name": "Alpha AB", "org_number": "16 5566778899"}],
+    )
+    try:
+        dlg._match_supplier_by_identifiers()
+        assert dlg._supplier_edit.text() == "Alpha AB"
+        assert "5566778899" in dlg._lbl_hint.text()
+        assert "Org" in dlg._lbl_hint.text()
+    finally:
+        dlg.close()
+
+
 def test_template_dialog_asks_when_bankgiro_has_competing_suppliers(
     monkeypatch,
 ):

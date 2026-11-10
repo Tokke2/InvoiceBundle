@@ -3938,7 +3938,9 @@ def _org_nr_checksum_ok(num: str) -> bool:
 
 
 _BANKGIRO_LABEL_RE = re.compile(
-    r"bankgiro[^0-9]{0,16}(\d[\d\s\-]{4,14}\d)", re.IGNORECASE
+    r"\b(?:bank[\s-]*giro\w*|bg)\b[^0-9]{0,16}"
+    r"(\d[\d\s\-]{4,14}\d)",
+    re.IGNORECASE,
 )
 
 
@@ -3952,15 +3954,24 @@ def _invoice_identifiers(text: str) -> dict[str, set[str]]:
     """
     ids: dict[str, set[str]] = {"org": set(), "bg": set()}
     flat = str(text or "")
-    for m in re.finditer(r"(?<!\d)(\d{6})[-\s]?(\d{4})(?!\d)", flat):
-        num = m.group(1) + m.group(2)
-        if _org_nr_checksum_ok(num):
-            ids["org"].add(num)
+    for m in re.finditer(
+        r"(?<!\d)(?:(16)[-\s]?)?(\d{6})[-\s]?(\d{4})(?!\d)",
+        flat,
+    ):
+        raw_number = (m.group(1) or "") + m.group(2) + m.group(3)
+        number = _normalize_supplier_identifier("org", raw_number)
+        if number:
+            ids["org"].add(number)
     for m in _BANKGIRO_LABEL_RE.finditer(flat):
         num = re.sub(r"\D", "", m.group(1))
         if 7 <= len(num) <= 8:
             ids["bg"].add(num)
     return ids
+
+
+def invoice_org_number_values(text: str) -> list[str]:
+    """Giltiga svenska organisationsnummer som hittats i fakturatexten."""
+    return sorted(_supplier_invoice_identifiers(text).get("org", set()))
 
 
 def invoice_bankgiro_values(text: str) -> list[str]:
@@ -4200,12 +4211,91 @@ def suppliers_matching_bankgiro(
         if not name:
             continue
         for key in ("bankgiro", "bg"):
-            number = re.sub(r"\D", "", str(supplier.get(key, "") or ""))
+            number = _normalize_supplier_identifier("bg", supplier.get(key, ""))
             identity = (name.casefold(), number)
             if number and number in invoice_bgs and identity not in seen:
                 matches.append({"name": name, "bankgiro": number})
                 seen.add(identity)
     return sorted(matches, key=lambda item: item["name"].casefold())
+
+
+def suppliers_matching_org_number(
+    text: str, suppliers: list[dict] | None
+) -> list[dict[str, str]]:
+    """Registerleverantörer vars giltiga org.nr finns i fakturan.
+
+    Både faktura och registervärde normaliseras och kontrollsiffran
+    kontrolleras; endast ett exakt nummer räknas som träff.
+    """
+    invoice_orgs = set(invoice_org_number_values(text))
+    if not invoice_orgs:
+        return []
+    matches: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for supplier in suppliers or []:
+        if not isinstance(supplier, dict):
+            continue
+        name = str(supplier.get("name", "") or "").strip()
+        if not name:
+            continue
+        for key in _SUPPLIER_ID_PROFILE_KEYS["org"]:
+            number = _normalize_supplier_identifier("org", supplier.get(key, ""))
+            identity = (name.casefold(), number)
+            if number and number in invoice_orgs and identity not in seen:
+                matches.append({"name": name, "org_number": number})
+                seen.add(identity)
+    return sorted(
+        matches,
+        key=lambda item: (item["name"].casefold(), item["org_number"]),
+    )
+
+
+def suppliers_matching_identifiers(
+    text: str, suppliers: list[dict] | None
+) -> list[dict[str, str]]:
+    """Exact supplier matches by invoice org.nr and/or labelled BG.
+
+    Results carry both identifiers when a supplier record matches both,
+    so the template editor can show the evidence and can ask the user to
+    choose if several registered suppliers share a number.
+    """
+    invoice_ids = _supplier_invoice_identifiers(text)
+    matches: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for supplier in suppliers or []:
+        if not isinstance(supplier, dict):
+            continue
+        name = str(supplier.get("name", "") or "").strip()
+        if not name:
+            continue
+        identifiers: dict[str, list[str]] = {"org_number": [], "bankgiro": []}
+        for key in _SUPPLIER_ID_PROFILE_KEYS["org"]:
+            number = _normalize_supplier_identifier("org", supplier.get(key, ""))
+            if number and number in invoice_ids["org"]:
+                identifiers["org_number"].append(number)
+        for key in _SUPPLIER_ID_PROFILE_KEYS["bg"]:
+            number = _normalize_supplier_identifier("bg", supplier.get(key, ""))
+            if number and number in invoice_ids["bg"]:
+                identifiers["bankgiro"].append(number)
+        org_number = ", ".join(sorted(set(identifiers["org_number"])))
+        bankgiro = ", ".join(sorted(set(identifiers["bankgiro"])))
+        if not org_number and not bankgiro:
+            continue
+        identity = (name.casefold(), org_number, bankgiro)
+        if identity in seen:
+            continue
+        matches.append({
+            "name": name,
+            "org_number": org_number,
+            "bankgiro": bankgiro,
+        })
+        seen.add(identity)
+    return sorted(
+        matches,
+        key=lambda item: (
+            item["name"].casefold(), item["org_number"], item["bankgiro"]
+        ),
+    )
 
 
 def load_match_learning(path: Path) -> dict:

@@ -633,8 +633,8 @@ class TemplateDialog(QDialog):
             )
             self._supplier_edit.setCurrentText(current_name)
         row_sup.addWidget(self._supplier_edit, stretch=1)
-        self._btn_match_bg = QPushButton(tr("tmpl.match_bg"))
-        self._btn_match_bg.clicked.connect(self._match_supplier_by_bankgiro)
+        self._btn_match_bg = QPushButton(tr("tmpl.match_identifiers"))
+        self._btn_match_bg.clicked.connect(self._match_supplier_by_identifiers)
         row_sup.addWidget(self._btn_match_bg)
         root.addLayout(row_sup)
 
@@ -1033,45 +1033,78 @@ class TemplateDialog(QDialog):
         self._set_logo_preview()
         return bool(self._logo_hash)
 
-    def _match_supplier_by_bankgiro(self) -> None:
-        """Låt användaren matcha med exakt BG ur fakturatexten."""
+    def _match_supplier_by_identifiers(self) -> None:
+        """Matcha mallen mot exakt org.nr och/eller etiketterat BG."""
         si = _scan_module()
-        matches = si.suppliers_matching_bankgiro(
+        matches = si.suppliers_matching_identifiers(
             self._text, self._suppliers
         )
+        org_numbers = si.invoice_org_number_values(self._text)
+        bankgiros = si.invoice_bankgiro_values(self._text)
+
+        def evidence(item: dict[str, str]) -> str:
+            parts: list[str] = []
+            if item.get("org_number"):
+                parts.append(tr(
+                    "tmpl.identifier_org_number",
+                    value=item["org_number"],
+                ))
+            if item.get("bankgiro"):
+                parts.append(tr(
+                    "tmpl.identifier_bankgiro",
+                    value=item["bankgiro"],
+                ))
+            return " · ".join(parts)
+
         if not matches:
-            values = si.invoice_bankgiro_values(self._text)
-            if values:
-                message = tr(
-                    "tmpl.bg_unregistered", bankgiro=", ".join(values)
-                )
-            else:
-                message = tr("tmpl.bg_not_found")
-            self._lbl_hint.setText(message)
+            if not org_numbers and not bankgiros:
+                self._lbl_hint.setText(tr("tmpl.identifier_not_found"))
+                return
+            found: list[str] = []
+            if org_numbers:
+                found.append(tr(
+                    "tmpl.identifier_org_number",
+                    value=", ".join(org_numbers),
+                ))
+            if bankgiros:
+                found.append(tr(
+                    "tmpl.identifier_bankgiro",
+                    value=", ".join(bankgiros),
+                ))
+            self._lbl_hint.setText(tr(
+                "tmpl.identifier_unregistered",
+                identifiers=" · ".join(found),
+            ))
             return
         if len(matches) == 1:
             picked = matches[0]
         else:
             choices = [
-                f"{item['name']} — BG {item['bankgiro']}"
+                tr(
+                    "tmpl.identifier_choice_item",
+                    name=item["name"], identifiers=evidence(item),
+                )
                 for item in matches
             ]
             choice, ok = QInputDialog.getItem(
-                self, tr("tmpl.match_bg"), tr("tmpl.bg_choose"),
-                choices, -1, False,
+                self, tr("tmpl.match_identifiers"),
+                tr("tmpl.identifier_choose"), choices, -1, False,
             )
             if not ok or choice not in choices:
                 return
-            index = choices.index(choice)
-            picked = matches[index]
+            picked = matches[choices.index(choice)]
         self._supplier_edit.setText(picked["name"])
         self.setWindowTitle(
             tr("tmpl.title", supplier=picked["name"] or "…")
         )
         self._lbl_hint.setText(tr(
-            "tmpl.bg_match_found",
-            bankgiro=picked["bankgiro"], supplier=picked["name"],
+            "tmpl.identifier_match_found",
+            identifiers=evidence(picked), supplier=picked["name"],
         ))
+
+    def _match_supplier_by_bankgiro(self) -> None:
+        """Bakåtkompatibelt alias; matchningen omfattar nu org.nr och BG."""
+        self._match_supplier_by_identifiers()
 
     def _logo_match_candidates(self, signature: str) -> list[dict]:
         """Existing saved logo signatures close to this marked PDF crop."""

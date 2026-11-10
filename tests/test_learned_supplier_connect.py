@@ -83,6 +83,23 @@ def test_registered_org_number_matches_without_printed_supplier_name():
     assert not parsed["supplier_match"]["uncertain"]
 
 
+def test_ocr_reference_is_not_required_for_matching_or_registration():
+    text = (
+        f"Faktura\nOrg.nr {ORG_A[:6]}-{ORG_A[6:]}\n"
+        "Bankgiro 999-1234\nFakturanr A-17\nAtt betala 500,00"
+    )
+    parsed = si.parse_invoice_text(text, suppliers=[{
+        "name": "Alpha AB", "org_number": ORG_A,
+        "bankgiro": "9991234",
+    }])
+
+    assert parsed["supplier"] == "Alpha AB"
+    assert parsed["invoice_number"] == "A-17"
+    assert parsed["total_amount"] == 500.0
+    assert parsed["ocr"] == ""
+    assert parsed["missing"] == []
+
+
 def test_identifiers_need_valid_org_checksum():
     assert si._org_nr_checksum_ok(ORG_A)
     bad = ORG_A[:9] + str((int(ORG_A[9]) + 1) % 10)
@@ -90,6 +107,9 @@ def test_identifiers_need_valid_org_checksum():
     ids = si._invoice_identifiers(_text(ORG_A))
     assert ids["org"] == {ORG_A}
     assert ids["bg"] == {"9991234"}
+    assert si._invoice_identifiers(
+        f"Org.nr 16 {ORG_A[:6]}-{ORG_A[6:]}"
+    )["org"] == {ORG_A}
     # Ogiltig kontrollsiffra = inget kännetecken alls.
     assert si._invoice_identifiers(_text(bad))["org"] == set()
 
@@ -521,6 +541,51 @@ def test_parse_connects_learned_supplier_automatically():
     assert r["total_amount"] == 500.0
 
 
+def test_confirmed_bankgiro_learning_connects_new_invoice_without_ocr():
+    learning: dict = {}
+    for number in range(5):
+        si.record_match_confirmation(
+            learning, "Okanda AB", text=(
+                f"Bankgiro 999-1234\nFakturanr A-{number}\n"
+                "Att betala 500,00"
+            ),
+            confirmation_id=f"confirmed-{number}",
+        )
+
+    parsed = si.parse_invoice_text(
+        "Bankgiro 999-1234\nFakturanr A-99\nAtt betala 125,00",
+        [{"name": "Okanda AB"}], {}, match_learning=learning,
+    )
+
+    assert parsed["supplier"] == "Okanda AB"
+    assert parsed["supplier_match"]["reason"] == "learned"
+    assert parsed["ocr"] == ""
+    assert parsed["missing"] == []
+
+
+def test_bg_abbreviation_is_learned_and_can_connect_a_new_invoice():
+    learning: dict = {}
+    for number in range(5):
+        si.record_match_confirmation(
+            learning, "Okanda AB",
+            text=f"BG: 999-1234\nFakturanr B-{number}\nAtt betala 50,00",
+            confirmation_id=f"bg-confirmed-{number}",
+        )
+
+    assert si.learning_entry(learning, "Okanda AB")["identifiers"]["bg"] == {
+        "9991234": 5,
+    }
+    parsed = si.parse_invoice_text(
+        "BG: 999-1234\nFakturanr B-99\nAtt betala 75,00",
+        [{"name": "Okanda AB"}], {}, match_learning=learning,
+    )
+
+    assert parsed["supplier"] == "Okanda AB"
+    assert parsed["supplier_match"]["reason"] == "learned"
+    assert parsed["ocr"] == ""
+    assert parsed["missing"] == []
+
+
 def test_without_learning_nothing_connects():
     """Samma faktura UTAN inlärningsminne: ingen koppling,
     ingen gissning (oförändrat försiktigt beteende)."""
@@ -619,6 +684,7 @@ def test_view_records_identifiers_and_announces_threshold(
         )
         assert entry["confirmed"] == 5
         assert entry["identifiers"]["org"][ORG_A] == 5
+        assert entry["identifiers"]["bg"]["9991234"] == 5
         assert "Okanda AB" in view._lbl_status.text()
         assert "känner appen igen" in view._lbl_status.text()
         # Och nästa likadana faktura kopplas nu av sig själv:
