@@ -1815,7 +1815,16 @@ class ScanImportView(QWidget):
             self._table_context_menu
         )
         hh = self._tbl.horizontalHeader()
-        for i, (_lbl, _key, width, _al) in enumerate(COLUMNS):
+        # Datumkolumnerna får plats för ett fullt datum (ÅÅÅÅ-MM-DD),
+        # även med användarens textstorlek — annars syns bara årtalet.
+        try:
+            from ui.invoices_helpers import date_column_width
+        except ImportError:
+            from invoices_helpers import date_column_width
+        date_width = date_column_width()
+        for i, (_lbl, key, width, _al) in enumerate(COLUMNS):
+            if key in {"date", "due_date"}:
+                width = max(width, date_width)
             self._tbl.setColumnWidth(i, width)
             hh.setSectionResizeMode(
                 i, QHeaderView.ResizeMode.Interactive

@@ -90,11 +90,11 @@ from PySide6.QtGui import (
 
 try:
     from ui.typography import (
-        font_scale, make_tabular_font, set_item_font,
+        font_scale, make_tabular_font, scaled_point_size, set_item_font,
     )
 except ImportError:
     from typography import (  # type: ignore[no-redef]
-        font_scale, make_tabular_font, set_item_font,
+        font_scale, make_tabular_font, scaled_point_size, set_item_font,
     )
 
 log = logging.getLogger("InvoicesHelpers")
@@ -1031,13 +1031,44 @@ def attachment_page_count(path: Any) -> int:
         return 0
 
 
-def fit_table_columns(table: QTableView, weights: list[int]) -> None:
+#: Datumskolumner som måste visa hela datumet (ÅÅÅÅ-MM-DD).
+DATE_COLUMN_KEYS: frozenset[str] = frozenset(
+    {"date", "due_date", "payment_date"}
+)
+
+
+def date_column_width(padding: int = 16) -> int:
+    """Bredd som rymmer ett fullt ISO-datum i tabellens fetstilta font.
+
+    Utan det här krymptes datumkolumnerna till något som bara visade
+    årtalet ("2021-…"), så fakturadatum och förfallodatum gick inte
+    att läsa. Bredden mäts ur den faktiska fonten och följer därför
+    användarens textstorlek.
+    """
+    try:
+        from PySide6.QtGui import QFontMetrics
+
+        font = make_tabular_font(scaled_point_size(12), bold=True)
+        return max(84, QFontMetrics(font).horizontalAdvance("2026-11-11")
+                   + padding)
+    except Exception:
+        return 104
+
+
+def fit_table_columns(
+    table: QTableView,
+    weights: list[int],
+    min_widths: list[int] | None = None,
+) -> None:
     """
     Fördelar kolumnerna så de fyller tabellens synliga bredd.
 
     Fungerar för både item-baserade tabeller och QTableView med en
-    QAbstractTableModel. Ingen horisontell scroll så länge fönstret är
-    normalt brett; vikterna styr kolumnernas proportioner.
+    QAbstractTableModel. Vikterna styr kolumnernas proportioner.
+
+    ``min_widths`` sätter en undre gräns per kolumn (t.ex. så att ett
+    datum alltid får plats). Räcker inte bredden krymper kolumnerna
+    aldrig under sin gräns — i stället får tabellen rulla i sidled.
     """
     try:
         column_count = table.columnCount()
@@ -1052,17 +1083,26 @@ def fit_table_columns(table: QTableView, weights: list[int]) -> None:
     n = min(len(weights), column_count)
     parts = [max(1, int(weights[i])) for i in range(n)]
     total = sum(parts) or 1
-    min_px = 36
-    widths = [max(min_px, available * part // total) for part in parts]
+    floor = 36
+    mins = [floor] * n
+    if min_widths:
+        for i, value in enumerate(min_widths[:n]):
+            try:
+                mins[i] = max(floor, int(value))
+            except (TypeError, ValueError):
+                pass
+    widths = [
+        max(mins[i], available * parts[i] // total) for i in range(n)
+    ]
     overflow = sum(widths) - available
     if overflow > 0:
         order = sorted(
-            range(n), key=lambda i: widths[i] - min_px, reverse=True
+            range(n), key=lambda i: widths[i] - mins[i], reverse=True
         )
         for i in order:
             if overflow <= 0:
                 break
-            spare = widths[i] - min_px
+            spare = widths[i] - mins[i]
             cut = min(spare, overflow)
             widths[i] -= cut
             overflow -= cut

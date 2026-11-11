@@ -23,7 +23,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QScrollArea
 
 from ui.i18n import set_language
-from ui.invoices_helpers import COL_WIDTHS
+from ui.invoices_helpers import (
+    COL_KEYS,
+    COL_WIDTHS,
+    DATE_COLUMN_KEYS,
+    date_column_width,
+)
 from ui.invoices_view import InvoicesView
 
 
@@ -130,11 +135,51 @@ def test_narrow_window_keeps_columns_readable_and_scrollable(tmp_path):
         widths = [view._table.columnWidth(i)
                   for i in range(view._table.model().columnCount())]
         assert widths[0] == 44
-        assert widths[1:] == COL_WIDTHS
+        # Datumskolumnerna är bredare än sina grundvikter: annars
+        # klipptes datumet till bara årtalet ("2021-…").
+        expected = [
+            max(width, date_column_width()) if key in DATE_COLUMN_KEYS
+            else width
+            for key, width in zip(COL_KEYS, COL_WIDTHS)
+        ]
+        assert widths[1:] == expected
         assert view._table.horizontalScrollBarPolicy() == (
             Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
         assert sum(widths) >= 1186
+    finally:
+        view.close()
+
+
+def test_date_columns_show_the_whole_date(tmp_path):
+    """Datum och Förfaller får aldrig visas som bara "2021-…"."""
+    from PySide6.QtGui import QFontMetrics
+
+    from ui.typography import make_tabular_font, scaled_point_size
+
+    app = _qapp()
+    view = _make_view(tmp_path)
+    view.resize(760, 700)
+    view.show()
+    app.processEvents()
+    try:
+        metrics = QFontMetrics(
+            make_tabular_font(scaled_point_size(12), bold=True)
+        )
+        sample = "2021-05-03"
+        needed = metrics.horizontalAdvance(sample) + 8
+        for column, key in enumerate(COL_KEYS, start=1):
+            if key not in DATE_COLUMN_KEYS:
+                continue
+            width = view._table.columnWidth(column)
+            assert width >= needed, (
+                f"{key}: {width} px räcker inte för {sample!r} "
+                f"({needed} px) — datumet kapas till årtalet"
+            )
+            elided = metrics.elidedText(
+                sample, Qt.TextElideMode.ElideRight, width
+            )
+            assert elided == sample
     finally:
         view.close()
 

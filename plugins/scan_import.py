@@ -518,6 +518,16 @@ def parse_invoice_number(text: str) -> str:
             num = re.match(r"\d[\d\-/]*\d|\d", m.group(1))
             if num and len(num.group(0)) >= 4:
                 return num.group(0)
+    # Rubrikrad utan etikett: "Kreditfaktura 2547500157" / "Faktura
+    # 2547500157". Minst sex siffror krävs, så ett datum eller ett
+    # kort kundnummer alldeles efter ordet aldrig tas för numret.
+    for m in re.finditer(
+        r"\b(?:Kredit)?[Ff]aktura\s+(?:nr\.?|nummer\s*)?"
+        r"\s*[:#]?\s*(\d{6,20})\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return m.group(1)
     return ""
 
 
@@ -561,25 +571,39 @@ def is_credit_note(text: str) -> bool:
     t = (text or "").lower()
     return any(m in t for m in _CREDIT_MARKERS)
 
+#: Ett datum: 2024-01-09, 2024.01.09, 09/01/2024, 20240109.
+_DATE_VALUE = (
+    r"(?:\d{4}[-./]\d{1,2}[-./]\d{1,2}"
+    r"|\d{1,2}[-./]\d{1,2}[-./]\d{2,4}|\d{8})"
+)
+
+#: Etiketter där datumet ofta står på raden UNDER etiketten
+#: ("Förfallodag:\n        2024.01.09" — Pilkingtons layout).
+_DATE_LABEL_GAP = r"[ \t]*[:#]?[ \t]*\n?[ \t]*"
+
+
 def parse_dates(text: str) -> tuple[str, str]:
     """
     Returnerar (fakturadatum, förfallodatum).
 
-    Mönstren är toleranta mot OCR-varianten "Forfallodatum" (utan ö)
-    och mot versaler.
+    Tolerant mot OCR-varianten "Forfallodatum" (utan ö), mot versaler
+    och mot layouter där datumet står på raden under sin etikett
+    ("Förfallodag:" följt av "2024.01.09").
     """
     inv = _parse_date(_search(text, (
-        r"Fakturadatum\s*[:#]?\s*([0-9\-/.]{6,12})",
-        r"Faktura\s*datum\s*[:#]?\s*([0-9\-/.]{6,12})",
-        r"Invoice\s*date\s*[:#]?\s*([0-9\-/.]{6,12})",
+        rf"Fakturadatum{_DATE_LABEL_GAP}({_DATE_VALUE})",
+        rf"Faktura\s*datum{_DATE_LABEL_GAP}({_DATE_VALUE})",
+        rf"Kreditfaktura\s*datum{_DATE_LABEL_GAP}({_DATE_VALUE})",
+        rf"Invoice\s*date{_DATE_LABEL_GAP}({_DATE_VALUE})",
     )))
     due = _parse_date(_search(text, (
-        r"F[öo]rfallodatum\s*[:#]?\s*([0-9\-/.]{6,12})",
-        r"F[öo]rfaller\s*[:#]?\s*([0-9\-/.]{6,12})",
-        r"F[öo]rfaller\s*den\s*([0-9\-/.]{6,12})",
-        r"Sista\s*betalningsdag\s*[:#]?\s*([0-9\-/.]{6,12})",
-        r"Betalningsdatum\s*[:#]?\s*([0-9\-/.]{6,12})",
-        r"Due\s*date\s*[:#]?\s*([0-9\-/.]{6,12})",
+        rf"F[öo]rfallodag{_DATE_LABEL_GAP}({_DATE_VALUE})",
+        rf"F[öo]rfallodatum{_DATE_LABEL_GAP}({_DATE_VALUE})",
+        rf"F[öo]rfaller\s*den{_DATE_LABEL_GAP}({_DATE_VALUE})",
+        rf"F[öo]rfaller{_DATE_LABEL_GAP}({_DATE_VALUE})",
+        rf"Sista\s*betalningsdag{_DATE_LABEL_GAP}({_DATE_VALUE})",
+        rf"Betalningsdatum{_DATE_LABEL_GAP}({_DATE_VALUE})",
+        rf"Due\s*date{_DATE_LABEL_GAP}({_DATE_VALUE})",
     )))
     return inv, due
 

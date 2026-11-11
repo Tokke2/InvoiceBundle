@@ -243,3 +243,52 @@ def test_suppliers_table_shows_the_setting():
 
     assert "ocr_same_as_invoice_number" in COL_KEYS
     assert i18n.tr("suppliers.ocr_same_mark")
+
+
+# ── Datumtolkning (Pilkington-layouten i skärmdumpen) ───────────────
+
+def test_dates_read_when_value_is_on_the_line_below_the_label():
+    """PDF:en visar "Förfallodag:" och datumet på nästa rad."""
+    import scan_import as si
+
+    text = (
+        "Pilkington Automotive Sweden AB - AGR\n"
+        "Kreditfaktura 2547500157\n\n"
+        "Förfallodag:\n"
+        "        2024.01.09\n"
+        "Vårt momsnummer:\n"
+        "        SE556114494901\n"
+        "Ert ordernummer:\n"
+        "Kreditfaktura datum:\n"
+        "        2024.01.09\n"
+        "Kundnummer:\n"
+        "        46817\n"
+    )
+    date, due = si.parse_dates(text)
+    assert date == "2024-01-09"     # "Kreditfaktura datum:"
+    assert due == "2024-01-09"      # "Förfallodag:"
+
+
+def test_dates_still_read_on_one_line_and_reject_junk():
+    import scan_import as si
+
+    assert si.parse_dates("Förfallodag: 2024.01.09")[1] == "2024-01-09"
+    assert si.parse_dates("Förfallodatum: 16/09/2026")[1] == "2026-09-16"
+    assert si.parse_dates("Fakturadatum 2026-08-17")[0] == "2026-08-17"
+    # En etikett utan datum får aldrig låna nästa fälts siffror
+    assert si.parse_dates("Förfallodag:\nKundnummer:\n46817")[1] == ""
+
+
+def test_invoice_number_read_from_the_credit_heading():
+    """Pilkington skriver numret bredvid rubriken, utan etikett."""
+    import scan_import as si
+
+    text = "Pilkington Automotive Sweden AB - AGR\nKreditfaktura 2547500157\n"
+    assert si.parse_invoice_number(text) == "2547500157"
+    # Ett datum eller ett kort kundnummer efter ordet är inget nummer
+    assert si.parse_invoice_number("Faktura 2024-01-09") == ""
+    assert si.parse_invoice_number("Kreditfaktura 46817") == ""
+    # En riktig etikett vinner fortfarande
+    assert si.parse_invoice_number(
+        "Fakturanummer: 2026-144\nKreditfaktura 2547500157"
+    ) == "2026-144"

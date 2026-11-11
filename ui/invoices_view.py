@@ -103,6 +103,7 @@ try:
         STATUS_COLORS,
         COLUMNS,
         COL_WIDTHS,
+        COL_KEYS,
         ExportHistoryManager,
         ExportHistoryDialog,
         InvoiceDialog,
@@ -114,6 +115,8 @@ try:
         make_font,
         h_line,
         fit_table_columns,
+        date_column_width,
+        DATE_COLUMN_KEYS,
         fmt_amount,
         combine_invoices,
         build_export_path,
@@ -132,6 +135,7 @@ except ImportError:
         STATUS_COLORS,
         COLUMNS,
         COL_WIDTHS,
+        COL_KEYS,
         ExportHistoryManager,
         ExportHistoryDialog,
         InvoiceDialog,
@@ -142,6 +146,8 @@ except ImportError:
         make_font,
         h_line,
         fit_table_columns,
+        date_column_width,
+        DATE_COLUMN_KEYS,
         fmt_amount,
         combine_invoices,
         build_export_path,
@@ -1570,12 +1576,23 @@ class InvoicesView(QWidget):
     def _fit_columns(self) -> None:
         column_count = self._table.model().columnCount()
         if column_count == len(COL_WIDTHS) + 1:
-            preferred = [44] + COL_WIDTHS
+            # Datumkolumnerna får aldrig bli så smala att bara årtalet
+            # syns ("2021-…") — bredden mäts ur tabellfonten.
+            date_width = date_column_width()
+            mins = [44] + [
+                date_width if key in DATE_COLUMN_KEYS else 36
+                for key in COL_KEYS
+            ]
+            preferred = [44] + [
+                max(width, date_width) if key in DATE_COLUMN_KEYS
+                else width
+                for key, width in zip(COL_KEYS, COL_WIDTHS)
+            ]
             vp = max(
                 self._table.viewport().width(), self._table.width()
             )
             if vp >= sum(preferred):
-                fit_table_columns(self._table, preferred)
+                fit_table_columns(self._table, preferred, mins)
                 # fit_table_columns lägger eventuell överskottsbredd
                 # på första kolumnen — kryssrutan ska stanna på
                 # 44 px, så överskottet flyttas till Leverantör
@@ -1594,7 +1611,14 @@ class InvoicesView(QWidget):
                 for i, w in enumerate(preferred):
                     self._table.setColumnWidth(i, w)
         else:
-            fit_table_columns(self._table, COL_WIDTHS)
+            fit_table_columns(
+                self._table,
+                COL_WIDTHS,
+                [
+                    date_column_width() if key in DATE_COLUMN_KEYS else 36
+                    for key in COL_KEYS
+                ],
+            )
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
