@@ -321,6 +321,14 @@ def setup_logging(trace_on: bool = True) -> MemoryHandler:
     root = logging.getLogger()
     root.setLevel(TRACE_LEVEL if trace_on else logging.DEBUG)
 
+    # Tredjepartsbibliotekens DEBUG-nivå skriver en rad per PNG-chunk och
+    # per tesseract-anrop. Under en skanning av hundratals fakturor blir
+    # det tusentals rader som både kostar tid och skymmer appens egna
+    # SCAN_WATCH-rader. De hålls därför på WARNING — appens egen
+    # TRACE/DEBUG-nivå påverkas inte.
+    for _noisy in ("PIL", "pytesseract", "fitz", "pypdf", "urllib3"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
+
     # Byt ut tidigare handlers (main.py:s tidiga) — ingen dubblering.
     for h in list(root.handlers):
         root.removeHandler(h)

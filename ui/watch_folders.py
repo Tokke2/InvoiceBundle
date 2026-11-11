@@ -32,11 +32,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import (
+    QObject, QRunnable, QThreadPool, QTimer, Signal,
+)
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -105,6 +108,27 @@ def supported_invoice_files(folder) -> list[Path]:
         return sorted(found, key=lambda p: p.name.lower())
     except Exception:
         return []
+
+
+def iter_invoice_files(folder):
+    """Som supported_invoice_files, men en filsökväg i taget.
+
+    Skanningen använder generatorn så att GUI-tråden kan ritas om
+    mellan filerna i stället för att frysa under en hel mapptraversering.
+    """
+    try:
+        root = Path(str(folder))
+        for dirpath, dirs, names in os.walk(root):
+            dirs[:] = [
+                d for d in dirs
+                if d.lower() != "arkiv" and not d.startswith(".")
+            ]
+            for name in sorted(names, key=str.lower):
+                cand = Path(dirpath) / name
+                if supported_file(cand):
+                    yield cand
+    except Exception:
+        return
 
 
 def file_hash(path: Path) -> str:
@@ -201,6 +225,162 @@ def _norm_supplier_name(name: str) -> frozenset:
     return frozenset(
         w for w in words if w not in ("ab", "aktiebolag", "och", "&")
     )
+
+
+def load_scan_module():
+    """Importerar scan_import med plugins/ på sys.path.
+
+    Ren modulimport (ingen QObject, ingen appdata): säker att anropa
+    både från GUI-tråden och från tolkningsarbetaren.
+    """
+    import sys
+
+    plugins = str(Path(__file__).resolve().parent.parent / "plugins")
+    if plugins not in sys.path:
+        sys.path.insert(0, plugins)
+    import scan_import as si
+
+    return si
+
+
+def resolve_supplier_in(suppliers: list[dict], wanted: str) -> str:
+    """Slår upp ett mappnamn mot registret tolerant.
+
+    Mappen kan heta "Martin G" medan registerposten heter
+    "AB Martin G Anderson" — exakt namnmatchning stoppade då
+    registreringen. Namnen jämförs normaliserade (bolagsform/punkt
+    borta, ordmängd): exakt eller entydig delmängd ger träff.
+    """
+    want = _norm_supplier_name(wanted)
+    if not want:
+        return ""
+    candidates: list[str] = []
+    for sup in suppliers or []:
+        name = str(sup.get("name", "")).strip()
+        have = _norm_supplier_name(name)
+        if not have:
+            continue
+        if have == want:
+            return name
+        if want <= have or have <= want:
+            candidates.append(name)
+    return candidates[0] if len(candidates) == 1 else ""
+
+
+def parse_watched_file(
+    si: Any,
+    path: Path,
+    folder_supplier: str,
+    suppliers: list[dict],
+    templates: dict | None,
+    learning: dict | None,
+    extract_fn: Callable[[Path], tuple[str, str]] | None = None,
+) -> tuple[str, str, dict]:
+    """Textuttag + tolkning av EN fil, med mappens leverantör påtvingad.
+
+    Allt tunga arbete (PDF-läsning, OCR, mallmatchning) sker här och
+    använder bara de data som skickas in — aldrig appens register eller
+    Qt-objekt. Därför kan funktionen köras i en arbetstråd så att
+    GUI-tråden förblir svarande medan stora skanningar pågår.
+    """
+    if extract_fn is not None:
+        text, method = extract_fn(path)
+    else:
+        text, method = si.extract_text(path)
+    templates = templates or {}
+    learning = learning or {}
+    parse_file = getattr(si, "parse_invoice_file", None)
+    if parse_file is not None:
+        try:
+            parsed = parse_file(
+                path, text or "", suppliers,
+                templates=templates, match_learning=learning,
+            )
+        except TypeError:
+            parsed = parse_file(
+                path, text or "", suppliers, templates=templates,
+            )
+    else:
+        parsed = si.parse_invoice_text(
+            text or "", suppliers, templates=templates,
+            match_learning=learning,
+        )
+    folder_supplier = str(folder_supplier or "").strip()
+    if folder_supplier:
+        resolved = resolve_supplier_in(suppliers, folder_supplier)
+        if resolved and resolved != folder_supplier:
+            log.info(
+                "SCAN_WATCH: mappens leverantör '%s' → "
+                "registerposten '%s'",
+                folder_supplier, resolved,
+            )
+            folder_supplier = resolved
+        parsed_supplier = str(parsed.get("supplier", "") or "").strip()
+        names_match = getattr(si, "_names_match", None)
+        same_supplier = bool(
+            parsed_supplier
+            and (
+                parsed_supplier.lower() == folder_supplier.lower()
+                or (
+                    callable(names_match)
+                    and names_match(parsed_supplier, folder_supplier)
+                )
+            )
+        )
+        if parsed.get("match_uncertain"):
+            # Mappens leverantör är bara ännu en kandidat när
+            # tolkningen själv är osäker — den får inte tyst
+            # avgöra valet åt användaren.
+            candidates = [
+                str(c).strip()
+                for c in parsed.get("match_candidates", []) or []
+                if str(c).strip()
+            ]
+            if folder_supplier.lower() not in {
+                c.lower() for c in candidates
+            }:
+                candidates.append(folder_supplier)
+            parsed["match_candidates"] = candidates
+            parsed["folder_supplier_candidate"] = folder_supplier
+            if "leverantör" not in parsed.get("missing", []):
+                parsed.setdefault("missing", []).append("leverantör")
+        elif parsed_supplier and not same_supplier:
+            # Fakturans egen starka leverantörsträff och mappens
+            # kopplade leverantör pekar åt olika håll. Det är en
+            # konflikt användaren ska avgöra, inte något
+            # mappinställningen får köra över i tysthet.
+            parsed["supplier"] = ""
+            parsed["match_uncertain"] = True
+            parsed["match_candidates"] = [
+                parsed_supplier, folder_supplier,
+            ]
+            parsed["match_reason"] = "competing"
+            parsed["match_kind"] = "supplier"
+            parsed["folder_supplier_candidate"] = folder_supplier
+            if "leverantör" not in parsed.get("missing", []):
+                parsed.setdefault("missing", []).append("leverantör")
+        else:
+            parsed["supplier"] = folder_supplier
+            parsed["missing"] = [
+                m for m in parsed.get("missing", [])
+                if m != "leverantör"
+            ]
+    if "ocr-saknas" in str(method) or "ocr-fel" in str(method):
+        parsed["ocr_warning"] = str(method)
+    assessor = getattr(si, "assess_invoice_payment_details", None)
+    if callable(assessor):
+        parsed = assessor(
+            parsed, text or "", suppliers,
+            details=parsed.get("invoice_payment_details"),
+        )
+    template_guard = getattr(
+        si, "require_template_confirmation", None
+    )
+    if callable(template_guard):
+        parsed = template_guard(
+            parsed, templates, learning, suppliers
+        )
+    return text, method, parsed
 
 
 _PARK_REASON_SV = {
@@ -526,6 +706,85 @@ def watch_diagnostic_lines(
     return lines
 
 
+#: Hur många filsignaturer (sökväg → storlek/tid/hash) som cachas.
+#: Cachen gör att en 30-sekunderspoll inte hashar om tusentals
+#: oförändrade original — det var den största orsaken till att
+#: appen kunde stå still i minuter vid stora mappar.
+HASH_CACHE_MAX = 6000
+
+#: En fil som tar längre tid än så att tolka avbryter skanningen i
+#: stället för att hänga appen för alltid. Filen prövas nästa gång.
+ANALYSIS_TIMEOUT_MS = 180_000
+
+#: Hur länge skanningen får arbeta innan den lämnar tillbaka till
+#: GUI-tråden (mellan filer, aldrig inuti en tolkning).
+SCAN_SLICE_SECONDS = 0.05
+
+
+class _AnalysisSignals(QObject):
+    """Signaler från tolkningsarbetaren tillbaka till GUI-tråden."""
+
+    finished = Signal(int, object)
+    failed = Signal(int, str)
+
+
+class _AnalyzeFileTask(QRunnable):
+    """Tolkar EN fil (textutdrag, OCR, mallmatchning) i en arbetstråd.
+
+    Arbetaren rör aldrig appens register, konfiguration eller Qt-vyer;
+    den får en eller flera kopior av leverantörer/mallar/inlärning och
+    returnerar resultatet som en signal. Alla beslut och alla
+    registerskrivningar sker därefter i GUI-tråden.
+    """
+
+    def __init__(
+        self,
+        token: int,
+        path: Path,
+        folder_supplier: str,
+        suppliers: list[dict],
+        templates: dict,
+        learning: dict,
+        signals: _AnalysisSignals,
+        extract_fn: Callable[[Path], tuple[str, str]] | None = None,
+    ) -> None:
+        super().__init__()
+        self.setAutoDelete(True)
+        self._token = int(token)
+        self._path = Path(path)
+        self._folder_supplier = str(folder_supplier or "")
+        self._suppliers = suppliers
+        self._templates = templates
+        self._learning = learning
+        self._signals = signals
+        self._extract_fn = extract_fn
+
+    def run(self) -> None:  # pragma: no cover - kräver Qt-tråd
+        try:
+            si = load_scan_module()
+            result = parse_watched_file(
+                si,
+                self._path,
+                self._folder_supplier,
+                self._suppliers,
+                self._templates,
+                self._learning,
+                extract_fn=self._extract_fn,
+            )
+        except BaseException as exc:  # noqa: BLE001 - rapporteras till tråden
+            try:
+                self._signals.failed.emit(
+                    self._token, f"{type(exc).__name__}: {exc}"
+                )
+            except Exception:
+                pass
+            return
+        try:
+            self._signals.finished.emit(self._token, result)
+        except Exception:
+            pass
+
+
 class WatchManager(QObject):
     """
     Bevakar mappar, tolkar nya filer och signalerar resultatet.
@@ -543,6 +802,8 @@ class WatchManager(QObject):
     file_error = Signal(dict)
     file_recovered = Signal(str)
     changed = Signal()
+    scan_started = Signal()
+    scan_finished = Signal(dict)
 
     def __init__(
         self,
@@ -576,6 +837,34 @@ class WatchManager(QObject):
         ] = {}
         self._stable_signatures: dict[str, tuple[int, int, int]] = {}
         self._watch_targets_by_root: dict[str, set[str]] = {}
+        # Sökväg → (storlek, mtime, ctime, sha256). Gör att oförändrade
+        # original inte behöver hashas om vid varje poll.
+        self._hash_cache: OrderedDict[
+            str, tuple[tuple[int, int, int], str]
+        ] = OrderedDict()
+        self._processed_path_keys: set[str] = set()
+        # Bakgrundsskanningens tillstånd. Allt tungt arbete sker i en
+        # arbetstråd; generatorn nedan håller bara bokföringen och
+        # återupptas i GUI-tråden när en fil är färdigtolkad.
+        self._scan_running = False
+        self._scan_force = False
+        self._scan_again = False
+        self._scan_again_force = False
+        self._scan_generator = None
+        self._scan_folders: list[dict] = []
+        self._scan_token = 0
+        self._scan_pending_token = 0
+        # Varje skanning har en egen epok. Redan köade
+        # händelseloop-anrop från en avbruten/ersatt skanning ignoreras,
+        # så två pumpar aldrig kan mata samma generator samtidigt.
+        self._scan_epoch = 0
+        self._scan_context: dict[str, Any] = {}
+        self._last_scan_force = False
+        self._analysis_signals = _AnalysisSignals(self)
+        self._analysis_signals.finished.connect(self._on_scan_analysis)
+        self._analysis_signals.failed.connect(
+            self._on_scan_analysis_failed
+        )
         log.info(
             "SCAN_WATCH: bevakning startad — %d mapp(ar): %s",
             len(self._config.get("folders", [])),
@@ -594,7 +883,7 @@ class WatchManager(QObject):
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(1200)
-        self._debounce.timeout.connect(self.scan_all)
+        self._debounce.timeout.connect(self.start_scan)
 
         # Om en fil fortfarande växer görs en riktad snabb kontroll.
         # Vi blockerar aldrig GUI-tråden med sleep och behöver därför
@@ -602,15 +891,21 @@ class WatchManager(QObject):
         self._settle_timer = QTimer(self)
         self._settle_timer.setSingleShot(True)
         self._settle_timer.setInterval(FILE_STABILITY_RECHECK_MS)
-        self._settle_timer.timeout.connect(self.scan_all)
+        self._settle_timer.timeout.connect(self.start_scan)
 
         # Säkerhetspoll (nätverksdiskar missar ibland watcher-events)
         self._poll = QTimer(self)
         self._poll.setInterval(30_000)
-        self._poll.timeout.connect(self.scan_all)
+        self._poll.timeout.connect(self.start_scan)
         self._poll.start()
+
+        # Vakt: en fil som hänger i OCR får aldrig låsa appen för alltid.
+        self._watchdog = QTimer(self)
+        self._watchdog.setSingleShot(True)
+        self._watchdog.timeout.connect(self._on_scan_watchdog)
+
         self._rewatch()
-        QTimer.singleShot(2000, self.scan_all)
+        QTimer.singleShot(2000, self.start_scan)
 
     # ── Konfiguration ─────────────────────────────────────────────────
 
@@ -706,7 +1001,7 @@ class WatchManager(QObject):
         self._save()
         self._rewatch()
         self.changed.emit()
-        self.scan_all()
+        self.start_scan()
 
     def set_auto_create(self, enabled: bool) -> None:
         self._config["auto_create"] = bool(enabled)
@@ -716,7 +1011,7 @@ class WatchManager(QObject):
             # Filer som bara väntade på att auto-registreringen
             # skulle slås på prövas direkt — annars låg de kvar
             # i parkeringen i evighet trots att formatet läses.
-            self.scan_all()
+            self.start_scan()
 
     def unprocess(self, file_hash_value: str) -> None:
         """Tar bort en fil ur bearbetade-registret så nästa
@@ -724,7 +1019,13 @@ class WatchManager(QObject):
         tolkad faktura misslyckades: filen får ALDRIG bli kvar som
         'importerad' utan att fakturan faktiskt finns i registret
         — då skulle den varken synas eller någonsin prövas om."""
-        if self._config.get("processed", {}).pop(file_hash_value, None) is not None:
+        removed = self._config.get("processed", {}).pop(
+            file_hash_value, None
+        )
+        if removed is not None:
+            self._processed_path_keys.discard(
+                _norm_path_key(str(removed.get("path", "")))
+            )
             self._save()
             self.changed.emit()
 
@@ -805,6 +1106,7 @@ class WatchManager(QObject):
             if _norm_path_key(str(parked.get("path", ""))) == old_key:
                 parked["path"] = new_path
                 parked["file"] = target.name
+        self._refresh_processed_paths()
         self._save()
         self.changed.emit()
         log.info(
@@ -931,6 +1233,7 @@ class WatchManager(QObject):
             if _norm_path_key(str(parked.get("path", ""))) == old_key:
                 parked["path"] = str(source)
                 parked["file"] = source.name
+        self._refresh_processed_paths()
         self._save()
         self.changed.emit()
 
@@ -982,41 +1285,11 @@ class WatchManager(QObject):
     # ── Tolkning ──────────────────────────────────────────────────────
 
     def _scan_module(self):
-        import sys
-
-        plugins = str(
-            Path(__file__).resolve().parent.parent / "plugins"
-        )
-        if plugins not in sys.path:
-            sys.path.insert(0, plugins)
-        import scan_import as si
-
-        return si
+        return load_scan_module()
 
     def _resolve_register_supplier(self, wanted: str) -> str:
-        """Slår upp mappens leverantörsnamn mot registret tolerant.
-
-        Mappen kan heta "Martin G" medan registerposten heter
-        "AB Martin G Anderson" — exakt namnmatchning fick då
-        registreringen att stoppa med "leverantör saknas" trots
-        att användaren pekat ut rätt leverantör. Nu jämförs
-        namnen normaliserade (bolagsform/punkt borta, ordmängd):
-        exakt eller entydig delmängd ger träff, annars "".
-        """
-        want = _norm_supplier_name(wanted)
-        if not want:
-            return ""
-        candidates = []
-        for sup in self._suppliers():
-            name = str(sup.get("name", "")).strip()
-            have = _norm_supplier_name(name)
-            if not have:
-                continue
-            if have == want:
-                return name
-            if want <= have or have <= want:
-                candidates.append(name)
-        return candidates[0] if len(candidates) == 1 else ""
+        """Slår upp mappens leverantörsnamn mot registret tolerant."""
+        return resolve_supplier_in(self._suppliers(), wanted)
 
     def _suppliers(self) -> list[dict]:
         try:
@@ -1097,13 +1370,92 @@ class WatchManager(QObject):
         Registrerade data ändrades inte — bara rapporten."""
         return [dict(d) for d in self._control_diffs]
 
-    def scan_all(self, force: bool = False) -> None:
+    # ── Hash-cache ─────────────────────────────────────────────────────
+
+    def _cached_digest(
+        self, path: Path, signature: tuple[int, int, int]
+    ) -> str | None:
+        """Tidigare beräknad sha256 för exakt samma filversion."""
+        key = _norm_path_key(str(path))
+        cached = self._hash_cache.get(key)
+        if cached is None or cached[0] != signature:
+            return None
+        self._hash_cache.move_to_end(key)
+        return cached[1]
+
+    def _remember_digest(
+        self,
+        path: Path,
+        signature: tuple[int, int, int],
+        digest: str,
+    ) -> None:
+        if not digest:
+            return
+        key = _norm_path_key(str(path))
+        self._hash_cache[key] = (signature, digest)
+        self._hash_cache.move_to_end(key)
+        while len(self._hash_cache) > HASH_CACHE_MAX:
+            self._hash_cache.popitem(last=False)
+
+    def _file_digest(self, path: Path) -> str:
+        """sha256 med cache: oförändrade filer hashas bara en gång."""
+        try:
+            stat = Path(path).stat()
+        except OSError:
+            return ""
+        signature = (
+            int(stat.st_size),
+            int(stat.st_mtime_ns),
+            int(stat.st_ctime_ns),
+        )
+        digest = self._cached_digest(Path(path), signature)
+        if digest:
+            return digest
+        try:
+            digest = file_hash(Path(path))
+        except Exception:
+            return ""
+        self._remember_digest(Path(path), signature, digest)
+        return digest
+
+    # ── Skanningsmotor ─────────────────────────────────────────────────
+
+    def _refresh_processed_paths(self) -> None:
+        self._processed_path_keys = {
+            _norm_path_key(str(info.get("path", "")))
+            for info in self._config.get("processed", {}).values()
+            if info.get("path")
+        }
+
+    def _reset_scan_stats(self) -> None:
+        self._refresh_processed_paths()
         self._scan_stats = {
             "imported": 0, "duplicate": 0, "parked": 0, "already": 0,
             "waiting": 0, "settling": 0, "changed": 0, "errors": 0,
         }
         self._waiting_reasons = {}
         self._control_diffs = []
+
+    @property
+    def is_scanning(self) -> bool:
+        """True medan en bakgrundsskanning pågår."""
+        return bool(self._scan_running)
+
+    @property
+    def last_scan_force(self) -> bool:
+        """Utfördes den senaste skanningen som kontrollskanning?"""
+        return bool(self._last_scan_force)
+
+    def scan_all(self, force: bool = False) -> None:
+        """Skanning som körs färdigt direkt i anropande tråd.
+
+        Används av tester och av interna flöden som måste ha resultatet
+        innan de går vidare. Den återkommande bevakningen använder
+        i stället start_scan(), som aldrig blockerar GUI-tråden.
+        """
+        self._abort_async_scan()
+        self._reset_scan_stats()
+        self._last_scan_force = bool(force)
         self._heal_missing_imports()
         for entry in self.folders:
             try:
@@ -1112,6 +1464,233 @@ class WatchManager(QObject):
                 self._record_scan_error(
                     str(entry.get("path", "?")), "folder", "", exc
                 )
+        self._complete_scan(announce=True)
+
+    def start_scan(self, force: bool = False) -> None:
+        """Startar en skanning som inte låser appen.
+
+        Tolkningen av varje fil (PDF-läsning, OCR, mallmatchning) körs i
+        en arbetstråd. GUI-tråden sköter bokföringen en fil i taget och
+        hinner därför rita om fönstret och svara på klick under hela
+        skanningen. En begäran som kommer medan en skanning pågår slås
+        ihop med den pågående i stället för att starta en till.
+        """
+        if self._scan_running:
+            self._scan_again = True
+            self._scan_again_force = self._scan_again_force or bool(force)
+            log.debug(
+                "SCAN_WATCH: skanning pågår — ny begäran köas (force=%s)",
+                bool(force),
+            )
+            return
+        self._reset_scan_stats()
+        self._scan_running = True
+        self._scan_force = bool(force)
+        self._last_scan_force = bool(force)
+        self._scan_again = False
+        self._scan_again_force = False
+        self._scan_generator = None
+        self._scan_token += 1
+        self._scan_pending_token = 0
+        self._scan_folders = list(self.folders)
+        self._scan_context = self._scan_context_snapshot()
+        try:
+            self._heal_missing_imports()
+        except Exception as exc:
+            log.warning("SCAN_WATCH självläkning: %s", exc)
+        self.scan_started.emit()
+        epoch = self._scan_epoch
+        QTimer.singleShot(
+            0, lambda: self._drive_scan(None, epoch=epoch)
+        )
+
+    def _scan_context_snapshot(self) -> dict[str, Any]:
+        """Kopior som arbetstråden får läsa — aldrig appens live-objekt."""
+        suppliers: list[dict] = []
+        templates: dict = {}
+        learning: dict = {}
+        try:
+            suppliers = [dict(s) for s in self._suppliers()]
+        except Exception:
+            suppliers = []
+        if self._templates_provider is not None:
+            try:
+                templates = dict(self._templates_provider() or {})
+            except Exception:
+                templates = {}
+        if self._learning_provider is not None:
+            try:
+                learning = dict(self._learning_provider() or {})
+            except Exception:
+                learning = {}
+        return {
+            "suppliers": suppliers,
+            "templates": templates,
+            "learning": learning,
+            # Endast test-/integrationskrok; normalt None och då görs
+            # den riktiga PDF-/OCR-extraktionen i arbetstråden.
+            "extract_fn": self._extract_fn,
+        }
+
+    def _abort_async_scan(self) -> None:
+        """Avbryter en pågående bakgrundsskanning (t.ex. före scan_all)."""
+        try:
+            self._watchdog.stop()
+        except Exception:
+            pass
+        self._scan_running = False
+        self._scan_again = False
+        self._scan_again_force = False
+        self._scan_pending_token = 0
+        self._scan_generator = None
+        self._scan_folders = []
+        self._scan_epoch += 1
+
+    def _drive_scan(
+        self,
+        send_value: Any,
+        throw_exc: Exception | None = None,
+        epoch: int | None = None,
+    ) -> None:
+        """Mata skanningsgeneratorn tills nästa fil behöver tolkning."""
+        if not self._scan_running:
+            return
+        if epoch is not None and epoch != self._scan_epoch:
+            return
+        deadline = time.monotonic() + SCAN_SLICE_SECONDS
+        while True:
+            if self._scan_generator is None:
+                if not self._scan_folders:
+                    self._finish_scan()
+                    return
+                entry = self._scan_folders.pop(0)
+                self._scan_generator = self._iter_scan_folder(
+                    entry, force=self._scan_force
+                )
+                send_value, throw_exc = None, None
+            try:
+                if throw_exc is not None:
+                    request = self._scan_generator.throw(throw_exc)
+                else:
+                    request = self._scan_generator.send(send_value)
+            except StopIteration:
+                self._scan_generator = None
+                send_value, throw_exc = None, None
+                continue
+            except Exception:
+                log.error(
+                    "SCAN_WATCH: skanningen avbröts för en mapp",
+                    exc_info=True,
+                )
+                self._scan_generator = None
+                send_value, throw_exc = None, None
+                continue
+            send_value, throw_exc = None, None
+            kind = request.get("kind") if isinstance(request, dict) else ""
+            if kind == "analyze":
+                self._submit_analysis(request)
+                return
+            # "pause": lämna tillbaka till händelseloopen så att
+            # fönstret hinner rita om och ta emot klick.
+            if kind == "pause":
+                epoch = self._scan_epoch
+                QTimer.singleShot(
+                    0, lambda: self._drive_scan(None, epoch=epoch)
+                )
+                return
+            if time.monotonic() >= deadline:
+                epoch = self._scan_epoch
+                QTimer.singleShot(
+                    0, lambda: self._drive_scan(None, epoch=epoch)
+                )
+                return
+
+    def _submit_analysis(self, request: dict) -> None:
+        """Skicka EN fil till tolkningsarbetaren."""
+        self._scan_token += 1
+        token = self._scan_token
+        self._scan_pending_token = token
+        context = self._scan_context or {}
+        entry = request.get("entry") or {}
+        task = _AnalyzeFileTask(
+            token,
+            Path(str(request.get("path", ""))),
+            str(entry.get("supplier", "") or ""),
+            list(context.get("suppliers") or []),
+            dict(context.get("templates") or {}),
+            dict(context.get("learning") or {}),
+            self._analysis_signals,
+            extract_fn=context.get("extract_fn"),
+        )
+        self._arm_scan_watchdog()
+        try:
+            QThreadPool.globalInstance().start(task)
+        except Exception as exc:
+            log.warning("SCAN_WATCH: kunde inte starta tolkning: %s", exc)
+            self._scan_pending_token = 0
+            self._watchdog.stop()
+            QTimer.singleShot(
+                0,
+                lambda: self._drive_scan(
+                    None,
+                    RuntimeError(f"tolkningen kunde inte startas: {exc}"),
+                ),
+            )
+
+    def _on_scan_analysis(self, token: int, result: object) -> None:
+        if not self._scan_running or token != self._scan_pending_token:
+            return
+        self._scan_pending_token = 0
+        self._watchdog.stop()
+        self._drive_scan(result)
+
+    def _on_scan_analysis_failed(self, token: int, message: str) -> None:
+        if not self._scan_running or token != self._scan_pending_token:
+            return
+        self._scan_pending_token = 0
+        self._watchdog.stop()
+        self._drive_scan(None, RuntimeError(str(message or "okänt fel")))
+
+    def _arm_scan_watchdog(self) -> None:
+        if self._scan_pending_token:
+            self._watchdog.start(ANALYSIS_TIMEOUT_MS)
+
+    def _on_scan_watchdog(self) -> None:
+        """En tolkning har hängt — avbryt hellre än att låsa appen."""
+        if not self._scan_running:
+            return
+        log.error(
+            "SCAN_WATCH: en fil tog mer än %d sekunder att tolka — "
+            "skanningen avbryts och filen prövas nästa gång",
+            ANALYSIS_TIMEOUT_MS // 1000,
+        )
+        self._scan_pending_token = 0
+        self._scan_token += 1
+        self._scan_stats["errors"] = self._scan_stats.get("errors", 0) + 1
+        if self._scan_generator is not None:
+            try:
+                self._scan_generator.close()
+            except Exception:
+                pass
+        self._scan_generator = None
+        self._scan_folders = []
+        self._finish_scan()
+
+    def _finish_scan(self) -> None:
+        self._watchdog.stop()
+        again = bool(self._scan_again)
+        again_force = bool(self._scan_again_force)
+        self._scan_running = False
+        self._scan_generator = None
+        self._scan_folders = []
+        self._scan_again = False
+        self._scan_again_force = False
+        self._complete_scan(announce=True)
+        if again:
+            self.start_scan(force=again_force)
+
+    def _complete_scan(self, announce: bool = True) -> None:
+        """Loggar sammanfattningen och meddelar vyn att skanningen är klar."""
         # Sammanfattningen loggas bara när själva utfallet ändras.
         # "already" räknas om vid varje 30-sekunderspoll och får inte
         # i sig göra att samma statusrad fylls på om och om igen.
@@ -1204,6 +1783,8 @@ class WatchManager(QObject):
         # Uppdatera senast kontrollerad tid och fel-/väntestatus även när
         # skanningen inte hittade någon ny faktura.
         self.changed.emit()
+        if announce:
+            self.scan_finished.emit(dict(self._scan_stats))
 
     def _record_scan_error(
         self, path: str, stage: str, digest: str, exc: Exception,
@@ -1269,8 +1850,8 @@ class WatchManager(QObject):
         try:
             invoices = self._invoices()
             known_paths: set[str] = set()
-            known_hashes: set[str] = set()
             known_numbers: set[tuple[str, str]] = set()
+            attachment_paths: list[str] = []
             for inv in invoices:
                 sup_l = str(
                     inv.get("supplier", "") or ""
@@ -1283,11 +1864,7 @@ class WatchManager(QObject):
                 att = str(inv.get("attachment", "") or "")
                 if att:
                     known_paths.add(_norm_path_key(att))
-                    if Path(att).is_file():
-                        try:
-                            known_hashes.add(file_hash(Path(att)))
-                        except Exception:
-                            pass
+                    attachment_paths.append(att)
             folder_supplier: dict[str, str] = {}
             for f in self._config.get("folders", []) or []:
                 sup = self._resolve_register_supplier(
@@ -1308,7 +1885,12 @@ class WatchManager(QObject):
                     "",
                 )
 
-            healed = 0
+            # Steg 1: hitta de få poster som alls kan behöva självläkas.
+            # Att hasha alla registrerade original vid varje poll var
+            # dyrt (tusentals filer) och gav appen frysningar. Hasharna
+            # beräknas nu bara om någon post faktiskt saknar en
+            # sökvägs-/nummerkoppling.
+            pending: list[tuple[str, dict, str, str]] = []
             for digest, info in list(
                 self._config.get("processed", {}).items()
             ):
@@ -1319,14 +1901,28 @@ class WatchManager(QObject):
                     continue
                 if _norm_path_key(fpath) in known_paths:
                     continue
-                if digest in known_hashes:
-                    continue
                 nr = str(
                     info.get("invoice_number", "") or ""
                 ).strip().lower()
-                if nr and (
-                    _supplier_of(fpath), nr
-                ) in known_numbers:
+                if nr and (_supplier_of(fpath), nr) in known_numbers:
+                    continue
+                pending.append((digest, info, fpath, nr))
+            known_hashes: set[str] = set()
+            if pending:
+                known_hashes = {
+                    digest
+                    for digest in (
+                        self._file_digest(Path(att))
+                        for att in attachment_paths
+                    )
+                    if digest
+                }
+
+            healed = 0
+            for digest, info, fpath, nr in pending:
+                if digest in known_hashes:
+                    continue
+                if nr and (_supplier_of(fpath), nr) in known_numbers:
                     continue
                 log.warning(
                     "SCAN_WATCH: %s står som importerad men "
@@ -1412,16 +2008,23 @@ class WatchManager(QObject):
             self._settle_timer.start(FILE_STABILITY_RECHECK_MS)
 
     def _file_is_stable(
-        self, path: Path, signature: tuple[int, int, int]
+        self, path: Path, signature: tuple[int, int, int],
+        known: bool = False,
     ) -> bool:
         """Require an unchanged size/time signature over a quiet interval.
 
         Samples are cached after a successful stability check, so regular
         polls do not add a delay to files already known to be unchanged.
         A changed signature invalidates that cache and starts a fresh wait.
+
+        ``known`` betyder att exakt den här filversionen redan har hashats
+        (finns i hash-cachen) — då är den per definition färdigskriven och
+        behöver varken väntetid eller ny kontroll.
         """
         key = _norm_path_key(str(path))
-        if self._stable_signatures.get(key) == signature:
+        if known or self._stable_signatures.get(key) == signature:
+            self._stability_samples.pop(key, None)
+            self._stable_signatures[key] = signature
             return True
         if FILE_STABILITY_SECONDS <= 0:
             self._stability_samples.pop(key, None)
@@ -1445,6 +2048,46 @@ class WatchManager(QObject):
         return False
 
     def scan_folder(self, entry: dict, force: bool = False) -> None:
+        """Skanning av EN mapp, färdig innan anropet returnerar.
+
+        Driver samma stegvisa skanning som bakgrundsläget, men tolkar
+        filerna direkt i den här tråden. Används av scan_all(),
+        reprocess_parked() och tester; den återkommande bevakningen
+        använder start_scan() som aldrig blockerar GUI-tråden.
+        """
+        generator = self._iter_scan_folder(entry, force=force)
+        si = None
+        try:
+            request = next(generator)
+            while True:
+                if (
+                    isinstance(request, dict)
+                    and request.get("kind") == "analyze"
+                ):
+                    if si is None:
+                        si = self._scan_module()
+                    try:
+                        result = self._parse_file(
+                            si, entry, Path(str(request.get("path", "")))
+                        )
+                    except Exception as exc:
+                        request = generator.throw(exc)
+                    else:
+                        request = generator.send(result)
+                else:
+                    request = next(generator)
+        except StopIteration:
+            return
+
+    def _iter_scan_folder(self, entry: dict, force: bool = False):
+        """Stegvis skanning av en mapp.
+
+        Yieldar ``{"kind": "analyze", ...}`` när en fil behöver tolkas
+        (tung OCR/textutdrag) och tar emot ``(text, metod, tolkning)``
+        via ``send()``. ``{"kind": "pause"}`` ger GUI-tråden en chans att
+        rita om mellan filerna. All bokföring — stabilitet, hash-cache,
+        parkering, statistik — sker i den här generatorn.
+        """
         folder = Path(str(entry.get("path", "")))
         if not folder.is_dir():
             key = str(folder)
@@ -1456,10 +2099,13 @@ class WatchManager(QObject):
                     folder, entry.get("supplier", "?"),
                 )
             return
-        si = None
-        for path in supported_invoice_files(folder):
-            if not path.is_file():
-                continue
+        seen = 0
+        last_pause = time.monotonic()
+        for path in iter_invoice_files(folder):
+            seen += 1
+            if seen % 20 == 0 or time.monotonic() - last_pause > 0.02:
+                last_pause = time.monotonic()
+                yield {"kind": "pause"}
             try:
                 before = path.stat()
             except FileNotFoundError:
@@ -1474,52 +2120,82 @@ class WatchManager(QObject):
                 int(before.st_ctime_ns),
             )
             path_key = _norm_path_key(str(path))
-            if not self._file_is_stable(path, signature):
+            # Redan hashad version → ingen väntan på skrivslut och ingen
+            # omhashning. Det här är vad som gör pollningen billig även
+            # med tusentals redan inlästa original.
+            digest = self._cached_digest(path, signature)
+            # Redan registrerade original behöver ingen väntan på
+            # skrivslut — de ska bara hashas (ur cachen när de är
+            # oförändrade) och räknas som redan bearbetade.
+            if not self._file_is_stable(
+                path,
+                signature,
+                known=(
+                    digest is not None
+                    or path_key in self._processed_path_keys
+                ),
+            ):
                 continue
-            try:
-                digest = file_hash(path)
-                after = path.stat()
-            except FileNotFoundError:
-                self._stable_signatures.pop(path_key, None)
-                continue
-            except Exception as exc:
-                self._record_scan_error(str(path), "hasha", "", exc)
-                continue
-            after_signature = (
-                int(after.st_size),
-                int(after.st_mtime_ns),
-                int(after.st_ctime_ns),
-            )
-            if after_signature != signature:
-                # Filen började ändras medan hashen lästes. Kasta resultatet
-                # och starta om stabilitetsfönstret med den nya versionen.
-                self._stable_signatures.pop(path_key, None)
-                self._stability_samples[path_key] = (
-                    after_signature, time.monotonic()
+            if digest is None:
+                try:
+                    digest = file_hash(path)
+                    after = path.stat()
+                except FileNotFoundError:
+                    self._stable_signatures.pop(path_key, None)
+                    continue
+                except Exception as exc:
+                    self._record_scan_error(str(path), "hasha", "", exc)
+                    continue
+                after_signature = (
+                    int(after.st_size),
+                    int(after.st_mtime_ns),
+                    int(after.st_ctime_ns),
                 )
-                self._scan_stats["settling"] = (
-                    self._scan_stats.get("settling", 0) + 1
-                )
-                self._schedule_stability_check()
-                continue
+                if after_signature != signature:
+                    # Filen började ändras medan hashen lästes. Kasta
+                    # resultatet och starta om stabilitetsfönstret.
+                    self._stable_signatures.pop(path_key, None)
+                    self._stability_samples[path_key] = (
+                        after_signature, time.monotonic()
+                    )
+                    self._scan_stats["settling"] = (
+                        self._scan_stats.get("settling", 0) + 1
+                    )
+                    self._schedule_stability_check()
+                    continue
+                self._remember_digest(path, signature, digest)
+
             if digest in self._config["processed"]:
                 if force:
-                    try:
-                        if si is None:
-                            si = self._scan_module()
-                        controlled = self._control_check_file(
-                            si, entry, path, digest
+                    info = (
+                        self._config["processed"].get(digest) or {}
+                    )
+                    inv = self._find_invoice_for_file(
+                        entry, path, digest, info
+                    )
+                    if inv is None:
+                        log.info(
+                            "SCAN_WATCH kontroll: %s är bearbetad men "
+                            "fakturan saknas i registret — läses in "
+                            "på nytt",
+                            path.name,
                         )
-                    except Exception as exc:
-                        self._record_scan_error(
-                            str(path), "kontrolläsa", digest, exc
-                        )
+                        self.unprocess(digest)
+                    else:
+                        try:
+                            text, method, parsed = yield {
+                                "kind": "analyze",
+                                "path": str(path),
+                                "entry": entry,
+                                "stage": "kontrolläsa",
+                            }
+                        except Exception as exc:
+                            self._record_scan_error(
+                                str(path), "kontrolläsa", digest, exc
+                            )
+                            continue
+                        self._control_check_parsed(inv, path, digest, parsed)
                         continue
-                    if controlled:
-                        continue
-                    # Ingen faktura i registret hör till filen
-                    # längre — kontrollen tog bort markeringen,
-                    # så filen läses in som ny nedan.
                 else:
                     self._reported_file_errors.pop(str(path), None)
                     self.file_recovered.emit(str(path))
@@ -1561,15 +2237,19 @@ class WatchManager(QObject):
                 self._config["parked"].remove(parked_entry)
                 self._save()
             try:
-                if si is None:
-                    si = self._scan_module()
-                self._process_file(si, entry, path, digest)
+                text, method, parsed = yield {
+                    "kind": "analyze",
+                    "path": str(path),
+                    "entry": entry,
+                    "stage": "läsa/tolka",
+                }
             except Exception as exc:
                 # Ett trasigt/skyddat original får aldrig stoppa resten av
                 # mappen eller markeras som bearbetat. Nästa skanning prövar
                 # filen igen; övriga original fortsätter normalt.
                 self._record_scan_error(str(path), "läsa/tolka", digest, exc)
                 continue
+            self._process_parsed(entry, path, digest, text, method, parsed)
             self._reported_file_errors.pop(str(path), None)
             self.file_recovered.emit(str(path))
 
@@ -1580,11 +2260,8 @@ class WatchManager(QObject):
         påtvingad. Returnerar (text, metod, tolkning) — samma
         väg som registreringen använder, så en kontrolläsning
         bedöms exakt som den ursprungliga inläsningen."""
-        if self._extract_fn is not None:
-            text, method = self._extract_fn(path)
-        else:
-            text, method = si.extract_text(path)
-        templates = {}
+        suppliers = self._suppliers()
+        templates: dict = {}
         if self._templates_provider is not None:
             try:
                 templates = self._templates_provider() or {}
@@ -1592,105 +2269,21 @@ class WatchManager(QObject):
                 templates = {}
         # Missing/corrupt learning memory means zero confirmations,
         # never implicit trust in a saved custom template.
-        learning = {}
+        learning: dict = {}
         if self._learning_provider is not None:
             try:
                 learning = self._learning_provider() or {}
             except Exception:
                 learning = {}
-        parse_file = getattr(si, "parse_invoice_file", None)
-        if parse_file is not None:
-            try:
-                parsed = parse_file(
-                    path, text or "", self._suppliers(),
-                    templates=templates, match_learning=learning,
-                )
-            except TypeError:
-                parsed = parse_file(
-                    path, text or "", self._suppliers(),
-                    templates=templates,
-                )
-        else:
-            parsed = si.parse_invoice_text(
-                text or "", self._suppliers(), templates=templates,
-                match_learning=learning,
-            )
-        folder_supplier = str(entry.get("supplier", "")).strip()
-        if folder_supplier:
-            resolved = self._resolve_register_supplier(folder_supplier)
-            if resolved and resolved != folder_supplier:
-                log.info(
-                    "SCAN_WATCH: mappens leverantör '%s' → "
-                    "registerposten '%s'",
-                    folder_supplier, resolved,
-                )
-                folder_supplier = resolved
-            parsed_supplier = str(parsed.get("supplier", "") or "").strip()
-            names_match = getattr(si, "_names_match", None)
-            same_supplier = bool(
-                parsed_supplier
-                and (
-                    parsed_supplier.lower() == folder_supplier.lower()
-                    or (
-                        callable(names_match)
-                        and names_match(parsed_supplier, folder_supplier)
-                    )
-                )
-            )
-            if parsed.get("match_uncertain"):
-                # Mappens leverantör är bara ännu en kandidat när
-                # tolkningen själv är osäker — den får inte tyst
-                # avgöra valet åt användaren.
-                candidates = [
-                    str(c).strip()
-                    for c in parsed.get("match_candidates", []) or []
-                    if str(c).strip()
-                ]
-                if folder_supplier.lower() not in {
-                    c.lower() for c in candidates
-                }:
-                    candidates.append(folder_supplier)
-                parsed["match_candidates"] = candidates
-                parsed["folder_supplier_candidate"] = folder_supplier
-                if "leverantör" not in parsed.get("missing", []):
-                    parsed.setdefault("missing", []).append("leverantör")
-            elif parsed_supplier and not same_supplier:
-                # Fakturans egen starka leverantörsträff och
-                # mappens kopplade leverantör pekar åt olika håll.
-                # Det är en konflikt användaren ska avgöra, inte
-                # något mappinställningen får köra över i tysthet.
-                parsed["supplier"] = ""
-                parsed["match_uncertain"] = True
-                parsed["match_candidates"] = [
-                    parsed_supplier, folder_supplier,
-                ]
-                parsed["match_reason"] = "competing"
-                parsed["match_kind"] = "supplier"
-                parsed["folder_supplier_candidate"] = folder_supplier
-                if "leverantör" not in parsed.get("missing", []):
-                    parsed.setdefault("missing", []).append("leverantör")
-            else:
-                parsed["supplier"] = folder_supplier
-                parsed["missing"] = [
-                    m for m in parsed.get("missing", [])
-                    if m != "leverantör"
-                ]
-        if "ocr-saknas" in str(method) or "ocr-fel" in str(method):
-            parsed["ocr_warning"] = str(method)
-        assessor = getattr(si, "assess_invoice_payment_details", None)
-        if callable(assessor):
-            parsed = assessor(
-                parsed, text or "", self._suppliers(),
-                details=parsed.get("invoice_payment_details"),
-            )
-        template_guard = getattr(
-            si, "require_template_confirmation", None
+        return parse_watched_file(
+            si,
+            path,
+            str(entry.get("supplier", "") or ""),
+            suppliers,
+            templates,
+            learning,
+            extract_fn=self._extract_fn,
         )
-        if callable(template_guard):
-            parsed = template_guard(
-                parsed, templates, learning, self._suppliers()
-            )
-        return text, method, parsed
 
     def _find_invoice_for_file(
         self, entry: dict, path: Path, digest: str, info: dict
@@ -1708,11 +2301,8 @@ class WatchManager(QObject):
         for inv in invoices:
             att = str(inv.get("attachment", "") or "")
             if att and Path(att).is_file():
-                try:
-                    if file_hash(Path(att)) == digest:
-                        return inv
-                except Exception:
-                    continue
+                if self._file_digest(Path(att)) == digest:
+                    return inv
         supplier = self._resolve_register_supplier(
             str(entry.get("supplier", "") or "")
         ).strip().lower()
@@ -1732,16 +2322,13 @@ class WatchManager(QObject):
     def _control_check_file(
         self, si: Any, entry: dict, path: Path, digest: str
     ) -> bool:
-        """Kontrolläs en REDAN bearbetad fil mot registret.
+        """Kontrolläs en REDAN bearbetad fil mot registret (synkront).
 
-        Fakturans original tolkas på nytt med dagens mallar och
-        jämförs med det registrerade — avvikelser räknas och
-        loggas (last_control_diffs), men registrerade data
-        ändras ALDRIG av kontrollen; rättning sker per faktura
-        via Fakturor-flikens omskanning. Returnerar True när
-        filen är färdigkontrollerad; False när ingen faktura
-        hör till filen längre (bearbetningsmarkeringen tas
-        då bort och anroparen läser in filen som ny)."""
+        Tolkningen kan också köras i arbetstråden; den här varianten
+        finns för scan_all(), reprocess_parked() och tester. Returnerar
+        True när filen är färdigkontrollerad; False när ingen faktura
+        hör till filen längre (bearbetningsmarkeringen tas då bort och
+        anroparen läser in filen som ny)."""
         info = self._config.get("processed", {}).get(digest, {}) or {}
         inv = self._find_invoice_for_file(entry, path, digest, info)
         if inv is None:
@@ -1759,6 +2346,17 @@ class WatchManager(QObject):
                 str(path), "kontrolläsa", digest, exc
             )
             return True
+        self._control_check_parsed(inv, path, digest, parsed)
+        return True
+
+    def _control_check_parsed(
+        self, inv: dict, path: Path, digest: str, parsed: dict
+    ) -> None:
+        """Jämför en färdigtolkad fil med den registrerade fakturan.
+
+        Registrerade data ändras ALDRIG härifrån; avvikelser räknas och
+        loggas (last_control_diffs) för rättning per faktura i
+        Fakturor-fliken."""
         self._reported_file_errors.pop(str(path), None)
         changes = invoice_control_changes(inv, parsed)
         self.file_recovered.emit(str(path))
@@ -1766,7 +2364,7 @@ class WatchManager(QObject):
             self._scan_stats["already"] = (
                 self._scan_stats.get("already", 0) + 1
             )
-            return True
+            return
         self._scan_stats["changed"] = (
             self._scan_stats.get("changed", 0) + 1
         )
@@ -1790,11 +2388,20 @@ class WatchManager(QObject):
             path.name,
             inv.get("invoice_number", "?"), detail,
         )
-        return True
 
     def _process_file(self, si: Any, entry: dict, path: Path,
                       digest: str) -> None:
+        """Tolkar och hanterar en fil synkront (scan_all/tester)."""
         text, method, parsed = self._parse_file(si, entry, path)
+        self._process_parsed(entry, path, digest, text, method, parsed)
+
+    def _process_parsed(self, entry: dict, path: Path, digest: str,
+                        text: str, method: str, parsed: dict) -> None:
+        """Klassificerar en färdigtolkad fil (körs alltid i GUI-tråden).
+
+        Registreringen/parkeringen sker här, aldrig i arbetstråden, så
+        att konfiguration, register och vyer bara rörs från en tråd.
+        """
         # Leverantören måste finnas i registret för auto-registrering,
         # annars parkeras filen för granskning i stället.
         known = {
@@ -1854,6 +2461,9 @@ class WatchManager(QObject):
                 "file": Path(final_path).name,
                 "result": "duplicate-invoice",
             }
+            self._processed_path_keys.add(
+                _norm_path_key(str(final_path))
+            )
             self._save()
             self._scan_stats["duplicate"] += 1
             log.info(
@@ -1959,6 +2569,7 @@ class WatchManager(QObject):
             "result": "imported",
             "invoice_number": str(parsed.get("invoice_number", "") or ""),
         }
+        self._processed_path_keys.add(_norm_path_key(str(final_path)))
         self._save()
         self.invoice_ready.emit(row, str(final_path))
         self._scan_stats["imported"] += 1
@@ -1968,7 +2579,7 @@ class WatchManager(QObject):
         )
 
     def scan_now(self) -> None:
-        self.scan_all()
+        self.start_scan()
 
 
 class WatchFolderDialog(QDialog):

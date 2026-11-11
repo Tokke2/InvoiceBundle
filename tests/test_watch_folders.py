@@ -31,6 +31,33 @@ def _qapp():
     return QApplication.instance() or QApplication([])
 
 
+def _await_scan(mgr, timeout_ms: int = 15000) -> bool:
+    """Kör händelseloopen tills en pågående bakgrundsskanning är klar.
+
+    Automatiska skanningar går i bakgrunden (tolkningen sker i en
+    arbetstråd) och behöver därför en snurrande händelseloop även i test.
+    """
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    finished: list[bool] = []
+
+    def _on_finished(_stats):
+        finished.append(True)
+        # En skanning som coalescats medan den pågick startar om direkt;
+        # vänta tills kön är tom så testet ser slutresultatet.
+        if not mgr.is_scanning:
+            loop.quit()
+
+    if not getattr(mgr, "is_scanning", False):
+        return False
+    loop = QEventLoop()
+    mgr.scan_finished.connect(_on_finished)
+    QTimer.singleShot(timeout_ms, loop.quit)
+    loop.exec()
+    mgr.scan_finished.disconnect(_on_finished)
+    return bool(finished)
+
+
 TEXT = """\
 PILKINGTON GLAS AB
 Fakturanr: 9911
@@ -1278,8 +1305,9 @@ def test_watch_review_parked_registers_when_auto_enabled(tmp_path):
     mgr.scan_all()
     assert not ready
     assert mgr.last_scan_stats["waiting"] == 1
-    # Slå PÅ auto → omgården släpps
+    # Slå PÅ auto → omgården släpps (skanningen körs i bakgrunden)
     mgr.set_auto_create(True)
+    assert _await_scan(mgr)
     assert len(ready) == 1
     assert not mgr.parked
     assert mgr.last_scan_stats["waiting"] == 0
@@ -1456,3 +1484,104 @@ def test_watch_control_check_missing_invoice_unprocesses(tmp_path):
     )
     assert handled is False
     assert digest not in mgr._config["processed"]
+
+
+def test_watch_unchanged_files_are_not_rehashed_on_every_poll(
+    tmp_path, monkeypatch,
+):
+    """En vanlig poll får inte hasha om tusentals oförändrade original.
+
+    Hash-cachen är det som gör 30-sekunderspollningen billig: samma
+    filversion läses en gång, därefter räcker storlek/tid.
+    """
+    _qapp()
+    import ui.watch_folders as watch_ui
+
+    mgr, folder = _manager(tmp_path)
+    _persist_emitted(mgr)
+    (folder / "f1.pdf").write_bytes(b"%PDF-fake-1")
+    mgr.scan_all()
+    assert mgr.last_scan_stats["imported"] == 1
+
+    calls = {"n": 0}
+    real_hash = watch_ui.file_hash
+
+    def counting_hash(path):
+        calls["n"] += 1
+        return real_hash(path)
+
+    monkeypatch.setattr(watch_ui, "file_hash", counting_hash)
+    mgr.scan_all()
+    first_poll = calls["n"]
+    mgr.scan_all()
+    assert calls["n"] == first_poll, "oförändrad fil hashas om igen"
+    assert mgr.last_scan_stats["already"] == 1
+
+
+def test_watch_registered_file_skips_write_settling(tmp_path, monkeypatch):
+    """Ett redan inläst original ska inte räknas som 'skrivs fortfarande'.
+
+    Stabilitetsfönstret behövs bara för filer som inte redan är
+    registrerade — annars visade statusraden tusentals väntande filer
+    vid varje omstart.
+    """
+    _qapp()
+    import ui.watch_folders as watch_ui
+
+    mgr, folder = _manager(tmp_path)
+    _persist_emitted(mgr)
+    src = folder / "f1.pdf"
+    src.write_bytes(b"%PDF-fake-1")
+    mgr.scan_all()
+    assert mgr.last_scan_stats["imported"] == 1
+
+    monkeypatch.setattr(watch_ui, "FILE_STABILITY_SECONDS", 30.0)
+    mgr.scan_all()
+    assert mgr.last_scan_stats["already"] == 1
+    assert mgr.last_scan_stats["settling"] == 0
+
+
+def test_watch_background_scan_does_not_block_caller(
+    tmp_path, monkeypatch,
+):
+    """start_scan() ska återvända direkt; tolkningen sker i arbetstråd."""
+    _qapp()
+    from PySide6.QtCore import QThreadPool
+
+    import ui.watch_folders as watch_ui
+
+    mgr, folder = _manager(tmp_path)
+    _persist_emitted(mgr)
+    # Låt mappens första (automatiska) skanning bli klar först.
+    _await_scan(mgr)
+    (folder / "f1.pdf").write_bytes(b"%PDF-fake-1")
+
+    def slow_parse(*_args, **_kwargs):
+        time.sleep(0.35)
+        return ("", "test", {
+            "supplier": "Pilkington",
+            "invoice_number": "9911",
+            "date": "2026-09-01",
+            "due_date": "2026-10-01",
+            "total_amount": 1250.0,
+            "missing": [],
+            "template": "Pilkington",
+        })
+
+    monkeypatch.setattr(watch_ui, "parse_watched_file", slow_parse)
+    finished = []
+    mgr.scan_finished.connect(lambda stats: finished.append(stats))
+
+    started = time.monotonic()
+    mgr.start_scan()
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.2, f"start_scan blockerade i {elapsed:.2f} s"
+    assert mgr.is_scanning
+
+    assert _await_scan(mgr)
+    QThreadPool.globalInstance().waitForDone(5000)
+
+    assert finished, "bakgrundsskanningen avslutades aldrig"
+    assert not mgr.is_scanning
+    assert finished[-1]["imported"] == 1
+    assert mgr._app._invoices

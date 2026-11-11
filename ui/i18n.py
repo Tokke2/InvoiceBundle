@@ -634,6 +634,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     "watch.folder_watch_tooltip": {"sv": "Händelsebevakning på {watched} av {total} kataloger. Hela mappträdet skannas återkommande även om vissa kataloger saknar händelsebevakning.", "en": "Event monitoring on {watched} of {total} directories. The full folder tree is rescanned periodically even when some directories lack event monitoring."},
     "watch.parked": {"sv": "⏸  {n} fil(er) väntar på granskning", "en": "⏸  {n} file(s) awaiting review"},
     "watch.settling": {"sv": "⏳ {n} fil(er) skrivs fortfarande", "en": "⏳ {n} file(s) still being written"},
+    "watch.scanning": {"sv": "🔎 Skannar bevakade mappar i bakgrunden — appen är användbar medan den pågår …", "en": "🔎 Scanning watched folders in the background — the app stays usable while it runs …"},
+    "watch.scanning_short": {"sv": "🔎 skannar …", "en": "🔎 scanning …"},
     "watch.last_scan": {"sv": "Senaste kontroll {time}", "en": "Last check {time}"},
     "watch.waiting_first_scan": {"sv": "Väntar på första kontrollen …", "en": "Waiting for the first check …"},
     "watch.review": {"sv": "Granska i tabellen", "en": "Review in table"},

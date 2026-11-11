@@ -1953,6 +1953,12 @@ class ScanImportView(QWidget):
                 self._on_watch_file_recovered
             )
             self._watch.changed.connect(self._refresh_watch_ui)
+            self._watch.scan_started.connect(
+                self._on_watch_scan_started
+            )
+            self._watch.scan_finished.connect(
+                self._on_watch_scan_finished
+            )
             self._chk_auto_watch.setChecked(self._watch.auto_create)
             self._refresh_watch_ui()
             # Osäkra parkeringar hör hemma i Import-tabellen —
@@ -2279,6 +2285,8 @@ class ScanImportView(QWidget):
         settling = stats.get("settling", 0)
         errors = watch.active_error_count if watch else 0
         labels = []
+        if watch and getattr(watch, "is_scanning", False):
+            labels.append(tr("watch.scanning_short"))
         if n:
             labels.append(tr("watch.parked", n=n))
         if settling:
@@ -2324,35 +2332,19 @@ class ScanImportView(QWidget):
     def _scan_watch_now(self) -> None:
         """Manuell skanning av alla bevakade mappar (knapp).
 
-        Samma skanning som annars sker vid start, mappändring
-        och var 30:e sekund — men på begäran, med återkoppling
-        i statusraden. Detaljer per fil hamnar i loggen
-        (SCAN_WATCH)."""
+        Skanningen körs i bakgrunden (tolkningen sker i en arbetstråd)
+        så att fönstret aldrig låser sig medan stora mappar gås igenom.
+        Resultatet visas i statusraden när den är klar. Detaljer per fil
+        hamnar i loggen (SCAN_WATCH)."""
         if not self._watch:
             return
         if not self._watch.folders:
             self._lbl_status.setText(tr("watch.scan_none"))
             return
-        self._watch.scan_all()
+        self._manual_scan_kind = "scan"
+        self._lbl_status.setText(tr("watch.scanning"))
+        self._watch.start_scan()
         self._refresh_watch_ui()
-        stats = self._watch.last_scan_stats
-        self._lbl_status.setText(
-            tr(
-                "watch.scan_done",
-                imported=stats.get("imported", 0),
-                duplicate=stats.get("duplicate", 0),
-                parked=stats.get("parked", 0),
-                already=stats.get("already", 0),
-                settling=stats.get("settling", 0),
-                errors=max(
-                    stats.get("errors", 0), self._watch.active_error_count
-                ),
-            )
-        )
-        log.info(
-            "SCAN_WATCH: manuell skanning klar — %s",
-            stats,
-        )
 
     def _control_scan_now(self) -> None:
         """Kontrollskanning (knapp): läs om ÄVEN redan inlästa
@@ -2362,34 +2354,79 @@ class ScanImportView(QWidget):
         tolkar dem på nytt med dagens mallar och rapporterar
         avvikelser (statusraden + loggen), utan att ändra
         något registrerat — rättning sker per faktura i
-        Fakturor-fliken via högerklick → Skanna om faktura."""
+        Fakturor-fliken via högerklick → Skanna om faktura.
+        Även denna skanning körs i bakgrunden."""
         if not self._watch:
             return
         if not self._watch.folders:
             self._lbl_status.setText(tr("watch.scan_none"))
             return
-        self._watch.scan_all(force=True)
+        self._manual_scan_kind = "control"
+        self._lbl_status.setText(tr("watch.scanning"))
+        self._watch.start_scan(force=True)
         self._refresh_watch_ui()
-        stats = self._watch.last_scan_stats
-        self._lbl_status.setText(
-            tr(
-                "watch.control_done",
-                imported=stats.get("imported", 0),
-                duplicate=stats.get("duplicate", 0),
-                parked=stats.get("parked", 0),
-                already=stats.get("already", 0),
-                changed=stats.get("changed", 0),
-                settling=stats.get("settling", 0),
-                errors=max(
-                    stats.get("errors", 0), self._watch.active_error_count
-                ),
+
+    def _on_watch_scan_started(self) -> None:
+        """Bevakningen har börjat skanna — visa det, lås aldrig vyn.
+
+        Statusraden lämnas orörd: den automatiska pollningen var 30:e
+        sekund ska inte skriva över användarens senaste besked. Att en
+        skanning pågår syns i stället i bevakningsraden.
+        """
+        self._refresh_watch_ui()
+
+    def _on_watch_scan_finished(self, stats: dict | None = None) -> None:
+        """Bakgrundsskanningen är klar.
+
+        Resultatet skrivs i statusraden bara när användaren själv
+        startade skanningen; den återkommande pollningen uppdaterar
+        enbart bevakningsraden (senaste kontroll, parkerade filer).
+        """
+        if self._watch is None:
+            return
+        stats = stats or self._watch.last_scan_stats
+        stats = dict(stats)
+        manual_kind = getattr(self, "_manual_scan_kind", None)
+        self._manual_scan_kind = None
+        self._refresh_watch_ui()
+        if not manual_kind:
+            return
+        errors = max(
+            stats.get("errors", 0), self._watch.active_error_count
+        )
+        if manual_kind == "control":
+            self._lbl_status.setText(
+                tr(
+                    "watch.control_done",
+                    imported=stats.get("imported", 0),
+                    duplicate=stats.get("duplicate", 0),
+                    parked=stats.get("parked", 0),
+                    already=stats.get("already", 0),
+                    changed=stats.get("changed", 0),
+                    settling=stats.get("settling", 0),
+                    errors=errors,
+                )
             )
-        )
-        log.info(
-            "SCAN_WATCH: manuell kontrollskanning klar — %s, "
-            "avvikelser=%s",
-            stats, self._watch.last_control_diffs,
-        )
+            log.info(
+                "SCAN_WATCH: kontrollskanning klar — %s, avvikelser=%s",
+                stats, self._watch.last_control_diffs,
+            )
+        else:
+            self._lbl_status.setText(
+                tr(
+                    "watch.scan_done",
+                    imported=stats.get("imported", 0),
+                    duplicate=stats.get("duplicate", 0),
+                    parked=stats.get("parked", 0),
+                    already=stats.get("already", 0),
+                    settling=stats.get("settling", 0),
+                    errors=errors,
+                )
+            )
+            log.info(
+                "SCAN_WATCH: skanning klar — %s",
+                stats,
+            )
 
     def _toggle_watch_auto(self, state) -> None:
         if self._watch:
