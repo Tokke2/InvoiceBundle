@@ -82,6 +82,10 @@ pytest tests/              # eller utan pytest:
 python tests/test_core.py
 ```
 
+## Loggar
+
+Allt som appen skriver hamnar i `<appmapp>/logs/`: `app.log` (huvudlogg), `felsamling.log` (alla fel på ett ställe, utan dubbletter) och autostartloggen. Felsamlingen visar samma fel en gång även om det både speglats direkt och skördats ur äldre loggar; status och antal träffar finns i `logs/felstatus.json`.
+
 ## Licens
 
 Ingen öppen licens är vald. Fritt att använda. Inte fritt att kopiera, ändra eller sälja vidare. Donation är frivillig.
@@ -158,6 +162,10 @@ python main.py
 pytest tests/              # or without pytest:
 python tests/test_core.py
 ```
+
+## Logs
+
+Everything the app writes ends up in `<app folder>/logs/`: `app.log` (main log), `felsamling.log` (all errors in one place, without duplicates) and the autostart log. The error journal lists a given error once even if it was both mirrored directly and harvested from older logs; status and hit counts are kept in `logs/felstatus.json`.
 
 ## Licence
 

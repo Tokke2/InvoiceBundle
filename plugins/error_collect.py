@@ -35,8 +35,10 @@ import hashlib
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Any
@@ -69,6 +71,10 @@ _TRACEBACK_MARK = "Traceback (most recent call last)"
 _LINE_MARKERS = (
     " ERROR ", " CRITICAL ", " ERROR:", " FAIL ", "FEL:", "[ERROR]"
 )
+
+
+#: Svansen "  (modul:rad)" som spegelns rader har.
+_LOC_SUFFIX_RE = re.compile(r"\s+\([^()\s]+:\d+\)\s*$")
 
 
 def error_log_path(root: Path | None = None) -> Path:
@@ -325,6 +331,80 @@ def resolve_stale_error_issues(
     return len(transitions)
 
 
+def _dedupe_key(line: str) -> str:
+    """Jämförelsenyckel för en felsamlingsrad.
+
+    Samma fel kan komma från flera källor: spegelns rad har en
+    ``(modul:rad)``-svans, skörden ur en textlogg har ``[källa]``-prefix
+    och annan indentering. Utan normalisering blev det två kopior av
+    samma händelse i felsamlingen.
+    """
+    body = str(line or "").strip()
+    if body.startswith("[") and "] " in body:
+        body = body.split("] ", 1)[1]
+    body = _LOC_SUFFIX_RE.sub("", body)
+    return " ".join(body.split())
+
+
+#: Datum/tid i början av en skördad rad ("2026-11-11T14:09:39 ...").
+_STAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]")
+
+
+def _strip_source(line: str) -> str:
+    """Ta bort källprefixet "[autostart.log] " som skörden sätter."""
+    body = str(line or "")
+    if body.startswith("[") and "] " in body:
+        body = body.split("] ", 1)[1]
+    return body
+
+
+def _is_block_header(line: str) -> bool:
+    """True för en felhuvudrad (inte en traceback-fortsättning)."""
+    body = str(line or "")
+    if not body:
+        return False
+    has_source = body.startswith("[") and "] " in body
+    body = _strip_source(body)
+    if not body or body[:1].isspace():
+        return False
+    # "RuntimeError: ..." i slutet av en traceback är ingen ny rubrik.
+    return has_source or bool(_STAMP_RE.match(body))
+
+
+def _iter_error_blocks(lines: list[str]):
+    """Dela in skördade rader i (huvudnyckel, rader)-block.
+
+    Ett traceback hör till sin huvudrad: blir huvudet en dubblett ska
+    hela blocket hoppas över, annars blir det kvarhängande tracebacks
+    i felsamlingen.
+    """
+    def finish(lines_in_block: list[str]) -> str:
+        """Nyckel för blocket — traceback-rader känns igen på innehållet.
+
+        En naken "Traceback ..."-rad utan tidsstämpel säger inget om
+        vilket fel det gäller, så hela blocket hashas. Annars skulle
+        två helt olika krascher räknas som samma dubblett.
+        """
+        first = _dedupe_key(lines_in_block[0])
+        if _STAMP_RE.match(_strip_source(lines_in_block[0])):
+            return first
+        body = "\n".join(_dedupe_key(ln) for ln in lines_in_block)
+        return first + "#" + hashlib.sha1(
+            body.encode("utf-8", "replace")
+        ).hexdigest()[:12]
+
+    block: list[str] = []
+    for line in lines:
+        if _is_block_header(line):
+            if block:
+                yield finish(block), block
+            block = [line]
+        else:
+            block.append(line)
+    if block:
+        yield finish(block), block
+
+
 def _fmt(ts: str, level: str, logger: str, msg: str,
          loc: str = "") -> str:
     line = f"{ts} | {level} | {logger} | {msg}"
@@ -336,12 +416,50 @@ def _fmt(ts: str, level: str, logger: str, msg: str,
 class ErrorMirrorHandler(logging.Handler):
     """Speglar varje ERROR/CRITICAL-post direkt till felsamlingen."""
 
+    #: Samma fel som upprepas inom den här tiden skrivs en gång —
+    #: frekvensen finns ändå kvar i felstatus.json (occurrences).
+    REPEAT_WINDOW_SECONDS = 300.0
+
     def __init__(self, path: Path) -> None:
         super().__init__(level=logging.ERROR)
         self._path = Path(path)
+        self._last_written: dict[tuple[str, ...], float] = {}
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
+            exc_text = (
+                "".join(traceback.format_exception(*record.exc_info))
+                if record.exc_info else ""
+            )
+            signature = (
+                str(record.levelname), str(record.name),
+                record.getMessage(), exc_text[:2000],
+            )
+            now = time.monotonic()
+            previous = self._last_written.get(signature)
+            if (
+                previous is not None
+                and now - previous < self.REPEAT_WINDOW_SECONDS
+            ):
+                # Stormskydd: en felande hook som upprepas varje gång en
+                # widget stängs får inte fylla hela felsamlingen.
+                record_error_issue(
+                    self._path.parent.parent,
+                    level=record.levelname,
+                    logger=record.name,
+                    message=record.getMessage(),
+                    location=f"{record.module}:{record.lineno}",
+                    exception_type=(
+                        type(record.exc_info[1]).__name__
+                        if record.exc_info else ""
+                    ),
+                    traceback_text=exc_text,
+                    timestamp=datetime.datetime.fromtimestamp(record.created),
+                )
+                return
+            self._last_written[signature] = now
+            if len(self._last_written) > 500:
+                self._last_written.clear()
             ts = datetime.datetime.fromtimestamp(
                 record.created
             ).isoformat(timespec="seconds")
@@ -352,30 +470,24 @@ class ErrorMirrorHandler(logging.Handler):
                     f"{record.module}:{record.lineno}",
                 )
             ]
-            if record.exc_info:
-                exc = "".join(
-                    traceback.format_exception(*record.exc_info)
-                )
+            if exc_text:
                 lines.extend(
-                    "    " + ln for ln in exc.rstrip().splitlines()
+                    "    " + ln for ln in exc_text.rstrip().splitlines()
                 )
             self._path.parent.mkdir(parents=True, exist_ok=True)
             with open(self._path, "a", encoding="utf-8") as fh:
                 fh.write("\n".join(lines) + "\n")
-            exception_type = (
-                type(record.exc_info[1]).__name__ if record.exc_info else ""
-            )
-            exc = "".join(
-                traceback.format_exception(*record.exc_info)
-            ) if record.exc_info else ""
             record_error_issue(
                 self._path.parent.parent,
                 level=record.levelname,
                 logger=record.name,
                 message=record.getMessage(),
                 location=f"{record.module}:{record.lineno}",
-                exception_type=exception_type,
-                traceback_text=exc,
+                exception_type=(
+                    type(record.exc_info[1]).__name__
+                    if record.exc_info else ""
+                ),
+                traceback_text=exc_text,
                 timestamp=datetime.datetime.fromtimestamp(record.created),
             )
         except Exception:
@@ -514,6 +626,7 @@ def _scan_text_log(path: Path, source: str) -> list[str]:
                 if (
                     nxt.startswith((" ", "\t"))
                     or nxt.startswith("File ")
+                    or nxt.startswith(_TRACEBACK_MARK)
                     or _looks_like_exception_line(nxt)
                 ):
                     out.append(nxt)
@@ -609,7 +722,9 @@ def collect_errors(root: Path | None = None) -> dict[str, Any]:
                 ).splitlines()
                 if not ln.startswith("#")
             ]
-        seen = set(existing)
+        seen: set[str] = set()
+        for _key, block in _iter_error_blocks(existing):
+            seen.add(_key)
         fresh: list[str] = []
         error_events: list[dict[str, Any]] = []
         for src, kind in _source_logs(root):
@@ -623,10 +738,11 @@ def collect_errors(root: Path | None = None) -> dict[str, Any]:
                 error_events.extend(
                     _events_from_text_scan(src, src.name, scanned)
                 )
-            for line in scanned:
-                if line not in seen:
-                    seen.add(line)
-                    fresh.append(line)
+            for key, block in _iter_error_blocks(scanned):
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                fresh.extend(block)
         lines = existing + fresh
         path.write_text(
             _HEADER + "\n".join(lines) + ("\n" if lines else ""),

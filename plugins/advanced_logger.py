@@ -660,6 +660,57 @@ def attach_app_watchers(app: Any) -> None:
 _qt_bridge: "QtEventBridge | None" = None
 
 
+def _qt_is_valid(obj: Any) -> bool:
+    """True så länge ett Qt-objekts C++-del lever.
+
+    Signaler som ``editingFinished`` kan komma precis när en dialog rivs.
+    Då är QLineEdit redan förstörd och varje anrop (``text()``,
+    ``objectName()`` …) kastar ``RuntimeError: Internal C++ object …
+    already deleted``. Loggningen får aldrig bli den som kraschar appen.
+    """
+    if obj is None:
+        return False
+    try:
+        import shiboken6
+
+        return bool(shiboken6.isValid(obj))
+    except Exception:
+        pass
+    try:
+        obj.objectName()
+        return True
+    except RuntimeError:
+        return False
+    except Exception:
+        return True
+
+
+def _safe_qt_callback(callback: Any) -> Any:
+    """Gör en logg-callback ofarlig.
+
+    En widget kan ha stängts mellan signalen och anropet. Då hoppas
+    loggningen över i stället för att ett undantag tar sig upp till
+    ``sys.excepthook`` och skriver en CRITICAL-rad i felsamlingen.
+    """
+    def _wrapped(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return callback(*args, **kwargs)
+        except RuntimeError as exc:
+            text = str(exc)
+            if "already deleted" in text or "Internal C++ object" in text:
+                _plugin_log.debug(
+                    "UI-loggning hoppades över: widgetn är redan stängd"
+                )
+            else:
+                _plugin_log.debug("UI-loggning misslyckades: %s", exc)
+            return None
+        except Exception as exc:
+            _plugin_log.debug("UI-loggning misslyckades: %s", exc)
+            return None
+
+    return _wrapped
+
+
 class QtEventBridge(QObject):
     """
     Global eventfilter på QApplication — loggar VARJE användarhändelse:
@@ -825,7 +876,7 @@ def _install_ui_signal_loggers(main_window: Any) -> None:
                             f"Menyaktion: '{lbl}'",
                             logger="QtUI", aktion=lbl,
                         )
-                    return _f
+                    return _safe_qt_callback(_f)
 
                 try:
                     act.triggered.connect(_mk())
@@ -841,6 +892,8 @@ def _install_ui_signal_loggers(main_window: Any) -> None:
 
                 def _mk_c(c: QComboBox = combo):
                     def _f(_idx: int):
+                        if not _qt_is_valid(c):
+                            return
                         alog(
                             "COMBO_CHANGED",
                             f"Rullista → '{c.currentText()}'",
@@ -848,7 +901,7 @@ def _install_ui_signal_loggers(main_window: Any) -> None:
                             objekt=c.objectName() or type(c).__name__,
                             varde=c.currentText(),
                         )
-                    return _f
+                    return _safe_qt_callback(_f)
 
                 try:
                     combo.currentIndexChanged.connect(_mk_c())
@@ -864,13 +917,15 @@ def _install_ui_signal_loggers(main_window: Any) -> None:
 
                 def _mk_d(d: QDateEdit = w):
                     def _f(_date):
+                        if not _qt_is_valid(d):
+                            return
                         alog(
                             "DATE_CHANGED",
                             f"Datumfält → {d.date().toString('yyyy-MM-dd')}",
                             level=TRACE_LEVEL, logger="QtUI",
                             objekt=d.objectName() or type(d).__name__,
                         )
-                    return _f
+                    return _safe_qt_callback(_f)
 
                 try:
                     w.dateChanged.connect(_mk_d())
@@ -889,6 +944,8 @@ def _install_ui_signal_loggers(main_window: Any) -> None:
 
                 def _mk_s(s=w):
                     def _f(v):
+                        if not _qt_is_valid(s):
+                            return
                         alog(
                             "SPIN_CHANGED",
                             f"Sifferfält → {v}",
@@ -896,7 +953,7 @@ def _install_ui_signal_loggers(main_window: Any) -> None:
                             objekt=s.objectName() or type(s).__name__,
                             varde=v,
                         )
-                    return _f
+                    return _safe_qt_callback(_f)
 
                 try:
                     w.valueChanged.connect(_mk_s())
@@ -911,6 +968,10 @@ def _install_ui_signal_loggers(main_window: Any) -> None:
 
                 def _mk_t(e: QLineEdit = w):
                     def _f():
+                        # editingFinished kan komma under själva rivningen
+                        # av dialogen — då finns ingen C++-widget kvar.
+                        if not _qt_is_valid(e):
+                            return
                         alog(
                             "TEXT_EDITED",
                             f"Textfält redigerat "
@@ -918,7 +979,7 @@ def _install_ui_signal_loggers(main_window: Any) -> None:
                             level=TRACE_LEVEL, logger="QtUI",
                             objekt=e.objectName() or type(e).__name__,
                         )
-                    return _f
+                    return _safe_qt_callback(_f)
 
                 try:
                     w.editingFinished.connect(_mk_t())

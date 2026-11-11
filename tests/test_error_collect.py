@@ -325,3 +325,78 @@ def test_log_view_collect_button(tmp_path):
     text = (logs / "felsamling.log").read_text(encoding="utf-8")
     assert "Knappfel" in text
     assert "felsamling" in view._lbl_info.text()
+
+
+def test_collect_merges_same_error_from_jsonl_and_text_log(tmp_path):
+    """Samma händelse i app.log och en textlogg ger EN rad i felsamlingen.
+
+    Spegelns rad har svansen "(modul:rad)", skörden ur textloggen har
+    prefixet "[källa]" — tidigare blev det två kopior av samma fel.
+    """
+    import json as _json
+
+    import error_collect as ec
+
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "ts": "2026-11-09T16:42:33", "level": "CRITICAL",
+        "logger": "UncaughtException",
+        "msg": "UNCAUGHT EXCEPTION: RuntimeError: widget already deleted",
+        "loc": "advanced_logger:447",
+    }
+    (logs / "app.log").write_text(
+        _json.dumps(entry) + "\n", encoding="utf-8"
+    )
+    (logs / "autostart.log").write_text(
+        "2026-11-09T16:42:33 | CRITICAL | UncaughtException | "
+        "UNCAUGHT EXCEPTION: RuntimeError: widget already deleted\n"
+        'Traceback (most recent call last):\n'
+        '  File "advanced_logger.py", line 909, in _f\n'
+        "RuntimeError: widget already deleted\n",
+        encoding="utf-8",
+    )
+
+    ec.collect_errors(tmp_path)
+    text = _read(tmp_path)
+    assert text.count("widget already deleted") == 1
+    # Ingen extra rad med källprefix för samma händelse
+    assert "[autostart.log]" not in text
+
+    # En ny skörd lägger inte tillbaka något
+    report = ec.collect_errors(tmp_path)
+    assert report["added"] == 0
+
+
+def test_mirror_throttles_identical_repeated_errors(tmp_path, monkeypatch):
+    """En felande hook som upprepas får inte fylla hela felsamlingen.
+
+    Frekvensen finns kvar som occurrences i felstatus.json.
+    """
+    import error_collect as ec
+
+    _drop_mirror_handlers()
+    try:
+        ec.install_error_mirror(tmp_path)
+        log = logging.getLogger("storm.modul")
+        for _ in range(5):
+            log.error("Samma fel om och om igen")
+        text = _read(tmp_path)
+        assert text.count("Samma fel om och om igen") == 1
+
+        state = ec._load_error_state(tmp_path)
+        occurrences = [
+            issue.get("occurrences", 0)
+            for issue in state["issues"].values()
+            if issue.get("message") == "Samma fel om och om igen"
+        ]
+        assert occurrences == [5]
+
+        # Efter spärrfönstret skrivs nästa förekomst igen
+        monkeypatch.setattr(
+            ec.ErrorMirrorHandler, "REPEAT_WINDOW_SECONDS", 0.0
+        )
+        log.error("Samma fel om och om igen")
+        assert _read(tmp_path).count("Samma fel om och om igen") == 2
+    finally:
+        _drop_mirror_handlers()
