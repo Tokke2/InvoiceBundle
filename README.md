@@ -70,7 +70,7 @@ python main.py
 
 ## Användning i korthet
 
-1. Skapa minst en leverantör på fliken **Leverantörer** (Ctrl+L).
+1. Skapa minst en leverantör på fliken **Leverantörer** (Ctrl+L). Använder leverantören fakturanumret som OCR-nummer markerar du **OCR-numret är samma som fakturanumret** – då fylls ett tomt OCR-fält automatiskt med fakturanumret vid import och registrering.
 2. Registrera fakturor på fliken **Fakturor** (Ctrl+N): fakturanummer + belopp (`+` = faktura, `−` = kreditfaktura). Du kan lämna leverantörsfiltret överst tomt och välja leverantör i dialogen **Ny faktura**.
 3. Välj vid export om originalen ska bifogas med alla sidor, bara första sidan eller inte alls; klicka **Exportera ALLA till PDF**, välj betalningsdatum i kalendern och bekräfta.
 4. Tidigare exporter finns under **Exporthistorik** om något behöver återställas.
@@ -151,7 +151,7 @@ python main.py
 
 ## Usage in short
 
-1. Create at least one supplier on the **Suppliers** tab (Ctrl+L).
+1. Create at least one supplier on the **Suppliers** tab (Ctrl+L). If the supplier uses the invoice number as its OCR number, tick **The OCR number is the same as the invoice number**; an empty OCR field is then filled with the invoice number during import and registration.
 2. Register invoices on the **Invoices** tab (Ctrl+N): invoice number + amount (`+` = invoice, `−` = credit note). Leave the top supplier filter blank if you want; choose the supplier in the **New Invoice** dialog.
 3. Choose whether originals should include all pages, only the first page, or none; click **Export ALL to PDF**, pick the payment date in the calendar and confirm.
 4. Previous exports are available under **Export history** if anything needs restoring.

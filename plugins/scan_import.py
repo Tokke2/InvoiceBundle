@@ -522,9 +522,14 @@ def parse_invoice_number(text: str) -> str:
 
 
 def parse_ocr(text: str) -> str:
+    # "OCR:", "OCR-nummer:" och "OCR nummer:" är samma fält på
+    # svenska fakturor; bindestrecket fick tidigare träffen att missa.
     return re.sub(
         r"\s", "",
-        _search(text, (r"OCR\s*[:#]?\s*(\d[\d \-]{4,24}\d)",)),
+        _search(
+            text,
+            (r"OCR(?:[\s\-]*nummer)?\s*[:#]?\s*(\d[\d \-]{4,24}\d)",),
+        ),
     )
 
 
@@ -1230,6 +1235,71 @@ def invoice_date_check(date: str, due: str) -> dict[str, Any]:
     return {"status": status, "problems": problems, "term_days": term}
 
 
+#: Leverantörsinställning: OCR-numret är samma nummer som fakturanumret.
+OCR_AS_INVOICE_NUMBER_KEY = "ocr_same_as_invoice_number"
+
+
+def _supplier_aliases(supplier: dict) -> list[str]:
+    raw = supplier.get("aliases")
+    if isinstance(raw, str):
+        return [part.strip() for part in re.split(r"[;\n]", raw)]
+    if isinstance(raw, (list, tuple, set)):
+        return [str(part).strip() for part in raw]
+    return []
+
+
+def supplier_ocr_as_invoice_number(
+    suppliers: list[dict] | None, name: Any
+) -> bool:
+    """Har leverantören valt att OCR-numret är fakturanumret?"""
+    wanted = str(name or "").strip()
+    if not wanted:
+        return False
+    for supplier in suppliers or []:
+        if not isinstance(supplier, dict):
+            continue
+        if not supplier.get(OCR_AS_INVOICE_NUMBER_KEY):
+            continue
+        if _names_match(supplier.get("name", ""), wanted):
+            return True
+        if any(
+            _names_match(alias, wanted)
+            for alias in _supplier_aliases(supplier)
+            if alias
+        ):
+            return True
+    return False
+
+
+def apply_supplier_ocr_rule(
+    parsed: dict[str, Any], suppliers: list[dict] | None
+) -> dict[str, Any]:
+    """Fyller OCR med fakturanumret för leverantörer som valt det.
+
+    Bara när OCR-fältet är tomt: ett nummer som faktiskt står på
+    fakturan vinner alltid. Leverantören måste redan vara entydigt
+    matchad — regeln gissar aldrig en leverantör och påverkar
+    därför inte auto-registrering eller osäkra träffar.
+    """
+    result = parsed if isinstance(parsed, dict) else {}
+    if not result or result.get("match_uncertain"):
+        return result
+    if str(result.get("ocr") or "").strip():
+        return result
+    number = str(result.get("invoice_number") or "").strip()
+    if not number:
+        return result
+    if not supplier_ocr_as_invoice_number(suppliers, result.get("supplier")):
+        return result
+    result["ocr"] = number
+    result["ocr_source"] = "supplier_rule"
+    log.info(
+        "SCAN_IMPORT: OCR = fakturanummer (%s) enligt leverantörens "
+        "inställning", number,
+    )
+    return result
+
+
 def parse_invoice_text(
     text: str,
     suppliers: list[dict] | None = None,
@@ -1591,7 +1661,10 @@ def parse_invoice_text(
     # men flaggar räkne-/datumfel för granskning och logg.
     result["math_check"] = invoice_math_check(text or "", total)
     result["date_check"] = invoice_date_check(date, due)
-    return assess_invoice_payment_details(result, text or "", suppliers)
+    return apply_supplier_ocr_rule(
+        assess_invoice_payment_details(result, text or "", suppliers),
+        suppliers,
+    )
 
 
 def _apply_supplier_logo_match(
@@ -1823,9 +1896,12 @@ def parse_invoice_file(
         result = _apply_multipage_guard(
             result, path, text, match_learning
         )
-        return assess_invoice_payment_details(
-            result, text, suppliers,
-            details=result.get("invoice_payment_details"),
+        return apply_supplier_ocr_rule(
+            assess_invoice_payment_details(
+                result, text, suppliers,
+                details=result.get("invoice_payment_details"),
+            ),
+            suppliers,
         )
     result = _parse_with_reader_fallback(
         path, text, suppliers, tpl, match_learning=match_learning
@@ -1834,9 +1910,12 @@ def parse_invoice_file(
         result, path, text, tpl, match_learning
     )
     result = _apply_multipage_guard(result, path, text, match_learning)
-    return assess_invoice_payment_details(
-        result, text, suppliers,
-        details=result.get("invoice_payment_details"),
+    return apply_supplier_ocr_rule(
+        assess_invoice_payment_details(
+            result, text, suppliers,
+            details=result.get("invoice_payment_details"),
+        ),
+        suppliers,
     )
 
 

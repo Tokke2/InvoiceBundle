@@ -400,3 +400,68 @@ def test_mirror_throttles_identical_repeated_errors(tmp_path, monkeypatch):
         assert _read(tmp_path).count("Samma fel om och om igen") == 2
     finally:
         _drop_mirror_handlers()
+
+
+def test_deleted_widget_error_blocks_are_merged_like_the_real_journal(
+    tmp_path,
+):
+    """Realistisk felsamling: speglade rader + skördade kopior.
+
+    Användarens fil hade samma Qt-fel två gånger per tillfälle — en
+    speglingsrad med "(advanced_logger:447)" och en skördad kopia där
+    tracebacken låg oindenterad. Båda ska bli EN rad, och en ny skörd
+    får inte lägga till något.
+    """
+    import error_collect as ec
+
+    header = "RuntimeError: libshiboken: Internal C++ object"
+    message = (
+        "UNCAUGHT EXCEPTION: RuntimeError: libshiboken: Internal "
+        "C++ object (PySide6.QtWidgets.QLineEdit) already deleted."
+    )
+    mirrored = (
+        f"2026-11-09T16:42:33 | CRITICAL | UncaughtException | {message}"
+        "  (advanced_logger:447)\n"
+        '  File "D:\\Program\\FakturaRäknaren\\plugins\\'
+        'advanced_logger.py", line 909, in _f\n'
+        f"{message}  (advanced_logger:447)\n"
+    )
+    harvested = (
+        f"2026-11-09T16:42:33 | CRITICAL | UncaughtException | {message}\n"
+        "Traceback (most recent call last):\n"
+        '  File "D:\\Program\\FakturaRäknaren\\plugins\\'
+        'advanced_logger.py", line 909, in _f\n'
+        f"{message}  (advanced_logger:447)\n"
+    )
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    path = ec.error_log_path(tmp_path)
+    # Spegelraden finns redan i felsamlingen; autostartloggen har
+    # samma händelse i skördad form (oindenterad traceback).
+    path.write_text(ec._HEADER + mirrored, encoding="utf-8")
+    (logs / "autostart.log").write_text(harvested, encoding="utf-8")
+
+    report = ec.collect_errors(tmp_path)
+    text = _read(tmp_path)
+    assert report["added"] == 0
+    # Rubrik + tracebackens sista rad — kopian lades aldrig till
+    assert text.count("already deleted.") == 2
+    assert header in text
+
+    # Samma sak via spegelhandlern: en gång, trots upprepning
+    _drop_mirror_handlers()
+    try:
+        ec.install_error_mirror(tmp_path)
+        log = logging.getLogger("QtUI")
+        for _ in range(4):
+            try:
+                raise RuntimeError(message)
+            except RuntimeError:
+                log.critical("UNCAUGHT EXCEPTION: %s", message,
+                             exc_info=True)
+        text = _read(tmp_path)
+        # En speglingsrad (rubrik + traceback) trots fyra upprepningar
+        assert text.count("| CRITICAL | QtUI |") == 1
+        assert text.count("already deleted.") == 4  # 2 i seed + 2 i speglingen
+    finally:
+        _drop_mirror_handlers()

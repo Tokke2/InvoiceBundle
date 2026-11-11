@@ -244,6 +244,7 @@ _SCHEMAS: dict[str, dict] = {
         "iban":           "",
         "bic":            "",
         "payment_terms":  30,
+        "ocr_same_as_invoice_number": False,
         "contact_person": "",
         "email":          "",
         "phone":          "",

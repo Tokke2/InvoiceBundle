@@ -3597,6 +3597,16 @@ class ScanImportView(QWidget):
         row.pop("template", None)
         row.pop("template_match", None)
         self._apply_template_to_row(row, text)
+        # OCR = fakturanummer när leverantören valt det. Bara tomma
+        # OCR-fält fylls; en mall eller ett tryckt nummer vinner.
+        try:
+            apply_rule = getattr(
+                _scan_module(), "apply_supplier_ocr_rule", None
+            )
+            if callable(apply_rule):
+                apply_rule(row, self._suppliers())
+        except Exception as exc:
+            log.debug("OCR-regel kunde inte tillämpas: %s", exc)
         if amount is not None and amount > 0:
             # Användarens bekräftade slutsumma vinner alltid över
             # den avlästa (som kan vara en delsumma på sida 1).

@@ -2143,6 +2143,9 @@ class InvoiceDialog(QDialog):
         self._default_currency = default_currency
         self._app_core = app_core
         self._is_edit = bool(existing)
+        # Värdet OCR-fältet fick av leverantörsregeln (OCR =
+        # fakturanummer). Användarens egen ändring rörs aldrig.
+        self._ocr_auto_value = ""
 
         # SMART IFYLLNING: leverantörsminne + leverantörspost
         data_dir = None
@@ -2177,6 +2180,7 @@ class InvoiceDialog(QDialog):
 
         self._refresh_supplier_info()
         self._on_sign_changed(self.f_sign.currentIndex())
+        self._apply_supplier_ocr_rule()
 
     # ══════════════════════════════════════════════════════════════════
     #  SMART IFYLLNING
@@ -2236,6 +2240,43 @@ class InvoiceDialog(QDialog):
         self._refresh_dup_warning()
         if not self._is_edit:
             self._apply_smart_defaults()
+        self._apply_supplier_ocr_rule()
+
+    # ── OCR = fakturanummer ──────────────────────────────────────────
+    #
+    # Vissa leverantörer använder fakturanumret som OCR-nummer. Har
+    # leverantören kryssat i det i leverantörsregistret fylls OCR-
+    # fältet med fakturanumret. Ett nummer som redan står på
+    # fakturan (eller som användaren skrivit) skrivs aldrig över.
+
+    def _supplier_has_ocr_rule(self) -> bool:
+        sup = self._supplier_rec or self._lookup_supplier(
+            self._get_supplier()
+        )
+        try:
+            return bool((sup or {}).get("ocr_same_as_invoice_number"))
+        except Exception:
+            return False
+
+    def _apply_supplier_ocr_rule(self, *_args: Any) -> None:
+        """Fyller OCR med fakturanumret när leverantören valt det."""
+        if not self._supplier_has_ocr_rule():
+            return
+        number = self.f_inv_nr.text().strip()
+        current = self.f_ocr.text().strip()
+        if current and current != self._ocr_auto_value:
+            # Användaren (eller fakturan) har ett eget OCR-nummer.
+            return
+        if not number:
+            if current and current == self._ocr_auto_value:
+                self._ocr_auto_value = ""
+                self.f_ocr.setText("")
+            return
+        if current == number:
+            self._ocr_auto_value = number
+            return
+        self._ocr_auto_value = number
+        self.f_ocr.setText(number)
 
     def _refresh_supplier_info(self) -> None:
         """Visar org.nr / bankgiro / betalvillkor under leverantören."""
@@ -2558,6 +2599,9 @@ class InvoiceDialog(QDialog):
         self.f_inv_nr.textChanged.connect(
             lambda *_: self._refresh_dup_warning()
         )
+        self.f_inv_nr.textChanged.connect(
+            lambda *_: self._apply_supplier_ocr_rule()
+        )
 
         # ── Dialog-knappar ─────────────────────────────────────────────
         bb = QDialogButtonBox(
@@ -2729,6 +2773,10 @@ class InvoiceDialog(QDialog):
             )
             self.f_total.setFocus()
             return
+
+        # OCR = fakturanummer om leverantören valt det och fältet
+        # fortfarande är tomt (värdet sparas med fakturan).
+        self._apply_supplier_ocr_rule()
 
         # OCR-kontrollsiffra (Luhn) – varna, men blockera inte helt
         ocr_text = self.f_ocr.text().strip()

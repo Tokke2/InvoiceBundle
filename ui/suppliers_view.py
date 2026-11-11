@@ -114,6 +114,8 @@ COLUMNS: list[tuple[str, str, int, Qt.AlignmentFlag]] = [
     ("IBAN",     "iban",           120, Qt.AlignmentFlag.AlignLeft),
     ("BIC",      "bic",             60, Qt.AlignmentFlag.AlignLeft),
     ("Villkor",  "payment_terms",   58, Qt.AlignmentFlag.AlignCenter),
+    ("OCR",      "ocr_same_as_invoice_number", 64,
+     Qt.AlignmentFlag.AlignCenter),
     ("Kontakt",  "contact_person",  90, Qt.AlignmentFlag.AlignLeft),
     ("E-post",   "email",          110, Qt.AlignmentFlag.AlignLeft),
     ("Telefon",  "phone",           80, Qt.AlignmentFlag.AlignLeft),
@@ -345,6 +347,12 @@ class SupplierDialog(QDialog):
         )
         self.f_favorite.setFont(_font(11, bold=True))
         form.addRow("", self.f_favorite)
+
+        # Vissa leverantörer använder fakturanumret som OCR-nummer.
+        self.f_ocr_rule = QCheckBox(tr("supplierdlg.ocr_rule"))
+        self.f_ocr_rule.setFont(_font(11))
+        self.f_ocr_rule.setToolTip(tr("supplierdlg.ocr_rule_tip"))
+        form.addRow("", self.f_ocr_rule)
         form.addRow(_h_line())
 
         # ── Kontakt ────────────────────────────────────────────────────
@@ -406,6 +414,7 @@ class SupplierDialog(QDialog):
                 self.f_phone,
                 self.f_address,
                 self.f_favorite,
+                self.f_ocr_rule,
                 self.f_note,
             ],
             on_last=self._validate_and_accept,
@@ -440,6 +449,9 @@ class SupplierDialog(QDialog):
         except (TypeError, ValueError):
             self.f_terms.setValue(30)
         self.f_favorite.setChecked(bool(d.get("favorite", False)))
+        self.f_ocr_rule.setChecked(
+            bool(d.get("ocr_same_as_invoice_number", False))
+        )
         self.f_contact.setText(d.get("contact_person", ""))
         self.f_email.setText(d.get("email", ""))
         self.f_phone.setText(d.get("phone", ""))
@@ -476,6 +488,7 @@ class SupplierDialog(QDialog):
             "bic":            self.f_bic.text().strip(),
             "payment_terms":  self.f_terms.value(),
             "favorite":       self.f_favorite.isChecked(),
+            "ocr_same_as_invoice_number": self.f_ocr_rule.isChecked(),
             "contact_person": self.f_contact.text().strip(),
             "email":          self.f_email.text().strip(),
             "phone":          self.f_phone.text().strip(),
@@ -802,7 +815,11 @@ class SuppliersView(QWidget):
                 zip(COL_KEYS, COL_ALIGN)
             ):
                 val = supplier.get(key, "")
-                txt = str(val) if val != "" else ""
+                if key == "ocr_same_as_invoice_number":
+                    # Kryssrutan visas som en kort markering.
+                    txt = tr("suppliers.ocr_same_mark") if val else ""
+                else:
+                    txt = str(val) if val != "" else ""
                 if col == 0 and fav:
                     txt = f"★ {txt}"
                 preferred = accent if col == 0 else ""
@@ -824,7 +841,10 @@ class SuppliersView(QWidget):
                 item.setData(ROLE_ROW_FG, fg)
                 item.setData(ROLE_STRIPE, stripe if col == 0 else "")
                 if txt:
-                    item.setToolTip(txt)
+                    if key == "ocr_same_as_invoice_number":
+                        item.setToolTip(tr("supplierdlg.ocr_rule_tip"))
+                    else:
+                        item.setToolTip(txt)
                 self._table.setItem(row, col, item)
 
         self._table.setSortingEnabled(True)
@@ -1012,10 +1032,12 @@ class SuppliersView(QWidget):
                 # Semikolonseparerad CSV (svensk Excel-standard) med BOM
                 lines = [";".join(COL_LABELS)]
                 for s in self._all_data:
-                    row = [
-                        str(s.get(key, "")).replace(";", ",")
-                        for key in COL_KEYS
-                    ]
+                    row = []
+                    for key in COL_KEYS:
+                        val = s.get(key, "")
+                        if isinstance(val, bool):
+                            val = "ja" if val else ""
+                        row.append(str(val).replace(";", ","))
                     lines.append(";".join(row))
                 p.write_text("\n".join(lines), encoding="utf-8-sig")
 
