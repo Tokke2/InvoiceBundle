@@ -2897,22 +2897,13 @@ class ScanImportView(QWidget):
         if confirmed_rows:
             status = tr("tmpl.remembered", supplier=name)
             # Först efter en sparad, uttrycklig bekräftelse prövas
-            # parkerade fakturor på nytt. En uppskjuten/avbruten
-            # kontroll lämnar dem orörda och synliga i Import.
-            if self._watch is not None:
-                try:
-                    self._watch.reprocess_parked(entry)
-                except Exception as exc:
-                    log.warning("teach rescan: %s", exc)
+            # ALLT på nytt: Import-raderna, de parkerade originalen
+            # och mapparna (i bakgrunden, så fönstret aldrig låser
+            # sig). En uppskjuten/avbruten kontroll lämnar dem orörda.
             try:
-                reread_count, ready_count = (
-                    self._reread_rows_after_manual_match()
-                )
-                if reread_count:
-                    status += "  ·  " + tr(
-                        "scan.learning_reread",
-                        n=reread_count, ready=ready_count,
-                    )
+                rescan_note = self._rescan_everything_after_learning()
+                if rescan_note:
+                    status += "  ·  " + rescan_note
             except Exception as exc:
                 log.warning("template confirmation reread: %s", exc)
             self._lbl_status.setText(status)
@@ -3762,14 +3753,22 @@ class ScanImportView(QWidget):
                     "scan.learned_auto_logo", supplier=chosen
                 ))
             self._save_match_learning()
-            reread_count, ready_count = self._reread_rows_after_manual_match(
+            if confirmed < si.LEARNED_SUPPLIER_CONFIRMATIONS:
+                # Synligt hur många egna matchningar som återstår
+                # innan appen får koppla leverantören själv.
+                notes.append(tr(
+                    "scan.learning_until_auto",
+                    supplier=chosen,
+                    n=si.LEARNED_SUPPLIER_CONFIRMATIONS - confirmed,
+                ))
+            # Efter en manuell matchning prövas ALLT om mot den nya
+            # kunskapen: raderna i Import, de parkerade originalen och
+            # hela den bevakade mappen (i bakgrunden).
+            rescan_note = self._rescan_everything_after_learning(
                 exclude=row
             )
-            if reread_count:
-                notes.append(tr(
-                    "scan.learning_reread",
-                    n=reread_count, ready=ready_count,
-                ))
+            if rescan_note:
+                notes.append(rescan_note)
             return " ".join(notes)
         except Exception as exc:
             log.warning("learn from match: %s", exc)
@@ -3874,6 +3873,87 @@ class ScanImportView(QWidget):
         except Exception as exc:
             log.warning("confirm template row: %s", exc)
             return ""
+
+    def _rescan_everything_after_learning(
+        self, exclude: dict | None = None,
+    ) -> str:
+        """Pröva om ALLT med den kunskap en manuell matchning gav.
+
+        En manuell matchning räcker inte bara för raden själv: appen
+        ska direkt se om de andra raderna, de parkerade originalen
+        och filerna i de bevakade mapparna nu kan matchas automatiskt.
+        Parkerade filer läggs tillbaka i Import och skanningen körs i
+        bakgrunden, så GUI:t aldrig väntar på tolkningen.
+
+        Säkerhetsreglerna är oförändrade: bara kompletta och säkra
+        rader går vidare automatiskt, osäkra blir kvar som frågor och
+        en tidigare uttrycklig användarmatchning skrivs aldrig över.
+        Returnerar en kort notis för statusraden.
+        """
+        if getattr(self, "_rescanning_everything", False):
+            # Redan igång (t.ex. via registreringen av en granskad rad)
+            # — en andra genomgång mitt i skulle bara kosta tid.
+            return ""
+        self._rescanning_everything = True
+        try:
+            return self._rescan_everything_after_learning_locked(
+                exclude=exclude
+            )
+        finally:
+            self._rescanning_everything = False
+
+    def _rescan_everything_after_learning_locked(
+        self, exclude: dict | None = None,
+    ) -> str:
+        reread_count = 0
+        ready_count = 0
+        parked_added = 0
+        watch = getattr(self, "_watch", None)
+
+        # Parkerade original som ännu inte syns i Import får en rad
+        # först, så att omläsningen nedan även omfattar dem.
+        if watch is not None:
+            try:
+                parked = [
+                    dict(info) for info in
+                    list(getattr(watch, "parked", []) or [])
+                    if isinstance(info, dict)
+                ]
+                if parked:
+                    before = len(self._rows)
+                    self._add_parked_rows_to_table(parked)
+                    parked_added = max(0, len(self._rows) - before)
+            except Exception as exc:
+                log.debug("rescan parked rows: %s", exc)
+
+        try:
+            reread_count, ready_count = (
+                self._reread_rows_after_manual_match(exclude=exclude)
+            )
+        except Exception as exc:
+            log.warning("rescan after learning: %s", exc)
+
+        # Läs om de parkerade originalen och mapparna i bakgrunden.
+        reprocess = getattr(watch, "reprocess_parked", None)
+        if callable(reprocess):
+            try:
+                reprocess(background=True)
+            except TypeError:
+                # Äldre bevakare utan bakgrundsläge: låt den köra
+                # som förut i stället för att hoppa över omläsningen.
+                try:
+                    reprocess()
+                except Exception as exc:
+                    log.debug("reprocess parked fallback: %s", exc)
+            except Exception as exc:
+                log.warning("reprocess parked: %s", exc)
+
+        if not (reread_count or parked_added):
+            return ""
+        return tr(
+            "scan.rescan_all",
+            n=reread_count, ready=ready_count, parked=parked_added,
+        )
 
     def _reread_rows_after_manual_match(
         self, exclude: dict | None = None,
@@ -4010,6 +4090,18 @@ class ScanImportView(QWidget):
         if ready:
             self._auto_register_matched_rows(ready)
         return reread_count, len(ready)
+
+    def _rescan_all_now(self) -> None:
+        """Högerklick: pröva om allt mot mallarna och inlärningen.
+
+        Samma genomgång som körs automatiskt efter en manuell
+        matchning, men på begäran: Import-raderna läses om, parkerade
+        original läggs tillbaka och mapparna skannas i bakgrunden.
+        """
+        note = self._rescan_everything_after_learning()
+        self._lbl_status.setText(
+            note or tr("scan.rescan_nothing")
+        )
 
     def _manual_match_row(self) -> None:
         """Högerklick: matcha markerad rad mot en leverantör själv.
@@ -5921,6 +6013,9 @@ class ScanImportView(QWidget):
         menu.addAction(tr("scan.print"), self._print_row)
         menu.addAction(tr("scan.manual_match"), self._manual_match_row)
         menu.addAction(tr("scan.template_btn"), self._open_template_dialog)
+        menu.addAction(
+            tr("scan.rescan_all_action"), self._rescan_all_now
+        )
         menu.addSeparator()
         menu.addAction(tr("scan.remove_row"), self._remove_row)
         menu.exec(self._tbl.viewport().mapToGlobal(pos))
@@ -6123,7 +6218,9 @@ class ScanImportView(QWidget):
                     self._rows.pop(idxs[0])
                     self._refresh_table()
                     if learned_note:
-                        self._reread_rows_after_manual_match()
+                        # En granskad rad sparad från dialogen är en
+                        # manuell bekräftelse: pröva om resten också.
+                        self._rescan_everything_after_learning()
                     self._show_invoices_tab()
         except Exception as exc:
             log.error("SCAN_OPEN_DIALOG: %s", exc, exc_info=True)
@@ -6426,12 +6523,9 @@ class ScanImportView(QWidget):
         self._refresh_table()
         reread_note = ""
         if template_confirmation_recorded:
-            reread_count, ready_count = self._reread_rows_after_manual_match()
-            if reread_count:
-                reread_note = tr(
-                    "scan.learning_reread",
-                    n=reread_count, ready=ready_count,
-                )
+            # En granskad och registrerad rad är också en manuell
+            # matchning: pröva om resten direkt, mapparna i bakgrunden.
+            reread_note = self._rescan_everything_after_learning()
         if created:
             status = f"{created} faktura(or) registrerade"
             learning_notes = template_learning_notes[:]

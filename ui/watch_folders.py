@@ -1958,15 +1958,24 @@ class WatchManager(QObject):
             return self.auto_create
         return False
 
-    def reprocess_parked(self, entry: dict | None = None) -> int:
+    def reprocess_parked(
+        self, entry: dict | None = None, background: bool = False,
+    ) -> int:
         """Läser OM parkerade tolkningsfiler med dagens mallar.
 
         Det här är tillfället då filer som parkerats för tolkning
         (orsak "no-template" eller "missing: …") tolkas på nytt —
-        anropas när användaren sparat en mall, så leverantörens
-        övriga väntande fakturor prövas mot den direkt. Med
+        anropas när användaren sparat en mall eller matchat en
+        faktura manuellt, så leverantörens övriga väntande
+        fakturor prövas mot det appen just lärt sig. Med
         `entry` bara den mappens filer, annars alla bevakade
         mappar. Returnerar antalet filer som lästes om.
+
+        ``background=True`` lägger skanningen i bakgrunden
+        (``start_scan``) i stället för att läsa färdigt i
+        anropande tråd — GUI:t får aldrig vänta på tolkningen.
+        Bakgrundsläget går genom alla bevakade mappar, eftersom det
+        är samma bakgrundsskanning som bevakningen använder.
         """
         folder_key = ""
         if entry is not None:
@@ -1995,9 +2004,14 @@ class WatchManager(QObject):
             self._save()
             log.info(
                 "SCAN_WATCH: läser om %d parkerade filer med "
-                "dagens mallar", len(targets),
+                "dagens mallar%s", len(targets),
+                " (i bakgrunden)" if background else "",
             )
-        if entry is not None:
+        if background:
+            # Aldrig blockera GUI-tråden: samma bakgrundsskanning
+            # som den återkommande bevakningen använder.
+            self.start_scan()
+        elif entry is not None:
             self.scan_folder(entry)
         else:
             self.scan_all()
