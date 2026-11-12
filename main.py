@@ -2254,12 +2254,24 @@ def main() -> None:
     app_qt.setOrganizationName(APP_ORGANIZATION)
     app_qt.setStyle("Fusion")
     app_qt.setQuitOnLastWindowClosed(False)
+    # Plattformsanpassad identitet:
+    #  • Linux  → desktop-filnamnet matchar autostart-postens
+    #    StartupWMClass, så aktivitetsfältet kopplar fönstret till rätt
+    #    ikon och .desktop-post.
+    #  • macOS  → visningsnamn i menyraden (annars "python3"/"main.py").
+    try:
+        if CURRENT_PLATFORM == "linux":
+            app_qt.setDesktopFileName("Fakturabunten")
+        elif CURRENT_PLATFORM == "macos":
+            app_qt.setApplicationDisplayName(APP_NAME)
+    except Exception as exc:
+        log.debug("plattformsidentitet: %s", exc)
     # Läsbar grundtypografi i hela appen (temat förstärker rubriker,
     # flikar och tabeller ytterligare via stilarket).
     try:
-        from PySide6.QtGui import QFont as _QFont
+        from ui.design import ui_font as _ui_font
 
-        app_qt.setFont(_QFont("Segoe UI", 11))
+        app_qt.setFont(_ui_font(11))
     except Exception:
         pass
     try:

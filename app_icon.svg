@@ -1,26 +1,20 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <!-- Fakturabunten: en bunt fakturor med guldband och bock.
-       Reservikon (vektor) — huvudikonerna är app_icon.png/.ico. -->
-  <rect x="8" y="8" width="496" height="496" rx="96" fill="#16305a"/>
-  <!-- bakre ark -->
-  <g fill="#dfe9f7">
-    <rect x="96" y="128" width="216" height="272" rx="18" transform="rotate(-8 204 264)"/>
-    <rect x="128" y="112" width="216" height="272" rx="18" transform="rotate(-4 236 248)"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Fakturabunten">
+  <title>Fakturabunten — appikon</title>
+  <!-- Vektorversion av appikonen (samma motiv som app_icon.png/.ico).
+       Redigera hellre brand/fakturabunten-ikon.svg och kopiera hit. -->
+  <rect x="10" y="10" width="492" height="492" rx="112" fill="#16305a"/>
+  <g transform="rotate(-8 244 268)">
+    <rect x="118" y="166" width="216" height="262" rx="20" fill="#c6d8ee"/>
   </g>
-  <!-- främre faktura -->
-  <g>
-    <path d="M176 104 h168 l56 56 v216 a24 24 0 0 1 -24 24 H176 a24 24 0 0 1 -24 -24 V128 a24 24 0 0 1 24 -24 z" fill="#ffffff"/>
-    <path d="M344 104 l56 56 h-56 z" fill="#b9cde8"/>
-    <g fill="#8fa9cc">
-      <rect x="188" y="196" width="176" height="20" rx="10"/>
-      <rect x="188" y="240" width="192" height="20" rx="10"/>
-      <rect x="188" y="284" width="192" height="20" rx="10"/>
-      <rect x="188" y="328" width="112" height="20" rx="10"/>
-    </g>
+  <rect x="140" y="142" width="216" height="266" rx="20" fill="#e4eefb" transform="rotate(-4 248 275)"/>
+  <path d="M180 104H336L396 164V392A26 26 0 0 1 370 418H180A26 26 0 0 1 154 392V130A26 26 0 0 1 180 104Z" fill="#ffffff"/>
+  <path d="M336 104L396 164H336Z" fill="#cbdcef"/>
+  <g fill="#16305a">
+    <rect x="196" y="160" width="40" height="150"/>
+    <rect x="196" y="160" width="128" height="38"/>
+    <rect x="196" y="228" width="100" height="36"/>
   </g>
-  <!-- guldband runt bunten -->
-  <path d="M104 316 L424 276 L424 348 L104 388 Z" fill="#e8a91c"/>
-  <!-- bock-badge -->
-  <circle cx="384" cy="368" r="62" fill="#f2b705" stroke="#12315e" stroke-width="10"/>
-  <path d="M348 368 l26 26 l46 -50" fill="none" stroke="#ffffff" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M112 336L400 298V352L112 390Z" fill="#e0a526"/>
+  <circle cx="368" cy="368" r="48" fill="#ffffff"/>
+  <path d="M342 368l19 20 33-38" fill="none" stroke="#16305a" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

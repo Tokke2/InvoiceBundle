@@ -68,7 +68,8 @@ def test_load_app_icon_uses_new_icon():
 def test_svg_fallback_matches_new_design():
     svg = (PROJECT_DIR / "app_icon.svg").read_text(encoding="utf-8")
     assert "#16305a" in svg           # marinblå bakgrund
-    assert "#e8a91c" in svg           # guldbandet
+    # Guldbandet: samma färg som i varumärkesfilen (brand/).
+    assert "#e0a526" in svg
     assert "circle" in svg            # bock-badgen
 
 

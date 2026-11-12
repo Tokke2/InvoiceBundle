@@ -1,6 +1,6 @@
 # Fakturabunten / InvoiceBundle
 
-<img src="app_icon.png" alt="Fakturabunten icon" width="112" align="right">
+<img src="brand/fakturabunten-logotyp.svg" alt="Fakturabunten" width="420">
 
 
 **Version 1.0.0** · Windows / Linux / macOS · Svenska & English
@@ -26,7 +26,7 @@ A local app that totals supplier invoices and credit notes into one amount to pa
   - Betalningsdatumet väljs **vid varje export** i en kalender med snabbval (Idag, +7, +14, +30 dagar, månadsslut) — och nollställs efteråt.
   - Välj om PDF:en ska innehålla alla originalsidor, bara första PDF-sidan eller inga original; valet sparas och gäller även autoexport.
 - Bevakade fakturamappar skannas rekursivt vid start och återkommande, även när filer lagts till medan appen varit stängd. Rotmappar och undermappar bevakas; nya/ändrade filer måste vara oförändrade i två sekunder innan de öppnas. Import-vyn visar senaste kontroll, filer som fortfarande skrivs, saknade mappar och läsfel; **Skanna nu / försök igen** startar en ny kontroll direkt. Skanningen och tolkningen (PDF/OCR) körs i bakgrunden så att fönstret aldrig låser sig, och oförändrade original hashas bara en gång per filversion. Efter lyckad registrering flyttas originalet till `<bevakad mapp>/<fakturans år>/`; ofullständiga och osäkra filer ligger kvar för granskning. Saknat/ogiltigt fakturadatum ger en fråga om år vid import; Avbryt lämnar originalet kvar på källplatsen.
-- Fyra teman (mörkt, ljust, auto, system), systemfältsikon, autostart och automatisk backup. Högerklicka på tray-ikonen för att bland annat öppna appmappen.
+- Fyra teman (mörkt, ljust, auto, system), systemfältsikon, autostart och automatisk backup. **Krysset och minimera-knappen kan gömma appen till systemfältet** — båda beteendena slås på/av i Inställningar-menyn *eller* direkt i tray-menyn, och kryssrutorna hålls i synk. Saknas systemfältet (t.ex. ett Linux-skrivbord utan AppIndicator) stannar fönstret kvar i aktivitetsfältet och appen säger till i statusraden i stället för att försvinna.
 - All data lagras lokalt som JSON i programmappen (`data/`). Ingenting skickas över nätet.
 
 ## Språk
@@ -36,7 +36,21 @@ Byt i menyn **🌐 Språk → Svenska / English** eller på fliken **Inställnin
 
 ## Plattformar
 
-Appen körs på **Windows, macOS och Linux** (Python + PySide6). Varje normal start börjar minimerad i systemfältet; om systemfält saknas visas fönstret så att appen inte blir oåtkomlig. **Autostart** väljer du i Inställningar-menyn med två metoder: **Direkt** (standard — Windows använder en ikonbärande genväg i Autostart-mappen, Linux XDG `.desktop`, macOS LaunchAgent) eller **Startfil** (en `start_hidden`-fil i appmappen som väntar tills disken är redo — bra för portabla USB-installationer). Båda behåller arbetsmappen satt till appmappen.
+Appen körs på **Windows, macOS och Linux** (Python + PySide6) med samma funktioner och samma gränssnitt. Varje normal start börjar minimerad i systemfältet; om systemfält saknas visas fönstret så att appen inte blir oåtkomlig.
+
+| | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| Systemfält | Aktivitetsfältets systemfält (färgad ikon) | Menyraden (monokrom **template-ikon** som OS:et färgar självt) | Statusfält via AppIndicator/SNI (färgad ikon) |
+| Minimera/stäng till fältet | ✅ kryss + minimera | ✅ kryss + minimera | ✅ kryss + minimera |
+| Autostart | Genväg med appikonen i Autostart-mappen | LaunchAgent (`launchctl bootstrap`, äldre `load` som reserv) | XDG `.desktop` med citerad `Exec`, `StartupWMClass` och appikon |
+| Typsnitt | Segoe UI Variable / Segoe UI | SF Pro / Helvetica Neue | Inter / Noto Sans / Ubuntu / Cantarell |
+| Öppna och skriva ut | `os.startfile`, `print` | `open`, `lpr` | `xdg-open`, `lp` |
+
+**Autostart** väljer du i Inställningar-menyn med två metoder: **Direkt** (standard — Windows använder en ikonbärande genväg i Autostart-mappen, Linux XDG `.desktop`, macOS LaunchAgent) eller **Startfil** (en `start_hidden`-fil i appmappen som väntar tills disken är redo — bra för portabla USB-installationer). Båda behåller arbetsmappen satt till appmappen. Saknar Linux-skrivbordet AppIndicator-stöd (vanligt i ren GNOME) visas ingen tray-ikon — då stannar fönstret i aktivitetsfältet och statusraden förklarar varför.
+
+## Logotyp och ikon
+
+All grafik finns som **vektorgrafik (SVG)** i [`brand/`](brand/README.md): ikon, tryckversion med 5 mm bleed, monokrom ikon för menyraden samt liggande logotyp för ljus bakgrund, mörk bakgrund och svartvitt tryck. Bokstäverna är omvandlade till banor (Poppins, SIL OFL), så filerna kräver inget installerat typsnitt och kan skalas hur stort som helst. Filerna i appens rot (`app_icon.svg/.png/.ico`, `app_icon_tray.png`) är byggda ur samma motiv.
 
 ## Gratis — med frivillig donation
 
@@ -60,6 +74,15 @@ Betalningen sker hos PayPal/Ko-fi. Programmet ser inga betalningsuppgifter.
 Saknade Python-paket (`PySide6`, `reportlab`, `pypdf`, `pytesseract`) hämtas automatiskt vid start, bara om de behövs. `pytesseract` är Python-gränssnittet; för OCR av skannade PDF:er och bilder krävs dessutom Tesseract-programmet (med svensk eller engelsk språkdata). Om OCR-motorn saknas visas en varning i Import — fakturan registreras inte tyst med påhittade uppgifter.
 
 **Veckovis uppdatering:** appen gör en kontroll måndag kl. 08 lokal tid. Om appen är öppen då köas uppdateringen och körs först när appen stängts; om den är stängd körs den vid nästa start. Python och paketen uppdateras i samma befintliga miljö — ingen virtuell miljö eller separat OS-schemalagd uppgift skapas. På Windows kan den igenkända Python.org-tolken och `requirements.txt` uppdateras. På macOS/Linux uppdateras paketen i appens aktiva Python; själva OS-/pakethanterarstyrda Python-tolken lämnas orörd. Veckostatus sparas i `data/python_update_state.json`.
+
+## Kom igång (macOS och Linux)
+
+1. Lägg mappen där du vill och öppna en terminal i den. Appen använder den `python3` som finns på `PATH` (3.10 eller nyare).
+2. Installera beroendena en gång — `python3 -m pip install -r requirements.txt` — eller starta appen direkt och låt den hämta det som saknas.
+3. Starta med `python3 main.py`. Appen börjar minimerad i systemfältet; klicka på ikonen för att öppna fönstret.
+
+- **Linux:** systemfältet kräver AppIndicator/StatusNotifier-stöd (finns i KDE, Xfce, Cinnamon, MATE och GNOME med tillägget *AppIndicator and KStatusNotifierItem Support*). Saknas stödet visas inget fält — då stannar fönstret kvar i aktivitetsfältet och statusraden säger till. Filer öppnas med `xdg-open`, utskrift går via `lp` (CUPS). Autostart skrivs som `~/.config/autostart/Fakturabunten.desktop`.
+- **macOS:** ikonen läggs i menyraden som en monokrom *template*-bild, så den följer ljust/mörkt läge automatiskt. Filer öppnas med `open`, utskrift går via `lpr`. Autostart läggs som en LaunchAgent i `~/Library/LaunchAgents` och laddas med `launchctl bootstrap` (äldre macOS: `load`). Första gången kan macOS fråga om åtkomst till mappen — godkänn det, annars kan appen inte läsa eller flytta fakturor.
 
 Utvecklare startar med:
 
@@ -107,7 +130,7 @@ Ingen öppen licens är vald. Fritt att använda. Inte fritt att kopiera, ändra
   - The payment date is chosen **at every export** in a calendar with quick picks (Today, +7, +14, +30 days, end of month) — and reset afterwards.
   - Choose whether PDFs include every original page, only the first PDF page, or no originals; the saved choice also applies to automatic exports.
 - Watched invoice folders are scanned recursively at startup and on a schedule, including files added while the app was closed. Root folders and subfolders are monitored; new/changed files must remain unchanged for two seconds before they are opened. The Import view shows the last check, files still being written, missing folders and read errors; **Scan now / retry** starts an immediate rescan. Scanning and parsing (PDF/OCR) run in the background so the window never freezes, and unchanged originals are hashed only once per file version. After successful registration, originals move into `<watched folder>/<invoice year>/`; incomplete and uncertain files stay for review. If the invoice date is missing or invalid, import asks for an archive year; Cancel leaves the original at its source path.
-- Four themes (dark, light, auto, system), system tray icon, autostart and automatic backups. Right-click the tray icon for options including opening the app folder.
+- Four themes (dark, light, auto, system), system tray icon, autostart and automatic backups. **The close button and the minimize button can hide the app to the system tray** — both behaviours are switched in the Settings menu *or* directly in the tray menu, and the checkboxes stay in sync. If the desktop has no tray (e.g. Linux without AppIndicator) the window stays in the taskbar and the status line explains why, instead of disappearing.
 - All data is stored locally as JSON in the app folder (`data/`). Nothing is sent over the network.
 
 ## Language
@@ -117,7 +140,21 @@ Switch via the **🌐 Language** menu or the **Settings** tab — the change app
 
 ## Platforms
 
-The app runs on **Windows, macOS and Linux** (Python + PySide6). Every normal launch starts minimized to the system tray; if no tray is available, the window stays visible so the app cannot become inaccessible. **Autostart** is chosen in the Settings menu with two methods: **Direct** (default — Windows uses an icon-bearing shortcut in the Startup folder, Linux uses XDG `.desktop`, macOS uses a LaunchAgent) or **Launcher file** (a `start_hidden` file in the app folder that waits until the disk is ready — good for portable USB installs). Both keep the working folder set to the app folder.
+The app runs on **Windows, macOS and Linux** (Python + PySide6) with the same features and the same interface. Every normal launch starts minimized to the system tray; if no tray is available, the window stays visible so the app cannot become inaccessible.
+
+| | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| System tray | Taskbar tray (colour icon) | Menu bar (**monochrome template icon**, tinted by the OS) | Status notifier via AppIndicator/SNI (colour icon) |
+| Minimize/close to tray | ✅ close + minimize | ✅ close + minimize | ✅ close + minimize |
+| Autostart | Icon-bearing shortcut in the Startup folder | LaunchAgent (`launchctl bootstrap`, `load` as fallback) | XDG `.desktop` with quoted `Exec`, `StartupWMClass` and app icon |
+| Fonts | Segoe UI Variable / Segoe UI | SF Pro / Helvetica Neue | Inter / Noto Sans / Ubuntu / Cantarell |
+| Open and print | `os.startfile`, `print` | `open`, `lpr` | `xdg-open`, `lp` |
+
+**Autostart** is chosen in the Settings menu with two methods: **Direct** (default — Windows uses an icon-bearing shortcut in the Startup folder, Linux uses XDG `.desktop`, macOS uses a LaunchAgent) or **Launcher file** (a `start_hidden` file in the app folder that waits until the disk is ready — good for portable USB installs). Both keep the working folder set to the app folder. If a Linux desktop lacks AppIndicator support (common in plain GNOME) no tray icon appears — the window then stays in the taskbar and the status line explains why.
+
+## Logo and icon
+
+All artwork ships as **vector graphics (SVG)** in [`brand/`](brand/README.md): the icon, a print version with 5 mm bleed, a monochrome menu-bar icon, and a horizontal logo for light backgrounds, dark backgrounds and black-and-white print. Letterforms are converted to outlines (Poppins, SIL OFL), so the files need no installed fonts and scale to any size. The files in the app root (`app_icon.svg/.png/.ico`, `app_icon_tray.png`) are built from the same artwork.
 
 ## Free — with a voluntary donation
 
@@ -141,6 +178,15 @@ Payment takes place at PayPal/Ko-fi. The app never sees any payment details.
 Missing Python packages (`PySide6`, `reportlab`, `pypdf`, `pytesseract`) are fetched automatically at startup, only if needed. `pytesseract` is the Python interface; OCR for scanned PDFs and images also requires the native Tesseract program and Swedish or English language data. If the OCR engine is missing, Import shows a warning instead of silently inventing invoice values.
 
 **Weekly update:** the app checks on Monday at 08:00 local time. If the app is open then, it queues the update and waits until the app closes; if it is closed, the update runs at the next launch. Python and packages stay in the same existing environment—no virtual environment or separate OS scheduled task is created. On Windows, the recognized Python.org interpreter and `requirements.txt` can be updated. On macOS/Linux, packages are updated in the app's active Python; the OS/package-manager-managed interpreter is left untouched. Weekly status is stored in `data/python_update_state.json`.
+
+## Getting started (macOS and Linux)
+
+1. Put the folder wherever you like and open a terminal in it. The app uses the `python3` on your `PATH` (3.10 or newer).
+2. Install the dependencies once — `python3 -m pip install -r requirements.txt` — or just start the app and let it fetch whatever is missing.
+3. Start it with `python3 main.py`. The app starts minimized to the system tray; click the icon to open the window.
+
+- **Linux:** the tray needs AppIndicator/StatusNotifier support (present in KDE, Xfce, Cinnamon, MATE, and GNOME with the *AppIndicator and KStatusNotifierItem Support* extension). Without it no tray appears — the window then stays in the taskbar and the status line says so. Files open with `xdg-open`, printing goes through `lp` (CUPS). Autostart is written to `~/.config/autostart/Fakturabunten.desktop`.
+- **macOS:** the icon sits in the menu bar as a monochrome *template* image, so it follows light/dark mode automatically. Files open with `open`, printing goes through `lpr`. Autostart is a LaunchAgent in `~/Library/LaunchAgents`, loaded with `launchctl bootstrap` (`load` on older macOS). On first run macOS may ask for folder access — allow it, otherwise the app cannot read or move invoices.
 
 Developers start with:
 

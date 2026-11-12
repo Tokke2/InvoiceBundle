@@ -70,6 +70,12 @@ def _tray_menu_with_spy():
         def _check_updates(self):
             called.append("check")
 
+        def _toggle_close_to_tray(self, checked):
+            called.append(f"close_to_tray={checked}")
+
+        def _toggle_minimize_to_tray(self, checked):
+            called.append(f"minimize_to_tray={checked}")
+
     fake = _Self()
     # Riktiga handlern, men på fejk-objektet (öppnar ingen dialog)
     fake._tray_check_updates = (
@@ -132,3 +138,19 @@ def test_applied_update_schedules_silent_restart(tmp_path, monkeypatch):
     fired[0][1]()                            # timern löper ut
     assert dlg.restart_requested is True
     dlg.close()
+
+
+def test_tray_menu_can_change_the_system_tray_behaviour():
+    """Beteendet ska gå att ändra direkt från systemfältet."""
+    menu, called = _tray_menu_with_spy()
+    close_act = [
+        a for a in menu.actions()
+        if "Stäng till systemfältet" in (a.text() or "")
+    ][0]
+    min_act = [
+        a for a in menu.actions()
+        if "Minimera till systemfältet" in (a.text() or "")
+    ][0]
+    close_act.trigger()
+    min_act.trigger()
+    assert called == ["close_to_tray=False", "minimize_to_tray=False"]

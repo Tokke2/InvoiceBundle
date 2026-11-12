@@ -67,7 +67,19 @@ PROJECT_DIR: Path = BASE_DIR.parent                # .../Fakturabunten_/
 APP_NAME: str = "Fakturabunten"
 APP_VERSION: str = "1.0.0"
 
-FONT_FAMILY: str = "Segoe UI"
+def _ui_font_family() -> str:
+    """Appens typsnittsfamilj för det här OS:et (se ui/design.py)."""
+    try:
+        try:
+            from ui.design import ui_font_family
+        except ImportError:
+            from design import ui_font_family  # type: ignore[no-redef]
+        return ui_font_family()
+    except Exception:
+        return "Segoe UI"
+
+
+FONT_FAMILY: str = _ui_font_family()
 
 log = logging.getLogger("MainWindow")
 
@@ -904,6 +916,21 @@ def _font(size: int = 11, bold: bool = False) -> QFont:
     return f
 
 
+def _setting_of(obj, key: str, default=None):
+    """Läser en inställning från ett objekt som kanske saknar lagring.
+
+    Tray-menyn byggs även i tester och av skalobjekt utan `_settings`;
+    då gäller standardvärdet i stället för ett AttributeError.
+    """
+    settings = getattr(obj, "_settings", None)
+    try:
+        if settings is not None:
+            return settings.get(key, default)
+    except Exception:
+        pass
+    return default
+
+
 def _load_app_icon() -> QIcon | None:
     """Använder den gemensamma flerupplösta appikonen."""
     try:
@@ -911,6 +938,27 @@ def _load_app_icon() -> QIcon | None:
     except ImportError:
         from design import load_app_icon  # type: ignore[no-redef]
     return load_app_icon()
+
+
+def _app_tray_icon(color: str = "#e8b030") -> QIcon:
+    """Systemfältets ikon för det här OS:et.
+
+    macOS maskar menylinjens ikoner och får därför den monokroma
+    varianten av appikonen; Windows och Linux får den färgade. Saknas
+    ikonfilerna ritas en enkel reserv (samma motiv) i stället för att
+    systemfältet blir tomt.
+    """
+    try:
+        try:
+            from ui.design import tray_icon
+        except ImportError:
+            from design import tray_icon  # type: ignore[no-redef]
+        icon = tray_icon()
+        if icon is not None and not icon.isNull():
+            return icon
+    except Exception as exc:
+        log.debug("tray icon: %s", exc)
+    return _make_tray_icon(color)
 
 
 def _make_tray_icon(color: str = "#e8b030") -> QIcon:
@@ -2689,9 +2737,30 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _sync_tray_behavior_actions(self) -> None:
+        """Speglar kryssrutorna för systemfältsbeteendet i båda menyerna."""
+        try:
+            close_on = bool(self._settings.get("close_to_tray", True))
+            min_on = bool(self._settings.get("minimize_to_tray", True))
+        except Exception:
+            return
+        for name, value in (
+            ("_act_close_to_tray", close_on),
+            ("_tray_act_close_to_tray", close_on),
+            ("_act_minimize_to_tray", min_on),
+            ("_tray_act_minimize_to_tray", min_on),
+        ):
+            action = getattr(self, name, None)
+            if action is not None:
+                try:
+                    action.setChecked(value)
+                except Exception:
+                    pass
+
     def _toggle_close_to_tray(self, checked: bool) -> None:
         """Kryssruta: göm till tray vid kryss."""
         self._settings.set("close_to_tray", checked)
+        self._sync_tray_behavior_actions()
         self.set_status(
             tr(
                 "main.close_tray_status",
@@ -2704,6 +2773,7 @@ class MainWindow(QMainWindow):
     def _toggle_minimize_to_tray(self, checked: bool) -> None:
         """Kryssruta: göm till tray även vid minimering."""
         self._settings.set("minimize_to_tray", checked)
+        self._sync_tray_behavior_actions()
         self.set_status(
             tr(
                 "main.minimize_tray_status",
@@ -2874,14 +2944,16 @@ class MainWindow(QMainWindow):
             apply_app_palette(theme)
             inst.setStyleSheet(build_stylesheet(theme))
 
-        if hasattr(self, "tray"):
-            # Egen ikon behålls vid temabyte; annars ritas tray-ikonen om
-            if getattr(self, "_custom_icon", None) is None:
+        if getattr(self, "tray", None) is not None:
+            # OS-anpassad ikon vid temabyte (samma motiv, rätt variant).
+            try:
                 self.tray.setIcon(
-                    _make_tray_icon(
+                    _app_tray_icon(
                         theme.get("tray_icon_color", "#58a6ff")
                     )
                 )
+            except Exception as exc:
+                log.debug("tray icon on theme change: %s", exc)
 
         self.theme_changed.emit(theme)
         if inst is not None:
@@ -2921,6 +2993,15 @@ class MainWindow(QMainWindow):
                 "SYSTEM_TRAY_SETUP_GAVE_UP: %s after %d retries",
                 reason, attempts,
             )
+            # Utan systemfält (t.ex. ett Linux-skrivbord utan
+            # AppIndicator-stöd) får fönstret aldrig försvinna tyst:
+            # säg det en gång i statusraden.
+            if not getattr(self, "_tray_unavailable_notified", False):
+                self._tray_unavailable_notified = True
+                try:
+                    self.set_status(tr("tray.unavailable"), 12000)
+                except Exception:
+                    pass
             return
         attempts += 1
         self._tray_setup_retries = attempts
@@ -2961,7 +3042,12 @@ class MainWindow(QMainWindow):
             return
 
         theme = resolve_theme(self._settings.get("theme", "dark"))
-        tray_icon = getattr(self, "_custom_icon", None)
+        # OS-anpassad ikon (monokrom mask på macOS, färgad annars).
+        tray_icon = _app_tray_icon(
+            theme.get("tray_icon_color", "#58a6ff")
+        )
+        if tray_icon is None or tray_icon.isNull():
+            tray_icon = getattr(self, "_custom_icon", None)
         if tray_icon is None or tray_icon.isNull():
             tray_icon = _make_tray_icon(
                 theme.get("tray_icon_color", "#58a6ff")
@@ -2989,6 +3075,10 @@ class MainWindow(QMainWindow):
             self._schedule_tray_setup_retry(
                 "Qt did not report the tray icon visible after show()"
             )
+
+    def _setting(self, key: str, default=None):
+        """Läser en inställning utan att kräva en lagring i testmiljö."""
+        return _setting_of(self, key, default)
 
     def _build_tray_menu(self) -> QMenu:
         """Systemfältsmenyn — byggs om vid språkbyte."""
@@ -3051,6 +3141,33 @@ class MainWindow(QMainWindow):
         a_hide = QAction(tr("tray.minimize"), self)
         a_hide.triggered.connect(self.hide)
         m.addAction(a_hide)
+
+        # Samma två beteenden som i Inställningar-menyn — nåbara direkt
+        # från systemfältet, utan att öppna fönstret först.
+        self._tray_act_close_to_tray = QAction(
+            tr("tray.close_to_tray"), self
+        )
+        self._tray_act_close_to_tray.setCheckable(True)
+        self._tray_act_close_to_tray.setChecked(
+            bool(_setting_of(self, "close_to_tray", True))
+        )
+        self._tray_act_close_to_tray.triggered.connect(
+            self._toggle_close_to_tray
+        )
+        m.addAction(self._tray_act_close_to_tray)
+
+        self._tray_act_minimize_to_tray = QAction(
+            tr("tray.minimize_to_tray"), self
+        )
+        self._tray_act_minimize_to_tray.setCheckable(True)
+        self._tray_act_minimize_to_tray.setChecked(
+            bool(_setting_of(self, "minimize_to_tray", True))
+        )
+        self._tray_act_minimize_to_tray.triggered.connect(
+            self._toggle_minimize_to_tray
+        )
+        m.addAction(self._tray_act_minimize_to_tray)
+        m.addSeparator()
 
         a_donate_tray = QAction(tr("menu.donate"), self)
         a_donate_tray.triggered.connect(lambda: open_donate_dialog(self))
@@ -3122,8 +3239,9 @@ class MainWindow(QMainWindow):
                 return False
         except Exception:
             pass
-        tray = getattr(self, "tray", None)
-        return bool(tray is not None and tray.isVisible())
+        # Samma skydd som closeEvent: en borttagen/osynlig tray-ikon
+        # får aldrig göra att fönstret göms utan väg tillbaka.
+        return self._visible_tray() is not None
 
     def changeEvent(self, event) -> None:  # noqa: N802
         """Minimera-knappen → göm till systemfältet (tray).
@@ -3163,28 +3281,48 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _visible_tray(self):
+        """Systemfältsikonen om den finns OCH syns, annars None.
+
+        ``hasattr(self, "tray")`` räcker inte: på skrivbord utan
+        systemfält (t.ex. Linux utan AppIndicator) är ``tray`` satt
+        men None eller osynlig. Då får krysset aldrig gömma fönstret
+        i ett systemfält som inte finns — och aldrig krascha.
+        """
+        tray = getattr(self, "tray", None)
+        if tray is None:
+            return None
+        try:
+            return tray if tray.isVisible() else None
+        except Exception:
+            return None
+
     def closeEvent(self, event) -> None:
         """Kryss → göm till tray (om close_to_tray), annars avsluta."""
         close_to_tray = bool(self._settings.get("close_to_tray", True))
-        if (
-            close_to_tray
-            and hasattr(self, "tray")
-            and self.tray.isVisible()
-        ):
+        tray = self._visible_tray()
+        if close_to_tray and tray is not None:
             event.ignore()
             self.hide()
-            self.tray.showMessage(
-                APP_NAME,
-                "Programmet körs i systemfältet.\n"
-                "Enkelklicka på ikonen för att öppna.\n"
-                "Högerklicka → Avsluta helt.",
-                QSystemTrayIcon.MessageIcon.Information,
-                3000,
-            )
+            try:
+                tray.showMessage(
+                    APP_NAME,
+                    tr("tray.still_running"),
+                    QSystemTrayIcon.MessageIcon.Information,
+                    3000,
+                )
+            except Exception as exc:
+                # Vissa Linux-skrivbord saknar meddelandestöd — appen
+                # ska ändå ligga kvar i systemfältet.
+                log.debug("tray.showMessage: %s", exc)
         else:
             self._save_geometry()
-            if hasattr(self, "tray"):
-                self.tray.hide()
+            has_tray = getattr(self, "tray", None)
+            if has_tray is not None:
+                try:
+                    has_tray.hide()
+                except Exception:
+                    pass
             event.accept()
 
     def _force_exit(self) -> None:
@@ -3200,8 +3338,12 @@ class MainWindow(QMainWindow):
             self._save_geometry()
             if self._watchdog is not None:
                 self._watchdog.stop()
-            if hasattr(self, "tray"):
-                self.tray.hide()
+            tray = getattr(self, "tray", None)
+            if tray is not None:
+                try:
+                    tray.hide()
+                except Exception:
+                    pass
             log.info("Programmet avslutas av användaren")
             QApplication.quit()
 
@@ -3875,13 +4017,35 @@ class MainWindow(QMainWindow):
         root.setSpacing(12)
         root.setContentsMargins(18, 16, 18, 14)
 
-        icon = self.windowIcon()
-        if not icon.isNull():
-            icon_lbl = QLabel()
-            icon_lbl.setPixmap(icon.pixmap(96, 96))
-            icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            icon_lbl.setStyleSheet("background:transparent;")
-            root.addWidget(icon_lbl)
+        # Logotypen (vektor) i stället för bara ikonen — samma fil som
+        # används för tryck. Saknas SVG-motorn faller vi tillbaka på
+        # appikonen, så rutan aldrig blir tom.
+        logotype = QPixmap()
+        try:
+            try:
+                from ui.design import logotype_pixmap
+            except ImportError:
+                from design import logotype_pixmap  # type: ignore[no-redef]
+            logotype = logotype_pixmap(
+                440, dark_background=bool(self._dark)
+            )
+        except Exception as exc:
+            log.warning("Om-dialogens logotyp: %s", exc)
+        if not logotype.isNull():
+            brand_lbl = QLabel()
+            brand_lbl.setPixmap(logotype)
+            brand_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            brand_lbl.setStyleSheet("background:transparent;")
+            brand_lbl.setToolTip(tr("about.brand_note"))
+            root.addWidget(brand_lbl)
+        else:
+            icon = self.windowIcon()
+            if not icon.isNull():
+                icon_lbl = QLabel()
+                icon_lbl.setPixmap(icon.pixmap(96, 96))
+                icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                icon_lbl.setStyleSheet("background:transparent;")
+                root.addWidget(icon_lbl)
 
         text = QTextEdit(dlg)
         text.setReadOnly(True)
@@ -3919,6 +4083,12 @@ class MainWindow(QMainWindow):
         btn_about.setToolTip(tr("donate.about_tip"))
         btn_about.clicked.connect(self._open_about_file)
 
+        btn_brand = QPushButton(tr("about.open_brand_folder"))
+        btn_brand.setToolTip(tr("about.brand_note"))
+        btn_brand.clicked.connect(
+            lambda: _open_path(PROJECT_DIR / "brand")
+        )
+
         btn_donate = QPushButton(tr("about.donate_btn"))
         btn_donate.setObjectName("DonateButton")
         btn_donate.setToolTip(tr("toolbar.donate_tip"))
@@ -3927,7 +4097,10 @@ class MainWindow(QMainWindow):
         btn_close = QPushButton(tr("about.close"))
         btn_close.clicked.connect(dlg.accept)
 
-        for b in (btn_donate, btn_swish, btn_paypal, btn_bmc, btn_about, btn_close):
+        for b in (
+            btn_donate, btn_swish, btn_paypal, btn_bmc,
+            btn_about, btn_brand, btn_close,
+        ):
             b.setMinimumHeight(38)
             b.setFont(_font(11, bold=True))
             b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))

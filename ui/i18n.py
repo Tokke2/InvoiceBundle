@@ -936,6 +936,13 @@ _STRINGS: dict[str, dict[str, str]] = {
     "pdf.no_invoices": {"sv": "Inga fakturor att exportera.", "en": "No invoices to export."},
 
     # ── Tray ─────────────────────────────────────────────────────────
+    "tray.close_to_tray": {"sv": "🙈  Stäng till systemfältet", "en": "🙈  Close to system tray"},
+    "tray.minimize_to_tray": {"sv": "🙈  Minimera till systemfältet", "en": "🙈  Minimize to system tray"},
+    "tray.unavailable": {"sv": "Systemfältet är inte tillgängligt på den här skrivbordsmiljön — fönstret stannar kvar i aktivitetsfältet i stället för att försvinna. (Linux: installera AppIndicator-stöd, t.ex. gnome-shell-extension-appindicator.)", "en": "The system tray is not available on this desktop — the window stays in the taskbar instead of disappearing. (Linux: install AppIndicator support, e.g. gnome-shell-extension-appindicator.)"},
+    "about.brand_title": {"sv": "Logotyp och varumärke", "en": "Logo and brand"},
+    "about.open_brand_folder": {"sv": "🎨  Öppna varumärkesmappen (SVG för tryck)", "en": "🎨  Open the brand folder (SVG for print)"},
+    "about.brand_note": {"sv": "Logotypen finns som vektor (SVG) med bleed för tryck, i en mörk och en svartvit version — plus en monokrom ikon för systemfältet.", "en": "The logo is available as vector (SVG) with bleed for print, in a dark and a black-and-white version — plus a monochrome icon for the system tray."},
+    "tray.still_running": {"sv": "Programmet körs i systemfältet.\nEnkelklicka på ikonen för att öppna.\nHögerklicka → Avsluta helt.", "en": "The app is running in the system tray.\nSingle-click the icon to open it.\nRight-click → Quit completely."},
     "tray.show": {"sv": "🖥  Visa fönster", "en": "🖥  Show window"},
     "tray.theme": {"sv": "🎨  Tema", "en": "🎨  Theme"},
     "tray.backup": {"sv": "💾  Backup nu", "en": "💾  Backup now"},

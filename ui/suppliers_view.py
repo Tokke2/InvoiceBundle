@@ -137,7 +137,19 @@ SEARCH_FIELDS: tuple[str, ...] = (
     "contact_person", "address",
 )
 
-FONT_FAMILY: str = "Segoe UI"
+def _ui_font_family() -> str:
+    """Samma typsnittskedja som resten av appen (per OS)."""
+    try:
+        try:
+            from ui.design import ui_font_family
+        except ImportError:
+            from design import ui_font_family  # type: ignore[no-redef]
+        return ui_font_family()
+    except Exception:
+        return "Segoe UI"
+
+
+FONT_FAMILY: str = _ui_font_family()
 
 # ═════════════════════════════════════════════════════════════════════
 #  UI-HJÄLPARE

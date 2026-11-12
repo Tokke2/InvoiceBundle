@@ -215,6 +215,9 @@ def open_folder(path: str | Path) -> None:
 #  TYPSSNITTSFABRIK — stöder svenska tecken (åäöÅÄÖ) på alla plattformar
 # ═════════════════════════════════════════════════════════════════════
 
+#: Bevarad namnlista för bakåtkompatibilitet. Själva valet görs av
+#: ``_ui_font_family`` (ui/design.py), som känner av vilka familjer
+#: som faktiskt finns på Windows, macOS respektive Linux.
 FONT_FALLBACKS: tuple[str, ...] = (
     "Segoe UI",
     "SF Pro Display",
@@ -227,14 +230,21 @@ FONT_FALLBACKS: tuple[str, ...] = (
 )
 
 
+def _ui_font_family() -> str:
+    """Första installerade familjen i appens kedja (annars Segoe UI)."""
+    try:
+        try:
+            from ui.design import ui_font_family
+        except ImportError:
+            from design import ui_font_family  # type: ignore[no-redef]
+        return ui_font_family()
+    except Exception:
+        return "Segoe UI"
+
+
 def make_font(size: int = 12, bold: bool = False) -> QFont:
-    """Skapar QFont med fallback-kedja för svenska tecken."""
-    for family in FONT_FALLBACKS:
-        f = QFont(family, size)
-        if f.exactMatch() or family == "sans-serif":
-            f.setBold(bold)
-            return f
-    f = QFont("Segoe UI", size)
+    """Skapar QFont med den plattformsanpassade familjen."""
+    f = QFont(_ui_font_family(), size)
     f.setBold(bold)
     return f
 

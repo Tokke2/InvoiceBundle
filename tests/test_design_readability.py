@@ -75,3 +75,34 @@ def test_dashboard_cards_follow_theme():
     assert "#ffffff" in view._card_pay.styleSheet()    # vit kortbotten
     assert "#b3261e" in view._card_overdue._value.styleSheet()
     assert "font-size:13px" in view._lbl_hint.styleSheet()
+
+
+def test_font_choice_before_qapplication_does_not_abort():
+    """Import av ui.main_window utan QApplication får inte krascha.
+
+    QFontDatabase avbryter processen om den anropas innan appen finns;
+    typsnittsvalet måste därför kontrollera instansen först. Körs i en
+    egen process eftersom felet är en abort, inte en Python-undantag.
+    """
+    import subprocess
+
+    script = (
+        "import ui.design as d;"
+        "assert d.installed_font_families() == set();"
+        "name = d.ui_font_family();"
+        "assert isinstance(name, str) and name;"
+        "import ui.main_window;"
+        "print('ok')"
+    )
+    env = dict(os.environ)
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(PROJECT_DIR),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "ok" in proc.stdout

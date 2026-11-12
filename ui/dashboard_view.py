@@ -48,7 +48,10 @@ except Exception:  # pragma: no cover
 
     def header_font():  # type: ignore[no-redef]
         from PySide6.QtGui import QFont
-        return QFont("Segoe UI", 17, QFont.Weight.Bold)
+        font = QFont()
+        font.setPointSize(17)
+        font.setWeight(QFont.Weight.Bold)
+        return font
 
 try:
     from ui.invoices_helpers import fmt_amount

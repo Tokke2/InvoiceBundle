@@ -1667,7 +1667,7 @@ class AutostartManager:
                 content = p.read_text(encoding="utf-8")
             except OSError:
                 content = ""
-            expected_exec = f"Exec={self.build_command()}"
+            expected_exec = f"Exec={self._desktop_exec_value()}"
             expected_path = f"Path={BASE_DIR}"
             if expected_exec not in content or expected_path not in content:
                 log.info("AUTOSTART: .desktop föråldrad → uppdaterar")
@@ -1917,6 +1917,32 @@ class AutostartManager:
 
     # ── Linux ────────────────────────────────────────────────────────────
 
+    def _desktop_exec_value(self) -> str:
+        """Exec-värdet för en .desktop-post, citerat enligt specen.
+
+        Desktop Entry-specifikationen kräver att varje argument citeras
+        för sig och att ``\\``, ``"``, ``$`` och ``\``` escapas inuti
+        citattecknen — annars tappas sökvägar med mellanslag och
+        skaltecken tolkas av GNOME/KDE i stället för att skickas vidare.
+        """
+        import shlex
+
+        try:
+            argv = shlex.split(self.build_command())
+        except ValueError:
+            argv = [self.build_command()]
+        quoted: list[str] = []
+        for token in argv:
+            escaped = (
+                str(token)
+                .replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("`", "\\`")
+                .replace("$", "\\$")
+            )
+            quoted.append(f'"{escaped}"')
+        return " ".join(quoted)
+
     @staticmethod
     def _linux_path() -> Path:
         return (
@@ -1932,20 +1958,27 @@ class AutostartManager:
             _ensure_dir(p.parent)
             icon = BASE_DIR / "app_icon.png"
             icon_line = f"Icon={icon}\n" if icon.exists() else ""
+            tryexec_line = (
+                f"TryExec={self._python_exe}\n" if self._python_exe else ""
+            )
+            exec_line = self._desktop_exec_value()
             p.write_text(
                 "[Desktop Entry]\n"
                 "Type=Application\n"
                 "Version=1.0\n"
                 f"Name={self._app_name}\n"
-                f"Exec={self.build_command()}\n"
+                f"Exec={exec_line}\n"
+                f"{tryexec_line}"
                 f"Path={BASE_DIR}\n"
                 f"{icon_line}"
                 "Terminal=false\n"
                 "StartupNotify=false\n"
+                "StartupWMClass=Fakturabunten\n"
                 "X-GNOME-Autostart-enabled=true\n"
                 "X-GNOME-Autostart-Delay=8\n"
                 "X-KDE-Autostart=true\n"
                 "Hidden=false\n"
+                "Categories=Office;Finance;\n"
                 f"Comment={self._app_name} startar gömd från appmappen\n",
                 encoding="utf-8",
             )
@@ -2019,15 +2052,40 @@ class AutostartManager:
 
     @staticmethod
     def _launchctl(action: str, plist: Path) -> None:
+        """Laddar/lossar LaunchAgent — modernt först, äldre som reserv.
+
+        ``launchctl bootstrap gui/<uid>`` är det som gäller från macOS
+        10.10 och framåt; ``load``/``unload`` finns kvar som reserv på
+        äldre system och i miljöer där bootstrap nekas.
+        """
         try:
-            subprocess.Popen(
-                ["launchctl", action, str(plist)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
+            uid = os.getuid()  # type: ignore[attr-defined]
+        except Exception:
+            uid = None
+        commands: list[list[str]] = []
+        if action in ("load", "bootstrap") and uid is not None:
+            commands.append(
+                ["launchctl", "bootstrap", f"gui/{uid}", str(plist)]
             )
-        except Exception as exc:
-            log.debug("launchctl %s: %s", action, exc)
+        if action in ("unload", "bootout") and uid is not None:
+            commands.append(
+                ["launchctl", "bootout", f"gui/{uid}", str(plist)]
+            )
+        commands.append(["launchctl", action, str(plist)])
+        for cmd in commands:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                )
+                if result.returncode == 0:
+                    log.debug("launchctl %s: ok", " ".join(cmd[1:]))
+                    return
+            except Exception as exc:
+                log.debug("launchctl %s: %s", " ".join(cmd[1:]), exc)
+        log.warning("launchctl %s misslyckades för %s", action, plist)
 
     def status(self) -> dict[str, Any]:
         info = self.plan()

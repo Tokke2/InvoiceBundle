@@ -231,3 +231,115 @@ def test_macos_plist_direct_and_launcher(monkeypatch, tmp_path):
     text2 = plist.read_text(encoding="utf-8")
     assert "start_hidden.sh" in text2
     assert "/bin/sh" in text2
+
+
+def test_linux_desktop_entry_is_quoted_and_identifies_the_window(
+    monkeypatch, tmp_path,
+):
+    """Desktop Entry-spec: Exec citeras, och fönstret får rätt WM-klass.
+
+    Utan citering tappas sökvägar med mellanslag, och utan
+    StartupWMClass kopplar aktivitetsfältet fönstret till en
+    generisk Python-ikon i stället för Fakturabunten.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    spacey = tmp_path / "Program Files" / "Fakturabunten"
+    spacey.mkdir(parents=True)
+    (spacey / "app_icon.png").write_bytes(b"PNG")
+    monkeypatch.setattr(appmod, "BASE_DIR", spacey)
+    mgr = _mgr(monkeypatch, "linux")
+    assert mgr.set_enabled(True) is True
+    text = (
+        tmp_path / ".config" / "autostart" / "Fakturabunten.desktop"
+    ).read_text(encoding="utf-8")
+
+    exec_line = next(
+        line for line in text.splitlines() if line.startswith("Exec=")
+    )
+    # Varje argument citeras för sig, så mellanslag i sökvägen bevaras.
+    assert exec_line.count('"') % 2 == 0
+    assert f'"{spacey / "main.py"}"' in exec_line
+    assert "--minimized" in exec_line
+    assert "StartupWMClass=Fakturabunten" in text
+    assert "TryExec=" in text
+    assert "Categories=Office;Finance;" in text
+    assert "Icon=" in text and "app_icon.png" in text
+    # En fönsterhanterare ska kunna läsa posten: exakt en Exec-rad
+    # (TryExec är en egen nyckel) och citerade argument.
+    assert text.count("\nExec=") == 1
+    assert 'Exec="' in text
+
+
+def test_linux_verify_rewrites_an_old_unquoted_entry(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    mgr = _mgr(monkeypatch, "linux")
+    desktop = (
+        tmp_path / ".config" / "autostart" / "Fakturabunten.desktop"
+    )
+    desktop.parent.mkdir(parents=True, exist_ok=True)
+    desktop.write_text(
+        "[Desktop Entry]\nType=Application\n"
+        f"Exec={mgr.build_command()}\n"
+        f"Path={appmod.BASE_DIR}\n",
+        encoding="utf-8",
+    )
+    assert mgr.verify_and_update() is True
+    text = desktop.read_text(encoding="utf-8")
+    assert '"' in next(
+        line for line in text.splitlines() if line.startswith("Exec=")
+    )
+    assert "StartupWMClass=Fakturabunten" in text
+
+
+def test_macos_launchctl_prefers_the_modern_bootstrap(monkeypatch, tmp_path):
+    """macOS 10.10+ använder bootstrap/bootout; load finns som reserv."""
+    import subprocess
+
+    plist = tmp_path / "com.fakturabunten.plist"
+    plist.write_text("<plist/>", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    class _Result:
+        def __init__(self, code):
+            self.returncode = code
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        # Första (moderna) varianten lyckas alltid här.
+        return _Result(0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(appmod.os, "getuid", lambda: 501, raising=False)
+
+    appmod.AutostartManager._launchctl("load", plist)
+    assert calls[0][:3] == ["launchctl", "bootstrap", "gui/501"]
+    assert calls[0][3] == str(plist)
+
+    calls.clear()
+    appmod.AutostartManager._launchctl("unload", plist)
+    assert calls[0][:3] == ["launchctl", "bootout", "gui/501"]
+
+
+def test_macos_launchctl_falls_back_when_bootstrap_is_refused(
+    monkeypatch, tmp_path,
+):
+    import subprocess
+
+    plist = tmp_path / "com.fakturabunten.plist"
+    plist.write_text("<plist/>", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    class _Result:
+        def __init__(self, code):
+            self.returncode = code
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        # bootstrap nekas (t.ex. äldre macOS) → gamla load används.
+        return _Result(1 if cmd[1] in ("bootstrap", "bootout") else 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(appmod.os, "getuid", lambda: 501, raising=False)
+
+    appmod.AutostartManager._launchctl("load", plist)
+    assert [c[1] for c in calls] == ["bootstrap", "load"]
