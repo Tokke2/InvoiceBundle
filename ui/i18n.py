@@ -942,6 +942,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "about.brand_title": {"sv": "Logotyp och varumärke", "en": "Logo and brand"},
     "about.open_brand_folder": {"sv": "🎨  Öppna varumärkesmappen (SVG för tryck)", "en": "🎨  Open the brand folder (SVG for print)"},
     "about.brand_note": {"sv": "Logotypen finns som vektor (SVG) med bleed för tryck, i en mörk och en svartvit version — plus en monokrom ikon för systemfältet.", "en": "The logo is available as vector (SVG) with bleed for print, in a dark and a black-and-white version — plus a monochrome icon for the system tray."},
+    "about.brand_missing": {"sv": "Varumärkesfilerna (SVG för tryck) ingår i programpaketet — kör en uppdatering via Hjälp → Sök ny version så läggs de på plats. Ingen separat nedladdning behövs.", "en": "The brand files (SVG for print) are part of the program package — run Help → Check for updates and they will be installed. No separate download is needed."},
     "tray.still_running": {"sv": "Programmet körs i systemfältet.\nEnkelklicka på ikonen för att öppna.\nHögerklicka → Avsluta helt.", "en": "The app is running in the system tray.\nSingle-click the icon to open it.\nRight-click → Quit completely."},
     "tray.show": {"sv": "🖥  Visa fönster", "en": "🖥  Show window"},
     "tray.theme": {"sv": "🎨  Tema", "en": "🎨  Theme"},

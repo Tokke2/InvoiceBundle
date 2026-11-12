@@ -4001,6 +4001,24 @@ class MainWindow(QMainWindow):
         """Öppnar about.md — komplett info om programmet + donationer."""
         _open_path(PROJECT_DIR / "about.md")
 
+    def _open_brand_folder(self) -> None:
+        """Öppnar brand/ — tryckfilerna som följer med programpaketet.
+
+        Filerna är en del av release-zipen (ingen separat nedladdning).
+        Saknas mappen är installationen äldre än filerna: säg då att en
+        uppdatering lägger dem på plats i stället för att öppna en tom
+        mapp.
+        """
+        folder = PROJECT_DIR / "brand"
+        try:
+            has_files = folder.is_dir() and any(folder.glob("*.svg"))
+        except OSError:
+            has_files = False
+        if not has_files:
+            self.set_status(tr("about.brand_missing"), 12000)
+            return
+        _open_path(folder)
+
     def _show_about_dialog(self) -> None:
         """Rik Om-dialog: info, snabbknappar, funktioner, donationer."""
         autostart_status = (
@@ -4085,9 +4103,7 @@ class MainWindow(QMainWindow):
 
         btn_brand = QPushButton(tr("about.open_brand_folder"))
         btn_brand.setToolTip(tr("about.brand_note"))
-        btn_brand.clicked.connect(
-            lambda: _open_path(PROJECT_DIR / "brand")
-        )
+        btn_brand.clicked.connect(self._open_brand_folder)
 
         btn_donate = QPushButton(tr("about.donate_btn"))
         btn_donate.setObjectName("DonateButton")

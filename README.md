@@ -50,7 +50,7 @@ Appen körs på **Windows, macOS och Linux** (Python + PySide6) med samma funkti
 
 ## Logotyp och ikon
 
-All grafik finns som **vektorgrafik (SVG)** i [`brand/`](brand/README.md): ikon, tryckversion med 5 mm bleed, monokrom ikon för menyraden samt liggande logotyp för ljus bakgrund, mörk bakgrund och svartvitt tryck. Bokstäverna är omvandlade till banor (Poppins, SIL OFL), så filerna kräver inget installerat typsnitt och kan skalas hur stort som helst. Filerna i appens rot (`app_icon.svg/.png/.ico`, `app_icon_tray.png`) är byggda ur samma motiv.
+All grafik finns som **vektorgrafik (SVG)** i [`brand/`](brand/README.md): ikon, tryckversion med 5 mm bleed, monokrom ikon för menyraden samt liggande logotyp för ljus bakgrund, mörk bakgrund och svartvitt tryck. Filerna ligger **inuti programpaketet** (release-zipen) — de följer med varje nedladdning och uppdatering och behöver aldrig hämtas separat. Bokstäverna är omvandlade till banor (Poppins, SIL OFL), så filerna kräver inget installerat typsnitt och kan skalas hur stort som helst. Filerna i appens rot (`app_icon.svg/.png/.ico`, `app_icon_tray.png`) är byggda ur samma motiv.
 
 ## Gratis — med frivillig donation
 
@@ -154,7 +154,7 @@ The app runs on **Windows, macOS and Linux** (Python + PySide6) with the same fe
 
 ## Logo and icon
 
-All artwork ships as **vector graphics (SVG)** in [`brand/`](brand/README.md): the icon, a print version with 5 mm bleed, a monochrome menu-bar icon, and a horizontal logo for light backgrounds, dark backgrounds and black-and-white print. Letterforms are converted to outlines (Poppins, SIL OFL), so the files need no installed fonts and scale to any size. The files in the app root (`app_icon.svg/.png/.ico`, `app_icon_tray.png`) are built from the same artwork.
+All artwork ships as **vector graphics (SVG)** in [`brand/`](brand/README.md): the icon, a print version with 5 mm bleed, a monochrome menu-bar icon, and a horizontal logo for light backgrounds, dark backgrounds and black-and-white print. The files live **inside the program package** (the release zip) — they come with every download and update and never have to be fetched separately. Letterforms are converted to outlines (Poppins, SIL OFL), so the files need no installed fonts and scale to any size. The files in the app root (`app_icon.svg/.png/.ico`, `app_icon_tray.png`) are built from the same artwork.
 
 ## Free — with a voluntary donation
 

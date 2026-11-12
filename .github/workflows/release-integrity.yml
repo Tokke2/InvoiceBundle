@@ -50,6 +50,36 @@ jobs:
             --out "$PACKAGE_PATH" \
             --version "$VERSION" \
             --sha "$(git rev-parse HEAD)"
+      - name: Verifiera tryckfilerna i paketet
+        run: |
+          PACKAGE_PATH="${RUNNER_TEMP}/InvoiceBundle-v${GITHUB_REF_NAME#v}.zip"
+          python - "$PACKAGE_PATH" <<'PY'
+          import json, sys, zipfile
+
+          required = [
+              "brand/README.md",
+              "brand/fakturabunten-ikon.svg",
+              "brand/fakturabunten-ikon-monokrom.svg",
+              "brand/fakturabunten-ikon-tryck-bleed.svg",
+              "brand/fakturabunten-logotyp.svg",
+              "brand/fakturabunten-logotyp-mork-bakgrund.svg",
+              "brand/fakturabunten-logotyp-svartvit.svg",
+          ]
+          with zipfile.ZipFile(sys.argv[1]) as zf:
+              names = set(zf.namelist())
+              listed = set(
+                  json.loads(zf.read("build_info.json").decode("utf-8"))["files"]
+              )
+          missing = [rel for rel in required if rel not in names or rel not in listed]
+          print("Tryckfiler i release-paketet:", len(required) - len(missing),
+                "av", len(required))
+          for rel in required:
+              print(f"  {'OK  ' if rel not in missing else 'SAKNAS'} {rel}")
+          if missing:
+              print("Tryckfilerna måste ligga i programpaketet:", missing)
+              sys.exit(1)
+          PY
+
       - name: Attach package to the existing GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

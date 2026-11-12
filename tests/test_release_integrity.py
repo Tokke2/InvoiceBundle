@@ -290,3 +290,55 @@ def test_updater_downloads_from_release_never_main():
         assert "heads/main" not in src
         assert "zipball/main" not in src
         assert "archive/main" not in src
+
+
+#: Tryckfilerna ska ligga INUTI programpaketet — inte som en separat
+#: nedladdning. Alla sex SVG:er + README följer med varje release.
+PRINT_FILES = (
+    "brand/README.md",
+    "brand/fakturabunten-ikon.svg",
+    "brand/fakturabunten-ikon-monokrom.svg",
+    "brand/fakturabunten-ikon-tryck-bleed.svg",
+    "brand/fakturabunten-logotyp.svg",
+    "brand/fakturabunten-logotyp-mork-bakgrund.svg",
+    "brand/fakturabunten-logotyp-svartvit.svg",
+)
+
+
+def test_print_ready_brand_files_are_in_the_release_manifest():
+    for rel in PRINT_FILES:
+        assert rel in br.RELEASE_FILES, rel
+    assert br.validate_release_files(PROJECT_DIR) == []
+    # Inga tryckfiler får ligga utanför manifestet — då skulle de
+    # saknas i release-zipen och kräva en egen nedladdning.
+    for path in sorted((PROJECT_DIR / "brand").rglob("*")):
+        if path.is_file() and path.suffix.lower() in (".svg", ".md"):
+            rel = path.relative_to(PROJECT_DIR).as_posix()
+            assert rel in br.RELEASE_FILES, rel
+
+
+def test_built_package_ships_the_print_files_inside_the_zip(tmp_path):
+    out = br.build_release_zip(
+        PROJECT_DIR, tmp_path / "InvoiceBundle-v1.0.0.zip",
+        version="1.0.0", sha="deadbeef",
+    )
+    with zipfile.ZipFile(out) as zf:
+        names = set(zf.namelist())
+        info = json.loads(zf.read("build_info.json").decode("utf-8"))
+    for rel in PRINT_FILES:
+        assert rel in names, rel
+        # Uppdateraren installerar det som står i build_info.files —
+        # därför måste tryckfilerna listas där också.
+        assert rel in info["files"], rel
+    # Tryckfilerna ska aldrig ligga som egna toppnivåfiler i paketet.
+    svg_top = [n for n in names if n.lower().endswith(".svg") and "/" not in n]
+    assert svg_top == ["app_icon.svg"], svg_top
+
+
+def test_release_workflow_verifies_the_package_contains_print_files():
+    workflow = (
+        PROJECT_DIR / ".github" / "workflows" / "release-integrity.yml"
+    ).read_text(encoding="utf-8")
+    assert "Verifiera tryckfilerna i paketet" in workflow
+    for rel in PRINT_FILES:
+        assert rel in workflow, rel
