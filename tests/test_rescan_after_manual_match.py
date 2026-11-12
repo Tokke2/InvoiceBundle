@@ -263,7 +263,7 @@ def test_status_says_how_many_manual_matches_remain(tmp_path):
         view._rows = [row]
         view._match_learning_cache = {}
         note = view._apply_manual_match(row, "Testbolaget AB")
-        assert "egna matchningar kvar" in note
+        assert "egna matchningar (mallar) kvar" in note
         assert "Testbolaget AB" in note
     finally:
         view.close()

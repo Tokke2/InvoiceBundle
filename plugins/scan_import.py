@@ -4011,11 +4011,16 @@ def save_templates(path: Path, templates: dict) -> bool:
 
 MULTIPAGE_CONFIRMATIONS_TO_GRADUATE = 2
 
-#: Efter så här många av användaren bekräftade matchningar mot
-#: samma leverantör får appen koppla nya fakturor till den
-#: leverantören SJÄLV — när fakturan bär ett kännetecken appen
+#: Efter så här många av användaren bekräftade matchningar (egna
+#: mallar) mot samma leverantör får appen koppla nya fakturor till
+#: den leverantören SJÄLV — när fakturan bär ett kännetecken appen
 #: lärt sig av de bekräftade fakturorna (användarens tumregel:
-#: 5–10 fakturor, sedan ska det sitta).
+#: 5 egna mallar, sedan ska det sitta).
+#:
+#: Räknaren är aldrig "avklarad": den fortsätter växa över 5, och
+#: en felaktig automatkoppling som användaren rättar nollställer
+#: den (se ``record_match_correction``) — då krävs fem nya egna
+#: matchningar innan appen kopplar leverantören själv igen.
 LEARNED_SUPPLIER_CONFIRMATIONS = 5
 
 #: Ett kännetecken (org.nr/bankgiro) måste ha setts i minst så
@@ -4758,6 +4763,88 @@ def record_match_confirmation(
             template_fields=template_fields,
         )
     return entry
+
+
+def record_match_correction(
+    learning: dict, supplier: str, *, text: str = "",
+) -> dict:
+    """Användaren rättade en AUTOMATISK koppling till leverantören.
+
+    En felaktig automatkoppling är det starkaste motbeviset appen
+    kan få: leverantörens räknare nollställs, så det krävs fem nya
+    egna matchningar innan appen kopplar den själv igen — precis som
+    när appen var ny för leverantören. Dessutom stryks de
+    kännetecken (org.nr/bankgiro) som fanns på den feldömda
+    fakturan ur leverantörens minne, så exakt samma misstag inte
+    upprepas. Övrig inlärning och redan bekräftade mallar behålls.
+
+    Returnerar leverantörens uppdaterade post (tom om okänd).
+    """
+    name = str(supplier or "").strip()
+    if not name:
+        return {}
+    key = name
+    if key not in learning:
+        for existing in learning:
+            if _names_match(name, str(existing)):
+                key = str(existing)
+                break
+    entry = learning.get(key)
+    if not isinstance(entry, dict):
+        return {}
+    previous = 0
+    try:
+        previous = int(entry.get("confirmed", 0) or 0)
+    except (TypeError, ValueError):
+        previous = 0
+    entry["confirmed"] = 0
+    try:
+        corrections = int(entry.get("corrections", 0) or 0)
+    except (TypeError, ValueError):
+        corrections = 0
+    entry["corrections"] = corrections + 1
+    entry["reset_after_correction"] = datetime.datetime.now().isoformat(
+        timespec="seconds"
+    )
+    # Kännetecknen som pekade fel får aldrig peka dit igen.
+    identifiers = entry.get("identifiers")
+    if isinstance(identifiers, dict) and text:
+        for kind, values in _invoice_identifiers(text).items():
+            bucket = identifiers.get(kind)
+            if not isinstance(bucket, dict):
+                continue
+            for value in values:
+                bucket.pop(value, None)
+    entry["last_correction"] = datetime.datetime.now().isoformat(
+        timespec="seconds"
+    )
+    log.info(
+        "SCAN_IMPORT: felaktig automatkoppling till %s rättad — "
+        "räknaren nollställd (%d -> 0), kännetecknen på den "
+        "feldömda fakturan ströks; fem nya egna matchningar krävs",
+        key, previous,
+    )
+    return entry
+
+
+def match_correction_needed(row: dict, chosen: str) -> str:
+    """Leverantören som appen SJÄLV kopplade raden till, om
+    användaren nu väljer en annan. Tom sträng annars."""
+    if not isinstance(row, dict):
+        return ""
+    match = row.get("supplier_match")
+    if not isinstance(match, dict):
+        return ""
+    if str(match.get("reason", "") or "") not in {
+        "learned", "learned_logo",
+    }:
+        return ""
+    previous = str(match.get("supplier", "") or row.get("supplier", "") or "")
+    chosen = str(chosen or "").strip()
+    if not previous or not chosen or _names_match(previous, chosen):
+        return ""
+    return previous
+
 
 
 def require_template_confirmation(

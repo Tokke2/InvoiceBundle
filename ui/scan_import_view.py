@@ -67,6 +67,15 @@ except Exception:  # pragma: no cover - fristående körning
 
 log = logging.getLogger("ScanImportView")
 
+#: Hur många parkerade original som läggs in i Import-tabellen per
+#: omgång när listan är stor. Med tusentals parkerade filer får
+#: inläsningen aldrig låsa fönstret i minuter.
+PARKED_INSERT_CHUNK = 40
+
+#: Hur många osäkra rader som frågas om direkt när ett stort lass
+#: parkerade original läses in. Resten ligger kvar i tabellen.
+PARKED_ASK_LIMIT = 8
+
 try:
     from ui.typography import make_tabular_font, set_item_font
 except ImportError:
@@ -2095,7 +2104,21 @@ class ScanImportView(QWidget):
         # avbryts frågan blir raden kvar i sikte i tabellen i
         # stället för att bara ligga gömd i parkeringen. Appen
         # gissar aldrig och parkerar aldrig tyst.
-        added = self._add_parked_rows_to_table(infos)
+        def _start(added: list[dict]) -> None:
+            self._review_parked_infos(infos, added)
+
+        self._add_parked_rows_to_table(infos, on_done=_start)
+
+    def _review_parked_infos(
+        self, infos: list[dict], added: list[dict] | None = None,
+    ) -> None:
+        """Frågar om de parkerade raderna — efter att de lagts in.
+
+        Anropas när tabellinläsningen är klar (den kan ha skett i
+        omgångar i bakgrunden), så dialogen alltid handlar om rader
+        som faktiskt syns i Import.
+        """
+        added = list(added or [])
         # Osäkra rader kan redan ha lagts in direkt i Import när
         # parkeringseventet kom. Ta med även de befintliga raderna så
         # batchdialogen fortfarande frågar användaren en gång.
@@ -3592,6 +3615,30 @@ class ScanImportView(QWidget):
         """
         candidates = list(candidates or [])
         text = str(row.get("_text", "") or "")
+        # Rättar användaren en koppling som APPEN gjorde själv är det
+        # ett motbevis: den leverantörens räknare nollställs, så fem
+        # nya egna matchningar krävs innan appen kopplar den själv
+        # igen — och kännetecknen som pekade fel stryks.
+        correction_note = ""
+        try:
+            si = _scan_module()
+            wrong = si.match_correction_needed(row, chosen)
+            if wrong:
+                si.record_match_correction(
+                    self._get_match_learning(), wrong, text=text
+                )
+                self._save_match_learning()
+                correction_note = tr(
+                    "scan.match_correction_reset",
+                    supplier=wrong,
+                    n=si.LEARNED_SUPPLIER_CONFIRMATIONS,
+                )
+                log.info(
+                    "SCAN_IMPORT: %s rättad från automatkopplad %s till %s",
+                    row.get("file", ""), wrong, chosen,
+                )
+        except Exception as exc:
+            log.warning("match correction: %s", exc)
         row["supplier"] = chosen
         # Do not keep a template from the previous, rejected match.
         row.pop("template", None)
@@ -3665,7 +3712,10 @@ class ScanImportView(QWidget):
             "SCAN_IMPORT: användaren matchade %s mot %s manuellt",
             row.get("file", ""), chosen,
         )
-        return self._learn_from_match(row, chosen)
+        note = self._learn_from_match(row, chosen)
+        if correction_note:
+            return " ".join(filter(None, (correction_note, note)))
+        return note
 
     def _learn_from_match(self, row: dict, chosen: str) -> str:
         """Lär leverantörskännetecken efter användarens manuella val.
@@ -3922,7 +3972,10 @@ class ScanImportView(QWidget):
                 if parked:
                     before = len(self._rows)
                     self._add_parked_rows_to_table(parked)
-                    parked_added = max(0, len(self._rows) - before)
+                    parked_added = (
+                        max(0, len(self._rows) - before)
+                        + self._pending_parked_inserts()
+                    )
             except Exception as exc:
                 log.debug("rescan parked rows: %s", exc)
 
@@ -4286,18 +4339,37 @@ class ScanImportView(QWidget):
                 self._lbl_status.text() + "  ·  " + note
             )
 
-    def _ask_uncertain_rows(self, rows: list[dict]) -> int:
+    def _ask_uncertain_rows(
+        self, rows: list[dict], limit: int | None = None,
+    ) -> int:
         """Frågar om osäkra rader och registrerar kompletta rader
-        när användaren uttryckligen har bekräftat matchningen."""
-        resolved_rows: list[dict] = []
-        for row in list(rows or []):
+        när användaren uttryckligen har bekräftat matchningen.
+
+        Frågorna ställs en åt gången. Kommer det hundratals osäkra
+        rader på en gång (en stor mapp) frågas bara de första
+        ``PARKED_ASK_LIMIT`` — resten ligger kvar synliga i Import
+        och kan matchas där, så ingen behöver klicka igenom en
+        dialogstorm. Antalet som väntar skrivs i statusraden.
+        """
+        uncertain = [
+            row for row in list(rows or [])
             if (
                 isinstance(row, dict)
                 and row.get("match_uncertain")
                 and not row.get("_scan_error")
-            ):
-                if self._ask_user_for_match(row):
-                    resolved_rows.append(row)
+            )
+        ]
+        if limit is None:
+            limit = PARKED_ASK_LIMIT
+        resolved_rows: list[dict] = []
+        asked = 0
+        for row in uncertain:
+            if asked >= max(0, int(limit)):
+                break
+            asked += 1
+            if self._ask_user_for_match(row):
+                resolved_rows.append(row)
+        waiting = len(uncertain) - asked
         if resolved_rows:
             self._refresh_table()
             self._auto_register_matched_rows(
@@ -4311,6 +4383,10 @@ class ScanImportView(QWidget):
                 self._lbl_status.setText(
                     tr("scan.ocr_review_after_match")
                 )
+        if waiting:
+            self._lbl_status.setText(
+                tr("scan.parked_ask_limit", n=waiting)
+            )
         return len(resolved_rows)
 
     def _auto_register_matched_rows(
@@ -4371,7 +4447,35 @@ class ScanImportView(QWidget):
             self._automatic_registering = previous_mode
         return len(indexes)
 
-    def _parked_entry_for(self, info: dict) -> dict | None:
+    @staticmethod
+    def _parked_lookup(watch) -> tuple[dict[str, dict], dict[str, dict]]:
+        """Sökindex över parkerade original (sökväg + hash).
+
+        Byggs en gång per inläsning: med tusentals parkerade filer
+        får varje rad aldrig leta igenom hela listan själv.
+        """
+        try:
+            from ui.watch_folders import _norm_path_key
+            normalize_path = _norm_path_key
+        except Exception:
+            normalize_path = lambda value: str(value or "").casefold()
+        by_path: dict[str, dict] = {}
+        by_hash: dict[str, dict] = {}
+        for entry in list(getattr(watch, "parked", []) or []):
+            if not isinstance(entry, dict):
+                continue
+            key = normalize_path(entry.get("path", ""))
+            if key:
+                by_path.setdefault(key, entry)
+            digest = str(entry.get("hash", "") or "")
+            if digest:
+                by_hash.setdefault(digest, entry)
+        return by_path, by_hash
+
+    def _parked_entry_for(
+        self, info: dict,
+        lookup: tuple[dict, dict] | None = None,
+    ) -> dict | None:
         """Parkerade posten som hör till ett parkeringsevent."""
         if (
             isinstance(info, dict)
@@ -4381,38 +4485,174 @@ class ScanImportView(QWidget):
             return info
         watch = getattr(self, "_watch", None)
         if watch is not None:
-            entries = list(getattr(watch, "parked", []) or [])
+            try:
+                from ui.watch_folders import _norm_path_key
+                normalize_path = _norm_path_key
+            except Exception:
+                normalize_path = lambda value: str(value or "").casefold()
+            if lookup is None:
+                lookup = self._parked_lookup(watch)
+            by_path, by_hash = lookup
             path = str(info.get("path", "") or "")
             if path:
-                try:
-                    from ui.watch_folders import _norm_path_key
-                    normalize_path = _norm_path_key
-                except Exception:
-                    normalize_path = lambda value: str(value or "").casefold()
-                target = normalize_path(path)
-                for entry in entries:
-                    if normalize_path(entry.get("path", "")) == target:
-                        return entry
+                entry = by_path.get(normalize_path(path))
+                if entry is not None:
+                    return entry
             else:
                 digest = str(info.get("hash", "") or "")
-                if digest:
-                    for entry in entries:
-                        if str(entry.get("hash", "")) == digest:
-                            return entry
+                entry = by_hash.get(digest) if digest else None
+                if entry is not None:
+                    return entry
         if isinstance(info, dict) and info.get("parsed"):
             return info
         return None
 
     def _add_parked_rows_to_table(
-        self, infos: list[dict]
+        self, infos: list[dict], on_done: "Any" = None,
     ) -> list[dict]:
         """Lägger osäkra, OCR-degraderade och oläsliga original i Import.
 
         Osäker matchning, OCR-varning eller läsfel ska alltid ha en
         synlig rad — inte bara finnas i parkeringen/felloggen. Hårda
         felrader behålls som ej registrerbara, och samma fil läggs
-        aldrig in två gånger. Returnerar de NYA raderna.
+        aldrig in två gånger.
+
+        Stora lass (hundratals eller tusentals parkerade original vid
+        start eller efter en omskanning) läggs in i omgångar via
+        händelseslingan, så fönstret aldrig fryser medan tabellen
+        byggs. Då returneras inga rader härifrån; ``on_done`` får i
+        stället hela listan när sista omgången är inne. Små lass
+        läggs in direkt och returneras som förut.
         """
+        pending = [
+            dict(info) for info in (infos or [])
+            if isinstance(info, dict)
+        ]
+        if not pending:
+            return []
+        lookup = self._parked_lookup(getattr(self, "_watch", None))
+        if len(pending) <= PARKED_INSERT_CHUNK or not self._can_batch_insert():
+            added, updated = self._insert_parked_infos(pending, lookup)
+            if added or updated:
+                self._refresh_table()
+            self._log_parked_insert(added)
+            if on_done is not None:
+                try:
+                    on_done(added)
+                except Exception as exc:
+                    log.warning("parked insert done: %s", exc)
+            return added
+
+        if self._pending_parked_inserts():
+            # En inläsning pågår redan (t.ex. startens insamling eller
+            # en omskanning): lägg det nya lasset efter i samma kö i
+            # stället för att starta en andra. Ingen rad går förlorad
+            # och ingen dubblett skapas — raderna slås upp på sökväg.
+            self._parked_insert_queue.extend(pending)
+            self._parked_insert_total += len(pending)
+            if on_done is not None:
+                self._parked_insert_callbacks.append(on_done)
+            log.debug(
+                "SCAN_IMPORT: %d parkerade original köades efter "
+                "pågående inläsning", len(pending),
+            )
+            return []
+
+        # Stort lass: bygg tabellen i omgångar i stället för att låsa
+        # fönstret i minuter.
+        queue = list(pending)
+        self._parked_insert_queue = queue
+        self._parked_insert_lookup = lookup
+        self._parked_insert_added = []
+        self._parked_insert_total = len(queue)
+        self._parked_insert_callbacks = [on_done] if on_done else []
+        self._parked_insert_updated = False
+        log.info(
+            "SCAN_IMPORT: %d parkerade original läggs in i Import i "
+            "omgångar om %d — fönstret förblir svarande",
+            len(queue), PARKED_INSERT_CHUNK,
+        )
+        QTimer.singleShot(0, self._insert_parked_chunk)
+        return []
+
+    def _can_batch_insert(self) -> bool:
+        """True när en fördröjd inläsning faktiskt kan köras."""
+        try:
+            return QApplication.instance() is not None
+        except Exception:
+            return False
+
+    def _pending_parked_inserts(self) -> int:
+        return len(getattr(self, "_parked_insert_queue", []) or [])
+
+    def _insert_parked_chunk(self) -> None:
+        """Lägger in nästa omgång parkerade rader."""
+        queue = getattr(self, "_parked_insert_queue", None) or []
+        if not queue:
+            self._finish_parked_insert()
+            return
+        chunk = queue[:PARKED_INSERT_CHUNK]
+        del queue[:PARKED_INSERT_CHUNK]
+        try:
+            added, updated = self._insert_parked_infos(
+                chunk, getattr(self, "_parked_insert_lookup", None)
+            )
+            self._parked_insert_added.extend(added)
+            self._parked_insert_updated = (
+                bool(getattr(self, "_parked_insert_updated", False))
+                or updated
+            )
+            self._append_table_rows(added)
+            if queue:
+                self._lbl_status.setText(tr(
+                    "scan.parked_loading",
+                    done=self._parked_insert_total - len(queue),
+                    total=self._parked_insert_total,
+                ))
+                QTimer.singleShot(0, self._insert_parked_chunk)
+                return
+        except Exception as exc:
+            log.warning("parked insert chunk: %s", exc)
+        self._finish_parked_insert()
+
+    def _finish_parked_insert(self) -> None:
+        added = list(getattr(self, "_parked_insert_added", []) or [])
+        updated = bool(getattr(self, "_parked_insert_updated", False))
+        self._parked_insert_queue = []
+        self._parked_insert_added = []
+        self._parked_insert_lookup = None
+        self._parked_insert_total = 0
+        self._parked_insert_updated = False
+        callbacks = list(
+            getattr(self, "_parked_insert_callbacks", []) or []
+        )
+        self._parked_insert_callbacks = []
+        try:
+            self._tbl.resizeRowsToContents()
+        except Exception:
+            pass
+        if updated and not added:
+            self._refresh_table()
+        self._log_parked_insert(added)
+        for callback in callbacks:
+            try:
+                callback(added)
+            except Exception as exc:
+                log.warning("parked insert done: %s", exc)
+
+    @staticmethod
+    def _log_parked_insert(added: list[dict]) -> None:
+        if added:
+            log.info(
+                "SCAN_IMPORT: %d osäkra/OCR-degraderade/betalningsavvikande/"
+                "oläsliga bevakade original lades direkt i Import-tabellen",
+                len(added),
+            )
+
+    def _insert_parked_infos(
+        self, infos: list[dict], lookup: "Any" = None,
+    ) -> tuple[list[dict], bool]:
+        """Bygger rader för parkerade original (utan att rita tabellen)."""
         added: list[dict] = []
         updated_existing = False
         try:
@@ -4420,10 +4660,12 @@ class ScanImportView(QWidget):
             normalize_path = _norm_path_key
         except Exception:
             normalize_path = lambda value: str(value or "").casefold()
+        if lookup is None:
+            lookup = self._parked_lookup(getattr(self, "_watch", None))
         for info in infos or []:
             if not isinstance(info, dict):
                 continue
-            source = self._parked_entry_for(info)
+            source = self._parked_entry_for(info, lookup)
             if not isinstance(source, dict):
                 continue
             parsed = dict(source.get("parsed", {}) or {})
@@ -4510,15 +4752,7 @@ class ScanImportView(QWidget):
                 )
             self._rows.append(parsed)
             added.append(parsed)
-        if added or updated_existing:
-            self._refresh_table()
-        if added:
-            log.info(
-                "SCAN_IMPORT: %d osäkra/OCR-degraderade/betalningsavvikande/"
-                "oläsliga bevakade original lades direkt i Import-tabellen",
-                len(added),
-            )
-        return added
+        return added, updated_existing
 
     def _unpark_row(self, row: dict) -> None:
         """Tar bort radens parkerade post när raden avgjorts i
@@ -5754,83 +5988,97 @@ class ScanImportView(QWidget):
     def _refresh_table(self) -> None:
         self._tbl.setRowCount(len(self._rows))
         for r, row in enumerate(self._rows):
-            for c, (_lbl, key, _w, align) in enumerate(COLUMNS):
-                if key == "total_amount":
-                    text = _fmt_amount(row.get(key, 0.0))
-                elif key == "status":
-                    text = self._display_status(row)
-                else:
-                    text = str(row.get(key, "") or "")
-                item = QTableWidgetItem(text)
-                item.setTextAlignment(
-                    align | Qt.AlignmentFlag.AlignVCenter
-                )
-                if key in {
-                    "invoice_number", "date", "due_date", "ocr",
-                    "total_amount",
-                }:
-                    set_item_font(item, make_tabular_font(12))
-                if key == "status":
-                    detail = str(row.get("error_detail", "") or "")
-                    item.setToolTip(
-                        (detail + "\n\n" if detail else "") + text
-                    )
-                    if self._extraction_review_state(row) == "review":
-                        item.setForeground(QColor("#ef6c00"))
-                    else:
-                        item.setForeground(
-                            QApplication.palette().link()
-                        )
-                self._tbl.setItem(r, c, item)
-            # Hela raden färgas efter matchningssäkerhet:
-            # OSÄKER matchning = röd rad, SÄKER = grön rad.
-            # Rader utan någon träff alls lämnas neutrala.
-            _state = self._row_match_state(row)
-            if _state:
-                _pair = (
-                    ROW_BG_MATCH_UNCERTAIN if _state == "uncertain"
-                    else ROW_BG_MATCH_SECURE
-                )
-                _bg = QColor(_pair[0] if self._dark else _pair[1])
-                _fg_pair = (
-                    ROW_FG_MATCH_UNCERTAIN if _state == "uncertain"
-                    else ROW_FG_MATCH_SECURE
-                )
-                _fg = QColor(_fg_pair[0] if self._dark else _fg_pair[1])
-                _tip = (
-                    tr("scan.match_uncertain_status")
-                    if _state == "uncertain"
-                    else tr("scan.match_secure_tip")
-                )
-                _status_col = next(
-                    (i for i, column in enumerate(COLUMNS)
-                     if column[1] == "status"),
-                    -1,
-                )
-                for _c in range(len(COLUMNS)):
-                    _cell = self._tbl.item(r, _c)
-                    if _cell is not None:
-                        _cell.setBackground(_bg)
-                        # Explicit textfärg parad med radbakgrunden —
-                        # raden ska gå att läsa även omarkerad, i
-                        # båda temana (aldrig palettens textfärg).
-                        _cell.setForeground(_fg)
-                        if _c == _status_col and _cell.toolTip():
-                            _cell.setToolTip(
-                                _tip + "\n\n" + _cell.toolTip()
-                            )
-                        else:
-                            _cell.setToolTip(_tip)
-                        if (
-                            _c == _status_col
-                            and self._extraction_review_state(row) == "review"
-                        ):
-                            _cell.setForeground(QColor(
-                                "#ffd166" if self._dark else "#9a3412"
-                            ))
+            self._fill_table_row(r, row)
         self._update_sum()
         self._tbl.resizeRowsToContents()
         self._tbl.resizeRowsToContents()
+
+    def _append_table_rows(self, rows: list[dict]) -> None:
+        """Ritar bara de NYA raderna — en stor inläsning får aldrig
+        rita om hela tabellen för varje omgång."""
+        if not rows:
+            return
+        start = max(0, self._tbl.rowCount())
+        self._tbl.setRowCount(start + len(rows))
+        for offset, row in enumerate(rows):
+            self._fill_table_row(start + offset, row)
+        self._update_sum()
+
+    def _fill_table_row(self, r: int, row: dict) -> None:
+        for c, (_lbl, key, _w, align) in enumerate(COLUMNS):
+            if key == "total_amount":
+                text = _fmt_amount(row.get(key, 0.0))
+            elif key == "status":
+                text = self._display_status(row)
+            else:
+                text = str(row.get(key, "") or "")
+            item = QTableWidgetItem(text)
+            item.setTextAlignment(
+                align | Qt.AlignmentFlag.AlignVCenter
+            )
+            if key in {
+                "invoice_number", "date", "due_date", "ocr",
+                "total_amount",
+            }:
+                set_item_font(item, make_tabular_font(12))
+            if key == "status":
+                detail = str(row.get("error_detail", "") or "")
+                item.setToolTip(
+                    (detail + "\n\n" if detail else "") + text
+                )
+                if self._extraction_review_state(row) == "review":
+                    item.setForeground(QColor("#ef6c00"))
+                else:
+                    item.setForeground(
+                        QApplication.palette().link()
+                    )
+            self._tbl.setItem(r, c, item)
+        # Hela raden färgas efter matchningssäkerhet:
+        # OSÄKER matchning = röd rad, SÄKER = grön rad.
+        # Rader utan någon träff alls lämnas neutrala.
+        _state = self._row_match_state(row)
+        if _state:
+            _pair = (
+                ROW_BG_MATCH_UNCERTAIN if _state == "uncertain"
+                else ROW_BG_MATCH_SECURE
+            )
+            _bg = QColor(_pair[0] if self._dark else _pair[1])
+            _fg_pair = (
+                ROW_FG_MATCH_UNCERTAIN if _state == "uncertain"
+                else ROW_FG_MATCH_SECURE
+            )
+            _fg = QColor(_fg_pair[0] if self._dark else _fg_pair[1])
+            _tip = (
+                tr("scan.match_uncertain_status")
+                if _state == "uncertain"
+                else tr("scan.match_secure_tip")
+            )
+            _status_col = next(
+                (i for i, column in enumerate(COLUMNS)
+                 if column[1] == "status"),
+                -1,
+            )
+            for _c in range(len(COLUMNS)):
+                _cell = self._tbl.item(r, _c)
+                if _cell is not None:
+                    _cell.setBackground(_bg)
+                    # Explicit textfärg parad med radbakgrunden —
+                    # raden ska gå att läsa även omarkerad, i
+                    # båda temana (aldrig palettens textfärg).
+                    _cell.setForeground(_fg)
+                    if _c == _status_col and _cell.toolTip():
+                        _cell.setToolTip(
+                            _tip + "\n\n" + _cell.toolTip()
+                        )
+                    else:
+                        _cell.setToolTip(_tip)
+                    if (
+                        _c == _status_col
+                        and self._extraction_review_state(row) == "review"
+                    ):
+                        _cell.setForeground(QColor(
+                            "#ffd166" if self._dark else "#9a3412"
+                        ))
 
     @staticmethod
     def _ocr_check_bad(row: dict) -> bool:
