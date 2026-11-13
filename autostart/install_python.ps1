@@ -592,7 +592,21 @@ function Test-AppPythonRuntime([string]$Exe, [switch]$EnsureDependencies) {
             return $false
         }
     }
-    $probeCode = "import importlib; [importlib.import_module(name) for name in ('PySide6','reportlab','pypdf','fitz','PIL','pytesseract','qrcode')]; from PySide6.QtWidgets import QApplication; app=QApplication([]); app.quit(); print('FAKTURABUNTEN_RUNTIME_OK')"
+    # Håll detta i takt med main.py:s _RUNTIME_PROBE. Nyare PyMuPDF
+    # använder pymupdf; fitz behövs bara för äldre installationer.
+    $probeCode = @'
+import importlib
+for name in ('PySide6', 'reportlab', 'pypdf', 'PIL', 'pytesseract', 'qrcode'):
+    importlib.import_module(name)
+try:
+    importlib.import_module('pymupdf')
+except Exception:
+    importlib.import_module('fitz')
+from PySide6.QtWidgets import QApplication
+app = QApplication([])
+app.quit()
+print('FAKTURABUNTEN_RUNTIME_OK')
+'@
     $probeOutput = & $Exe -c $probeCode 2>&1
     $probeExit = $LASTEXITCODE
     foreach ($line in $probeOutput) {

@@ -135,6 +135,7 @@ def _win_mgr(monkeypatch, tmp_path, method="auto"):
     import app as appmod
 
     monkeypatch.setattr(appmod, "CURRENT_PLATFORM", "windows")
+    monkeypatch.setattr(appmod, "DATA_DIR", tmp_path / "data")
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
     return appmod, appmod.AutostartManager(method=method)
 
@@ -167,6 +168,12 @@ def test_powershell_script_carries_app_icon_not_python(monkeypatch, tmp_path):
 def test_wscript_fallback_keeps_the_app_icon(monkeypatch, tmp_path):
     appmod, mgr = _win_mgr(monkeypatch, tmp_path)
     commands = []
+    staged_links = []
+    real_vbscript = mgr._shortcut_vbscript
+
+    def capture_script(destination):
+        staged_links.append(destination)
+        return real_vbscript(destination)
 
     def fake_run(command, **_kwargs):
         commands.append(command)
@@ -176,15 +183,20 @@ def test_wscript_fallback_keeps_the_app_icon(monkeypatch, tmp_path):
             vbs = Path(command[-1])
             content = vbs.read_text(encoding="utf-16")
             assert "app_icon.ico,0" in content
-            mgr._startup_shortcut_path().write_bytes(b"LNK")
+            staged_links[-1].write_bytes(b"LNK")
+            return types.SimpleNamespace(returncode=0)
+        raise AssertionError(command)
 
+    monkeypatch.setattr(mgr, "_shortcut_vbscript", capture_script)
     monkeypatch.setattr(appmod.subprocess, "run", fake_run)
     monkeypatch.setattr(appmod.shutil, "which", lambda _name: "wscript.exe")
     assert mgr._write_startup_shortcut() is True
+    assert mgr._startup_shortcut_path().read_bytes() == b"LNK"
     assert [command[0] for command in commands] == [
         "powershell", "wscript.exe",
     ]
     assert not list(mgr._startup_folder().glob("*.vbs"))
+    assert not staged_links[-1].parent.exists()
 
 
 def test_enable_prefers_shortcut_and_clears_registry(
@@ -238,3 +250,73 @@ def test_launcher_method_shortcut_targets_wscript(monkeypatch, tmp_path):
     target, args = mgr._shortcut_target()
     assert "wscript" in target.lower()
     assert "start_hidden.vbs" in args.replace("\\", "/")
+
+
+def test_shortcut_update_preserves_old_link_until_new_link_is_ready(
+    monkeypatch, tmp_path
+):
+    appmod, mgr = _win_mgr(monkeypatch, tmp_path)
+    final_link = mgr._startup_shortcut_path()
+    final_link.parent.mkdir(parents=True)
+    final_link.write_bytes(b"OLD")
+    staged_links = []
+    real_powershell = mgr._shortcut_powershell
+
+    def capture_script(destination):
+        staged_links.append(destination)
+        return real_powershell(destination)
+
+    def fake_run(command, **_kwargs):
+        assert command[0] == "powershell"
+        assert final_link.read_bytes() == b"OLD"
+        assert staged_links[-1] != final_link
+        staged_links[-1].write_bytes(b"NEW")
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(mgr, "_shortcut_powershell", capture_script)
+    monkeypatch.setattr(appmod.subprocess, "run", fake_run)
+    assert mgr._write_startup_shortcut() is True
+    assert final_link.read_bytes() == b"NEW"
+    assert not staged_links[-1].parent.exists()
+
+
+def test_failed_shortcut_update_keeps_existing_link_and_rejects_partial_file(
+    monkeypatch, tmp_path
+):
+    appmod, mgr = _win_mgr(monkeypatch, tmp_path)
+    final_link = mgr._startup_shortcut_path()
+    final_link.parent.mkdir(parents=True)
+    final_link.write_bytes(b"OLD")
+    staged_links = []
+    real_powershell = mgr._shortcut_powershell
+
+    def capture_script(destination):
+        staged_links.append(destination)
+        return real_powershell(destination)
+
+    def fake_run(command, **_kwargs):
+        if command[0] == "powershell":
+            staged_links[-1].write_bytes(b"PARTIAL")
+        else:
+            # PowerShell failed, so its partial output must not be accepted
+            # when the fallback fails to create a link.
+            assert not staged_links[-1].exists()
+        return types.SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(mgr, "_shortcut_powershell", capture_script)
+    monkeypatch.setattr(appmod.subprocess, "run", fake_run)
+    monkeypatch.setattr(appmod.shutil, "which", lambda _name: "wscript.exe")
+    assert mgr._write_startup_shortcut() is False
+    assert final_link.read_bytes() == b"OLD"
+    assert not staged_links[-1].parent.exists()
+
+
+def test_powershell_shortcut_quotes_apostrophes(monkeypatch, tmp_path):
+    appmod, mgr = _win_mgr(monkeypatch, tmp_path)
+    monkeypatch.setattr(appmod, "BASE_DIR", tmp_path / "Rickard's program")
+    monkeypatch.setattr(mgr, "_python_exe", r"C:\Users\Rickard's\pythonw.exe")
+    script = mgr._shortcut_powershell(tmp_path / "Rickard's link.lnk")
+    assert "Rickard''s program" in script
+    assert "Rickard''s link.lnk" in script
+    assert "Rickard''s\\pythonw.exe" in script
+    assert "$ErrorActionPreference = 'Stop'" in script

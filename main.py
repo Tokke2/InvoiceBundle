@@ -415,15 +415,19 @@ def _relaunch_windowless() -> bool:
 
 _RUNTIME_ATTEMPTS = "FAKTURABUNTEN_RUNTIME_ATTEMPTS"
 _RUNTIME_VERIFIED: set[str] = set()
-_RUNTIME_PROBE = (
-    "import importlib; "
-    "[importlib.import_module(name) for name in "
-    "('PySide6', 'reportlab', 'pypdf', 'fitz', 'PIL', "
-    "'pytesseract', 'qrcode')]; "
-    "from PySide6.QtWidgets import QApplication; "
-    "app = QApplication([]); app.quit(); "
-    "print('FAKTURABUNTEN_RUNTIME_OK')"
-)
+_RUNTIME_PROBE = """\
+import importlib
+for name in ('PySide6', 'reportlab', 'pypdf', 'PIL', 'pytesseract', 'qrcode'):
+    importlib.import_module(name)
+try:
+    importlib.import_module('pymupdf')
+except Exception:
+    importlib.import_module('fitz')
+from PySide6.QtWidgets import QApplication
+app = QApplication([])
+app.quit()
+print('FAKTURABUNTEN_RUNTIME_OK')
+"""
 
 
 def _python_path_key(path: str | Path) -> str:
@@ -1941,8 +1945,27 @@ def _sync_autostart(app_core: Any) -> None:
             safe_autostart_set(mgr, True)
             return
 
-        # Fall 2: OS=True men registry pekar fel (endast Windows)
+        # Fall 2: kontrollera Windows-posten. En .lnk är inte ett
+        # registervärde: get_registered_command() bygger kommandot och
+        # har inte läst genvägens fält.
         if os_status and CURRENT_PLATFORM == "windows":
+            shortcut_path_fn = getattr(mgr, "_startup_shortcut_path", None)
+            if callable(shortcut_path_fn):
+                shortcut = shortcut_path_fn()
+                if shortcut.is_file():
+                    watcher_log.info("  Autostart-genväg : %s", shortcut)
+                    checker = getattr(mgr, "_shortcut_is_current", None)
+                    if callable(checker):
+                        if checker():
+                            watcher_log.info(
+                                "  Genväg oförändrad sedan appen skapade den"
+                            )
+                        else:
+                            watcher_log.warning(
+                                "  Genvägens innehåll kunde inte bekräftas"
+                            )
+                    watcher_log.info("  Avsett kommando  : %s", cmd)
+                    return
             registered_cmd = ""
             get_cmd_fn = getattr(mgr, "get_registered_command", None)
             if callable(get_cmd_fn):

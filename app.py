@@ -1483,9 +1483,14 @@ class AutostartManager:
         return False
 
     def get_registered_command(self) -> str:
+        """Returnera Run-värdet, eller det avsedda kommandot för en .lnk.
+
+        En genvägs existens säger i sig inte vad dess fält innehåller;
+        för den kan kommandot därför inte beskrivas som ett registervärde.
+        """
         if CURRENT_PLATFORM != "windows":
             return ""
-        # Med genväg som post är det byggkommandot som gäller.
+        # Bakåtkompatibelt API: ett befintligt .lnk ger avsett kommando.
         try:
             if self._startup_shortcut_path().exists():
                 return self.build_command()
@@ -1657,8 +1662,8 @@ class AutostartManager:
             self._write_launcher()
 
         if CURRENT_PLATFORM == "windows":
-            # Rebuild the link on startup: the icon and target are
-            # always current, and any legacy Python Run entry is removed.
+            # Skapa bara om genvägen om målet eller filen har ändrats.
+            # En äldre Run-post städas även när genvägen är oförändrad.
             return self._win_set(True)
 
         if CURRENT_PLATFORM == "linux":
@@ -1737,6 +1742,68 @@ class AutostartManager:
     def _startup_shortcut_path(self) -> Path:
         return self._startup_folder() / f"{self._app_name}.lnk"
 
+    @staticmethod
+    def _shortcut_fingerprint_path() -> Path:
+        """Lokal cache för den senast skapade Windows-genvägen."""
+        return DATA_DIR / "autostart_windows.json"
+
+    def _shortcut_spec(self) -> dict[str, str]:
+        """Inställningarna som appen använde när genvägen skapades."""
+        target, args = self._shortcut_target()
+        return {
+            "target": str(target),
+            "arguments": str(args),
+            "workdir": str(BASE_DIR),
+            "icon": str(BASE_DIR / "app_icon.ico") + ",0",
+            "description": self._app_name,
+            "window_style": "7",
+            "method": self.resolved_method(),
+        }
+
+    def _shortcut_digest(self) -> str:
+        """Hash av själva .lnk-filen, inte bara dess namn eller tidsstämpel."""
+        digest = hashlib.sha256()
+        with self._startup_shortcut_path().open("rb") as link:
+            for chunk in iter(lambda: link.read(64 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _shortcut_is_current(self) -> bool:
+        """Oförändrad sedan appen skapade den med nuvarande inställningar.
+
+        En cache utan hash, ett läsfel eller en externt ändrad genväg
+        innebär att den måste skapas om. Cachefilen är inte en läsning
+        av Windows-genvägens individuella fält.
+        """
+        try:
+            if not self._startup_shortcut_path().is_file():
+                return False
+            stored = json.loads(
+                self._shortcut_fingerprint_path().read_text(encoding="utf-8")
+            )
+            return (
+                isinstance(stored, dict)
+                and stored.get("version") == 1
+                and stored.get("spec") == self._shortcut_spec()
+                and stored.get("sha256") == self._shortcut_digest()
+            )
+        except (OSError, ValueError, TypeError):
+            return False
+
+    def _remember_shortcut(self) -> None:
+        """Spara fingeravtrycket först efter en lyckad genvägsskrivning."""
+        try:
+            state = {
+                "version": 1,
+                "spec": self._shortcut_spec(),
+                "sha256": self._shortcut_digest(),
+            }
+            _save_json(self._shortcut_fingerprint_path(), state)
+        except (OSError, ValueError, TypeError) as exc:
+            # Nästa start försöker då skapa genvägen igen; ingen cache
+            # får anses giltig om själva filen inte gick att läsa.
+            log.debug("AUTOSTART: kunde inte spara genvägsstatus: %s", exc)
+
     def _shortcut_target(self) -> tuple[str, str]:
         """(målprogram, argument) för autostart-genvägen."""
         if self.resolved_method() == "launcher":
@@ -1748,20 +1815,27 @@ class AutostartManager:
             return self._python_exe, f'"{self._main_py}" --minimized'
         return self._python_exe, "--minimized"
 
-    def _shortcut_powershell(self) -> str:
-        """PowerShell som skapar genvägen — med APPENS ikon, aldrig pyw:s."""
+    @staticmethod
+    def _powershell_quote(value: object) -> str:
+        """PowerShell-literal som även klarar apostrof i sökvägar."""
+        return "'" + str(value).replace("'", "''") + "'"
+
+    def _shortcut_powershell(self, destination: Path | None = None) -> str:
+        """PowerShell som skapar genvägen — med appens egen ikon."""
         target, args = self._shortcut_target()
-        lnk = self._startup_shortcut_path()
+        lnk = destination or self._startup_shortcut_path()
         ico = BASE_DIR / "app_icon.ico"
+        q = self._powershell_quote
         return (
+            "$ErrorActionPreference = 'Stop'; "
             "$w = New-Object -ComObject WScript.Shell; "
-            f"$s = $w.CreateShortcut('{lnk}'); "
-            f"$s.TargetPath = '{target}'; "
-            f"$s.Arguments = '{args}'; "
-            f"$s.WorkingDirectory = '{BASE_DIR}'; "
-            f"$s.IconLocation = '{ico},0'; "
+            f"$s = $w.CreateShortcut({q(lnk)}); "
+            f"$s.TargetPath = {q(target)}; "
+            f"$s.Arguments = {q(args)}; "
+            f"$s.WorkingDirectory = {q(BASE_DIR)}; "
+            f"$s.IconLocation = {q(str(ico) + ',0')}; "
             "$s.WindowStyle = 7; "
-            f"$s.Description = '{self._app_name}'; "
+            f"$s.Description = {q(self._app_name)}; "
             "$s.Save()"
         )
 
@@ -1770,10 +1844,10 @@ class AutostartManager:
         """Citerar en sträng säkert som VBScript-literal."""
         return '"' + str(value).replace('"', '""') + '"'
 
-    def _shortcut_vbscript(self) -> str:
+    def _shortcut_vbscript(self, destination: Path | None = None) -> str:
         """COM-reservväg utan PowerShell; genvägen får fortfarande appikonen."""
         target, args = self._shortcut_target()
-        lnk = self._startup_shortcut_path()
+        lnk = destination or self._startup_shortcut_path()
         ico = BASE_DIR / "app_icon.ico"
         q = self._vbs_quote
         return "\r\n".join((
@@ -1789,73 +1863,67 @@ class AutostartManager:
         ))
 
     def _write_startup_shortcut(self) -> bool:
-        """Skapar en appikon-genväg; skriver aldrig en Python-Run-post."""
+        """Byt inte ut en fungerande genväg förrän den nya har skapats."""
         lnk = self._startup_shortcut_path()
         try:
             _ensure_dir(lnk.parent)
-            # Ta bort en gammal länk först: filens blotta existens får
-            # aldrig misstas för att den redan bär appens ikon.
-            lnk.unlink(missing_ok=True)
-            subprocess.run(
-                [
-                    "powershell", "-NoProfile", "-ExecutionPolicy",
-                    "Bypass", "-Command", self._shortcut_powershell(),
-                ],
-                cwd=str(BASE_DIR),
-                check=False,
-                timeout=30,
-                capture_output=True,
-                creationflags=getattr(
-                    subprocess, "CREATE_NO_WINDOW", 0
-                ),
-            )
-            if lnk.exists():
-                return True
-        except Exception as exc:
-            log.debug("PowerShell-genväg misslyckades: %s", exc)
+            # Samma volym som Startup, men utanför Startup-mappen så att
+            # en avbruten skapelse aldrig blir en extra autostartpost.
+            with tempfile.TemporaryDirectory(
+                prefix=f".{self._app_name}-", dir=str(lnk.parent.parent),
+                ignore_cleanup_errors=True,
+            ) as staging:
+                staged_link = Path(staging) / lnk.name
+                common = {
+                    "cwd": str(BASE_DIR),
+                    "check": False,
+                    "capture_output": True,
+                    "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                }
 
-        # Windows Script Host finns även på system där PowerShell är avstängt.
-        # Tillfälliga VBS-filen tas bort direkt efter COM-anropet.
-        script_path: Path | None = None
-        try:
-            _ensure_dir(lnk.parent)
-            import tempfile
+                try:
+                    result = subprocess.run(
+                        [
+                            "powershell", "-NoProfile", "-ExecutionPolicy",
+                            "Bypass", "-Command",
+                            self._shortcut_powershell(staged_link),
+                        ],
+                        timeout=30, **common,
+                    )
+                    if (result.returncode == 0 and staged_link.is_file()
+                            and staged_link.stat().st_size > 0):
+                        staged_link.replace(lnk)
+                        return True
+                except Exception as exc:
+                    log.debug("PowerShell-genväg misslyckades: %s", exc)
 
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-16",
-                suffix=".vbs",
-                prefix=f".{self._app_name}-",
-                dir=str(lnk.parent),
-                delete=False,
-            ) as script:
-                script.write(self._shortcut_vbscript())
-                script_path = Path(script.name)
-            wscript = shutil.which("wscript.exe") or "wscript.exe"
-            subprocess.run(
-                [wscript, "//B", str(script_path)],
-                cwd=str(BASE_DIR),
-                check=False,
-                timeout=20,
-                capture_output=True,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            return lnk.exists()
+                # PowerShell kan vara avstängt. Låt inte en ofullständig
+                # fil från det första försöket misstas för VBS-resultatet.
+                staged_link.unlink(missing_ok=True)
+                script_path = Path(staging) / "create_shortcut.vbs"
+                script_path.write_text(
+                    self._shortcut_vbscript(staged_link), encoding="utf-16"
+                )
+                wscript = shutil.which("wscript.exe") or "wscript.exe"
+                result = subprocess.run(
+                    [wscript, "//B", str(script_path)], timeout=20, **common,
+                )
+                if (result.returncode == 0 and staged_link.is_file()
+                        and staged_link.stat().st_size > 0):
+                    staged_link.replace(lnk)
+                    return True
         except Exception as exc:
             log.warning("Autostart-genväg kunde inte skapas: %s", exc)
-            return False
-        finally:
-            if script_path is not None:
-                try:
-                    script_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+        return False
 
     def _remove_startup_shortcut(self) -> None:
-        try:
-            self._startup_shortcut_path().unlink(missing_ok=True)
-        except Exception as exc:
-            log.warning("Kunde inte ta bort autostart-genväg: %s", exc)
+        # Försök ta bort båda även om den ena inte är åtkomlig.
+        for path in (self._startup_shortcut_path(),
+                     self._shortcut_fingerprint_path()):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                log.warning("Kunde inte ta bort autostart-fil %s: %s", path, exc)
 
     def _win_set(self, enable: bool) -> bool:
         try:
@@ -1869,6 +1937,18 @@ class AutostartManager:
                     0,
                     winreg.KEY_SET_VALUE,
                 )
+                if enable and self._shortcut_is_current():
+                    # Filen och den sparade specifikationen är oförändrade:
+                    # ingen PowerShell, men ett gammalt Run-värde städas.
+                    try:
+                        winreg.DeleteValue(key, self._app_name)
+                    except Exception:
+                        pass
+                    log.debug(
+                        "Windows autostart: genvägen är aktuell (%s)",
+                        self._startup_shortcut_path(),
+                    )
+                    return True
                 if enable:
                     # FÖRSTAHANDSVAL: genväg i Autostart-mappen med
                     # appens egen ikon — ingen pythonw/Python-ikon i
@@ -1879,6 +1959,7 @@ class AutostartManager:
                             winreg.DeleteValue(key, self._app_name)
                         except Exception:
                             pass
+                        self._remember_shortcut()
                         log.info(
                             "Windows autostart: genväg %s (egen ikon)",
                             self._startup_shortcut_path(),
@@ -2091,15 +2172,18 @@ class AutostartManager:
         info = self.plan()
         info["enabled"] = self.is_enabled()
         info["registered_command"] = self.get_registered_command()
-        info["target"] = (
-            "HKCU\\" + self._WIN_RUN_KEY
-            if CURRENT_PLATFORM == "windows"
-            else str(
+        if CURRENT_PLATFORM == "windows":
+            shortcut = self._startup_shortcut_path()
+            info["target"] = (
+                str(shortcut) if shortcut.is_file()
+                else "HKCU\\" + self._WIN_RUN_KEY
+            )
+        else:
+            info["target"] = str(
                 self._linux_path()
                 if CURRENT_PLATFORM == "linux"
                 else self._macos_path()
             )
-        )
         return info
 
 # ═════════════════════════════════════════════════════════════════════
@@ -4682,10 +4766,13 @@ if __name__ == "__main__":
     print("\n  ── Session-betalningsdatum ──")
     print(f"  Initialt         : {fa.session_due_date}")
     print(f"  has_session_due  : {fa.has_session_due_date}")
-    fa.set_session_due_date("2026-06-30")
+    # Framtida datum: självtestet ska inte skriva "PASSERAT"-varningar
+    # som ser ut som ett fel i loggen.
+    _future = datetime.date.today() + datetime.timedelta(days=30)
+    fa.set_session_due_date(_future.isoformat())
     print(f"  Efter set (str)  : {fa.session_due_date}")
     print(f"  Som sträng       : {fa.session_due_date_str}")
-    fa.set_session_due_date(datetime.date(2026, 7, 15))
+    fa.set_session_due_date(_future + datetime.timedelta(days=15))
     print(f"  Efter set (date) : {fa.session_due_date}")
     fa.set_session_due_date(None)
     print(f"  Efter nollst.    : {fa.session_due_date}")
@@ -4699,16 +4786,27 @@ if __name__ == "__main__":
     print(f"  main.py          : {mgr._main_py}")
     print(f"  OS-registrerad   : {mgr.is_enabled()}")
     if CURRENT_PLATFORM == "windows":
-        current = mgr.get_registered_command()
-        print(f"  Registry-värde   : {current or '(ej registrerad)'}")
-        expected = mgr.build_command()
-        if current == expected:
-            print("  Status           : ✔ Korrekt")
-        elif current:
-            print("  Status           : ✘ Felaktig sökväg!")
-            print(f"  Korrekt          : {expected}")
+        # Genvägen är huvudvägen. get_registered_command() räknar ut
+        # kommandot när .lnk finns, det läser INTE genvägens innehåll.
+        shortcut = mgr._startup_shortcut_path()
+        print(f"  Autostart-genväg : {shortcut}")
+        if shortcut.is_file():
+            unchanged = mgr._shortcut_is_current()
+            print(f"  Oförändrad       : {unchanged}")
+            print(f"  Avsett kommando  : {mgr.build_command()}")
+            if unchanged:
+                print("  Status           : ✔ Oförändrad sedan appen skapade den")
+            else:
+                print("  Status           : – Genvägens innehåll ej bekräftat")
         else:
-            print("  Status           : – Ej registrerad")
+            current = mgr.get_registered_command()
+            print(f"  Äldre Run-värde  : {current or '(ej registrerad)'}")
+            if current and current == mgr.build_command():
+                print("  Status           : ✔ Run-värdet stämmer")
+            elif current:
+                print("  Status           : ✘ Run-värdet pekar fel")
+            else:
+                print("  Status           : – Ej registrerad")
 
     # ── Datastatus ─────────────────────────────────────────────────────
     print("\n  ── Data ──")

@@ -1027,7 +1027,10 @@ def attachment_page_count(path: Any) -> int:
     if suffix != ".pdf":
         return 0
     try:
-        import fitz  # PyMuPDF
+        try:
+            import pymupdf as fitz  # PyMuPDF 1.24+
+        except ImportError:
+            import fitz  # type: ignore[no-redef]  # PyMuPDF < 1.24
 
         with fitz.open(str(p)) as doc:
             return len(doc)

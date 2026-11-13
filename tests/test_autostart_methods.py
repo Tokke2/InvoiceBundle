@@ -8,6 +8,9 @@ filer skrivs bara under tmp-HOME. Inget rör det riktiga OS:et.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -164,6 +167,7 @@ def test_windows_direct_uses_icon_shortcut_without_run_entry(
 ):
     store = _fake_winreg(monkeypatch)
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setattr(appmod, "DATA_DIR", tmp_path / "data")
     mgr = _mgr(monkeypatch, "windows")  # direct som standard
 
     def fake_write_shortcut(self):
@@ -343,3 +347,159 @@ def test_macos_launchctl_falls_back_when_bootstrap_is_refused(
 
     appmod.AutostartManager._launchctl("load", plist)
     assert [c[1] for c in calls] == ["bootstrap", "load"]
+
+
+def test_windows_shortcut_is_not_rewritten_when_it_is_current(
+    monkeypatch, tmp_path
+):
+    """En oförändrad .lnk skrivs inte om vid nästa programstart."""
+    store = _fake_winreg(monkeypatch)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setattr(appmod, "DATA_DIR", tmp_path / "data")
+    mgr = _mgr(monkeypatch, "windows")
+
+    writes: list[int] = []
+
+    def fake_write_shortcut(self):
+        writes.append(1)
+        link = self._startup_shortcut_path()
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.write_bytes(b"LNK")
+        return True
+
+    monkeypatch.setattr(
+        type(mgr), "_write_startup_shortcut", fake_write_shortcut
+    )
+
+    assert mgr.set_enabled(True) is True
+    assert writes == [1]
+    fingerprint = tmp_path / "data" / "autostart_windows.json"
+    state = json.loads(fingerprint.read_text(encoding="utf-8"))
+    assert state["sha256"] == hashlib.sha256(b"LNK").hexdigest()
+    assert state["spec"] == mgr._shortcut_spec()
+
+    # Nästa start använder cachen, men rensar en eventuell äldre Run-post.
+    store[appmod.APP_NAME] = "gammal pythonw-post"
+    assert mgr.verify_and_update() is True
+    assert writes == [1], "genvägen skrevs om utan att något ändrats"
+    assert appmod.APP_NAME not in store
+
+    # Extern ändring med samma storlek och tidsstämpel upptäcks också.
+    link = mgr._startup_shortcut_path()
+    original_stat = link.stat()
+    link.write_bytes(b"BAD")
+    os.utime(link, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    assert mgr._shortcut_is_current() is False
+    assert mgr.verify_and_update() is True
+    assert writes == [1, 1]
+    assert link.read_bytes() == b"LNK"
+
+    # Ny Python-tolk → genvägen måste uppdateras.
+    monkeypatch.setattr(mgr, "_python_exe", r"C:\Python3\pythonw.exe")
+    assert mgr.verify_and_update() is True
+    assert writes == [1, 1, 1]
+
+    # Borttagning glömmer fingeravtrycket också.
+    assert mgr.set_enabled(False) is True
+    assert not fingerprint.exists()
+
+
+def test_windows_current_shortcut_check_requires_the_file(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setattr(appmod, "DATA_DIR", tmp_path / "data")
+    mgr = _mgr(monkeypatch, "windows")
+    link = mgr._startup_shortcut_path()
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.write_bytes(b"LNK")
+    mgr._remember_shortcut()
+    assert mgr._shortcut_is_current() is True
+    with monkeypatch.context() as change:
+        change.setattr(appmod, "BASE_DIR", tmp_path / "en annan appmapp")
+        assert mgr._shortcut_is_current() is False
+    with monkeypatch.context() as change:
+        change.setattr(mgr, "method", "launcher")
+        assert mgr._shortcut_is_current() is False
+
+    # Cache från en äldre version utan hash eller en trasig JSON är inte
+    # ett bevis för att länken är oförändrad.
+    cache = mgr._shortcut_fingerprint_path()
+    cache.write_text(json.dumps(mgr._shortcut_spec()), encoding="utf-8")
+    assert mgr._shortcut_is_current() is False
+    cache.write_text("{trasig", encoding="utf-8")
+    assert mgr._shortcut_is_current() is False
+    mgr._remember_shortcut()
+    link.unlink()
+    assert mgr._shortcut_is_current() is False
+
+
+def test_startup_log_describes_shortcut_not_a_fabricated_registry_value(
+    monkeypatch, tmp_path, caplog
+):
+    import logging
+    import main
+
+    _fake_winreg(monkeypatch)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setattr(appmod, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(main, "CURRENT_PLATFORM", "windows")
+    mgr = _mgr(monkeypatch, "windows")
+    link = mgr._startup_shortcut_path()
+    link.parent.mkdir(parents=True)
+    link.write_bytes(b"LNK")
+    mgr._remember_shortcut()
+
+    class Settings:
+        def get_autostart_manager(self):
+            return mgr
+
+        def get(self, key, default=None):
+            return True if key == "startup" else default
+
+    core = types.SimpleNamespace(settings=Settings())
+    watcher_log = logging.getLogger("WindowWatcher")
+    watcher_log.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.INFO, logger="WindowWatcher"):
+            main._sync_autostart(core)
+    finally:
+        watcher_log.removeHandler(caplog.handler)
+    assert "Autostart-genväg" in caplog.text
+    assert "oförändrad sedan appen skapade den" in caplog.text
+    assert "Avsett kommando" in caplog.text
+    assert "Registry-värde" not in caplog.text
+    assert mgr.status()["target"] == str(link)
+
+
+def test_startup_log_does_not_certify_an_unverified_shortcut(
+    monkeypatch, tmp_path, caplog
+):
+    import logging
+    import main
+
+    _fake_winreg(monkeypatch)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setattr(appmod, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(main, "CURRENT_PLATFORM", "windows")
+    mgr = _mgr(monkeypatch, "windows")
+    link = mgr._startup_shortcut_path()
+    link.parent.mkdir(parents=True)
+    link.write_text("okänd genväg", encoding="utf-8")
+
+    class Settings:
+        def get_autostart_manager(self):
+            return mgr
+
+        def get(self, key, default=None):
+            return True if key == "startup" else default
+
+    watcher_log = logging.getLogger("WindowWatcher")
+    watcher_log.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.INFO, logger="WindowWatcher"):
+            main._sync_autostart(types.SimpleNamespace(settings=Settings()))
+    finally:
+        watcher_log.removeHandler(caplog.handler)
+    assert "innehåll kunde inte bekräftas" in caplog.text
+    assert "Registry korrekt" not in caplog.text

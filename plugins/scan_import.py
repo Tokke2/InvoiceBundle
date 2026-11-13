@@ -55,11 +55,18 @@ except Exception:
 
 HAS_FITZ = False
 try:
-    import fitz  # type: ignore  # PyMuPDF
-
-    HAS_FITZ = True
+    # PyMuPDF 1.24+ heter pymupdf; "fitz" finns kvar men varnar i
+    # konsolen vid varje start ("The `fitz` API is deprecated").
+    import pymupdf as fitz  # type: ignore
 except Exception:
-    pass
+    try:
+        import fitz  # type: ignore  # PyMuPDF < 1.24
+
+        HAS_FITZ = True
+    except Exception:
+        pass
+else:
+    HAS_FITZ = True
 
 HAS_TESS = False
 try:

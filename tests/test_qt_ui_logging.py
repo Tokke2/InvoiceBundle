@@ -223,3 +223,79 @@ def test_window_and_tray_loggers_are_wrapped(monkeypatch):
     assert "main_window.theme_changed.connect(_safe_qt_callback(_on_theme))" in source
     assert "main_window.tabs.currentChanged.connect(_safe_qt_callback(_on_tab))" in source
     assert "tray.activated.connect(_safe_qt_callback(_on_tray))" in source
+
+
+def test_qt_bridge_is_installed_after_late_qapplication_without_duplicates(
+    monkeypatch,
+):
+    """Fas 1 utan Qt följt av UI-start måste ge exakt en aktiv brygga."""
+    import logging
+    from types import SimpleNamespace
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication, QWidget
+    import advanced_logger as al
+
+    qapp = _qapp()
+    previous_bridge = al._qt_bridge
+    previous_live = (
+        previous_bridge is not None
+        and al._qt_is_valid(previous_bridge)
+        and previous_bridge.parent() is qapp
+    )
+    if previous_live:
+        qapp.removeEventFilter(previous_bridge)
+    monkeypatch.setattr(al, "_qt_bridge", None)
+    monkeypatch.setattr(al, "_memory_handler_global", None)
+    monkeypatch.setattr(al, "_app_ref", None)
+    monkeypatch.setattr(al, "setup_logging", lambda **_kw: object())
+    monkeypatch.setattr(al, "install_exception_hook", lambda: None)
+    monkeypatch.setattr(al, "install_qt_message_hook", lambda: None)
+    monkeypatch.setattr(al, "log_system_info", lambda: None)
+    monkeypatch.setattr(al, "attach_app_watchers", lambda _app: None)
+    monkeypatch.setattr(al, "attach_window_watchers", lambda _window: None)
+    monkeypatch.setattr(al, "_install_ui_signal_loggers", lambda _window: None)
+    actions = []
+    monkeypatch.setattr(al, "alog", lambda action, *_a, **_kw: actions.append(action))
+    debug_messages = []
+    warnings = []
+    monkeypatch.setattr(al._plugin_log, "debug", lambda msg, *_a: debug_messages.append(msg))
+    monkeypatch.setattr(al._plugin_log, "warning", lambda msg, *_a, **_kw: warnings.append(msg))
+
+    bridge = None
+    root = logging.getLogger()
+    original_level = root.level
+    try:
+        # Kärnan registreras innan någon QApplication finns.
+        monkeypatch.setattr(QApplication, "instance", lambda: None)
+        al.register(SimpleNamespace())
+        assert al._qt_bridge is None
+        assert any("ingen QApplication" in msg for msg in debug_messages)
+        assert not any("Qt-brygga" in msg for msg in warnings)
+
+        # När fönstret senare registreras ska bryggan installeras på riktigt.
+        monkeypatch.setattr(QApplication, "instance", lambda: qapp)
+        window = QWidget()
+        window._builtin_log_tab = True
+        al.register_ui(window)
+        bridge = al._qt_bridge
+        assert bridge is not None and bridge.parent() is qapp
+        assert actions.count("QT_BRIDGE") == 1
+
+        # Upprepad registrering får inte skapa flera eventfilter.
+        al.register_ui(window)
+        assert al._qt_bridge is bridge
+        assert actions.count("QT_BRIDGE") == 1
+
+        actions.clear()
+        root.setLevel(al.TRACE_LEVEL)
+        qapp.sendEvent(window, QEvent(QEvent.Type.FocusIn))
+        assert actions.count("UI_FOCUS") == 1
+        window.close()
+    finally:
+        root.setLevel(original_level)
+        if bridge is not None and al._qt_is_valid(bridge):
+            qapp.removeEventFilter(bridge)
+            bridge.setParent(None)
+            bridge.deleteLater()
+        if previous_live:
+            qapp.installEventFilter(previous_bridge)

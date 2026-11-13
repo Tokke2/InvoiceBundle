@@ -850,11 +850,18 @@ class QtEventBridge(QObject):
 
 
 def install_qt_event_bridge(app_qt: Any) -> bool:
-    """Installerar den globala Qt-bryggan. Returnerar True vid framgång."""
+    """Installera bryggan en gång per QApplication, även vid sen UI-start."""
     global _qt_bridge
     try:
         if app_qt is None:
             return False
+        if _qt_bridge is not None and _qt_is_valid(_qt_bridge):
+            previous_app = _qt_bridge.parent()
+            if previous_app is app_qt:
+                return True
+            if previous_app is not None and _qt_is_valid(previous_app):
+                previous_app.removeEventFilter(_qt_bridge)
+            _qt_bridge.deleteLater()
         _qt_bridge = QtEventBridge(app_qt)
         app_qt.installEventFilter(_qt_bridge)
         alog(
@@ -1632,8 +1639,10 @@ def register(app: Any) -> None:
         if qapp is not None:
             install_qt_event_bridge(qapp)
         else:
-            _plugin_log.warning(
-                "Qt-brygga: ingen QApplication ännu — hoppar över"
+            # T.ex. app.py:s fristående självtest skapar ingen QApplication.
+            # Om ett fönster senare skapas gör fas 2 ett nytt försök.
+            _plugin_log.debug(
+                "Qt-brygga: ingen QApplication ännu; försöker igen vid UI-start"
             )
     except Exception as exc:
         _plugin_log.warning("Qt-brygga: %s", exc)
@@ -1679,6 +1688,18 @@ def register_ui(main_window: Any) -> None:
 
     if _app_ref is None:
         _app_ref = getattr(main_window, "_app", None)
+
+    # Kärnan kan ha skapats före QApplication (t.ex. i ett självtest).
+    # Då installerar fas 2 den brygga som fas 1 inte kunde installera.
+    # Funktionen är idempotent om bryggan redan finns från fas 1.
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        qapp = QApplication.instance()
+        if qapp is not None:
+            install_qt_event_bridge(qapp)
+    except Exception as exc:
+        _plugin_log.warning("Qt-brygga vid UI-start: %s", exc)
 
     try:
         attach_window_watchers(main_window)

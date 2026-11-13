@@ -1,11 +1,15 @@
 """System Python selection, probing, persistence, and safe fallback."""
 from __future__ import annotations
 
+import builtins
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 for _directory in (
@@ -286,3 +290,69 @@ def test_runtime_attempt_guard_prevents_returning_to_failed_python(
 
     assert main._relaunch_runtime_fallback() is False
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    "available", ["modern", "legacy", "broken_modern", "neither", "missing_qt"]
+)
+def test_runtime_probe_uses_available_pdf_api_and_still_requires_qt(
+    available, capsys,
+):
+    import main
+
+    calls = []
+    qt_calls = []
+
+    def module_import(name):
+        calls.append(name)
+        if name == "PySide6" and available == "missing_qt":
+            raise ImportError("no Qt")
+        if name == "pymupdf" and available != "modern":
+            if available == "broken_modern":
+                raise RuntimeError("modern PDF module is broken")
+            raise ImportError("no modern PDF module")
+        if name == "fitz" and available == "neither":
+            raise ImportError("no legacy PDF module")
+        return SimpleNamespace()
+
+    class FakeApplication:
+        def __init__(self, args):
+            qt_calls.append(("created", args))
+
+        def quit(self):
+            qt_calls.append(("quit",))
+
+    def fake_import(name, *args, **kwargs):
+        if name == "importlib":
+            return SimpleNamespace(import_module=module_import)
+        if name == "PySide6.QtWidgets":
+            return SimpleNamespace(QApplication=FakeApplication)
+        return builtins.__import__(name, *args, **kwargs)
+
+    namespace = {"__builtins__": {**vars(builtins), "__import__": fake_import}}
+    if available in ("neither", "missing_qt"):
+        with pytest.raises(ImportError):
+            exec(main._RUNTIME_PROBE, namespace)
+        assert not qt_calls
+        assert "FAKTURABUNTEN_RUNTIME_OK" not in capsys.readouterr().out
+        return
+
+    exec(main._RUNTIME_PROBE, namespace)
+    assert all(name in calls for name in (
+        "PySide6", "reportlab", "pypdf", "PIL", "pytesseract", "qrcode"
+    ))
+    assert "pymupdf" in calls
+    assert ("fitz" in calls) is (available != "modern")
+    assert qt_calls == [("created", []), ("quit",)]
+    assert "FAKTURABUNTEN_RUNTIME_OK" in capsys.readouterr().out
+
+
+def test_windows_installer_uses_the_same_runtime_probe_as_main():
+    import main
+
+    script = (PROJECT_DIR / "autostart" / "install_python.ps1").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(r"\$probeCode = @'\n(.*?)\n'@", script, re.DOTALL)
+    assert match is not None
+    assert match.group(1).strip() == main._RUNTIME_PROBE.strip()
