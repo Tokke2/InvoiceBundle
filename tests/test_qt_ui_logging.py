@@ -140,3 +140,86 @@ def test_uncaught_deleted_widget_error_is_not_logged_critical(monkeypatch):
     )
     callback()
     assert seen == []
+
+
+def _raise_from_logger_module(message: str) -> BaseException:
+    """Skapar ett undantag vars stackspår går genom advanced_logger.py.
+
+    Samma form som i felsamlingen: ``_f`` i den här modulen läser
+    ``text()`` på en widget som redan rivits.
+    """
+    source = (
+        "def _f(field):\n"
+        "    return len(field.text() or '')\n"
+    )
+    namespace: dict = {}
+    exec(compile(source, "advanced_logger.py", "exec"), namespace)
+    try:
+        namespace["_f"](object())
+    except Exception as exc:  # AttributeError → byts mot rätt fel nedan
+        return RuntimeError(message).with_traceback(exc.__traceback__)
+    raise AssertionError("undantaget uteblev")
+
+
+def test_closed_widget_error_from_our_hooks_is_never_critical(
+    monkeypatch, caplog
+):
+    """Bruset från en stängd widget får aldrig bli en CRITICAL-rad.
+
+    Felsamlingen visade upprepade ``Internal C++ object (QLineEdit)
+    already deleted`` med action CRASH. Hookarna ska fånga det själva,
+    och om något ändå når sys.excepthook ska det bara bli DEBUG.
+    """
+    import logging
+
+    import advanced_logger
+
+    monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
+    advanced_logger.install_exception_hook()
+    installed = sys.excepthook
+
+    exc = _raise_from_logger_module(
+        "libshiboken: Internal C++ object "
+        "(PySide6.QtWidgets.QLineEdit) already deleted."
+    )
+    with caplog.at_level(logging.DEBUG, logger="UncaughtException"):
+        installed(type(exc), exc, exc.__traceback__)
+
+    critical = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert critical == [], [r.getMessage() for r in critical]
+    assert any("redan stängd widget" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_real_uncaught_error_still_becomes_critical(monkeypatch, caplog):
+    """Skyddsnätet får inte dölja verkliga fel utanför loggningen."""
+    import logging
+
+    import advanced_logger
+
+    advanced_logger.install_exception_hook()
+    installed = sys.excepthook
+
+    try:
+        raise RuntimeError("Internal C++ object (QLineEdit) already deleted.")
+    except RuntimeError as exc:
+        real = exc
+
+    with caplog.at_level(logging.DEBUG, logger="UncaughtException"):
+        installed(type(real), real, real.__traceback__)
+
+    critical = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
+    assert len(critical) == 1
+    assert "UNCAUGHT EXCEPTION" in critical[0].getMessage()
+
+
+def test_window_and_tray_loggers_are_wrapped(monkeypatch):
+    """Fönster-, flik- och tray-hookarna använder samma skydd."""
+    import advanced_logger
+
+    source = (
+        PROJECT_DIR / "plugins" / "advanced_logger.py"
+    ).read_text(encoding="utf-8")
+    assert "main_window.theme_changed.connect(_safe_qt_callback(_on_theme))" in source
+    assert "main_window.tabs.currentChanged.connect(_safe_qt_callback(_on_tab))" in source
+    assert "tray.activated.connect(_safe_qt_callback(_on_tray))" in source

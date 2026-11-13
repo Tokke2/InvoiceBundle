@@ -443,6 +443,39 @@ def set_trace_enabled(on: bool, log_change: bool = True) -> None:
 # ═════════════════════════════════════════════════════════════════════
 
 
+#: Filnamnet på den här modulen — används för att känna igen brus som
+#: kommer från våra egna logg-hookar (se _is_closed_widget_noise).
+_THIS_MODULE_FILE = "advanced_logger.py"
+
+
+def _is_closed_widget_noise(exc_value: BaseException,
+                            exc_tb: Any) -> bool:
+    """True för "redan stängd widget" som uppstått i vår egen loggning.
+
+    ``editingFinished`` kan komma under rivningen av en dialog. Våra
+    hookar kontrollerar visserligen att widgeten lever, men om någon
+    framtida hook glömmer det ska felsamlingen inte fyllas av brus
+    som användaren aldrig kan åtgärda. Bara RuntimeError av den kända
+    formen **och** ett stackspår genom den här modulen räknas — ett
+    verkligt fel någon annanstans loggas fortfarande som CRITICAL.
+    """
+    if not isinstance(exc_value, RuntimeError):
+        return False
+    text = str(exc_value)
+    if "already deleted" not in text and "Internal C++ object" not in text:
+        return False
+    tb = exc_tb
+    while tb is not None:
+        try:
+            name = str(tb.tb_frame.f_code.co_filename)
+        except Exception:
+            return False
+        if name.endswith(_THIS_MODULE_FILE):
+            return True
+        tb = tb.tb_next
+    return False
+
+
 def install_exception_hook() -> None:
     """Fångar oupptäckta Python-undantag och trådfel."""
     log = logging.getLogger("UncaughtException")
@@ -451,6 +484,12 @@ def install_exception_hook() -> None:
     def hook(exc_type, exc_value, exc_tb):
         if issubclass(exc_type, KeyboardInterrupt):
             original(exc_type, exc_value, exc_tb)
+            return
+        if _is_closed_widget_noise(exc_value, exc_tb):
+            # Loggning får aldrig bli det som skräpar ner felsamlingen.
+            log.debug(
+                "UI-loggning rörde en redan stängd widget: %s", exc_value
+            )
             return
         log.critical(
             "UNCAUGHT EXCEPTION: %s: %s",
@@ -462,6 +501,12 @@ def install_exception_hook() -> None:
     sys.excepthook = hook
 
     def thread_hook(args):
+        if _is_closed_widget_noise(args.exc_value, args.exc_tb):
+            log.debug(
+                "UI-loggning i tråd rörde en redan stängd widget: %s",
+                args.exc_value,
+            )
+            return
         log.critical(
             "UNCAUGHT THREAD EXCEPTION in '%s': %s",
             args.thread.name if args.thread else "unknown",
@@ -1013,7 +1058,9 @@ def attach_window_watchers(main_window: Any) -> None:
         def _on_theme(theme: dict):
             alog("THEME_CHANGED", f"Tema bytt → {theme.get('name')}",
                  tema=theme.get("name"), bg=theme.get("bg"))
-        main_window.theme_changed.connect(_on_theme)
+        # Samma skydd som signal-loggarna: en signal som kommer under
+        # rivningen får aldrig nå sys.excepthook.
+        main_window.theme_changed.connect(_safe_qt_callback(_on_theme))
 
     if hasattr(main_window, "tabs"):
         def _on_tab(idx: int):
@@ -1023,7 +1070,7 @@ def attach_window_watchers(main_window: Any) -> None:
                  flik=idx)
             except Exception:
                 pass
-        main_window.tabs.currentChanged.connect(_on_tab)
+        main_window.tabs.currentChanged.connect(_safe_qt_callback(_on_tab))
 
     # Tray-klick loggas (diagnos för blink/göm-beteendet)
     tray = getattr(main_window, "tray", None)
@@ -1032,7 +1079,7 @@ def attach_window_watchers(main_window: Any) -> None:
             alog("TRAY_CLICK", f"Tray-ikon klickad (reason={reason})",
                  reason=str(reason))
         try:
-            tray.activated.connect(_on_tray)
+            tray.activated.connect(_safe_qt_callback(_on_tray))
         except Exception:
             pass
 
