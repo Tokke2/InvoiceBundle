@@ -108,7 +108,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "menu.clean_cache_old": {"sv": "Bara gamla filer (äldre än 1 dygn) — smartfilter", "en": "Old files only (older than 1 day) — smart filter"},
     "menu.clean_cache_all": {"sv": "All cache nu", "en": "All cache now"},
     "menu.about": {"sv": "ℹ️  Om programmet", "en": "ℹ️  About"},
-    "menu.donate": {"sv": "💖  Stöd Fakturabunten…", "en": "💖  Support InvoiceBundle…"},
+    "menu.donate": {"sv": "💖  Donationer…", "en": "💖  Donations…"},
     "menu.donate_bar": {"sv": "💖  Stöd", "en": "💖  Support"},
     "menu.donate_swish_qr": {"sv": "💚  Swish QR (låst mottagare)…", "en": "💚  Swish QR (locked recipient)…"},
     "menu.donate_paypal": {"sv": "💙  Donera via PayPal", "en": "💙  Donate with PayPal"},
@@ -343,15 +343,45 @@ _STRINGS: dict[str, dict[str, str]] = {
 
     # ── Donation ─────────────────────────────────────────────────────
     "donate.title": {"sv": "💖 Stöd Fakturabunten", "en": "💖 Support InvoiceBundle"},
-    "donate.window_title": {"sv": "Fakturabunten — Stöd projektet", "en": "InvoiceBundle — Support the project"},
+    "donate.window_title": {"sv": "Fakturabunten — Stöd & donationer", "en": "InvoiceBundle — Support & donations"},
     "donate.eyebrow": {"sv": "✨ GRATIS · REKLAMFRITT · LÅST MOTTAGARE", "en": "✨ FREE · AD-FREE · LOCKED RECIPIENT"},
     "donate.hero_sub": {
-        "sv": "Fakturabunten är 100 % gratis att använda — både privat och kommersiellt. En frivillig gåva hjälper fortsatt utveckling och underhåll.",
-        "en": "InvoiceBundle is 100% free to use — both privately and commercially. A voluntary gift helps keep development and maintenance going.",
+        "sv": "Frivilliga donationer för fortsatt utveckling av en lokal, helt reklamfri fakturaapp.",
+        "en": "Voluntary donations supporting ongoing development of a local, completely ad-free invoice app.",
     },
     "donate.pill_local": {"sv": "📖 100 % lokalt", "en": "📖 100% local"},
     "donate.pill_noads": {"sv": "🕊️ Ingen reklam", "en": "🕊️ No ads"},
+    "donate.pill_commercial": {"sv": "📄 Privat & kommersiellt", "en": "📄 Private & commercial"},
     "donate.pill_locked": {"sv": "🔒 Låst mottagare", "en": "🔒 Locked recipient"},
+    "donate.story_kicker": {"sv": "FRIVILLIGT STÖD", "en": "VOLUNTARY SUPPORT"},
+    "donate.story_title": {
+        "sv": "Tack för att du använder Fakturabunten",
+        "en": "Thank you for using InvoiceBundle",
+    },
+    "donate.story_body": {
+        "sv": (
+            "<p style='margin:0 0 6px 0;'>Fakturabunten byggdes med ett enkelt mål: att göra "
+            "fakturahanteringen lugn, överskådlig och helt lokal på din egen dator — utan "
+            "prenumerationer, molntvång, reklam eller låsta funktioner.</p>"
+            "<p style='margin:0 0 6px 0;'>Programmet är <b>100 % gratis</b> att installera och "
+            "använda både privat och i företag (se <code>LICENSE</code>). Allt fungerar exakt "
+            "lika bra utan donation, och inget kommer någonsin att låsas bakom betalning.</p>"
+            "<p style='margin:0;'>Om Fakturabunten sparar tid i din vardag är en frivillig "
+            "gåva ett varmt tack som hjälper utvecklaren att lägga tid på nya förbättringar, "
+            "smartare fakturatolkning och löpande uppdateringar för Windows, macOS och Linux.</p>"
+        ),
+        "en": (
+            "<p style='margin:0 0 6px 0;'>InvoiceBundle was built with a simple goal: to keep "
+            "invoice management calm, clear, and entirely local on your own computer — with no "
+            "subscriptions, no cloud lock-in, no ads, and no gated features.</p>"
+            "<p style='margin:0 0 6px 0;'>The app is <b>100% free</b> to install and use for "
+            "both personal and business purposes (see <code>LICENSE</code>). Everything works "
+            "identically without a donation, and nothing will ever be locked behind payment.</p>"
+            "<p style='margin:0;'>If InvoiceBundle saves you time in everyday work, a voluntary "
+            "gift is a warm thank-you that helps fund developer time for new improvements, "
+            "smarter invoice parsing, and ongoing releases across Windows, macOS, and Linux.</p>"
+        ),
+    },
     "donate.body_html": {
         "sv": "<p><b>Fakturabunten är gratis och utan reklam.</b> Om programmet hjälper dig i vardagen är en donation ett frivilligt tack som hjälper mig att fortsätta utveckla och underhålla det.</p><ul><li>Ingen reklam, ingen inloggning, inga prenumerationer.</li><li>Donationer går direkt till utveckling och underhåll.</li><li>Appen fungerar exakt lika bra utan donation.</li></ul><p style='color:#8a8a9e;font-size:11px'>Betalningen sker via Swish QR, PayPal eller Ko-fi. Mottagaren är låst och Fakturabunten ser inga betalningsuppgifter.</p>",
         "en": "<p><b>InvoiceBundle is free and ad-free.</b> If the app helps you in everyday life, a donation is a voluntary thank-you that helps me keep developing and maintaining it.</p><ul><li>No ads, no sign-up, no subscriptions.</li><li>Donations go directly to development and maintenance.</li><li>The app works exactly the same without a donation.</li></ul><p style='color:#8a8a9e;font-size:11px'>Payment takes place via Swish QR, PayPal or Ko-fi. The recipient is locked and InvoiceBundle never sees any payment details.</p>",
@@ -373,6 +403,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Selected: {amount} SEK — Swish QR and PayPal are updated 💚",
     },
     "donate.swish_card_title": {"sv": "💚 Swish · Standard QR", "en": "💚 Swish · Standard QR"},
+    "donate.swish_locked_pill": {"sv": "🔒 Låst", "en": "🔒 Locked"},
     "donate.locked_badge": {"sv": "🔒 Låst · ej ändringsbar", "en": "🔒 Locked · read-only"},
     "donate.swish_scan": {"sv": "📱  Skanna med Swish-appen", "en": "📱  Scan with the Swish app"},
     "donate.swish_qr_tip": {
@@ -387,14 +418,23 @@ _STRINGS: dict[str, dict[str, str]] = {
         "sv": "QR-biblioteket (qrcode) saknas i denna Python-miljö.\nStarta appen via startfilen så hämtas det automatiskt.",
         "en": "The QR library (qrcode) is missing in this Python environment.\nLaunch via the start file to install it automatically.",
     },
-    "donate.methods_title": {"sv": "💳 Kort eller månadsstöd", "en": "💳 Card or monthly support"},
+    "donate.methods_title": {"sv": "💳 PayPal & Ko-fi", "en": "💳 PayPal & Ko-fi"},
     "donate.methods_hint": {
-        "sv": "Öppnas direkt från appen i din webbläsare — ingen separat donationssida.",
-        "en": "Opens directly from the app in your browser — no separate donation webpage.",
+        "sv": "Öppna i webbläsaren på datorn — eller visa QR-koder för att skanna med mobilen.",
+        "en": "Open in your desktop browser — or show QR codes to scan with your phone.",
     },
     "donate.paypal": {"sv": "💙 Donera via PayPal", "en": "💙 Donate with PayPal"},
     "donate.paypal_amount": {"sv": "💙 Donera {amount} kr via PayPal", "en": "💙 Donate {amount} SEK via PayPal"},
     "donate.kofi": {"sv": "☕ Bjud på en kaffe (Ko-fi)", "en": "☕ Buy me a coffee (Ko-fi)"},
+    "donate.qr_toggle_show": {"sv": "📱  Visa QR-koder (PayPal och Ko-fi)", "en": "📱  Show QR codes (PayPal / Ko-fi)"},
+    "donate.qr_toggle_hide": {"sv": "📱  Dölj QR-koder (PayPal och Ko-fi)", "en": "📱  Hide QR codes (PayPal / Ko-fi)"},
+    "donate.paypal_qr_caption": {"sv": "PayPal QR", "en": "PayPal QR"},
+    "donate.paypal_qr_caption_amount": {"sv": "PayPal ({amount} kr)", "en": "PayPal ({amount} SEK)"},
+    "donate.kofi_qr_caption": {"sv": "Ko-fi QR", "en": "Ko-fi QR"},
+    "donate.qr_scan_sub": {
+        "sv": "Skanna med mobilkameran för att öppna länken.",
+        "en": "Scan with your phone camera to open the link.",
+    },
     "donate.locked_box_title": {"sv": "🔒 Låst konfiguration (kan ej ändras)", "en": "🔒 Locked configuration (read-only)"},
     "donate.locked_line_swish": {"sv": "• Swish: Låst mottagare via Swish QR-kod", "en": "• Swish: Locked recipient via Swish QR code"},
     "donate.locked_line_paypal": {"sv": "• PayPal: {url}", "en": "• PayPal: {url}"},
@@ -413,12 +453,12 @@ _STRINGS: dict[str, dict[str, str]] = {
 
     # ── Om-dialogen ──────────────────────────────────────────────────
     "about.title": {"sv": "Om {app}", "en": "About {app}"},
-    "about.donate_btn": {"sv": "💖  Stöd projektet", "en": "💖  Support the project"},
+    "about.donate_btn": {"sv": "💖  Donationer…", "en": "💖  Donations…"},
     "about.close": {"sv": "✖  Stäng", "en": "✖  Close"},
 
     "about.body_html": {
-        "sv": "<h2 style='color:#58a6ff'>{app}</h2><p><b>Version {version}</b> · Modern lokal fakturahantering för Windows, Linux och macOS.</p><p><b>© {year} Rickard Längkvist</b> · Fri att använda privat och kommersiellt (se <code>LICENSE</code>).</p><hr><h3>Vad programmet gör</h3><p>Registrerar leverantörsfakturor och kreditfakturor, summerar Fakturor (+) / Krediter (−) / <b>ATT BETALA</b>, håller koll på förfallodatum och exporterar betallistor till PDF — helt lokalt på din dator, utan prenumeration.</p><h3>Hur det funkar</h3><ol><li>Välj leverantör i rullistan (favoriter ★ överst).</li><li>Registrera faktura: fakturanummer + belopp. ＋ = faktura, − = kreditfaktura.</li><li>Exportera ALLA aktiva till PDF — betalningsdatum frågas alltid innan export och nollställs efteråt.</li><li>Exporthistorik: återställ arkiverade fakturor, öppna PDF eller mapp.</li></ol><h3>Stöd utvecklingen 💖</h3><p>💚 Swish: <b>Swish QR-kod i Stöd-dialogen</b> (låst mottagare, Swish-standard)<br>🅿️ PayPal: {paypal}<br>☕ Ko-fi: {kofi}</p><hr><p style='color:#888;font-size:11px;'>Plattform: {platform} · Python {python} · Autostart: {autostart}</p>",
-        "en": "<h2 style='color:#58a6ff'>{app}</h2><p><b>Version {version}</b> · Modern local invoice handling for Windows, Linux and macOS.</p><p><b>© {year} Rickard Längkvist</b> · Free for private and commercial use (see <code>LICENSE</code>).</p><hr><h3>What the app does</h3><p>Registers supplier invoices and credit notes, totals Invoices (+) / Credits (−) / <b>TO PAY</b>, keeps track of due dates and exports payment lists to PDF — entirely locally on your computer, no subscription.</p><h3>How it works</h3><ol><li>Choose a supplier in the list (favourites ★ first).</li><li>Register an invoice: invoice number + amount. ＋ = invoice, − = credit note.</li><li>Export ALL active invoices to PDF — the payment date is always asked before export and reset afterwards.</li><li>Export history: restore archived invoices, open the PDF or folder.</li></ol><h3>Support development 💖</h3><p>💚 Swish: <b>Swish QR code in the Support dialog</b> (locked recipient, Swish standard)<br>🅿️ PayPal: {paypal}<br>☕ Ko-fi: {kofi}</p><hr><p style='color:#888;font-size:11px;'>Platform: {platform} · Python {python} · Autostart: {autostart}</p>",
+        "sv": "<h2 style='color:#58a6ff'>{app}</h2><p><b>Version {version}</b> · Modern lokal fakturahantering för Windows, Linux och macOS.</p><p><b>© {year} Rickard Längkvist</b> · Fri att använda privat och kommersiellt (se <code>LICENSE</code>).</p><hr><h3>Vad programmet gör</h3><p>Registrerar leverantörsfakturor och kreditfakturor, summerar Fakturor (+) / Krediter (−) / <b>ATT BETALA</b>, håller koll på förfallodatum och exporterar betallistor till PDF — helt lokalt på din dator, utan prenumeration.</p><h3>Hur det funkar</h3><ol><li>Välj leverantör i rullistan (favoriter ★ överst).</li><li>Registrera faktura: fakturanummer + belopp. ＋ = faktura, − = kreditfaktura.</li><li>Exportera ALLA aktiva till PDF — betalningsdatum frågas alltid innan export och nollställs efteråt.</li><li>Exporthistorik: återställ arkiverade fakturor, öppna PDF eller mapp.</li></ol><h3>Stöd utvecklingen 💖</h3><p>💚 Swish: <b>Swish QR-kod under Hjälp → Donationer…</b> (låst mottagare, Swish-standard)<br>🅿️ PayPal: {paypal}<br>☕ Ko-fi: {kofi}</p><hr><p style='color:#888;font-size:11px;'>Plattform: {platform} · Python {python} · Autostart: {autostart}</p>",
+        "en": "<h2 style='color:#58a6ff'>{app}</h2><p><b>Version {version}</b> · Modern local invoice handling for Windows, Linux and macOS.</p><p><b>© {year} Rickard Längkvist</b> · Free for private and commercial use (see <code>LICENSE</code>).</p><hr><h3>What the app does</h3><p>Registers supplier invoices and credit notes, totals Invoices (+) / Credits (−) / <b>TO PAY</b>, keeps track of due dates and exports payment lists to PDF — entirely locally on your computer, no subscription.</p><h3>How it works</h3><ol><li>Choose a supplier in the list (favourites ★ first).</li><li>Register an invoice: invoice number + amount. ＋ = invoice, − = credit note.</li><li>Export ALL active invoices to PDF — the payment date is always asked before export and reset afterwards.</li><li>Export history: restore archived invoices, open the PDF or folder.</li></ol><h3>Support development 💖</h3><p>💚 Swish: <b>Swish QR code under Help → Donations…</b> (locked recipient, Swish standard)<br>🅿️ PayPal: {paypal}<br>☕ Ko-fi: {kofi}</p><hr><p style='color:#888;font-size:11px;'>Platform: {platform} · Python {python} · Autostart: {autostart}</p>",
     },
 
     # ── Fakturadialogen ──────────────────────────────────────────────

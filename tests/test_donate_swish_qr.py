@@ -147,6 +147,9 @@ def test_dialog_amount_chips_update_swish_qr_and_paypal():
     decoded = _decode_pixmap_qr(dlg._lbl_swish_qr.pixmap())
     if decoded is not None:
         assert decoded == "C0721817177;50,00;Fakturabunten;6"
+    pp_decoded = _decode_pixmap_qr(dlg._lbl_paypal_qr.pixmap())
+    if pp_decoded is not None:
+        assert pp_decoded == "https://paypal.me/Rickard3dPrint/50SEK"
 
     dlg._custom_amount_edit.setText("125")
     dlg._custom_amount_edit.textEdited.emit("125")
@@ -158,6 +161,47 @@ def test_dialog_amount_chips_update_swish_qr_and_paypal():
     assert dlg._swish_payload == "C0721817177;;Fakturabunten;6"
     assert dlg._btn_paypal.toolTip() == "https://paypal.me/Rickard3dPrint"
     dlg.reject()
+
+
+def test_dialog_has_personal_message_and_optional_paypal_kofi_qr():
+    _qapp()
+    from PySide6.QtWidgets import QLabel
+    from ui import i18n
+    from ui.donate import DonateDialog
+
+    for lang, needle in (("sv", "100 % gratis"), ("en", "100% free")):
+        i18n.set_language(lang, notify=False)
+        dlg = DonateDialog()
+        dlg.show()
+        _qapp().processEvents()
+
+        story = dlg.findChild(QLabel, "DonateStoryBody")
+        assert story is not None
+        assert needle in story.text()
+
+        # Valfri QR-vy för PayPal och Ko-fi är hopfälld från start och går att fälla ut
+        assert dlg._web_qr_panel.isVisible() is False
+        dlg._btn_toggle_web_qr.click()
+        _qapp().processEvents()
+        assert dlg._web_qr_panel.isVisible() is True
+
+        pp_qr = dlg._lbl_paypal_qr.pixmap()
+        kf_qr = dlg._lbl_kofi_qr.pixmap()
+        assert pp_qr is not None and not pp_qr.isNull()
+        assert kf_qr is not None and not kf_qr.isNull()
+        pp_decoded = _decode_pixmap_qr(pp_qr)
+        kf_decoded = _decode_pixmap_qr(kf_qr)
+        if pp_decoded is not None:
+            assert pp_decoded == "https://paypal.me/Rickard3dPrint"
+        if kf_decoded is not None:
+            assert kf_decoded == "https://ko-fi.com/tokke2"
+
+        dlg._btn_toggle_web_qr.click()
+        _qapp().processEvents()
+        assert dlg._web_qr_panel.isVisible() is False
+        dlg.reject()
+
+    i18n.set_language("sv", notify=False)
 
 
 def test_donate_menu_is_locked_and_has_no_separate_page():
@@ -207,7 +251,7 @@ def test_dialog_renders_in_dark_and_light_and_small_screens():
         host.close()
 
 
-def test_main_window_menu_bar_exposes_locked_support_menu(monkeypatch):
+def test_main_window_places_donations_dialog_under_help_menu(monkeypatch):
     _qapp()
     from PySide6.QtWidgets import QMainWindow
     from ui import i18n, main_window
@@ -234,26 +278,32 @@ def test_main_window_menu_bar_exposes_locked_support_menu(monkeypatch):
             return False
 
     win = _Win()
-    for lang, expected_title, expected_locked in (
-        ("sv", "Stöd", "låst"),
-        ("en", "Support", "locked"),
+    for lang, help_title, donate_label in (
+        ("sv", "Hjälp", "Donationer"),
+        ("en", "Help", "Donations"),
     ):
         i18n.set_language(lang, notify=False)
         win.menuBar().clear()
         win._build_menu_bar()
         menus = [act.text() for act in win.menuBar().actions()]
-        assert any(expected_title in text for text in menus), menus
-        donate_actions = [a for a in win._donate_menu.actions() if not a.isSeparator()]
-        assert len(donate_actions) == 5
-        assert donate_actions[-1].isEnabled() is False
-        assert expected_locked in donate_actions[-1].text().lower()
+        assert any(help_title in text for text in menus), menus
+        # Renare menyrad: ingen separat toppmeny för Stöd/Support
+        assert not any(
+            word in text for text in menus for word in ("Stöd", "Support")
+        ), menus
+        assert win._donate_menu is None
+        help_actions = [a.text() for a in win._help_menu.actions() if not a.isSeparator()]
+        assert any(donate_label in t for t in help_actions), help_actions
+        assert donate_label in win._help_donate_action.text()
         assert "0721817177" not in i18n.tr(
             "about.body_html",
             app="Fakturabunten", version="1.0.0", year=2026,
             swish="", paypal=main_window.DONATE_PAYPAL, kofi=main_window.DONATE_BMC,
             platform="linux", python="3.11", autostart="off",
         )
+    before = len(opened)
+    win._help_donate_action.trigger()
     win._copy_swish()
-    assert len(opened) == 1
+    assert len(opened) == before + 2
     i18n.set_language("sv", notify=False)
     win.close()

@@ -600,8 +600,9 @@ def test_donate_menu_and_locked_values_in_main_window():
         encoding="utf-8"
     )
     donate_src = (PROJECT_DIR / "ui" / "donate.py").read_text(encoding="utf-8")
-    assert "build_donate_menu" in main_window
-    assert "bar.addMenu(self._donate_menu)" in main_window
+    assert 'tr("menu.donate")' in main_window
+    assert "m_help.addAction(a_donate)" in main_window
+    assert "bar.addMenu(self._donate_menu)" not in main_window
     assert "123 456 78 90" not in main_window
     assert "https://www.paypal.com/donate" not in main_window
     assert "LockedDonationConfig" in donate_src

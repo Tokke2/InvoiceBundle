@@ -119,13 +119,11 @@ except Exception:  # pragma: no cover
             return "sv"
 
 try:
-    from ui.donate import build_donate_menu, open_donate_dialog
+    from ui.donate import open_donate_dialog
 except Exception:  # pragma: no cover
     try:
-        from donate import build_donate_menu, open_donate_dialog  # type: ignore
+        from donate import open_donate_dialog  # type: ignore
     except Exception:
-        def build_donate_menu(parent, **_kw):  # type: ignore
-            return None
         def open_donate_dialog(parent=None) -> bool:  # type: ignore
             return False
 
@@ -1941,6 +1939,8 @@ class MainWindow(QMainWindow):
 
         # ── Hjälp ─────────────────────────────────────────────────────
         m_help = bar.addMenu(tr("menu.help"))
+        self._help_menu = m_help
+        self._donate_menu = None
         a_about = QAction(tr("menu.about"), self)
         if self._custom_icon is not None:
             a_about.setIcon(self._custom_icon)
@@ -1959,6 +1959,7 @@ class MainWindow(QMainWindow):
             a_donate.setIcon(self._custom_icon)
         a_donate.triggered.connect(lambda: open_donate_dialog(self))
         m_help.addAction(a_donate)
+        self._help_donate_action = a_donate
         m_help.addSeparator()
         a_diag = QAction(tr("menu.diagnostics"), self)
         a_diag.setToolTip(
@@ -1968,15 +1969,6 @@ class MainWindow(QMainWindow):
         )
         a_diag.triggered.connect(self._copy_diagnostics)
         m_help.addAction(a_diag)
-
-        # ── Stöd (låst donationsmeny direkt i appens menyrad) ─────────
-        self._donate_menu = build_donate_menu(
-            self,
-            open_dialog_cb=lambda: open_donate_dialog(self),
-            open_url_cb=lambda url: QDesktopServices.openUrl(QUrl(url)),
-        )
-        if self._donate_menu is not None:
-            bar.addMenu(self._donate_menu)
 
     def _rebuild_view_menu(self) -> None:
         """Bygger om Visa-menyn med aktuella visa/dölj-statusar."""
@@ -4012,7 +4004,7 @@ class MainWindow(QMainWindow):
                 "Modern lokal fakturahantering för\n"
                 "Windows, Linux och macOS.\n"
                 "Licens: Privat och kommersiell användning (se LICENSE).\n\n"
-                "💚 Swish: Swish QR-kod i Stöd-dialogen (låst mottagare)\n"
+                "💚 Swish: Swish QR-kod under Hjälp → Donationer… (låst mottagare)\n"
                 f"🅿️ PayPal: {DONATE_PAYPAL}\n"
                 f"☕ Ko-fi: {DONATE_BMC}\n\n"
                 f"© {COPYRIGHT_YEAR} Rickard Längkvist",
