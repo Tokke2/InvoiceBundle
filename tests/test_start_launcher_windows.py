@@ -33,7 +33,11 @@ def test_real_windows_discovery_finds_existing_interpreter_without_installing():
     script = str(ROOT / 'autostart' / 'start_fakturabunten.ps1').replace("'", "''")
     command = (
         f". '{script}' -NoMain; $p = Get-InstalledPython; "
-        "if (-not $p.Found -or -not $p.Executable) { throw 'installed Python not detected' }; "
+        "if (-not $p.Found -or -not $p.Executable) { "
+        "$p | ConvertTo-Json | Write-Output; "
+        "$cmd = Get-Command python.exe -ErrorAction SilentlyContinue; "
+        "Write-Output ('python command: ' + $cmd.Source); "
+        "throw 'installed Python not detected' }; "
         "if ($env:PYTHON_MANAGER_AUTOMATIC_INSTALL -ne '0') { throw 'automatic install enabled' }; "
         "Write-Output $p.Executable"
     )
@@ -81,3 +85,15 @@ def test_windows_pid_probe_does_not_terminate_the_process():
         process.terminate()
         process.wait(timeout=10)
     assert not scheduler._pid_is_alive(process.pid)
+
+
+def test_native_windows_python_version_probe_preserves_its_quotes():
+    exe = sys.executable.replace("'", "''")
+    command = (
+        f"$lines = @(& '{exe}' -c \"import sys; print('%d.%d.%d' % sys.version_info[:3])\" 2>&1); "
+        "if ($LASTEXITCODE -ne 0 -or $lines.Count -eq 0) { throw ($lines -join ' ') }; "
+        "Write-Output $lines[-1]"
+    )
+    result = _powershell('-Command', command)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert result.stdout.strip().startswith(f'{sys.version_info.major}.')

@@ -153,7 +153,9 @@ function Get-InstalledPython {
     $found = ($registered -or $uncertain)
     $best = ''
     $bestVersion = [version]'0.0'
-    $probe = 'import sys; print("%d.%d.%d" % sys.version_info[:3])'
+    # Windows PowerShell 5 can strip embedded double quotes when passing a
+    # native -c argument. Python single quotes survive the Windows argv rules.
+    $probe = "import sys; print('%d.%d.%d' % sys.version_info[:3])"
     foreach ($raw in $paths) {
         if (-not $raw) { continue }
         $path = [Environment]::ExpandEnvironmentVariables($raw.Trim('"'))
