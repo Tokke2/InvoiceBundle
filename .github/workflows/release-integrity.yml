@@ -49,7 +49,7 @@ jobs:
       - name: Test Windows startup, shortcuts and package updates
         shell: pwsh
         run: |
-          python -m pytest tests/test_windows_shortcut_logic.py tests/test_windows_shortcut_native.py tests/test_autostart_settings.py tests/test_start_launcher_windows.py tests/test_python_update_scheduler.py -q --junitxml=windows-autostart-results.xml
+          python -m pytest tests/test_windows_shortcut_logic.py tests/test_windows_shortcut_native.py tests/test_autostart_settings.py tests/test_start_launcher_windows.py tests/test_startup_errors.py tests/test_python_update_scheduler.py -q --junitxml=windows-autostart-results.xml
           $code = $LASTEXITCODE
           if ($code -ne 0) {
             if (Test-Path windows-autostart-results.xml) {
@@ -63,6 +63,8 @@ jobs:
                   'tests/test_autostart_settings.py'
                 } elseif ($case.classname -match 'test_start_launcher_windows') {
                   'tests/test_start_launcher_windows.py'
+                } elseif ($case.classname -match 'test_startup_errors') {
+                  'tests/test_startup_errors.py'
                 } elseif ($case.classname -match 'test_python_update_scheduler') {
                   'tests/test_python_update_scheduler.py'
                 } elseif ($case.classname -match 'test_windows_shortcut_logic') {
@@ -136,6 +138,7 @@ jobs:
         run: >-
           python -m pytest
           tests/test_start_launcher_unix.py
+          tests/test_startup_errors.py
           tests/test_python_runtime_fallback.py
           tests/test_python_update_scheduler.py
           -q

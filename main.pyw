@@ -23,7 +23,7 @@ from pathlib import Path
 # Säkerställer att projektroten finns i sys.path även vid dubbelklick
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 
-from main import main  # noqa: E402
+from main import run_with_crash_reporting  # noqa: E402
 
 if __name__ == "__main__":
-    main()
+    run_with_crash_reporting()

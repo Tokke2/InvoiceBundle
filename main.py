@@ -2215,6 +2215,28 @@ def _missing_companion_files() -> list[Path]:
     return [BASE_DIR / rel for rel in _COMPANION_FILES if not (BASE_DIR / rel).is_file()]
 
 
+def _show_startup_error(message: str) -> None:
+    """Report startup failures even when Qt/Windows pythonw has no console."""
+    title = "Startfel — Fakturabunten"
+    try:
+        # This standard-library helper works before Qt is initialized and
+        # uses a native Windows dialog if tkinter is not installed.
+        from ensure_packages import _tell_user
+        _tell_user(title, message)
+        return
+    except Exception:
+        pass
+    # An incomplete installation may be missing ensure_packages itself.
+    if CURRENT_PLATFORM == "windows":
+        try:
+            import ctypes
+            if ctypes.windll.user32.MessageBoxW(0, message, title, 0x10):
+                return
+        except Exception:
+            pass
+    print(f"{title}\n{message}", file=sys.stderr)
+
+
 def _abort_missing_files(missing: list[Path]) -> None:
     """Avslutar med en lista. Säger inte PySide6 när felet är en saknad fil."""
     lines = "\n".join(f"  - {path.relative_to(BASE_DIR)}" for path in missing)
@@ -2224,20 +2246,19 @@ def _abort_missing_files(missing: list[Path]) -> None:
         BASE_DIR,
         lines,
     )
-    print(
+    _show_startup_error(
         f"{APP_NAME} startar inte. Dessa filer saknas i\n{BASE_DIR}\n\n"
         f"{lines}\n\n"
         "Det här är inte PySide6. Kopiera filerna från den nya versionen\n"
         "till samma mapp som main.py.\n"
-        "Rör inte data, logs, exports eller bak.",
-        file=sys.stderr,
+        "Rör inte data, logs, exports eller bak."
     )
     sys.exit(1)
 
 
-# Exact shipped legacy launchers only. Older installations without a
-# build_info manifest cannot have these removed by the old updater. Never
-# remove a custom file, a symlink, or anything under a user's data folders.
+# Exact shipped legacy launchers only. The updater defers these files to this
+# hash check, including in older installations without a build_info manifest.
+# Never remove a custom file, a symlink, or anything in a user's data folders.
 _LEGACY_PYTHON_FILES: dict[str, frozenset[str]] = {
     "Installera senaste Python.bat": frozenset({
         "6df78cf15cdb6e9ecbdd01a9a2bbf35cf07af1fd43f5caaff8103706c1261dc0",
@@ -2308,7 +2329,7 @@ def main() -> None:
             "och starta appen igen."
         )
         log.critical("APP_LOCAL_PYTHON_REJECTED: %s", sys.executable)
-        print(message, file=sys.stderr)
+        _show_startup_error(message)
         sys.exit(1)
 
     # Startades vi med konsoltolken (python.exe) startar vi om
@@ -2390,10 +2411,9 @@ def main() -> None:
         from PySide6.QtCore import Qt
     except ImportError as exc:
         log.critical("PySide6 saknas: %s", exc)
-        print(
+        _show_startup_error(
             "Fakturabunten kräver PySide6.\n"
-            "Installera med:  pip install PySide6",
-            file=sys.stderr,
+            "Installera paketet med:  pip install PySide6"
         )
         sys.exit(1)
 
@@ -2405,12 +2425,11 @@ def main() -> None:
             BASE_DIR / "ui" / "letter_jump.py",
             exc,
         )
-        print(
+        _show_startup_error(
             "Fakturabunten saknar filen ui\\letter_jump.py\n"
             f"i {BASE_DIR}\n\n"
             "Det här är inte PySide6. Kopiera ui\\letter_jump.py "
-            "till ui-mappen.",
-            file=sys.stderr,
+            "till ui-mappen."
         )
         sys.exit(1)
 
@@ -2633,7 +2652,8 @@ def main() -> None:
 #  ENTRY POINT — med kraschskydd för tysta pythonw-krascher
 # ═════════════════════════════════════════════════════════════════════
 
-if __name__ == "__main__":
+def run_with_crash_reporting() -> None:
+    """Use the same early error reporting for main.py and main.pyw."""
     try:
         main()
     except SystemExit:
@@ -2641,15 +2661,11 @@ if __name__ == "__main__":
     except BaseException as exc:  # noqa: BLE001 — sista skyddsnätet
         _write_startup_crash(exc)
         log.critical("STARTKRASCH: %s", exc, exc_info=True)
-        try:
-            from PySide6.QtWidgets import QMessageBox
-
-            QMessageBox.critical(
-                None,
-                "Startfel — Fakturabunten",
-                f"Ohanterat fel vid start:\n{exc}\n\n"
-                f"Detaljer: {LOG_FILE}",
-            )
-        except Exception:
-            pass
+        _show_startup_error(
+            f"Ohanterat fel vid start:\n{exc}\n\nDetaljer: {LOG_FILE}"
+        )
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    run_with_crash_reporting()

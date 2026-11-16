@@ -73,7 +73,7 @@ Betalningen sker hos PayPal/Ko-fi. Programmet ser inga betalningsuppgifter.
 
 Saknade Python-paket (`PySide6`, `reportlab`, `pypdf`, `pytesseract`) hämtas automatiskt vid start, bara om de behövs. `pytesseract` är Python-gränssnittet; för OCR av skannade PDF:er och bilder krävs dessutom Tesseract-programmet (med svensk eller engelsk språkdata). Om OCR-motorn saknas visas en varning i Import — fakturan registreras inte tyst med påhittade uppgifter.
 
-**Veckovis paketuppdatering:** appen kontrollerar måndag kl. 08 lokal tid och köar en uppdatering av `requirements.txt` tills appen har avslutats. Missas tiden köas den vid nästa start. På alla operativsystem används den aktiva Python-miljön: själva Python installeras, uppdateras eller tas inte bort av veckokontrollen. Paket som uppdateras i en delad Python-miljö kan däremot påverka andra program som använder samma paket. Ingen virtuell miljö eller OS-schemalagd uppgift skapas. Status sparas i `data/python_update_state.json`.
+**Veckovis paketuppdatering:** appen kontrollerar måndag kl. 08 lokal tid och köar en uppdatering av `requirements.txt` tills appen har avslutats. Missas tiden köas den vid nästa start. På alla operativsystem används den aktiva Python-miljön: själva Python installeras, uppdateras eller tas inte bort av den nya veckokontrollen. Paket som uppdateras i en delad Python-miljö kan däremot påverka andra program som använder samma paket. Ingen virtuell miljö eller OS-schemalagd uppgift skapas. Status sparas i `data/python_update_state.json`. Obs: en Windows-worker som redan köats av en äldre version kan fortfarande köra sitt gamla uppdrag när den äldre appen stängs; filuppdateringen stoppar inte en redan startad process.
 
 ## Kom igång (macOS och Linux)
 
@@ -177,7 +177,7 @@ Payment takes place at PayPal/Ko-fi. The app never sees any payment details.
 
 Missing Python packages (`PySide6`, `reportlab`, `pypdf`, `pytesseract`) are fetched automatically at startup, only if needed. `pytesseract` is the Python interface; OCR for scanned PDFs and images also requires the native Tesseract program and Swedish or English language data. If the OCR engine is missing, Import shows a warning instead of silently inventing invoice values.
 
-**Weekly package update:** the app checks on Monday at 08:00 local time and queues a `requirements.txt` update until the app has exited. If the time was missed, it queues the update at the next launch. On every platform the active Python environment is used: the weekly check does not install, update or remove the Python interpreter itself. Updated packages in a shared Python environment may nevertheless affect other programs using those packages. No virtual environment or OS scheduled task is created. Status is stored in `data/python_update_state.json`.
+**Weekly package update:** the app checks on Monday at 08:00 local time and queues a `requirements.txt` update until the app has exited. If the time was missed, it queues the update at the next launch. On every platform the active Python environment is used: the new weekly check does not install, update or remove the Python interpreter itself. Updated packages in a shared Python environment may nevertheless affect other programs using those packages. No virtual environment or OS scheduled task is created. Status is stored in `data/python_update_state.json`. Note: a Windows worker already queued by an older version can still run its old task when the old app exits; the file update does not stop an already running process.
 
 ## Getting started (macOS and Linux)
 

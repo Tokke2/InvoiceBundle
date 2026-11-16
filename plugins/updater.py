@@ -17,7 +17,8 @@ Aldrig-rör-regeln (samma som appens cache-rensare):
     den äldre datamappen) lämnas helt orörda.
   • settings.json och shortcuts.json i approten rörs aldrig.
   • Filer som fanns i förra builden men inte i den nya tas bort
-    (endast spårade programfiler — aldrig data).
+    (endast spårade programfiler — aldrig data). De två äldre
+    Python-hjälparna hanteras i stället med hashkontroll vid start.
 Innan något skrivs tas en backup till bak/update-<tid>/ .
 
 Modulen är Qt-fri och kan testas rakt av.
@@ -49,6 +50,13 @@ PRESERVED_FILES = {"settings.json", "shortcuts.json",
 BUILD_INFO_NAME = "build_info.json"
 # Only the two trusted root launchers need execute permission after updates.
 EXECUTABLE_STARTERS = {"Starta Fakturabunten.sh", "Starta Fakturabunten.command"}
+# Their contents, not just an old manifest entry, determine whether these old
+# Python helpers are ours. The new main.py removes recognized originals at
+# startup; customized files and symlinks must not be unlinked here.
+LEGACY_PYTHON_HELPERS = {
+    "Installera senaste Python.bat",
+    "autostart/install_python.ps1",
+}
 
 ProgressFn = Callable[[int, int], None] | None
 
@@ -428,9 +436,11 @@ def apply_update(zip_path: Path, root: Path, *,
             if progress:
                 progress(done_files, total_files)
 
-        # Stale: spårade programfiler som inte finns i nya builden
+        # Stale: spårade programfiler som inte finns i nya builden.
+        # De gamla Python-hjälparna kan ha ändrats av användaren. Låt den nya
+        # startens hashkontroll ta bort endast våra omodifierade original.
         for rel in old_files:
-            if rel in new_files or is_preserved(rel):
+            if rel in new_files or is_preserved(rel) or rel in LEGACY_PYTHON_HELPERS:
                 continue
             dst = root / rel
             try:

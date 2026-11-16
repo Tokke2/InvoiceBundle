@@ -3,7 +3,8 @@ Fakturabunten — saknade Python-tillbehör
 ==========================================
 Körs vid start, före PySide6. Installerar eller uppdaterar bara det
 som saknas eller är för gammalt mot requirements.txt. Visar en
-förloppsindikator. Skriver inget utanför appmappens logg.
+förloppsindikator och loggar i appmappen. Paket i den aktiva
+Python-miljön kan även användas av andra program.
 
 Copyright © dynamiskt år Rickard Längkvist
 """
@@ -15,6 +16,7 @@ import importlib.metadata as metadata
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -383,16 +385,51 @@ def upgrade_all_packages(*, force_user: bool = False) -> int:
 
 
 def _tell_user(title: str, text: str) -> None:
+    """Show an error even before Qt is available or pythonw has a console."""
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            if ctypes.windll.user32.MessageBoxW(0, text, title, 0x10):  # MB_ICONERROR
+                return
+        except Exception:
+            pass
     try:
         import tkinter as tk
         from tkinter import messagebox
         root = tk.Tk()
-        root.withdraw()
-        messagebox.showerror(title, text)
-        root.destroy()
+        try:
+            root.withdraw()
+            messagebox.showerror(title, text)
+        finally:
+            root.destroy()
         return
     except Exception:
         pass
+
+    # Some Linux distribution Pythons do not ship tkinter, and a file-manager
+    # launch may have no terminal. Use the desktop's own dialog if available.
+    command: list[str] = []
+    if sys.platform == "darwin" and shutil.which("osascript"):
+        command = [
+            "osascript", "-e",
+            'on run argv\n'
+            'display dialog (item 2 of argv) with title (item 1 of argv) '
+            'buttons {"OK"} default button "OK" with icon stop\nend run',
+            title, text,
+        ]
+    elif (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) \
+            and shutil.which("zenity"):
+        command = ["zenity", "--error", "--title", title, "--text", text]
+    if command:
+        try:
+            result = subprocess.run(
+                command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, check=False,
+            )
+            if result.returncode == 0:
+                return
+        except OSError:
+            pass
     print(f"{title}\n{text}", file=sys.stderr)
 
 

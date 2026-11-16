@@ -119,9 +119,12 @@ def test_apply_update_replaces_only_program_files(tmp_path):
         (root / "build_info.json").read_text(encoding="utf-8"))
     assert info["sha"] == "nyasha"
     assert "ui/main_window.py" in info["files"]
-    # Backup av det som byttes/togs bort finns i bak/
+    # Backup av det som byttes/togs bort finns i bak/, även när en
+    # spårad programfil har redigerats av användaren.
     backups = list((root / "bak").rglob("app.py"))
     assert backups and backups[0].read_text(encoding="utf-8") == "GAMMAL"
+    stale_backups = list((root / "bak").rglob("stale.py"))
+    assert stale_backups and stale_backups[0].read_text(encoding="utf-8") == "borta i nya"
 
 
 def test_apply_update_strips_zipball_root(tmp_path):

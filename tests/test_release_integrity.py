@@ -373,6 +373,7 @@ def test_release_workflow_tests_actual_windows_shortcuts_before_upload():
     assert "tests/test_autostart_settings.py" in workflow
     assert "tests/test_start_launcher_windows.py" in workflow
     assert "tests/test_start_launcher_unix.py" in workflow
+    assert "tests/test_startup_errors.py" in workflow
     assert "macos-latest" in workflow
     assert "autostart-ui:" in workflow
     assert "tests/test_autostart_ui_status.py" in workflow
@@ -380,29 +381,41 @@ def test_release_workflow_tests_actual_windows_shortcuts_before_upload():
     assert "needs: [updater-guard, windows-autostart, autostart-ui, unix-startup]" in workflow
 
 
-def test_update_removes_obsolete_tracked_installers_and_preserves_data(tmp_path):
+def test_update_defers_legacy_helpers_to_content_checked_startup(monkeypatch, tmp_path):
+    import main
     from plugins import updater
 
-    obsolete = ("Installera senaste Python.bat", "autostart/install_python.ps1")
+    # The historical, unmodified BAT is removed on the following startup,
+    # while a user's modified PowerShell file survives even if old build_info
+    # listed it. Neither helper is present in the new release package.
+    batch = (
+        b'@echo off\nsetlocal\necho.\n'
+        b'echo Den manuella Python-uppdateringen ar avaktiverad.\n'
+        b'echo Ingen Python-version har installerats eller andrats av denna fil.\n'
+        b'echo Den automatiska veckokontrollen kan fortfarande uppdatera Python.\n'
+        b'echo.\npause\nexit /b 2\n'
+    )
+    bat_name = "Installera senaste Python.bat"
+    ps_name = "autostart/install_python.ps1"
+    assert hashlib.sha256(batch).hexdigest() in main._LEGACY_PYTHON_FILES[bat_name]
     package = br.build_release_zip(
         PROJECT_DIR, tmp_path / "package.zip", version="1.0.0", sha="start-files"
     )
     old = tmp_path / "old-installation"
-    old.mkdir()
-    for rel in obsolete:
-        path = old / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("old program file", encoding="utf-8")
+    (old / "autostart").mkdir(parents=True)
+    (old / bat_name).write_bytes(batch.replace(b"\n", b"\r\n"))
+    (old / ps_name).write_text("my customized file", encoding="utf-8")
     (old / "build_info.json").write_text(
-        json.dumps({"sha": "old", "files": list(obsolete)}), encoding="utf-8"
+        json.dumps({"sha": "old", "files": [bat_name, ps_name]}), encoding="utf-8"
     )
     (old / "data").mkdir()
     invoice = old / "data" / "invoices.json"
     invoice.write_text('[{"id":"keep-me"}]', encoding="utf-8")
     report = updater.apply_update(package, old, version="1.0.0", sha="start-files")
 
-    assert all(not (old / rel).exists() for rel in obsolete)
-    assert report["removed"] == 2
+    assert report["removed"] == 0
+    assert (old / bat_name).is_file()  # cleaned by the new app on restart
+    assert (old / ps_name).read_text(encoding="utf-8") == "my customized file"
     assert all((old / name).is_file() for name in (
         "Starta Fakturabunten.bat", "Starta Fakturabunten.command",
         "Starta Fakturabunten.sh", "autostart/start_fakturabunten.ps1",
@@ -412,6 +425,54 @@ def test_update_removes_obsolete_tracked_installers_and_preserves_data(tmp_path)
         assert (old / "Starta Fakturabunten.sh").stat().st_mode & 0o100
     assert json.loads(invoice.read_text(encoding="utf-8")) == [{"id": "keep-me"}]
     assert all((old / path).is_file() for path in PRINT_FILES)
+    monkeypatch.setattr(main, "BASE_DIR", old)
+    main._repair_startup_files()
+    assert not (old / bat_name).exists()
+    assert (old / ps_name).read_text(encoding="utf-8") == "my customized file"
+
+
+def test_update_preserves_custom_tracked_legacy_batch(monkeypatch, tmp_path):
+    import main
+    from plugins import updater
+
+    name = "Installera senaste Python.bat"
+    package = br.build_release_zip(PROJECT_DIR, tmp_path / "package.zip", sha="new")
+    old = tmp_path / "old-installation"
+    old.mkdir()
+    (old / name).write_text("custom batch", encoding="utf-8")
+    (old / "build_info.json").write_text(
+        json.dumps({"sha": "old", "files": [name]}), encoding="utf-8"
+    )
+    updater.apply_update(package, old, sha="new")
+    monkeypatch.setattr(main, "BASE_DIR", old)
+    main._repair_startup_files()
+    assert (old / name).read_text(encoding="utf-8") == "custom batch"
+
+
+@pytest.mark.parametrize("name", ["Installera senaste Python.bat", "autostart/install_python.ps1"])
+def test_update_keeps_tracked_legacy_symlinks_and_their_targets(monkeypatch, tmp_path, name):
+    import main
+    from plugins import updater
+
+    package = br.build_release_zip(PROJECT_DIR, tmp_path / "package.zip", sha="new")
+    old = tmp_path / "old-installation"
+    old.mkdir()
+    target = tmp_path / "user-file"
+    target.write_text("keep me", encoding="utf-8")
+    link = old / name
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+    (old / "build_info.json").write_text(
+        json.dumps({"sha": "old", "files": [name]}), encoding="utf-8"
+    )
+    updater.apply_update(package, old, sha="new")
+    monkeypatch.setattr(main, "BASE_DIR", old)
+    main._repair_startup_files()
+    assert link.is_symlink()
+    assert target.read_text(encoding="utf-8") == "keep me"
 
 
 def test_legacy_no_manifest_cleanup_removes_only_known_shipped_batch(monkeypatch, tmp_path):
