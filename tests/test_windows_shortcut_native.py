@@ -164,3 +164,65 @@ def test_windows_startup_folder_uses_the_current_user_known_folder():
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip()
     assert _normalize(actual) == _normalize(result.stdout.strip())
+
+
+def test_failed_real_shortcut_replacement_is_reported_and_can_be_retried(
+    monkeypatch, tmp_path
+):
+    """A real .lnk stays intact, while the settings result reports the failure."""
+    import types
+    import windows_shortcut
+
+    app, original_mgr, startup = _manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        app.AutostartManager, "_native_startup_folder", staticmethod(lambda: startup)
+    )
+    monkeypatch.setattr(app.AutostartManager, "migrate_legacy_if_present", lambda _self: None)
+    monkeypatch.setattr(app.AutostartManager, "_retire_legacy_autostart", lambda _self: None)
+
+    # The real Startup folder and HKCU Run key are never touched by this test.
+    registry = types.ModuleType("winreg")
+    registry.HKEY_CURRENT_USER = 1
+    registry.KEY_READ = 1
+    registry.KEY_SET_VALUE = 2
+    registry.OpenKey = lambda *_args: object()
+    registry.CloseKey = lambda _key: None
+
+    def not_found(*_args):
+        raise FileNotFoundError("no Run entry in the test registry")
+
+    registry.QueryValueEx = not_found
+    registry.DeleteValue = not_found
+    monkeypatch.setitem(sys.modules, "winreg", registry)
+
+    assert original_mgr._write_startup_shortcut(), original_mgr._shortcut_last_failure
+    link = startup / "Fakturabunten.lnk"
+    before_bytes = link.read_bytes()
+    before_fields = _read_link(link)
+    settings = app.SettingsManager(tmp_path / "settings.json")
+    assert settings.get("startup") is True  # an OS entry exists
+    mgr = settings.get_autostart_manager()
+    new_main = app.BASE_DIR / "annan startfil.pyw"
+    new_main.write_text("# new test target", encoding="utf-8")
+    mgr._main_py = str(new_main)
+    assert mgr._shortcut_is_current() is False
+    real_run = subprocess.run
+
+    def fail(*_args, **_kwargs):
+        raise PermissionError("simulated inability to create a replacement")
+
+    with monkeypatch.context() as failed:
+        failed.setattr(windows_shortcut, "create_shortcut", fail)
+        failed.setattr(app.subprocess, "run", fail)
+        assert settings.set("startup", True) is False
+        assert mgr.is_enabled() is True
+        assert link.read_bytes() == before_bytes
+        assert _read_link(link, run=real_run) == before_fields
+        assert "simulated inability" in mgr._shortcut_last_failure
+
+    # Retrying the same saved setting must create the new target, not infer
+    # success merely from the old .lnk's presence.
+    assert settings.set("startup", True) is True
+    assert mgr._shortcut_is_current() is True
+    _assert_link(mgr, link)
+    assert _read_link(link)["arguments"] != before_fields["arguments"]

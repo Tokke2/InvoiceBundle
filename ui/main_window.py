@@ -1111,13 +1111,14 @@ def _field(obj: Any, *names: str, default: Any = "") -> Any:
 # ═════════════════════════════════════════════════════════════════════
 
 
-def _set_autostart_os(enable: bool) -> None:
+def _set_autostart_os(enable: bool) -> bool:
     """Fallback: samma AutostartManager som app.py (startfil i appmappen)."""
     try:
         from app import AutostartManager
-        AutostartManager().set_enabled(enable)
+        return bool(AutostartManager().set_enabled(enable))
     except Exception as exc:
         log.error("_set_autostart_os: %s", exc)
+        return False
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -2383,37 +2384,53 @@ class MainWindow(QMainWindow):
         try:
             if self._app and hasattr(self._app, "settings"):
                 mgr = self._app.settings.get_autostart_manager()
-                return mgr.is_enabled()
+            else:
+                from app import AutostartManager
+                mgr = AutostartManager()
+            return mgr.is_enabled()
         except Exception:
-            pass
-        return bool(self._settings.get("startup", False))
+            return bool(self._settings.get("startup", False))
 
     def _toggle_autostart(self, checked: bool) -> None:
         """Kryssruta i Inställningar-menyn → synka settings + OS."""
+        mgr = None
         try:
             if self._app and hasattr(self._app, "settings"):
-                self._app.settings.set("startup", checked)
+                result = self._app.settings.set("startup", checked)
+                mgr = self._app.settings.get_autostart_manager()
+                actual = bool(mgr.is_enabled())
             else:
-                _set_autostart_os(checked)
+                result = _set_autostart_os(checked)
                 self._settings.set("startup", checked)
+                actual = self._read_autostart_status()
         except Exception as exc:
             log.error("_toggle_autostart: %s", exc)
+            self._sync_autostart_checkboxes(self._read_autostart_status())
             QMessageBox.warning(
                 self, tr("main.autostart"),
                 tr("main.autostart_error", error=exc)
             )
             return
 
-        actual = checked
-        message = (
-            tr("main.autostart_on")
-            if checked
-            else tr("main.autostart_off")
-        )
-        try:
-            if self._app and hasattr(self._app, "settings"):
-                mgr = self._app.settings.get_autostart_manager()
-                actual = mgr.is_enabled()
+        # En bevarad, gammal genväg gör is_enabled() sann även när
+        # omskrivningen misslyckats. Kontrollera därför även resultatet
+        # från själva ändringen innan en lyckad registrering meddelas.
+        self._sync_autostart_checkboxes(actual)
+        if result is False or actual != checked:
+            if not checked:
+                error_key = "main.autostart_disable_failed"
+            elif actual:
+                error_key = "main.autostart_update_failed"
+            else:
+                error_key = "main.autostart_failed"
+            error = tr(error_key)
+            self.set_status(error.splitlines()[0], 6000)
+            QMessageBox.warning(self, tr("main.autostart"), error)
+            return
+
+        message = tr("main.autostart_on" if actual else "main.autostart_off")
+        if mgr is not None:
+            try:
                 message = mgr.user_message(actual)
                 if _i18n_language() == "en":
                     # app.py:s user_message är svenska — bygg EN-text här
@@ -2433,16 +2450,8 @@ class MainWindow(QMainWindow):
                             )
                     else:
                         message = tr("main.autostart_off")
-                self._sync_autostart_checkboxes(actual)
-        except Exception:
-            pass
-        if checked and not actual:
-            QMessageBox.warning(
-                self,
-                tr("main.autostart"),
-                tr("main.autostart_failed"),
-            )
-            return
+            except Exception as exc:
+                log.debug("Autostart-beskrivning kunde inte byggas: %s", exc)
         txt = tr("main.on_check") if actual else tr("main.off")
         self.set_status(tr("main.autostart_status", state=txt), 4000)
         QMessageBox.information(self, tr("main.autostart"), message)
@@ -2450,17 +2459,29 @@ class MainWindow(QMainWindow):
     def _set_autostart_method(self, method: str) -> None:
         """Byter autostart-metod; registrerar om hos OS om den är på."""
         ok = True
+        error_message = None
         try:
             self._settings.set("autostart_method", method)
             if self._app and hasattr(self._app, "settings"):
                 mgr = self._app.settings.get_autostart_manager()
-                if mgr.is_enabled():
+                actual = bool(mgr.is_enabled())
+                if actual or self._settings.get("startup", False):
                     ok = bool(mgr.set_enabled(True))
+                    actual = bool(mgr.is_enabled())
+                    ok = ok and actual
+                self._sync_autostart_checkboxes(actual)
         except Exception as exc:
             log.error("_set_autostart_method: %s", exc)
+            self._sync_autostart_checkboxes(self._read_autostart_status())
             ok = False
+            error_message = tr("main.autostart_error", error=exc)
         for key, act in self._autostart_method_actions.items():
             act.setChecked(key == method)
+        if not ok:
+            message = error_message or tr("autostart.method_failed")
+            self.set_status(message.splitlines()[0], 6000)
+            QMessageBox.warning(self, tr("main.autostart"), message)
+            return
         self.set_status(
             tr(
                 "autostart.method_set",
@@ -2468,12 +2489,6 @@ class MainWindow(QMainWindow):
             ),
             4000,
         )
-        if not ok:
-            QMessageBox.warning(
-                self,
-                tr("main.autostart"),
-                tr("autostart.method_failed"),
-            )
 
     def _toggle_update_auto(self, checked: bool) -> None:
         """Kryss i Inställningar: automatisk versionskoll vid start."""
@@ -2832,18 +2847,20 @@ class MainWindow(QMainWindow):
         log.info("CACHE_CLEAN_MANUAL mode=%s n=%d", mode, n)
 
     def set_autostart(self, enable: bool) -> None:
-        """Programmatisk autostart-sättning (synkar även kryssrutan)."""
+        """Programmatisk autostart-sättning (synkar även kryssrutorna)."""
         try:
             if self._app and hasattr(self._app, "settings"):
-                self._app.settings.set("startup", enable)
+                result = self._app.settings.set("startup", enable)
             else:
-                _set_autostart_os(enable)
+                result = _set_autostart_os(enable)
                 self._settings.set("startup", enable)
+            if result is False:
+                log.warning("set_autostart(%s) misslyckades", enable)
         except Exception as exc:
             log.error("set_autostart: %s", exc)
-        if hasattr(self, "_act_autostart"):
-            self._act_autostart.setChecked(enable)
-        log.info("set_autostart → %s", enable)
+        actual = self._read_autostart_status()
+        self._sync_autostart_checkboxes(actual)
+        log.info("set_autostart önskat=%s OS-post=%s", enable, actual)
 
     def _sync_autostart_checkboxes(self, checked: bool) -> None:
         """Synkar autostart-kryssrutorna i meny och tray."""
@@ -3195,8 +3212,9 @@ class MainWindow(QMainWindow):
         self._quick_new_invoice()
 
     def _tray_autostart_toggled(self, checked: bool) -> None:
+        # _toggle_autostart synkar båda kryssrutorna med OS-resultatet.
+        # Återställ inte till önskat läge om ändringen misslyckades.
         self._toggle_autostart(checked)
-        self._sync_autostart_checkboxes(checked)
 
     def _tray_activated(
         self, reason: QSystemTrayIcon.ActivationReason

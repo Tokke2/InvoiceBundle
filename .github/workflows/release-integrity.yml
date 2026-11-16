@@ -49,7 +49,7 @@ jobs:
       - name: Test real Windows shortcuts and fallbacks
         shell: pwsh
         run: |
-          python -m pytest tests/test_windows_shortcut_logic.py tests/test_windows_shortcut_native.py -q --junitxml=windows-autostart-results.xml
+          python -m pytest tests/test_windows_shortcut_logic.py tests/test_windows_shortcut_native.py tests/test_autostart_settings.py -q --junitxml=windows-autostart-results.xml
           $code = $LASTEXITCODE
           if ($code -ne 0) {
             if (Test-Path windows-autostart-results.xml) {
@@ -59,7 +59,12 @@ jobs:
                 $detail = ("$($case.name): $($failure.InnerText)")
                 if ($detail.Length -gt 15000) { $detail = $detail.Substring(0,15000) }
                 $detail = $detail.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
-                Write-Output "::error file=tests/test_windows_shortcut_native.py,title=Windows autostart::$detail"
+                $file = if ($case.classname -match 'test_autostart_settings') {
+                  'tests/test_autostart_settings.py'
+                } elseif ($case.classname -match 'test_windows_shortcut_logic') {
+                  'tests/test_windows_shortcut_logic.py'
+                } else { 'tests/test_windows_shortcut_native.py' }
+                Write-Output "::error file=$file,title=Windows autostart::$detail"
               }
             } else {
               Write-Output "::error::Windows autostart test exited $code without a test report"
@@ -67,9 +72,51 @@ jobs:
             exit $code
           }
 
+  autostart-ui:
+    name: Autostart and tray UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install offscreen Qt and pytest
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libgl1 libegl1 libxkbcommon0 libdbus-1-3
+          python -m pip install -q pytest PySide6-Essentials
+      - name: Test autostart and tray status
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set +e
+          python -m pytest tests/test_autostart_ui_status.py tests/test_tray_minimize.py tests/test_tray_behaviour_menu.py tests/test_start_minimized.py -q --junitxml=autostart-ui-results.xml > autostart-ui.log 2>&1
+          code=$?
+          cat autostart-ui.log
+          if [ "$code" -ne 0 ]; then
+            python - <<'PY'
+          import os, xml.etree.ElementTree as ET
+          path = 'autostart-ui-results.xml'
+          if os.path.isfile(path):
+              report = ET.parse(path)
+              failures = [(case, issue) for case in report.iter('testcase')
+                          for issue in case if issue.tag in ('error', 'failure')]
+              for case, issue in failures:
+                  text = (case.get('name', '') + ': ' + (issue.text or ''))[:15000]
+                  text = text.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                  print('::error title=Autostart UI::' + text)
+          else:
+              with open('autostart-ui.log', encoding='utf-8', errors='replace') as log:
+                  text = log.read()[-15000:]
+              text = text.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print('::error title=Autostart UI::' + text)
+          PY
+          fi
+          exit "$code"
+
   build-release-package:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [updater-guard, windows-autostart]
+    needs: [updater-guard, windows-autostart, autostart-ui]
     runs-on: ubuntu-latest
     permissions:
       contents: write

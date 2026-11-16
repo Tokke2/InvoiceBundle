@@ -1651,16 +1651,17 @@ class AutostartManager:
         return new_state
 
     def verify_and_update(self) -> bool:
-        """
-        Om OS-posten eller startfilen är gammal (t.ex. pythonw direkt,
-        utan arbetsmapp) skrivs den om till startfilen i appmappen.
-        """
+        """Kontrollera OS-posten och uppdatera den för den valda metoden."""
         self._retire_legacy_autostart()
         if not self.is_enabled():
             return False
-        if not self._launcher_is_current():
+        if self.resolved_method() == "launcher" and not self._launcher_is_current():
             log.info("AUTOSTART: startfil saknas eller är gammal → skriver om")
-            self._write_launcher()
+            try:
+                self._write_launcher()
+            except Exception as exc:
+                log.error("AUTOSTART: startfil kunde inte skrivas: %s", exc)
+                return False
 
         if CURRENT_PLATFORM == "windows":
             # Skapa bara om genvägen om målet eller filen har ändrats.
@@ -1994,14 +1995,19 @@ class AutostartManager:
         self._shortcut_last_failure = "; ".join(failures) or "okänt fel"
         return False
 
-    def _remove_startup_shortcut(self) -> None:
-        # Försök ta bort båda även om den ena inte är åtkomlig.
-        for path in (self._startup_shortcut_path(),
-                     self._shortcut_fingerprint_path()):
+    def _remove_startup_shortcut(self) -> bool:
+        # Försök ta bort båda även om den ena inte är åtkomlig. Att
+        # cachefilen inte kan raderas betyder inte att OS-posten finns kvar.
+        shortcut = self._startup_shortcut_path()
+        removed = True
+        for path in (shortcut, self._shortcut_fingerprint_path()):
             try:
                 path.unlink(missing_ok=True)
             except OSError as exc:
                 log.warning("Kunde inte ta bort autostart-fil %s: %s", path, exc)
+                if path == shortcut:
+                    removed = False
+        return removed
 
     def _win_set(self, enable: bool) -> bool:
         try:
@@ -2062,13 +2068,13 @@ class AutostartManager:
                     return False
                 else:
                     # Bort med BÅDA: genvägen och ett eventuellt Run-värde.
-                    self._remove_startup_shortcut()
+                    removed = self._remove_startup_shortcut()
                     try:
                         winreg.DeleteValue(key, self._app_name)
                         log.info("Windows registry DELETE: %s", self._app_name)
                     except FileNotFoundError:
                         log.debug("Registry DELETE: nyckel fanns inte")
-                return True
+                    return removed
             finally:
                 if key is not None:
                     winreg.CloseKey(key)
@@ -2374,14 +2380,18 @@ class SettingsManager:
         startup_in_os = self._autostart.is_enabled()
 
         if startup_in_settings:
-            if not startup_in_os:
-                log.info(
-                    "Autostart: settings=True, OS-post saknas "
-                    "→ registrerar nu"
-                )
-                self._autostart.set_enabled(True)
-            else:
-                self._autostart.verify_and_update()
+            try:
+                if not startup_in_os:
+                    log.info(
+                        "Autostart: settings=True, OS-post saknas "
+                        "→ registrerar nu"
+                    )
+                    self._autostart.set_enabled(True)
+                else:
+                    self._autostart.verify_and_update()
+            except Exception as exc:
+                # Ett OS-/filfel i autostarten får inte hindra att appen öppnas.
+                log.error("Autostart-synk vid inläsning misslyckades: %s", exc)
         elif startup_in_os:
             log.info(
                 "Autostart: OS-post finns men settings=False "
@@ -2402,29 +2412,66 @@ class SettingsManager:
         with self._lock:
             return self._data.get(key, default)
 
-    def set(self, key: str, value: Any) -> None:
+    def _sync_autostart_setting(
+        self, enabled: bool, old: Any, *, force: bool = False,
+    ) -> bool:
+        """Synka ett önskat läge, och prova igen efter ett tidigare fel."""
+        needs_sync = force or enabled != bool(old)
+        if not needs_sync:
+            try:
+                needs_sync = self._autostart.is_enabled() != enabled
+                if enabled and CURRENT_PLATFORM == "windows":
+                    # Existens räcker inte: en äldre .lnk kan ha bevarats
+                    # efter en misslyckad uppdatering. En giltig cache betyder
+                    # bara att fil och avsedd spec är oförändrade.
+                    needs_sync = (
+                        needs_sync or not self._autostart._shortcut_is_current()
+                        or (self._autostart.resolved_method() == "launcher"
+                            and not self._autostart._launcher_is_current())
+                    )
+            except Exception as exc:
+                log.debug("Autostart-status kunde inte läsas: %s", exc)
+                needs_sync = True
+        if not needs_sync:
+            return True
+        ok = bool(self._autostart.set_enabled(enabled))
+        if not ok:
+            log.warning(
+                "AutostartManager.set_enabled(%s) misslyckades", enabled
+            )
+        return ok
+
+    def set(self, key: str, value: Any) -> bool | None:
+        """Spara inställningen; för startup returneras resultatet från OS-synken."""
         with self._lock:
             old = self._data.get(key)
             self._data[key] = value
-        if key == "startup" and value != old:
-            if not self._autostart.set_enabled(bool(value)):
-                log.warning(
-                    "AutostartManager.set_enabled(%s) misslyckades", value
-                )
+        result = None
+        if key == "startup":
+            self._sync_autostart_method()
+            result = self._sync_autostart_setting(bool(value), old)
         self.save()
+        return result
 
     def update(self, mapping: dict[str, Any]) -> None:
-        startup_changed: bool | None = None
+        startup_requested: bool | None = None
+        old_startup: Any = None
+        method_changed = False
         with self._lock:
             for k, v in mapping.items():
                 old = self._data.get(k)
                 self._data[k] = v
-                if k == "startup" and v != old:
-                    startup_changed = bool(v)
-        if "autostart_method" in mapping:
+                if k == "startup":
+                    startup_requested, old_startup = bool(v), old
+                elif k == "autostart_method":
+                    method_changed = v != old
+        if "autostart_method" in mapping or startup_requested is not None:
             self._sync_autostart_method()
-        if startup_changed is not None:
-            self._autostart.set_enabled(startup_changed)
+        if startup_requested is not None:
+            self._sync_autostart_setting(
+                startup_requested, old_startup,
+                force=method_changed and startup_requested,
+            )
         self.save()
 
     def all(self) -> dict[str, Any]:

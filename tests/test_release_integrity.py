@@ -383,4 +383,8 @@ def test_release_workflow_tests_actual_windows_shortcuts_before_upload():
     assert "runs-on: windows-latest" in workflow
     assert 'python: ["3.11", "3.15"]' in workflow
     assert "tests/test_windows_shortcut_native.py" in workflow
-    assert "needs: [updater-guard, windows-autostart]" in workflow
+    assert "tests/test_autostart_settings.py" in workflow
+    assert "autostart-ui:" in workflow
+    assert "tests/test_autostart_ui_status.py" in workflow
+    assert "QT_QPA_PLATFORM: offscreen" in workflow
+    assert "needs: [updater-guard, windows-autostart, autostart-ui]" in workflow
