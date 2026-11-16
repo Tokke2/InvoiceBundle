@@ -113,13 +113,10 @@ def test_every_ui_and_plugin_python_module_is_shipped():
     assert runtime_modules - set(br.RELEASE_FILES) == set()
 
 
-def test_python_update_helper_is_shipped_and_checks_before_download():
-    launcher = PROJECT_DIR / "Installera senaste Python.bat"
+def test_weekly_python_update_helper_is_shipped_and_checks_before_download():
     script = PROJECT_DIR / "autostart" / "install_python.ps1"
-    assert launcher.is_file()
-    assert "Installera senaste Python.bat" in br.RELEASE_FILES
+    assert script.is_file()
     assert "autostart/install_python.ps1" in br.RELEASE_FILES
-    assert "install_python.ps1" in launcher.read_text(encoding="utf-8")
 
     source = script.read_text(encoding="utf-8")
     detect = source.index("$registered = @(Get-RegistryPythonEntries)")
@@ -148,6 +145,24 @@ def test_python_update_helper_is_shipped_and_checks_before_download():
     assert "[int]$WaitForPid" in source
     assert "WEEKLY_PACKAGE_UPDATE_START" in source
     assert "ensure_packages.py" in source
+
+
+def test_manual_python_batch_is_disabled_but_still_shipped():
+    name = "Installera senaste Python.bat"
+    launcher = PROJECT_DIR / name
+    assert name in br.RELEASE_FILES
+    text = launcher.read_text(encoding="utf-8")
+    assert "avaktiverad" in text.lower()
+    assert "automatiska veckokontrollen" in text.lower()
+    # This entry point may only print a notice, pause and return a nonzero
+    # status; it must not invoke PowerShell, Python, or another updater.
+    allowed = {"@echo off", "setlocal", "echo.", "pause", "exit /b 2"}
+    for line in text.splitlines():
+        command = line.strip().lower()
+        assert not any(char in command for char in "&|<>^%")
+        assert not command or command in allowed or command.startswith("echo ")
+    assert "powershell" not in text.lower()
+    assert "install_python.ps1" not in text.lower()
 
 
 def test_weekly_python_update_is_wired_and_shipped():
@@ -384,7 +399,62 @@ def test_release_workflow_tests_actual_windows_shortcuts_before_upload():
     assert 'python: ["3.11", "3.15"]' in workflow
     assert "tests/test_windows_shortcut_native.py" in workflow
     assert "tests/test_autostart_settings.py" in workflow
+    assert "tests/test_manual_python_batch_windows.py" in workflow
     assert "autostart-ui:" in workflow
     assert "tests/test_autostart_ui_status.py" in workflow
     assert "QT_QPA_PLATFORM: offscreen" in workflow
     assert "needs: [updater-guard, windows-autostart, autostart-ui]" in workflow
+
+
+def test_update_replaces_active_manual_batch_without_touching_user_data(tmp_path):
+    from plugins import updater
+
+    name = "Installera senaste Python.bat"
+    package = br.build_release_zip(
+        PROJECT_DIR, tmp_path / "package.zip", version="1.0.0", sha="disabled-bat"
+    )
+    with zipfile.ZipFile(package) as zf:
+        info = json.loads(zf.read("build_info.json"))
+        assert name in info["files"]
+        assert zf.read(name) == (PROJECT_DIR / name).read_bytes()
+
+    old = tmp_path / "old-installation"
+    old.mkdir()
+    (old / name).write_text(
+        '@echo off\npowershell.exe -File autostart\\install_python.ps1\n',
+        encoding="utf-8",
+    )
+    (old / "data").mkdir()
+    invoice = old / "data" / "invoices.json"
+    invoice.write_text('[{"id":"keep-me"}]', encoding="utf-8")
+    report = updater.apply_update(package, old, version="1.0.0", sha="disabled-bat")
+
+    assert name in report["files"]
+    assert (old / name).read_bytes() == (PROJECT_DIR / name).read_bytes()
+    assert "avaktiverad" in (old / name).read_text(encoding="utf-8").lower()
+    assert json.loads(invoice.read_text(encoding="utf-8")) == [{"id": "keep-me"}]
+    assert all((old / path).is_file() for path in PRINT_FILES)
+
+
+def test_startup_help_does_not_recommend_the_disabled_batch(monkeypatch, tmp_path):
+    import app as appmod
+
+    for path, encoding in (
+        (PROJECT_DIR / "autostart" / "LAS_MIG.txt", "utf-8"),
+        (PROJECT_DIR / "autostart" / "start_hidden.vbs", "utf-16"),
+        (PROJECT_DIR / "app.py", "utf-8"),
+    ):
+        text = path.read_text(encoding=encoding)
+        assert "Kör Installera senaste Python.bat" not in text
+        assert "kör Installera senaste Python.bat" not in text
+
+    # Regenerating the portable launcher must not reintroduce stale help.
+    monkeypatch.setattr(appmod, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(appmod, "CURRENT_PLATFORM", "windows")
+    launcher = appmod.AutostartManager(method="launcher")._write_launcher()
+    assert launcher.read_text(encoding="utf-16") == (
+        PROJECT_DIR / "autostart" / "start_hidden.vbs"
+    ).read_text(encoding="utf-16")
+    assert (launcher.parent / "LAS_MIG.txt").read_text(encoding="utf-8") == (
+        PROJECT_DIR / "autostart" / "LAS_MIG.txt"
+    ).read_text(encoding="utf-8")

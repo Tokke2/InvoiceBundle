@@ -49,7 +49,7 @@ jobs:
       - name: Test real Windows shortcuts and fallbacks
         shell: pwsh
         run: |
-          python -m pytest tests/test_windows_shortcut_logic.py tests/test_windows_shortcut_native.py tests/test_autostart_settings.py -q --junitxml=windows-autostart-results.xml
+          python -m pytest tests/test_windows_shortcut_logic.py tests/test_windows_shortcut_native.py tests/test_autostart_settings.py tests/test_manual_python_batch_windows.py -q --junitxml=windows-autostart-results.xml
           $code = $LASTEXITCODE
           if ($code -ne 0) {
             if (Test-Path windows-autostart-results.xml) {
@@ -61,6 +61,8 @@ jobs:
                 $detail = $detail.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
                 $file = if ($case.classname -match 'test_autostart_settings') {
                   'tests/test_autostart_settings.py'
+                } elseif ($case.classname -match 'test_manual_python_batch_windows') {
+                  'tests/test_manual_python_batch_windows.py'
                 } elseif ($case.classname -match 'test_windows_shortcut_logic') {
                   'tests/test_windows_shortcut_logic.py'
                 } else { 'tests/test_windows_shortcut_native.py' }

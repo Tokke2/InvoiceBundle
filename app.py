@@ -1317,8 +1317,8 @@ class AutostartManager:
             "OS-posten pekar bara hit. Logg: logs/autostart.log\n"
             "Exporter och data skrivs aldrig här.\n"
             "Startfilen hittar appmappen själv (ingen fast sökväg).\n"
-            "Python saknas eller behöver uppdateras: kör Installera senaste Python.bat.\n"
-            "Skriptet kontrollerar först och lägger inte till en parallell version.\n",
+            "Python saknas: installera en kompatibel system-Python manuellt.\n"
+            "Den manuella Python-uppdateringsfilen är avaktiverad.\n",
             encoding="utf-8",
         )
         log.info("AUTOSTART_LAUNCHER: %s", path)
@@ -1460,7 +1460,7 @@ class AutostartManager:
             "\n"
             "sh.CurrentDirectory = appDir\n"
             "If pythonw = \"\" Then\n"
-            "    WriteLog \"FAIL: Python saknas på datorn. Kör Installera senaste Python.bat\"\n"
+            "    WriteLog \"FAIL: Python saknas på datorn. Installera en kompatibel system-Python manuellt.\"\n"
             "    WScript.Quit 1\n"
             "End If\n"
             "\n"
