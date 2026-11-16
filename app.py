@@ -1163,6 +1163,7 @@ class AutostartManager:
     def __init__(self, method: str = "auto") -> None:
         self.method: str = self.normalize_method(method)
         self._python_exe, self._main_py = self._detect_paths()
+        self._shortcut_last_failure: str = ""
         log.debug(
             "AutostartManager: python=%s  main=%s  cwd=%s",
             self._python_exe,
@@ -1727,8 +1728,27 @@ class AutostartManager:
     # En genväg (.lnk) i användarens Autostart-mapp bär i stället
     # app_icon.ico och namnet Fakturabunten — appens egen ikon överallt.
 
+    @staticmethod
+    def _native_startup_folder() -> Path | None:
+        """Fråga Windows om den faktiska, eventuellt flyttade Startup-mappen."""
+        if os.name != "nt":
+            return None
+        try:
+            from windows_shortcut import startup_folder
+
+            return startup_folder()
+        except Exception as exc:
+            log.warning(
+                "AUTOSTART: Windows kunde inte ange Startup-mappen: %s; "
+                "provar standardmappen i APPDATA", exc,
+            )
+            return None
+
     def _startup_folder(self) -> Path:
-        """%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup."""
+        """Windows Startup-mapp; APPDATA är reserv om Windows-anropet fallerar."""
+        folder = self._native_startup_folder()
+        if folder is not None:
+            return folder
         appdata = os.environ.get("APPDATA", "")
         base = (
             Path(appdata) if appdata
@@ -1862,9 +1882,33 @@ class AutostartManager:
             "shortcut.Save",
         ))
 
+    @staticmethod
+    def _shortcut_process_failure(result: Any) -> str:
+        """Kort feltext från ett misslyckat PowerShell-/skriptanrop."""
+        output = getattr(result, "stderr", b"") or getattr(result, "stdout", b"")
+        if isinstance(output, bytes):
+            try:
+                output = output.decode("utf-8")
+            except UnicodeDecodeError:
+                output = output.decode("cp1252", errors="replace")
+        text = " ".join(str(output or "").split())[:500]
+        code = getattr(result, "returncode", "okänd")
+        return f"exitkod {code}" + (f": {text}" if text else "")
+
     def _write_startup_shortcut(self) -> bool:
-        """Byt inte ut en fungerande genväg förrän den nya har skapats."""
+        """Skapa en genväg med appikon; ersätt aldrig en fungerande i förtid."""
+        self._shortcut_last_failure = ""
         lnk = self._startup_shortcut_path()
+        icon = BASE_DIR / "app_icon.ico"
+        if not icon.is_file():
+            self._shortcut_last_failure = f"appikonen saknas: {icon}"
+            return False
+        failures: list[str] = []
+
+        def remember_failure(method: str, exc: Exception) -> None:
+            detail = " ".join(str(exc).split())[:600] or type(exc).__name__
+            failures.append(f"{method}: {detail}")
+
         try:
             _ensure_dir(lnk.parent)
             # Samma volym som Startup, men utanför Startup-mappen så att
@@ -1881,39 +1925,73 @@ class AutostartManager:
                     "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 }
 
+                def activate() -> None:
+                    if not staged_link.is_file() or staged_link.stat().st_size == 0:
+                        raise OSError("ingen komplett genvägsfil skapades")
+                    staged_link.replace(lnk)
+
+                def clean_stage() -> None:
+                    # Ett misslyckat försök får inte lämna en fil som
+                    # nästa försök kan misstas för en lyckad genväg.
+                    staged_link.unlink(missing_ok=True)
+
+                try:
+                    # Windows Shell API: ingen PowerShell eller WScript krävs.
+                    from windows_shortcut import create_shortcut
+
+                    target, args = self._shortcut_target()
+                    create_shortcut(
+                        staged_link, target=target, arguments=args,
+                        workdir=str(BASE_DIR), icon=str(icon),
+                        description=self._app_name,
+                    )
+                    activate()
+                    log.debug("AUTOSTART: genväg skapad med Windows Shell")
+                    return True
+                except Exception as exc:
+                    remember_failure("Windows Shell", exc)
+                    clean_stage()
+
                 try:
                     result = subprocess.run(
                         [
                             "powershell", "-NoProfile", "-ExecutionPolicy",
                             "Bypass", "-Command",
                             self._shortcut_powershell(staged_link),
-                        ],
-                        timeout=30, **common,
+                        ], timeout=30, **common,
                     )
-                    if (result.returncode == 0 and staged_link.is_file()
-                            and staged_link.stat().st_size > 0):
-                        staged_link.replace(lnk)
-                        return True
-                except Exception as exc:
-                    log.debug("PowerShell-genväg misslyckades: %s", exc)
-
-                # PowerShell kan vara avstängt. Låt inte en ofullständig
-                # fil från det första försöket misstas för VBS-resultatet.
-                staged_link.unlink(missing_ok=True)
-                script_path = Path(staging) / "create_shortcut.vbs"
-                script_path.write_text(
-                    self._shortcut_vbscript(staged_link), encoding="utf-16"
-                )
-                wscript = shutil.which("wscript.exe") or "wscript.exe"
-                result = subprocess.run(
-                    [wscript, "//B", str(script_path)], timeout=20, **common,
-                )
-                if (result.returncode == 0 and staged_link.is_file()
-                        and staged_link.stat().st_size > 0):
-                    staged_link.replace(lnk)
+                    if result.returncode != 0:
+                        raise OSError(self._shortcut_process_failure(result))
+                    activate()
+                    log.debug("AUTOSTART: genväg skapad med PowerShell")
                     return True
+                except Exception as exc:
+                    remember_failure("PowerShell", exc)
+                    clean_stage()
+
+                try:
+                    script_path = Path(staging) / "create_shortcut.vbs"
+                    script_path.write_text(
+                        self._shortcut_vbscript(staged_link), encoding="utf-16"
+                    )
+                    # cscript ger konsolfel som kan fångas; wscript är
+                    # reserv för system där bara den finns tillgänglig.
+                    host = (shutil.which("cscript.exe")
+                            or shutil.which("wscript.exe") or "cscript.exe")
+                    result = subprocess.run(
+                        [host, "//nologo", "//B", str(script_path)],
+                        timeout=20, **common,
+                    )
+                    if result.returncode != 0:
+                        raise OSError(self._shortcut_process_failure(result))
+                    activate()
+                    log.debug("AUTOSTART: genväg skapad med Windows Script Host")
+                    return True
+                except Exception as exc:
+                    remember_failure("Windows Script Host", exc)
         except Exception as exc:
-            log.warning("Autostart-genväg kunde inte skapas: %s", exc)
+            remember_failure("Förberedelse", exc)
+        self._shortcut_last_failure = "; ".join(failures) or "okänt fel"
         return False
 
     def _remove_startup_shortcut(self) -> None:
@@ -1972,9 +2050,14 @@ class AutostartManager:
                         winreg.DeleteValue(key, self._app_name)
                     except Exception:
                         pass
+                    existing = self._startup_shortcut_path().is_file()
                     log.error(
-                        "Windows autostart nekad: genväg med appikon kunde "
-                        "inte skapas; ingen Python/Run-post skrivs."
+                        "Windows autostart: genväg med appikon kunde inte "
+                        "skapas eller uppdateras. %s Ingen Python/Run-post "
+                        "skrivs. Orsak: %s",
+                        ("Befintlig genväg är kvar men kan vara föråldrad."
+                         if existing else "Autostart kunde inte aktiveras."),
+                        self._shortcut_last_failure or "ingen detalj tillgänglig",
                     )
                     return False
                 else:
@@ -2276,6 +2359,10 @@ class SettingsManager:
                 len(repairs), "; ".join(repairs),
             )
 
+        # OS-synken nedan måste använda den sparade metoden redan under
+        # första starten, innan en genväg skrivs eller verifieras.
+        self._sync_autostart_method()
+
         # Gammal registerpost (FakturaBetalaren Pro) flyttas till det nya namnet
         # så autostart inte startar två gånger.
         try:
@@ -2334,6 +2421,8 @@ class SettingsManager:
                 self._data[k] = v
                 if k == "startup" and v != old:
                     startup_changed = bool(v)
+        if "autostart_method" in mapping:
+            self._sync_autostart_method()
         if startup_changed is not None:
             self._autostart.set_enabled(startup_changed)
         self.save()

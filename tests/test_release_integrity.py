@@ -342,3 +342,45 @@ def test_release_workflow_verifies_the_package_contains_print_files():
     assert "Verifiera tryckfilerna i paketet" in workflow
     for rel in PRINT_FILES:
         assert rel in workflow, rel
+
+
+def test_native_windows_shortcut_is_bundled_and_installed_on_update(tmp_path):
+    from plugins import updater
+
+    assert "windows_shortcut.py" in br.RELEASE_FILES
+    package = br.build_release_zip(
+        PROJECT_DIR, tmp_path / "package.zip", version="1.0.0", sha="testsha"
+    )
+    with zipfile.ZipFile(package) as zf:
+        names = set(zf.namelist())
+        info = json.loads(zf.read("build_info.json").decode("utf-8"))
+        assert zf.read("windows_shortcut.py") == (
+            PROJECT_DIR / "windows_shortcut.py"
+        ).read_bytes()
+    assert "windows_shortcut.py" in names
+    assert "windows_shortcut.py" in info["files"]
+
+    # A previously installed app has no helper yet. Updating adds it and
+    # does not touch existing invoices or other local data.
+    old = tmp_path / "old-installation"
+    (old / "data").mkdir(parents=True)
+    invoices = old / "data" / "invoices.json"
+    invoices.write_text('[{"id":"keep-me"}]', encoding="utf-8")
+    report = updater.apply_update(package, old, version="1.0.0", sha="testsha")
+    assert "windows_shortcut.py" in report["files"]
+    assert (old / "windows_shortcut.py").read_bytes() == (
+        PROJECT_DIR / "windows_shortcut.py"
+    ).read_bytes()
+    assert json.loads(invoices.read_text(encoding="utf-8")) == [{"id": "keep-me"}]
+    assert all((old / path).is_file() for path in PRINT_FILES)
+
+
+def test_release_workflow_tests_actual_windows_shortcuts_before_upload():
+    workflow = (
+        PROJECT_DIR / ".github" / "workflows" / "release-integrity.yml"
+    ).read_text(encoding="utf-8")
+    assert "windows-autostart:" in workflow
+    assert "runs-on: windows-latest" in workflow
+    assert 'python: ["3.11", "3.15"]' in workflow
+    assert "tests/test_windows_shortcut_native.py" in workflow
+    assert "needs: [updater-guard, windows-autostart]" in workflow

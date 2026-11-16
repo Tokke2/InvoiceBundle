@@ -56,6 +56,7 @@ RELEASE_FILES: tuple[str, ...] = (
     "plugins/scan_import.py",
     "plugins/updater.py",
     "requirements.txt",
+    "windows_shortcut.py",
     "ui/auto_batch.py",
     "ui/contrast.py",
     "ui/core/calculator.py",

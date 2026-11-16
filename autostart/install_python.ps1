@@ -486,7 +486,12 @@ function Update-AppAutostart([string]$OldExe, [string]$NewExe) {
     $newWindowed = Join-Path (Split-Path -Parent $NewExe) 'pythonw.exe'
     if (-not (Test-Path -LiteralPath $newWindowed -PathType Leaf)) { return }
     $oldWindowed = Join-Path (Split-Path -Parent $OldExe) 'pythonw.exe'
-    $startup = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'
+    # Windows kan flytta Startup-mappen från den vanliga APPDATA-platsen.
+    $startup = [Environment]::GetFolderPath([Environment+SpecialFolder]::Startup)
+    if ([string]::IsNullOrWhiteSpace($startup)) {
+        $startup = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'
+        Write-Log 'AUTOSTART_STARTUP_FOLDER_FALLBACK: använder APPDATA.'
+    }
     $linkPath = Join-Path $startup 'Fakturabunten.lnk'
     if (Test-Path -LiteralPath $linkPath -PathType Leaf) {
         try {

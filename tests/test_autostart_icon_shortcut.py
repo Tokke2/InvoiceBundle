@@ -133,9 +133,19 @@ def _fake_winreg(monkeypatch):
 
 def _win_mgr(monkeypatch, tmp_path, method="auto"):
     import app as appmod
+    import windows_shortcut
 
     monkeypatch.setattr(appmod, "CURRENT_PLATFORM", "windows")
     monkeypatch.setattr(appmod, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(
+        appmod.AutostartManager, "_native_startup_folder", staticmethod(lambda: None)
+    )
+    # Dessa tester simulerar PowerShell/WSH även när de körs på Windows;
+    # den verkliga COM-vägen testas separat på en Windows-runner.
+    def disabled_native(*_args, **_kwargs):
+        raise OSError("native API disabled in this test")
+
+    monkeypatch.setattr(windows_shortcut, "create_shortcut", disabled_native)
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
     return appmod, appmod.AutostartManager(method=method)
 
@@ -320,3 +330,112 @@ def test_powershell_shortcut_quotes_apostrophes(monkeypatch, tmp_path):
     assert "Rickard''s link.lnk" in script
     assert "Rickard''s\\pythonw.exe" in script
     assert "$ErrorActionPreference = 'Stop'" in script
+
+
+def test_native_shell_creates_shortcut_without_powershell_or_wscript(
+    monkeypatch, tmp_path
+):
+    import windows_shortcut
+
+    appmod, mgr = _win_mgr(monkeypatch, tmp_path)
+    old_link = mgr._startup_shortcut_path()
+    old_link.parent.mkdir(parents=True)
+    old_link.write_bytes(b"old")
+    calls = []
+
+    def create(staged, **kwargs):
+        calls.append((staged, kwargs))
+        assert old_link.read_bytes() == b"old"
+        staged.write_bytes(b"new native lnk")
+
+    def no_shell(*_args, **_kwargs):
+        raise AssertionError("PowerShell/WSH must not run on native success")
+
+    monkeypatch.setattr(windows_shortcut, "create_shortcut", create)
+    monkeypatch.setattr(appmod.subprocess, "run", no_shell)
+    assert mgr._write_startup_shortcut() is True
+    assert old_link.read_bytes() == b"new native lnk"
+    assert calls[0][1] == {
+        "target": mgr._shortcut_target()[0],
+        "arguments": mgr._shortcut_target()[1],
+        "workdir": str(appmod.BASE_DIR),
+        "icon": str(appmod.BASE_DIR / "app_icon.ico"),
+        "description": "Fakturabunten",
+    }
+    assert mgr._shortcut_last_failure == ""
+    assert not calls[0][0].parent.exists()
+
+
+def test_all_shortcut_failures_report_real_causes_and_keep_existing_link(
+    monkeypatch, tmp_path, caplog
+):
+    import logging
+    import windows_shortcut
+
+    store = _fake_winreg(monkeypatch)
+    appmod, mgr = _win_mgr(monkeypatch, tmp_path)
+    final_link = mgr._startup_shortcut_path()
+    final_link.parent.mkdir(parents=True)
+    final_link.write_bytes(b"previous working link")
+    staged = []
+
+    def failed_native(path, **_kwargs):
+        staged.append(path)
+        path.write_bytes(b"partial native")
+        raise OSError("COM 0x80070005 access denied")
+
+    def failed_run(command, **_kwargs):
+        assert not staged[0].exists(), "failed method left a partial link"
+        if command[0] == "powershell":
+            staged[0].write_bytes(b"partial powershell")
+            return types.SimpleNamespace(
+                returncode=1, stderr=b"PowerShell blocked by policy"
+            )
+        assert command[0] == "cscript.exe"
+        return types.SimpleNamespace(returncode=5, stderr=b"WSH disabled")
+
+    monkeypatch.setattr(windows_shortcut, "create_shortcut", failed_native)
+    monkeypatch.setattr(appmod.subprocess, "run", failed_run)
+    monkeypatch.setattr(
+        appmod.shutil, "which",
+        lambda name: "cscript.exe" if name == "cscript.exe" else None,
+    )
+    store["Fakturabunten"] = "legacy Python entry"
+    appmod.log.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.ERROR, logger="FakturaApp"):
+            assert mgr.set_enabled(True) is False
+    finally:
+        appmod.log.removeHandler(caplog.handler)
+
+    assert final_link.read_bytes() == b"previous working link"
+    assert "Fakturabunten" not in store  # no Python/Run fallback
+    assert "Befintlig genväg är kvar" in caplog.text
+    assert "0x80070005" in caplog.text
+    assert "PowerShell blocked by policy" in caplog.text
+    assert "WSH disabled" in caplog.text
+    assert "exitkod 5" in caplog.text
+    assert not staged[0].parent.exists()
+
+
+def test_missing_app_icon_is_reported_without_creating_a_shortcut(
+    monkeypatch, tmp_path
+):
+    appmod, mgr = _win_mgr(monkeypatch, tmp_path)
+    missing_dir = tmp_path / "app utan ikon"
+    missing_dir.mkdir()
+    monkeypatch.setattr(appmod, "BASE_DIR", missing_dir)
+    assert mgr._write_startup_shortcut() is False
+    assert "appikonen saknas" in mgr._shortcut_last_failure
+    assert not mgr._startup_shortcut_path().exists()
+
+
+def test_redirected_windows_startup_folder_takes_precedence_over_appdata(
+    monkeypatch, tmp_path
+):
+    _appmod, mgr = _win_mgr(monkeypatch, tmp_path)
+    redirected = tmp_path / "Anpassad Autostart" / "åäö"
+    monkeypatch.setattr(mgr, "_native_startup_folder", lambda: redirected)
+    assert mgr._startup_shortcut_path() == redirected / "Fakturabunten.lnk"
+    monkeypatch.setattr(mgr, "_native_startup_folder", lambda: None)
+    assert mgr._startup_shortcut_path().is_relative_to(tmp_path / "appdata")

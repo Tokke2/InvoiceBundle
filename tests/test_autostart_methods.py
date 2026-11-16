@@ -24,6 +24,10 @@ import app as appmod
 
 def _mgr(monkeypatch, platform: str, method: str = "auto"):
     monkeypatch.setattr(appmod, "CURRENT_PLATFORM", platform)
+    # Tester får aldrig skriva till användarens verkliga Startup-mapp.
+    monkeypatch.setattr(
+        appmod.AutostartManager, "_native_startup_folder", staticmethod(lambda: None)
+    )
     return appmod.AutostartManager(method=method)
 
 
@@ -503,3 +507,42 @@ def test_startup_log_does_not_certify_an_unverified_shortcut(
         watcher_log.removeHandler(caplog.handler)
     assert "innehåll kunde inte bekräftas" in caplog.text
     assert "Registry korrekt" not in caplog.text
+
+
+def test_settings_load_uses_saved_launcher_method_before_autostart_sync(
+    monkeypatch, tmp_path
+):
+    calls = []
+    monkeypatch.setattr(
+        appmod.AutostartManager, "migrate_legacy_if_present", lambda _self: None
+    )
+    monkeypatch.setattr(appmod.AutostartManager, "is_enabled", lambda _self: False)
+    monkeypatch.setattr(
+        appmod.AutostartManager, "set_enabled",
+        lambda self, enable: calls.append((self.method, enable)) or True,
+    )
+    path = tmp_path / "settings.json"
+    path.write_text(
+        json.dumps({"startup": True, "autostart_method": "launcher"}),
+        encoding="utf-8",
+    )
+    settings = appmod.SettingsManager(path)
+    assert calls == [("launcher", True)]
+    assert settings.get_autostart_manager().method == "launcher"
+
+
+def test_settings_update_applies_method_before_enabling_autostart(
+    monkeypatch, tmp_path
+):
+    calls = []
+    monkeypatch.setattr(
+        appmod.AutostartManager, "migrate_legacy_if_present", lambda _self: None
+    )
+    monkeypatch.setattr(appmod.AutostartManager, "is_enabled", lambda _self: False)
+    monkeypatch.setattr(
+        appmod.AutostartManager, "set_enabled",
+        lambda self, enable: calls.append((self.method, enable)) or True,
+    )
+    settings = appmod.SettingsManager(tmp_path / "settings.json")
+    settings.update({"startup": True, "autostart_method": "launcher"})
+    assert calls == [("launcher", True)]
