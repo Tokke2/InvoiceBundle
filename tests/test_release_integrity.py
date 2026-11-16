@@ -381,6 +381,13 @@ def test_release_workflow_tests_actual_windows_shortcuts_before_upload():
     assert "needs: [updater-guard, windows-autostart, autostart-ui, unix-startup]" in workflow
 
 
+def test_deferred_legacy_helpers_match_the_startup_hash_check():
+    import main
+    from plugins import updater
+
+    assert updater.LEGACY_PYTHON_HELPERS == set(main._LEGACY_PYTHON_FILES)
+
+
 def test_update_defers_legacy_helpers_to_content_checked_startup(monkeypatch, tmp_path):
     import main
     from plugins import updater
