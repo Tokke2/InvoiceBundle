@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for the app-controlled weekly Python/package update path."""
+"""Tests for the app-controlled weekly package-only update path."""
 from __future__ import annotations
 
 import datetime as dt
@@ -165,7 +165,7 @@ def test_scheduler_queues_detached_worker_for_missed_week(tmp_path, monkeypatch)
     assert timer.delay == 60 * 60 * 1000
 
 
-def test_non_windows_worker_uses_current_python_and_marks_completion(tmp_path, monkeypatch):
+def test_package_worker_uses_current_python_and_marks_completion(tmp_path, monkeypatch):
     (tmp_path / "requirements.txt").write_text("PySide6>=6.6\n", encoding="utf-8")
     (tmp_path / "ensure_packages.py").write_text("# helper\n", encoding="utf-8")
     command_calls = []
@@ -185,7 +185,7 @@ def test_non_windows_worker_uses_current_python_and_marks_completion(tmp_path, m
 
     monkeypatch.setattr(scheduler.subprocess, "Popen", fake_popen)
     slot = "2026-11-02T08:00:00"
-    code = scheduler.run_non_windows_worker(
+    code = scheduler.run_package_worker(
         tmp_path, 123, "/active/python", slot
     )
 
@@ -227,3 +227,20 @@ def test_package_upgrade_uses_requirements_and_running_interpreter(tmp_path, mon
     user_command = calls[1][0]
     assert "--user" in user_command
     assert user_command[-2:] == ["-r", str(requirements)]
+
+
+def test_worker_is_package_only_and_uses_exact_active_interpreter(tmp_path):
+    interpreter = str(tmp_path / 'System Python' / 'python.exe')
+    slot = dt.datetime(2026, 10, 12, 8)
+    args, options = scheduler._worker_command(tmp_path, interpreter, slot, 12345)
+    assert args[0] == interpreter
+    assert Path(args[1]).name == 'python_update_scheduler.py'
+    assert args[args.index('--python-exe') + 1] == interpreter
+    assert args[args.index('--wait-for-pid') + 1] == '12345'
+    assert '--worker' in args
+    assert not any('install_python.ps1' in arg.lower() for arg in args)
+    assert not any('powershell' in arg.lower() for arg in args)
+    if os.name == 'nt':
+        assert 'creationflags' in options
+    else:
+        assert options == {'start_new_session': True}

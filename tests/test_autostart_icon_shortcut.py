@@ -79,14 +79,14 @@ def test_bootstrap_progress_uses_app_icon():
     assert "self.root.iconphoto(True, self._icon_photo)" in source
 
 
-def test_python_updater_migrates_legacy_run_entry_to_icon_shortcut():
-    script = (
-        PROJECT_DIR / "autostart" / "install_python.ps1"
+def test_weekly_package_worker_does_not_rewrite_autostart():
+    source = (
+        PROJECT_DIR / "plugins" / "python_update_scheduler.py"
     ).read_text(encoding="utf-8")
-    assert "Set-ItemProperty -LiteralPath $runKey" not in script
-    assert "Remove-ItemProperty -LiteralPath $runKey" in script
-    assert "app_icon.ico" in script
-    assert "CreateShortcut($linkPath)" in script
+    assert "winreg" not in source
+    assert "install_python.ps1" not in source
+    assert "CreateShortcut" not in source
+    # Legacy Run-to-icon-shortcut migration is tested below via the manager.
 
 
 # ── Autostart-genvägen ──────────────────────────────────────────────

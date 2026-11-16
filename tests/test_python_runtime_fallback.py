@@ -4,7 +4,6 @@ from __future__ import annotations
 import builtins
 import json
 import os
-import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -248,6 +247,7 @@ def test_python_discovery_ignores_app_local_runtime(monkeypatch, tmp_path):
 
     monkeypatch.setattr(main.shutil, "which", _which)
     monkeypatch.setattr(main, "_inspect_python", _inspect)
+    monkeypatch.setattr(main, "_additional_system_python_paths", lambda: [])
 
     assert main._system_python_candidates() == [
         ("/usr/bin/python3.14", (3, 14, 9))
@@ -347,12 +347,66 @@ def test_runtime_probe_uses_available_pdf_api_and_still_requires_qt(
     assert "FAKTURABUNTEN_RUNTIME_OK" in capsys.readouterr().out
 
 
-def test_windows_installer_uses_the_same_runtime_probe_as_main():
+def test_windows_manager_lists_installed_paths_without_version_launches(monkeypatch):
     import main
 
-    script = (PROJECT_DIR / "autostart" / "install_python.ps1").read_text(
-        encoding="utf-8"
-    )
-    match = re.search(r"\$probeCode = @'\n(.*?)\n'@", script, re.DOTALL)
-    assert match is not None
-    assert match.group(1).strip() == main._RUNTIME_PROBE.strip()
+    calls = []
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(stdout=(
+            " -V:3.14 *        C:\\Program Files\\Python314\\python.exe\n"
+            " -V:3.15          C:\\Users\\me\\Python315\\python.exe\n"
+        ))
+
+    monkeypatch.setattr(main.subprocess, "run", run)
+    monkeypatch.setenv("PYTHON_MANAGER_AUTOMATIC_INSTALL", "1")
+    paths = main._windows_launcher_paths("C:\\PythonManager\\py.exe")
+    assert paths == [
+        "C:\\Program Files\\Python314\\python.exe",
+        "C:\\Users\\me\\Python315\\python.exe",
+    ]
+    assert calls[0][0] == ["C:\\PythonManager\\py.exe", "-0p"]
+    assert calls[0][1]["env"]["PYTHON_MANAGER_AUTOMATIC_INSTALL"] == "0"
+    assert os.environ["PYTHON_MANAGER_AUTOMATIC_INSTALL"] == "1"  # child only
+
+
+def test_windows_runtime_discovery_only_probes_listed_executables(monkeypatch, tmp_path):
+    main = _main_module(monkeypatch, base_dir=tmp_path)
+    monkeypatch.setattr(main, "CURRENT_PLATFORM", "windows")
+    monkeypatch.setattr(main.shutil, "which", lambda name: "py.exe" if name == "py.exe" else None)
+    monkeypatch.setattr(main, "_windows_launcher_paths", lambda _: ["/installed/python.exe"])
+    monkeypatch.setattr(main, "_additional_system_python_paths", lambda: [])
+    for key in ("LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"):
+        monkeypatch.delenv(key, raising=False)
+    commands = []
+    def inspect(command):
+        commands.append(command)
+        return (command[0], (3, 14, 0))
+    monkeypatch.setattr(main, "_inspect_python", inspect)
+    main._system_python_candidates()
+    assert commands == [["/installed/python.exe"]]
+    assert all(len(command) == 1 and command[0] != "py.exe" for command in commands)
+
+
+def test_inspection_disables_python_manager_auto_install(monkeypatch):
+    import main
+
+    calls = []
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout="/installed/python\n3.14.0\n")
+    monkeypatch.setattr(main.subprocess, "run", run)
+    assert main._inspect_python(["/installed/python"])[1] == (3, 14, 0)
+    assert calls[0][1]["env"]["PYTHON_MANAGER_AUTOMATIC_INSTALL"] == "0"
+
+
+def test_python_discovery_includes_user_managed_frameworks_and_future_versions(monkeypatch, tmp_path):
+    import main
+
+    python = tmp_path / ".pyenv" / "versions" / "3.16.0" / "bin" / "python3.16"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(main, "CURRENT_PLATFORM", "linux")
+    assert python in main._additional_system_python_paths()

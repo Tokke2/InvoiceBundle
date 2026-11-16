@@ -46,10 +46,10 @@ jobs:
           allow-prereleases: true
       - name: Install pytest
         run: python -m pip install -q pytest
-      - name: Test real Windows shortcuts and fallbacks
+      - name: Test Windows startup, shortcuts and package updates
         shell: pwsh
         run: |
-          python -m pytest tests/test_windows_shortcut_logic.py tests/test_windows_shortcut_native.py tests/test_autostart_settings.py tests/test_manual_python_batch_windows.py -q --junitxml=windows-autostart-results.xml
+          python -m pytest tests/test_windows_shortcut_logic.py tests/test_windows_shortcut_native.py tests/test_autostart_settings.py tests/test_start_launcher_windows.py tests/test_python_update_scheduler.py -q --junitxml=windows-autostart-results.xml
           $code = $LASTEXITCODE
           if ($code -ne 0) {
             if (Test-Path windows-autostart-results.xml) {
@@ -61,8 +61,10 @@ jobs:
                 $detail = $detail.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
                 $file = if ($case.classname -match 'test_autostart_settings') {
                   'tests/test_autostart_settings.py'
-                } elseif ($case.classname -match 'test_manual_python_batch_windows') {
-                  'tests/test_manual_python_batch_windows.py'
+                } elseif ($case.classname -match 'test_start_launcher_windows') {
+                  'tests/test_start_launcher_windows.py'
+                } elseif ($case.classname -match 'test_python_update_scheduler') {
+                  'tests/test_python_update_scheduler.py'
                 } elseif ($case.classname -match 'test_windows_shortcut_logic') {
                   'tests/test_windows_shortcut_logic.py'
                 } else { 'tests/test_windows_shortcut_native.py' }
@@ -116,9 +118,31 @@ jobs:
           fi
           exit "$code"
 
+  unix-startup:
+    name: Start files (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pytest
+        run: python -m pip install -q pytest
+      - name: Test startup without installing Python
+        run: >-
+          python -m pytest
+          tests/test_start_launcher_unix.py
+          tests/test_python_runtime_fallback.py
+          tests/test_python_update_scheduler.py
+          -q
+
   build-release-package:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [updater-guard, windows-autostart, autostart-ui]
+    needs: [updater-guard, windows-autostart, autostart-ui, unix-startup]
     runs-on: ubuntu-latest
     permissions:
       contents: write

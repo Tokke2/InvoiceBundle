@@ -1,15 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Weekly Python/runtime and package update scheduling for Fakturabunten.
+"""Weekly package update scheduling for Fakturabunten on every platform.
 
-The app checks its persisted weekly slot at startup and schedules the next
-Monday at 08:00 while its Qt event loop is running. Actual changes are
-handed to a detached worker that waits for the app process to exit, so pip
-and the interpreter installer never replace files currently in use.
-
-On Windows the existing system Python installation and requirements are
-updated by ``autostart/install_python.ps1``. On macOS/Linux the app updates
-its required packages through the exact running interpreter; it does not
-attempt to replace an OS-managed Python runtime.
+A detached worker waits for the app to exit, then updates its requirements
+with the exact running interpreter. It never installs, replaces, removes or
+upgrades the system's Python interpreter, and creates no OS scheduled task.
 """
 from __future__ import annotations
 
@@ -19,7 +13,6 @@ import json
 import logging
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import time
@@ -113,9 +106,39 @@ def _state_pid(value: Any) -> int:
         return 0
 
 
+def _windows_pid_is_alive(pid: int) -> bool:
+    """Query a Windows process without sending a signal or terminating it."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel.WaitForSingleObject.restype = wintypes.DWORD
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle.restype = wintypes.BOOL
+        handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        if not handle:
+            # Invalid PID means exited; permission errors are conservatively
+            # treated as alive, so we never update while the app might run.
+            return ctypes.get_last_error() != 87  # ERROR_INVALID_PARAMETER
+        try:
+            return kernel.WaitForSingleObject(handle, 0) != 0  # WAIT_OBJECT_0
+        finally:
+            kernel.CloseHandle(handle)
+    except Exception as exc:
+        log.warning("Cannot query Windows process %s: %s", pid, exc)
+        return True
+
+
 def _pid_is_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os.name == "nt":
+        # os.kill(pid, 0) is not a harmless existence check on Windows.
+        return _windows_pid_is_alive(pid)
     try:
         os.kill(pid, 0)
         return True
@@ -141,7 +164,7 @@ def wait_for_active_update(base_dir: Path, *, poll_seconds: float = 2.0) -> bool
     worker_pid = _state_pid(state.get("worker_pid"))
     if _pid_is_alive(app_pid) or not _pid_is_alive(worker_pid):
         return False
-    message = "Waiting for the weekly Python/package update to finish before startup."
+    message = "Waiting for the weekly package update to finish before startup."
     log.info("PYTHON_WEEKLY_UPDATE_WAIT: worker=%s", worker_pid)
     _append_log(base_dir, message)
     while _pid_is_alive(worker_pid):
@@ -156,27 +179,6 @@ def _worker_command(
     parent_pid: int,
 ) -> tuple[list[str], dict[str, Any]]:
     slot_text = slot.isoformat(timespec="seconds")
-    if os.name == "nt":
-        script = Path(base_dir) / "autostart" / "install_python.ps1"
-        powershell = shutil.which("powershell.exe") or "powershell.exe"
-        args = [
-            powershell,
-            "-NoLogo",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(script),
-            "-WaitForPid",
-            str(parent_pid),
-            "-UpdatePackages",
-            "-PythonExe",
-            python_exe,
-            "-Slot",
-            slot_text,
-        ]
-        return args, {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
-
     worker = Path(__file__).resolve()
     args = [
         python_exe,
@@ -191,6 +193,8 @@ def _worker_command(
         "--slot",
         slot_text,
     ]
+    if os.name == "nt":
+        return args, {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
     return args, {"start_new_session": True}
 
 
@@ -218,19 +222,19 @@ def _wait_for_pid(pid: int) -> None:
         time.sleep(2)
 
 
-def run_non_windows_worker(
+def run_package_worker(
     base_dir: Path,
     wait_for_pid: int,
     python_exe: str,
     slot_text: str,
 ) -> int:
-    """Run the package upgrade after the GUI exits (non-Windows worker)."""
+    """Run the package upgrade after the GUI exits on any supported OS."""
     base_dir = Path(base_dir).resolve()
     _wait_for_pid(wait_for_pid)
     _append_log(
         base_dir,
-        "Weekly update started after the app closed. "
-        "The OS-managed Python runtime is left unchanged on this platform; "
+        "Weekly package update started after the app closed. "
+        "The system Python runtime is left unchanged; "
         "updating the app's requirements in the current interpreter.",
     )
     requirements = base_dir / "requirements.txt"
@@ -276,12 +280,12 @@ def schedule_weekly_python_updates(
     *,
     python_exe: str | None = None,
 ) -> None:
-    """Schedule one update at Monday 08:00, or after that slot if missed.
+    """Schedule a package update at Monday 08:00, or after a missed slot.
 
     No package index or version check happens on every startup. Startup only
     reads the small local state file and schedules a Qt timer. The worker is
-    detached and waits for this app process to exit before changing Python or
-    its packages.
+    detached and waits for this app process to exit before changing packages.
+    The system Python interpreter is not installed or upgraded by this worker.
     """
     from PySide6.QtCore import QTimer
 
@@ -307,7 +311,7 @@ def schedule_weekly_python_updates(
             "app_pid": 0,
         })
         _write_state(state_path, state)
-        _append_log(base_dir, "Weekly Python update schedule initialized.")
+        _append_log(base_dir, "Weekly package update schedule initialized.")
 
     timer = QTimer(qt_app)
     timer.setSingleShot(True)
@@ -366,7 +370,7 @@ def schedule_weekly_python_updates(
             "worker_pid": 0,
             "app_pid": os.getpid(),
             "updated_at": current_now.isoformat(timespec="seconds"),
-            "message": "Weekly Python/package update queued; waiting for app shutdown.",
+            "message": "Weekly package update queued; waiting for app shutdown.",
         })
         _write_state(state_path, current_state)
         _append_log(base_dir, current_state["message"])
@@ -387,7 +391,7 @@ def schedule_weekly_python_updates(
             _write_state(state_path, current_state)
             log.info("PYTHON_WEEKLY_UPDATE_QUEUED: slot=%s worker=%s", slot_text, worker.pid)
         except Exception as exc:
-            message = f"Could not start weekly Python update worker: {exc}"
+            message = f"Could not start weekly package update worker: {exc}"
             _finish_state(base_dir, slot_text, "failed", message)
             _append_log(base_dir, message, "ERROR")
             log.error("PYTHON_WEEKLY_UPDATE_START_FAIL: %s", exc)
@@ -408,7 +412,7 @@ def _worker_cli(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not args.worker:
         parser.error("--worker is required")
-    return run_non_windows_worker(
+    return run_package_worker(
         Path(args.base_dir), args.wait_for_pid, args.python_exe, args.slot
     )
 

@@ -132,7 +132,8 @@ def test_generated_and_static_launchers_only_choose_system_python(
     linux = _mgr(monkeypatch, "linux")
     shell = linux._sh_text()
     assert '"$APP_DIR/python/bin/' not in shell
-    assert "command -v python3" in shell
+    assert 'Starta Fakturabunten.sh' in shell
+    assert '--no-prompt --minimized' in shell
 
     windows = _mgr(monkeypatch, "windows", method="launcher")
     vbs = windows._vbs_text()

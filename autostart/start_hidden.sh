@@ -18,10 +18,10 @@ if [ ! -f "$APP_DIR/main.py" ]; then
 fi
 cd "$APP_DIR" || exit 1
 mkdir -p "$APP_DIR/logs"
-if command -v python3 >/dev/null 2>&1; then
-  PY=python3
-else
-  PY=python
+STARTER="$APP_DIR/Starta Fakturabunten.sh"
+if [ ! -f "$STARTER" ]; then
+  echo "$(date '+%Y-%m-%d %H:%M:%S')  FAIL startfilen saknas: $STARTER" >> "$LOG"
+  exit 1
 fi
 echo "$(date '+%Y-%m-%d %H:%M:%S')  OK cwd=$APP_DIR --minimized" >> "$LOG"
-exec "$PY" "$APP_DIR/main.py" --minimized
+exec /bin/sh "$STARTER" --no-prompt --minimized >> "$LOG" 2>&1

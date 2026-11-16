@@ -1317,8 +1317,8 @@ class AutostartManager:
             "OS-posten pekar bara hit. Logg: logs/autostart.log\n"
             "Exporter och data skrivs aldrig här.\n"
             "Startfilen hittar appmappen själv (ingen fast sökväg).\n"
-            "Python saknas: installera en kompatibel system-Python manuellt.\n"
-            "Den manuella Python-uppdateringsfilen är avaktiverad.\n",
+            "Python saknas: använd startfilen för ditt operativsystem i appmappen.\n"
+            "När Python finns visas inget erbjudande om Pythoninstallation.\n",
             encoding="utf-8",
         )
         log.info("AUTOSTART_LAUNCHER: %s", path)
@@ -1374,13 +1374,13 @@ class AutostartManager:
             "fi\n"
             "cd \"$APP_DIR\" || exit 1\n"
             "mkdir -p \"$APP_DIR/logs\"\n"
-            "if command -v python3 >/dev/null 2>&1; then\n"
-            "  PY=python3\n"
-            "else\n"
-            "  PY=python\n"
+            "STARTER=\"$APP_DIR/Starta Fakturabunten.sh\"\n"
+            "if [ ! -f \"$STARTER\" ]; then\n"
+            "  echo \"$(date '+%Y-%m-%d %H:%M:%S')  FAIL startfilen saknas: $STARTER\" >> \"$LOG\"\n"
+            "  exit 1\n"
             "fi\n"
             "echo \"$(date '+%Y-%m-%d %H:%M:%S')  OK cwd=$APP_DIR --minimized\" >> \"$LOG\"\n"
-            "exec \"$PY\" \"$APP_DIR/main.py\" --minimized\n"
+            "exec /bin/sh \"$STARTER\" --no-prompt --minimized >> \"$LOG\" 2>&1\n"
         )
 
     def _vbs_text(self) -> str:
@@ -1460,7 +1460,7 @@ class AutostartManager:
             "\n"
             "sh.CurrentDirectory = appDir\n"
             "If pythonw = \"\" Then\n"
-            "    WriteLog \"FAIL: Python saknas på datorn. Installera en kompatibel system-Python manuellt.\"\n"
+            "    WriteLog \"FAIL: Python hittades inte. Använd Starta Fakturabunten.bat i appmappen.\"\n"
             "    WScript.Quit 1\n"
             "End If\n"
             "\n"

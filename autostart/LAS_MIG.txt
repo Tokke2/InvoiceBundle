@@ -2,5 +2,5 @@ Startfil för autostart. Skapas av programmet.
 OS-posten pekar bara hit. Logg: logs/autostart.log
 Exporter och data skrivs aldrig här.
 Startfilen hittar appmappen själv (ingen fast sökväg).
-Python saknas: installera en kompatibel system-Python manuellt.
-Den manuella Python-uppdateringsfilen är avaktiverad.
+Python saknas: använd startfilen för ditt operativsystem i appmappen.
+När Python finns visas inget erbjudande om Pythoninstallation.

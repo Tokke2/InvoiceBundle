@@ -359,8 +359,7 @@ def upgrade_all_packages(*, force_user: bool = False) -> int:
     This is called only by the weekly worker, never by ordinary app startup.
     ``_pip_base`` deliberately uses this script's running ``sys.executable``;
     no virtual environment or second Python is created. ``force_user`` keeps
-    packages in the invoking user's site when the runtime installer had to
-    elevate to replace a machine-wide Python installation.
+    packages in the invoking user's site when explicitly requested.
     """
     if not REQUIREMENTS.is_file():
         message = f"WEEKLY_PACKAGE_UPDATE_FAIL: missing {REQUIREMENTS}"

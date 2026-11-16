@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -352,6 +353,13 @@ def _write_startup_crash(exc: BaseException) -> None:
 _WINDOWLESS_GUARD = "FAKTURABUNTEN_WINDOWLESS_RELAUNCH"
 
 
+def _python_child_environment() -> dict[str, str]:
+    """Never let a Windows Python-manager alias install a missing runtime."""
+    env = dict(os.environ)
+    env["PYTHON_MANAGER_AUTOMATIC_INSTALL"] = "0"
+    return env
+
+
 def _windowless_python(executable: str | None = None) -> Path | None:
     """Motsvarande pythonw.exe för en Windows-Python, om den finns.
 
@@ -391,7 +399,7 @@ def _relaunch_windowless() -> bool:
         script = BASE_DIR / "main.py"
     if not script.is_file():
         return False
-    env = dict(os.environ)
+    env = _python_child_environment()
     env[_WINDOWLESS_GUARD] = "1"
     try:
         subprocess.Popen(
@@ -528,6 +536,7 @@ def _inspect_python(command: list[str]) -> tuple[str, tuple[int, ...]] | None:
             text=True,
             timeout=10,
             check=False,
+            env=_python_child_environment(),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if result.returncode != 0:
@@ -544,14 +553,94 @@ def _inspect_python(command: list[str]) -> tuple[str, tuple[int, ...]] | None:
         return None
 
 
+def _windows_launcher_paths(launcher: str) -> list[str]:
+    """List already-installed runtimes; never launch an uninstalled tag."""
+    try:
+        result = subprocess.run(
+            [launcher, "-0p"], capture_output=True, text=True, timeout=10,
+            check=False, env=_python_child_environment(),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return []
+    paths = []
+    for line in result.stdout.splitlines():
+        match = re.search(
+            r"(?i)((?:[a-z]:\\|\\\\)[^\r\n]*?\\python(?:w|[23](?:\.\d+)?)?\.exe)\s*$",
+            line,
+        )
+        if match:
+            paths.append(match.group(1))
+    return paths
+
+
+def _additional_system_python_paths() -> list[Path]:
+    """Find non-PATH and future-version runtimes in common user locations."""
+    roots: list[Path] = []
+    if CURRENT_PLATFORM == "windows":
+        for env_name in ("LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"):
+            raw = os.environ.get(env_name)
+            if not raw:
+                continue
+            base = Path(raw)
+            roots.extend((base, base / "Programs" / "Python"))
+        paths: list[Path] = []
+        for base in roots:
+            try:
+                paths.extend(folder / "python.exe" for folder in base.glob("Python*"))
+            except OSError:
+                pass
+        try:
+            home = Path.home()
+            local = Path(os.environ.get("LOCALAPPDATA") or home)
+            for base in (
+                home / ".pyenv" / "pyenv-win" / "versions",
+                home / ".conda" / "envs",
+                local / "uv" / "python",
+            ):
+                paths.extend(base.glob("*/python.exe"))
+            for name in ("anaconda3", "miniconda3", "miniforge3"):
+                paths.append(home / name / "python.exe")
+                paths.extend((home / name / "envs").glob("*/python.exe"))
+        except (OSError, RuntimeError):
+            pass
+        return paths
+
+    for raw in os.environ.get("PATH", "").split(os.pathsep):
+        if raw:
+            roots.append(Path(raw))
+    roots.extend((Path("/usr/local/bin"), Path("/usr/bin"), Path("/opt/homebrew/bin")))
+    try:
+        home = Path.home()
+        roots.extend(Path("/Library/Frameworks/Python.framework/Versions").glob("*/bin"))
+        roots.extend((home / ".pyenv" / "versions").glob("*/bin"))
+        roots.extend((home / ".local" / "share" / "uv" / "python").glob("*/bin"))
+        roots.extend((home / ".conda" / "envs").glob("*/bin"))
+        roots.append(home / ".local" / "bin")
+        for name in ("anaconda3", "miniconda3", "micromamba"):
+            roots.append(home / name / "bin")
+            roots.extend((home / name / "envs").glob("*/bin"))
+    except (OSError, RuntimeError):
+        pass
+    paths = []
+    for base in roots:
+        try:
+            paths.extend(
+                path for path in base.glob("python3*")
+                if re.fullmatch(r"python3(?:\.\d+)?", path.name)
+            )
+        except OSError:
+            pass
+    return paths
+
+
 def _system_python_candidates() -> list[tuple[str, tuple[int, ...]]]:
-    """Find installed interpreters, with the requested 3.15/3.14 order."""
+    """Find installed interpreters and rank them by their actual version."""
     commands: list[list[str]] = []
     if CURRENT_PLATFORM == "windows":
         launcher = shutil.which("py.exe") or shutil.which("py")
         if launcher:
-            for minor in range(15, 9, -1):
-                commands.append([launcher, f"-3.{minor}"])
+            commands.extend([path] for path in _windows_launcher_paths(launcher))
         roots = [
             os.environ.get("LOCALAPPDATA", ""),
             os.environ.get("ProgramFiles", ""),
@@ -572,7 +661,7 @@ def _system_python_candidates() -> list[tuple[str, tuple[int, ...]]]:
             "python.exe",
         ):
             found = shutil.which(name)
-            if found and "\\Microsoft\\WindowsApps\\" not in found:
+            if found and "\\microsoft\\windowsapps\\" not in found.casefold():
                 commands.append([found])
     else:
         # Only use interpreters installed on the system/PATH. Never prefer
@@ -585,12 +674,18 @@ def _system_python_candidates() -> list[tuple[str, tuple[int, ...]]]:
             if found:
                 commands.append([found])
 
+    commands.extend([str(path)] for path in _additional_system_python_paths())
     current = _python_path_key(sys.executable)
     seen: set[str] = set()
+    seen_commands: set[str] = set()
     candidates: list[tuple[str, tuple[int, ...]]] = []
     for command in commands:
-        if command and _is_app_local_python(command[0]):
+        if not command or _is_app_local_python(command[0]):
             continue
+        command_key = _python_path_key(command[0])
+        if command_key in seen_commands:
+            continue
+        seen_commands.add(command_key)
         inspected = _inspect_python(command)
         if inspected is None:
             continue
@@ -607,7 +702,7 @@ def _system_python_candidates() -> list[tuple[str, tuple[int, ...]]]:
 
 def _python_has_runtime(executable: str) -> bool:
     """Probe the app's declared runtime imports without starting its UI."""
-    env = dict(os.environ)
+    env = _python_child_environment()
     env["QT_QPA_PLATFORM"] = "offscreen"
     try:
         result = subprocess.run(
@@ -737,7 +832,7 @@ def _spawn_with_python(
     if mark_current:
         attempts.add(_python_path_key(sys.executable))
     attempts.add(_python_path_key(executable))
-    env = dict(os.environ)
+    env = _python_child_environment()
     env[_RUNTIME_ATTEMPTS] = json.dumps(sorted(attempts))
     try:
         subprocess.Popen(
@@ -2140,10 +2235,62 @@ def _abort_missing_files(missing: list[Path]) -> None:
     sys.exit(1)
 
 
+# Exact shipped legacy launchers only. Older installations without a
+# build_info manifest cannot have these removed by the old updater. Never
+# remove a custom file, a symlink, or anything under a user's data folders.
+_LEGACY_PYTHON_FILES: dict[str, frozenset[str]] = {
+    "Installera senaste Python.bat": frozenset({
+        "6df78cf15cdb6e9ecbdd01a9a2bbf35cf07af1fd43f5caaff8103706c1261dc0",
+        "b6a4a94ade9b20548fd27bd8fcab5d2cd2c65b9e2dcc89e28b1172654ebe8b91",
+    }),
+    "autostart/install_python.ps1": frozenset({
+        "d3038ce8263d330cd5eedb6b69260ca62bc6602d1bce9ad091da20174bbf1ffa",
+        "f784276f92a1a695cf1db3b279d2160d37cf2ce910a770d8a8e4cdb9a176952b",
+        "7937c652759f7fc64c4762f1453a622c6be008d2d7d57a37339153cc1283f195",
+        "f7a81a0380a9ce97abeeb01e55383372d76c159af4d071658a659ed7da9ed2cd",
+        "2871a0f059a7e3e571e093aa225fda115063b7ada19e17f4ac5fd0d57b4d364d",
+    }),
+}
+
+
+def _repair_startup_files() -> None:
+    for rel, known_hashes in _LEGACY_PYTHON_FILES.items():
+        path = BASE_DIR / rel
+        try:
+            root = BASE_DIR.resolve()
+            parent = path.parent.resolve()
+            if parent != root and root not in parent.parents:
+                continue  # a symlinked directory must not lead outside the app
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 1_000_000:
+                continue
+            content = path.read_bytes().replace(b"\r\n", b"\n")
+            if hashlib.sha256(content).hexdigest() in known_hashes:
+                path.unlink()
+                log.info("Removed obsolete shipped Python helper: %s", rel)
+            else:
+                log.warning("Retained unrecognized legacy file unchanged: %s", rel)
+        except OSError as exc:
+            log.warning("Could not remove obsolete Python helper %s: %s", rel, exc)
+
+    if os.name != "nt":
+        # Older versions of the updater copied files without executable bits.
+        # Repair only the two known launchers, and never follow symlinks.
+        for name in ("Starta Fakturabunten.sh", "Starta Fakturabunten.command"):
+            path = BASE_DIR / name
+            try:
+                if not path.is_symlink() and path.is_file():
+                    mode = path.stat().st_mode & 0o7777
+                    if not mode & 0o100:
+                        path.chmod(mode | 0o100)
+            except OSError as exc:
+                log.warning("Could not make starter executable %s: %s", name, exc)
+
+
 def main() -> None:
     """Startpunkt — se moduldocstring för steg-för-steg-ordningen."""
     global _SESSION_MONOTONIC
     _SESSION_MONOTONIC = time.monotonic()
+    _repair_startup_files()
 
     # Qt-runtime-miljö före QApplication (DPI-scalning, Qt6-hantering)
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
@@ -2432,7 +2579,7 @@ def main() -> None:
 
         _log_startup_info(app_core)
 
-        # Veckovis Python-/paketuppdatering: måndag kl. 08 lokal tid.
+        # Veckovis paketuppdatering: måndag kl. 08 lokal tid; Python ändras inte.
         # QTimer gör bara en lokal tids-/statuskontroll; uppdateraren
         # väntar tills denna appinstans stängts innan den ändrar filer.
         try:

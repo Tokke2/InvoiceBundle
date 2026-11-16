@@ -27,6 +27,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import os
 import shutil
 import tempfile
 import urllib.request
@@ -46,6 +47,8 @@ PRESERVED_DIRS = {"data", "js", "logs", "exports", "bak", "__pycache__"}
 PRESERVED_FILES = {"settings.json", "shortcuts.json",
                    "startup_crash.log"}
 BUILD_INFO_NAME = "build_info.json"
+# Only the two trusted root launchers need execute permission after updates.
+EXECUTABLE_STARTERS = {"Starta Fakturabunten.sh", "Starta Fakturabunten.command"}
 
 ProgressFn = Callable[[int, int], None] | None
 
@@ -332,10 +335,12 @@ def _safe_extract(zip_path: Path, stage: Path) -> Path:
     return stage
 
 
-def _copy_file(src: Path, dst: Path) -> None:
+def _copy_file(src: Path, dst: Path, *, executable: bool = False) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_name(dst.name + ".update-tmp")
     shutil.copyfile(src, tmp)
+    if executable and os.name != "nt":
+        tmp.chmod((tmp.stat().st_mode & 0o7777) | 0o100)
     tmp.replace(dst)
 
 
@@ -361,7 +366,7 @@ def restore_backup(backup_dir: Path, root: Path) -> dict:
             report["skipped"] += 1
             continue
         try:
-            _copy_file(src, root / rel)
+            _copy_file(src, root / rel, executable=rel in EXECUTABLE_STARTERS)
             report["restored"] += 1
         except Exception as exc:
             log.warning("UPDATE återställ %s: %s", rel, exc)
@@ -416,7 +421,7 @@ def apply_update(zip_path: Path, root: Path, *,
                     report["replaced"] += 1
                 else:
                     report["added"] += 1
-                _copy_file(src, dst)
+                _copy_file(src, dst, executable=rel in EXECUTABLE_STARTERS)
             except Exception as exc:
                 log.warning("UPDATE %s misslyckades: %s", rel, exc)
                 report["skipped"] += 1

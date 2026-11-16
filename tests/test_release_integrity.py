@@ -16,7 +16,9 @@ publicerade källkoden. De här testerna är Qt-fria och vaktar:
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -59,8 +61,8 @@ def test_tag_workflow_builds_and_attaches_the_release_package():
 def test_python_runtime_and_autostart_use_system_interpreters_only():
     app = (PROJECT_DIR / "app.py").read_text(encoding="utf-8")
     main = (PROJECT_DIR / "main.py").read_text(encoding="utf-8")
-    installer = (
-        PROJECT_DIR / "autostart" / "install_python.ps1"
+    starter = (
+        PROJECT_DIR / "autostart" / "start_fakturabunten.ps1"
     ).read_text(encoding="utf-8")
     shell = (
         PROJECT_DIR / "autostart" / "start_hidden.sh"
@@ -74,7 +76,8 @@ def test_python_runtime_and_autostart_use_system_interpreters_only():
     assert "python_runtime_selection.json" in main
     assert "_choose_working_system_python" in main
     assert "_remember_selected_python" in main
-    assert "$candidates.Add($localAppPython)" not in installer
+    assert "Test-AppLocalPython" in starter
+    assert "PYTHON_MANAGER_AUTOMATIC_INSTALL = '0'" in starter
     assert "APP_DIR/python/bin/" not in shell
     assert 'appDir & "\\python\\pythonw.exe"' not in vbs
     assert 'appDir & "\\python\\pythonw.exe"' not in app
@@ -113,56 +116,25 @@ def test_every_ui_and_plugin_python_module_is_shipped():
     assert runtime_modules - set(br.RELEASE_FILES) == set()
 
 
-def test_weekly_python_update_helper_is_shipped_and_checks_before_download():
-    script = PROJECT_DIR / "autostart" / "install_python.ps1"
-    assert script.is_file()
-    assert "autostart/install_python.ps1" in br.RELEASE_FILES
-
-    source = script.read_text(encoding="utf-8")
-    detect = source.index("$registered = @(Get-RegistryPythonEntries)")
-    release_lookup = source.index("$release = Get-LatestInstallerInfo $tag")
-    download = source.index("Download-Installer $release.Url $TempInstaller")
-    assert detect < release_lookup < download
-    assert "Find-UnregisteredPython $registered" in source
-    assert "PYTHON_APP_LOCAL_IGNORED" in source
-    assert "$candidates.Add($localAppPython)" not in source
-    assert "Get-UninstallEntry $selected $selected.Scope" in source
-    assert "Rollback-NewPython" in source
-    assert "Test-AppPythonRuntime" in source
-    assert "Get-FallbackInstallerInfo" in source
-    assert "3.14.8" in source
-    probe_new_runtime = source.index(
-        "if (-not (Test-AppPythonRuntime $newExe -EnsureDependencies))"
-    )
-    uninstall_old_runtime = source.index(
-        "Invoke-PythonUninstaller $oldUninstaller"
-    )
-    assert probe_new_runtime < uninstall_old_runtime
-    assert "ingen ominstallation behövs" in source
-    assert "[switch]$UpdatePackages" in source
-    assert "[switch]$UseUserPackages" in source
-    assert "[string]$PythonExe" in source
-    assert "[int]$WaitForPid" in source
-    assert "WEEKLY_PACKAGE_UPDATE_START" in source
-    assert "ensure_packages.py" in source
-
-
-def test_manual_python_batch_is_disabled_but_still_shipped():
-    name = "Installera senaste Python.bat"
-    launcher = PROJECT_DIR / name
-    assert name in br.RELEASE_FILES
-    text = launcher.read_text(encoding="utf-8")
-    assert "avaktiverad" in text.lower()
-    assert "automatiska veckokontrollen" in text.lower()
-    # This entry point may only print a notice, pause and return a nonzero
-    # status; it must not invoke PowerShell, Python, or another updater.
-    allowed = {"@echo off", "setlocal", "echo.", "pause", "exit /b 2"}
-    for line in text.splitlines():
-        command = line.strip().lower()
-        assert not any(char in command for char in "&|<>^%")
-        assert not command or command in allowed or command.startswith("echo ")
-    assert "powershell" not in text.lower()
-    assert "install_python.ps1" not in text.lower()
+def test_release_ships_start_files_but_not_the_old_python_installer(tmp_path):
+    names = {
+        "Starta Fakturabunten.bat",
+        "Starta Fakturabunten.command",
+        "Starta Fakturabunten.sh",
+        "autostart/start_fakturabunten.ps1",
+    }
+    forbidden = {"Installera senaste Python.bat", "autostart/install_python.ps1"}
+    assert names <= set(br.RELEASE_FILES)
+    assert not (forbidden & set(br.RELEASE_FILES))
+    assert all(not (PROJECT_DIR / name).exists() for name in forbidden)
+    package = br.build_release_zip(PROJECT_DIR, tmp_path / "package.zip", sha="start-files")
+    with zipfile.ZipFile(package) as zf:
+        members = set(zf.namelist())
+        manifest = json.loads(zf.read("build_info.json"))["files"]
+        assert names <= members and names <= set(manifest)
+        assert not (forbidden & members) and not (forbidden & set(manifest))
+        for name in ("Starta Fakturabunten.command", "Starta Fakturabunten.sh"):
+            assert (zf.getinfo(name).external_attr >> 16) & 0o100
 
 
 def test_weekly_python_update_is_wired_and_shipped():
@@ -399,41 +371,88 @@ def test_release_workflow_tests_actual_windows_shortcuts_before_upload():
     assert 'python: ["3.11", "3.15"]' in workflow
     assert "tests/test_windows_shortcut_native.py" in workflow
     assert "tests/test_autostart_settings.py" in workflow
-    assert "tests/test_manual_python_batch_windows.py" in workflow
+    assert "tests/test_start_launcher_windows.py" in workflow
+    assert "tests/test_start_launcher_unix.py" in workflow
+    assert "macos-latest" in workflow
     assert "autostart-ui:" in workflow
     assert "tests/test_autostart_ui_status.py" in workflow
     assert "QT_QPA_PLATFORM: offscreen" in workflow
-    assert "needs: [updater-guard, windows-autostart, autostart-ui]" in workflow
+    assert "needs: [updater-guard, windows-autostart, autostart-ui, unix-startup]" in workflow
 
 
-def test_update_replaces_active_manual_batch_without_touching_user_data(tmp_path):
+def test_update_removes_obsolete_tracked_installers_and_preserves_data(tmp_path):
     from plugins import updater
 
-    name = "Installera senaste Python.bat"
+    obsolete = ("Installera senaste Python.bat", "autostart/install_python.ps1")
     package = br.build_release_zip(
-        PROJECT_DIR, tmp_path / "package.zip", version="1.0.0", sha="disabled-bat"
+        PROJECT_DIR, tmp_path / "package.zip", version="1.0.0", sha="start-files"
     )
-    with zipfile.ZipFile(package) as zf:
-        info = json.loads(zf.read("build_info.json"))
-        assert name in info["files"]
-        assert zf.read(name) == (PROJECT_DIR / name).read_bytes()
-
     old = tmp_path / "old-installation"
     old.mkdir()
-    (old / name).write_text(
-        '@echo off\npowershell.exe -File autostart\\install_python.ps1\n',
-        encoding="utf-8",
+    for rel in obsolete:
+        path = old / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("old program file", encoding="utf-8")
+    (old / "build_info.json").write_text(
+        json.dumps({"sha": "old", "files": list(obsolete)}), encoding="utf-8"
     )
     (old / "data").mkdir()
     invoice = old / "data" / "invoices.json"
     invoice.write_text('[{"id":"keep-me"}]', encoding="utf-8")
-    report = updater.apply_update(package, old, version="1.0.0", sha="disabled-bat")
+    report = updater.apply_update(package, old, version="1.0.0", sha="start-files")
 
-    assert name in report["files"]
-    assert (old / name).read_bytes() == (PROJECT_DIR / name).read_bytes()
-    assert "avaktiverad" in (old / name).read_text(encoding="utf-8").lower()
+    assert all(not (old / rel).exists() for rel in obsolete)
+    assert report["removed"] == 2
+    assert all((old / name).is_file() for name in (
+        "Starta Fakturabunten.bat", "Starta Fakturabunten.command",
+        "Starta Fakturabunten.sh", "autostart/start_fakturabunten.ps1",
+    ))
+    if os.name != "nt":
+        assert (old / "Starta Fakturabunten.command").stat().st_mode & 0o100
+        assert (old / "Starta Fakturabunten.sh").stat().st_mode & 0o100
     assert json.loads(invoice.read_text(encoding="utf-8")) == [{"id": "keep-me"}]
     assert all((old / path).is_file() for path in PRINT_FILES)
+
+
+def test_legacy_no_manifest_cleanup_removes_only_known_shipped_batch(monkeypatch, tmp_path):
+    import main
+
+    # Exact historical launcher, with Windows CRLF as it may exist on disk.
+    batch = (
+        '@echo off\nsetlocal\nset "SCRIPT=%~dp0autostart\\install_python.ps1"\n'
+        'if not exist "%SCRIPT%" (\n'
+        '    echo Python-skriptet saknas: "%SCRIPT%"\n'
+        '    pause\n    exit /b 2\n)\n\n'
+        'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%"\n'
+        'set "RC=%ERRORLEVEL%"\nif not "%RC%"=="0" (\n    echo.\n'
+        '    echo Python kunde inte uppdateras eller installeras. Se logs\\starta.log.\n'
+        '    pause\n)\nexit /b %RC%\n'
+    ).encode('utf-8')
+    assert hashlib.sha256(batch).hexdigest() in main._LEGACY_PYTHON_FILES['Installera senaste Python.bat']
+    old = tmp_path / "old-no-manifest"
+    old.mkdir()
+    path = old / "Installera senaste Python.bat"
+    path.write_bytes(batch.replace(b"\n", b"\r\n"))
+    (old / "data").mkdir()
+    (old / "data" / "invoice.json").write_text('safe', encoding='utf-8')
+    from plugins import updater
+    package = br.build_release_zip(PROJECT_DIR, tmp_path / 'new.zip', sha='new')
+    updater.apply_update(package, old, sha='new')
+    assert path.exists()  # the legacy updater cannot infer untracked old files
+    starters = [old / 'Starta Fakturabunten.sh', old / 'Starta Fakturabunten.command']
+    if os.name != 'nt':
+        for starter in starters:  # simulate an older updater that lost execute bits
+            starter.chmod(0o644)
+    monkeypatch.setattr(main, 'BASE_DIR', old)
+    main._repair_startup_files()
+    assert not path.exists()
+    if os.name != 'nt':
+        assert all(starter.stat().st_mode & 0o100 for starter in starters)
+    assert (old / "data" / "invoice.json").read_text(encoding='utf-8') == 'safe'
+
+    path.write_text('my customized file', encoding='utf-8')
+    main._repair_startup_files()
+    assert path.read_text(encoding='utf-8') == 'my customized file'
 
 
 def test_startup_help_does_not_recommend_the_disabled_batch(monkeypatch, tmp_path):
@@ -458,3 +477,31 @@ def test_startup_help_does_not_recommend_the_disabled_batch(monkeypatch, tmp_pat
     assert (launcher.parent / "LAS_MIG.txt").read_text(encoding="utf-8") == (
         PROJECT_DIR / "autostart" / "LAS_MIG.txt"
     ).read_text(encoding="utf-8")
+    monkeypatch.setattr(appmod, "CURRENT_PLATFORM", "linux")
+    shell = appmod.AutostartManager(method="launcher")._write_launcher()
+    assert shell.read_text(encoding="utf-8") == (
+        PROJECT_DIR / "autostart" / "start_hidden.sh"
+    ).read_text(encoding="utf-8")
+    assert "--no-prompt" in shell.read_text(encoding="utf-8")
+
+
+def test_legacy_cleanup_does_not_follow_symlinks_outside_app(monkeypatch, tmp_path):
+    import main
+
+    app = tmp_path / 'app'
+    app.mkdir()
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    payload = b'legacy program file'
+    target = outside / 'install_python.ps1'
+    target.write_bytes(payload)
+    try:
+        (app / 'autostart').symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip('symlink creation unavailable')
+    monkeypatch.setattr(main, 'BASE_DIR', app)
+    monkeypatch.setattr(main, '_LEGACY_PYTHON_FILES', {
+        'autostart/install_python.ps1': frozenset({hashlib.sha256(payload).hexdigest()}),
+    })
+    main._repair_startup_files()
+    assert target.read_bytes() == payload
