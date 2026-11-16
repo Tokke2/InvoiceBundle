@@ -90,13 +90,13 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends libgl1 libegl1 libxkbcommon0 libdbus-1-3
-          python -m pip install -q pytest PySide6-Essentials
+          python -m pip install -q pytest PySide6-Essentials qrcode
       - name: Test autostart and tray status
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
           set +e
-          python -m pytest tests/test_autostart_ui_status.py tests/test_tray_minimize.py tests/test_tray_behaviour_menu.py tests/test_start_minimized.py -q --junitxml=autostart-ui-results.xml > autostart-ui.log 2>&1
+          python -m pytest tests/test_autostart_ui_status.py tests/test_tray_minimize.py tests/test_tray_behaviour_menu.py tests/test_start_minimized.py tests/test_donate_swish_qr.py tests/test_views_i18n_donate.py -q --junitxml=autostart-ui-results.xml > autostart-ui.log 2>&1
           code=$?
           cat autostart-ui.log
           if [ "$code" -ne 0 ]; then

@@ -76,9 +76,9 @@ APP_VERSION: str = "1.0.0"
 COPYRIGHT_YEAR: int = datetime.date.today().year
 COPYRIGHT: str = f"© {COPYRIGHT_YEAR} Rickard Längkvist"
 
-#: Donationsuppgifter. PayPal/Ko-fi ägs av ui/donate.py (dialogen);
-#: Swish bor här. Används av ui/donate.py och Om-dialogen.
-DONATE_SWISH: str = "0721817177"   # Swish-nummer för donationer
+#: Låsta donationsuppgifter — speglar LOCKED_DONATION i ui/donate.py och
+#: går inte att ändra via settings.json eller UI.
+DONATE_SWISH: str = "0721817177"   # Låst mottagarnummer (endast Swish-QR)
 DONATE_PAYPAL: str = "https://paypal.me/Rickard3dPrint"
 DONATE_KOFI: str = "https://ko-fi.com/tokke2"
 DONATE_BMC: str = "https://ko-fi.com/tokke2"  # bakåtkompat: BMC → Ko-fi

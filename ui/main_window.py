@@ -119,11 +119,13 @@ except Exception:  # pragma: no cover
             return "sv"
 
 try:
-    from ui.donate import open_donate_dialog
+    from ui.donate import build_donate_menu, open_donate_dialog
 except Exception:  # pragma: no cover
     try:
-        from donate import open_donate_dialog  # type: ignore
+        from donate import build_donate_menu, open_donate_dialog  # type: ignore
     except Exception:
+        def build_donate_menu(parent, **_kw):  # type: ignore
+            return None
         def open_donate_dialog(parent=None) -> bool:  # type: ignore
             return False
 
@@ -142,13 +144,12 @@ CURRENT_PLATFORM: str = get_platform()
 
 VALID_THEMES: tuple[str, ...] = ("dark", "light", "auto", "system")
 
-#: Donationslänk — definieras på EN plats (app.py), används av
-#: donate-knappen i Om-dialogen.
+#: Låsta donationsuppgifter — speglar LOCKED_DONATION / app.py.
 try:
     from app import DONATE_SWISH, DONATE_PAYPAL, DONATE_BMC
 except Exception:  # pragma: no cover
-    DONATE_SWISH = "123 456 78 90"
-    DONATE_PAYPAL = "https://www.paypal.com/donate"
+    DONATE_SWISH = "0721817177"
+    DONATE_PAYPAL = "https://paypal.me/Rickard3dPrint"
     DONATE_BMC = "https://ko-fi.com/tokke2"
 
 # ═════════════════════════════════════════════════════════════════════
@@ -1967,6 +1968,15 @@ class MainWindow(QMainWindow):
         )
         a_diag.triggered.connect(self._copy_diagnostics)
         m_help.addAction(a_diag)
+
+        # ── Stöd (låst donationsmeny direkt i appens menyrad) ─────────
+        self._donate_menu = build_donate_menu(
+            self,
+            open_dialog_cb=lambda: open_donate_dialog(self),
+            open_url_cb=lambda url: QDesktopServices.openUrl(QUrl(url)),
+        )
+        if self._donate_menu is not None:
+            bar.addMenu(self._donate_menu)
 
     def _rebuild_view_menu(self) -> None:
         """Bygger om Visa-menyn med aktuella visa/dölj-statusar."""
@@ -4000,20 +4010,17 @@ class MainWindow(QMainWindow):
                 f"Om {APP_NAME}",
                 f"{APP_NAME} v{APP_VERSION}\n"
                 "Modern lokal fakturahantering för\n"
-                "Windows, Linux och macOS.\n\n"
-                f"💙 Swish: {DONATE_SWISH}\n"
+                "Windows, Linux och macOS.\n"
+                "Licens: Privat och kommersiell användning (se LICENSE).\n\n"
+                "💚 Swish: Swish QR-kod i Stöd-dialogen (låst mottagare)\n"
                 f"🅿️ PayPal: {DONATE_PAYPAL}\n"
                 f"☕ Ko-fi: {DONATE_BMC}\n\n"
                 f"© {COPYRIGHT_YEAR} Rickard Längkvist",
             )
 
     def _copy_swish(self) -> None:
-        """Kopierar Swish-numret till urklipp + bekräftar i statusraden."""
-        try:
-            QApplication.clipboard().setText(DONATE_SWISH.replace(" ", ""))
-            self.set_status(f"💙  Swish-nummer kopierat: {DONATE_SWISH}", 6000)
-        except Exception as exc:
-            log.warning("Swish-kopiering: %s", exc)
+        """Öppnar donationsrutan med Swish-QR (numret visas inte i klartext)."""
+        open_donate_dialog(self)
 
     def _open_about_file(self) -> None:
         """Öppnar about.md — komplett info om programmet + donationer."""
@@ -4099,9 +4106,9 @@ class MainWindow(QMainWindow):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
 
-        btn_swish = QPushButton("💙  Swish")
-        btn_swish.setToolTip(f"Kopierar Swish-numret {DONATE_SWISH}")
-        btn_swish.clicked.connect(self._copy_swish)
+        btn_swish = QPushButton("💚  Swish QR")
+        btn_swish.setToolTip(tr("donate.swish_qr_tip"))
+        btn_swish.clicked.connect(lambda: open_donate_dialog(dlg))
 
         btn_paypal = QPushButton("🅿️  PayPal")
         btn_paypal.setToolTip(tr("donate.paypal_tip"))

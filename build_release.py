@@ -25,6 +25,7 @@ from pathlib import Path
 #: Alla programfiler i release-zippen (build_info.json genereras).
 RELEASE_FILES: tuple[str, ...] = (
     "CHANGELOG.md",
+    "LICENSE",
     "README.md",
     "Starta Fakturabunten.bat",
     "Starta Fakturabunten.command",

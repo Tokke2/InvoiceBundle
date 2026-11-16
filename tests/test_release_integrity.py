@@ -573,3 +573,36 @@ def test_legacy_cleanup_does_not_follow_symlinks_outside_app(monkeypatch, tmp_pa
     })
     main._repair_startup_files()
     assert target.read_bytes() == payload
+
+
+def test_overarching_license_allows_private_and_commercial_use_and_ships(tmp_path):
+    license_path = PROJECT_DIR / "LICENSE"
+    assert license_path.is_file()
+    text = license_path.read_text(encoding="utf-8")
+    low = text.lower()
+    assert "privat" in low and "kommersiellt" in low
+    assert "private" in low and "commercial" in low
+    assert "rickard längkvist" in low
+    assert "LICENSE" in br.RELEASE_FILES
+
+    package = br.build_release_zip(
+        PROJECT_DIR, tmp_path / "package.zip", version="1.0.0", sha="licsha"
+    )
+    with zipfile.ZipFile(package) as zf:
+        assert "LICENSE" in zf.namelist()
+        assert zf.read("LICENSE") == license_path.read_bytes()
+        manifest = json.loads(zf.read("build_info.json").decode("utf-8"))["files"]
+        assert "LICENSE" in manifest
+
+
+def test_donate_menu_and_locked_values_in_main_window():
+    main_window = (PROJECT_DIR / "ui" / "main_window.py").read_text(
+        encoding="utf-8"
+    )
+    donate_src = (PROJECT_DIR / "ui" / "donate.py").read_text(encoding="utf-8")
+    assert "build_donate_menu" in main_window
+    assert "bar.addMenu(self._donate_menu)" in main_window
+    assert "123 456 78 90" not in main_window
+    assert "https://www.paypal.com/donate" not in main_window
+    assert "LockedDonationConfig" in donate_src
+    assert "frozen=True" in donate_src

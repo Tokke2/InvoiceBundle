@@ -54,16 +54,16 @@ All grafik finns som **vektorgrafik (SVG)** i [`brand/`](brand/README.md): ikon,
 
 ## Gratis — med frivillig donation
 
-Programmet är gratis att använda. En donation krävs inte och låser inte upp något.
+Programmet är gratis att använda, både privat och kommersiellt. En donation krävs inte och låser inte upp något.
 
-Vill du stödja utvecklingen finns flera vägar i programmet under
-**💖 Stöd Fakturabunten…** (Hjälp-menyn, guldknappen i verktygsfältet, knappen i statusfältet, högerklick på flikraden eller fliken Inställningar):
+Vill du stödja utvecklingen finns **💖 Stöd** direkt i appens menyrad och under
+**💖 Stöd Fakturabunten…** (Hjälp-menyn, guldknappen i verktygsfältet, knappen i statusfältet, högerklick på flikraden eller fliken Inställningar). Mottagaruppgifterna är låsta i appen och går inte att ändra:
 
+- 💚 **Swish:** Swish-QR enligt Swish-standard i appens donationsruta (mottagaren är låst och numret visas aldrig i klartext)
 - 💙 **PayPal:** https://paypal.me/Rickard3dPrint
 - ☕ **Ko-fi:** https://ko-fi.com/tokke2
-- 📱 **Swish:** knappen i donationsrutan kopierar numret
 
-Betalningen sker hos PayPal/Ko-fi. Programmet ser inga betalningsuppgifter.
+Betalningen sker via Swish, PayPal eller Ko-fi. Programmet ser inga betalningsuppgifter.
 
 ## Kom igång (Windows)
 
@@ -111,7 +111,7 @@ Allt som appen skriver hamnar i `<appmapp>/logs/`: `app.log` (huvudlogg), `felsa
 
 ## Licens
 
-Ingen öppen licens är vald. Fritt att använda. Inte fritt att kopiera, ändra eller sälja vidare. Donation är frivillig.
+Fakturabunten (InvoiceBundle) är gratis att installera och använda, både **privat och kommersiellt**, i hela världen. Se den övergripande licensfilen [`LICENSE`](LICENSE). Ändring, bearbetning och vidare spridning kräver särskilt tillstånd från rättighetshavaren (detta är inte en öppen källkodslicens). Tredjepartsberoenden och typsnittet Poppins (SIL OFL 1.1) omfattas av sina egna licenser. Donation är frivillig.
 
 © 2026 Rickard Längkvist
 
@@ -158,16 +158,16 @@ All artwork ships as **vector graphics (SVG)** in [`brand/`](brand/README.md): t
 
 ## Free — with a voluntary donation
 
-The app is free to use. A donation is never required and unlocks nothing.
+The app is free to use for both private and commercial purposes. A donation is never required and unlocks nothing.
 
-If you would like to support development, use
-**💖 Support InvoiceBundle…** inside the app (Help menu, the gold toolbar button, the status-bar button, right-clicking the tab bar, or the Settings tab):
+If you would like to support development, open **💖 Support** in the menu bar or
+**💖 Support InvoiceBundle…** inside the app (Help menu, the gold toolbar button, the status-bar button, right-clicking the tab bar, or the Settings tab). Recipient details are locked inside the app and cannot be changed:
 
+- 💚 **Swish:** Swish QR code following the Swish standard inside the app dialog (the recipient is locked and the number is never shown in plain text)
 - 💙 **PayPal:** https://paypal.me/Rickard3dPrint
 - ☕ **Ko-fi:** https://ko-fi.com/tokke2
-- 📱 **Swish:** the button in the donation dialog copies the number
 
-Payment takes place at PayPal/Ko-fi. The app never sees any payment details.
+Payment takes place via Swish, PayPal or Ko-fi. The app never sees any payment details.
 
 ## Getting started (Windows)
 
@@ -215,7 +215,7 @@ Everything the app writes ends up in `<app folder>/logs/`: `app.log` (main log),
 
 ## Licence
 
-No open licence has been chosen. Free to use. Not free to copy, modify or resell. Donations are voluntary.
+Fakturabunten (InvoiceBundle) is free to install and use, for both **private and commercial** purposes, worldwide. See the overarching [`LICENSE`](LICENSE) file. Modification, adaptation, and redistribution require separate permission from the rights holder (this is not an open source licence). Third-party dependencies and the Poppins font (SIL OFL 1.1) remain subject to their respective licences. Donations are voluntary.
 
 © 2026 Rickard Längkvist
 
