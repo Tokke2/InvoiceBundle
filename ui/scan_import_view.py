@@ -1585,19 +1585,28 @@ class TemplatesManagerDialog(QDialog):
         if not self._templates:
             self._list.addItem(tr("tmpl.manager_empty"))
             return
+        si = _scan_module()
         for name in sorted(self._templates):
             template = self._templates[name] or {}
             fields = template.get("fields", {}) or {}
             field_names = list(fields.keys())
-            logo_count = len(_scan_module().supplier_logo_specs(template))
+            logo_count = len(si.supplier_logo_specs(template))
             if logo_count:
                 field_names.append(tr(
                     "tmpl.logo_label_count", n=logo_count
                 ))
-            self._list.addItem(tr(
+            variants = si.template_variants(template)
+            entry_text = tr(
                 "tmpl.manager_entry", supplier=name,
                 n=len(field_names), fields=", ".join(field_names),
-            ))
+            )
+            if len(variants) > 1:
+                entry_text += " · " + tr(
+                    "tmpl.variant_count",
+                    n=len(variants),
+                    max=si.MAX_TEMPLATES_PER_SUPPLIER,
+                )
+            self._list.addItem(entry_text)
 
     def _delete_selected(self) -> None:
         row = self._list.currentRow()
@@ -2841,11 +2850,18 @@ class ScanImportView(QWidget):
         )
         if not dlg.exec() or not dlg.result_template:
             return False
-        name = dlg.result_template["supplier"]
-        templates[name] = {
+        candidate = {
             key: value for key, value in dlg.result_template.items()
             if key != "supplier"
         }
+        name, _, _ = si.store_supplier_template(
+            templates, dlg.result_template["supplier"], candidate,
+            max_templates=si.MAX_TEMPLATES_PER_SUPPLIER,
+            replace_primary=bool(
+                existing is not None
+                and not si._template_has_core_fields(existing)
+            ),
+        )
         if not self._save_templates_file():
             self._lbl_status.setText(
                 tr("tmpl.save_failed", supplier=name)
@@ -2872,11 +2888,15 @@ class ScanImportView(QWidget):
             )
             if not dlg2.exec() or not dlg2.result_template:
                 break
-            name = dlg2.result_template["supplier"]
-            templates[name] = {
+            candidate2 = {
                 key: value for key, value in dlg2.result_template.items()
                 if key != "supplier"
             }
+            name, _, _ = si.store_supplier_template(
+                templates, dlg2.result_template["supplier"], candidate2,
+                max_templates=si.MAX_TEMPLATES_PER_SUPPLIER,
+                replace_primary=True,
+            )
             if not self._save_templates_file():
                 self._lbl_status.setText(
                     tr("tmpl.save_failed", supplier=name)
@@ -3411,7 +3431,7 @@ class ScanImportView(QWidget):
                 *preserved_specs,
                 *(dict(spec) for spec in logo_specs),
             ],
-        })
+        })[-si.MAX_TEMPLATES_PER_SUPPLIER:]
         merged_template["supplier"] = chosen
         merged_template["supplier_logos"] = [
             dict(spec) for spec in merged_specs
@@ -3713,17 +3733,152 @@ class ScanImportView(QWidget):
             row.get("file", ""), chosen,
         )
         note = self._learn_from_match(row, chosen)
+        row["status"] = self._compute_status(
+            row, bool(text or row.get("_path"))
+        )
         if correction_note:
             return " ".join(filter(None, (correction_note, note)))
         return note
 
-    def _learn_from_match(self, row: dict, chosen: str) -> str:
-        """Lär leverantörskännetecken efter användarens manuella val.
+    def _ensure_verified_template_from_row(
+        self, row: dict, supplier: str,
+    ) -> tuple[str, dict | None, list[str], bool]:
+        """Matchar en befintlig mallvariant eller härleder & sparar ny direkt.
 
-        Mallvärden lärs inte av själva leverantörsvalet: de registreras
-        separat i ``_record_confirmed_template_row`` först när fakturan
-        faktiskt har sparats efter användarens granskning. Automatiskt
-        registrerade rader hoppar över det steget.
+        Sparar högst ``MAX_TEMPLATES_PER_SUPPLIER`` (15) varianter per
+        leverantör och gissar aldrig — en ny mall sparas bara när
+        etiketterna läser tillbaka fakturanummer och belopp som användaren
+        just bekräftat.
+        """
+        si = _scan_module()
+        templates = self._get_templates()
+        learning = self._get_match_learning()
+        suppliers = self._suppliers()
+        path = str(row.get("_path", "") or "")
+        text = str(row.get("_text", "") or "")
+        template_name = str(row.get("template", "") or supplier).strip() or supplier
+        existing = (
+            si.find_template(templates, template_name, suppliers)
+            or si.find_template(templates, supplier, suppliers)
+        )
+        inv_nr = str(row.get("invoice_number", "") or "").strip()
+        try:
+            want_total = float(row.get("total_amount") or 0)
+        except (TypeError, ValueError):
+            want_total = 0.0
+
+        matched_template: dict | None = None
+        accepted_fields: list[str] = []
+        derived_template = False
+
+        if existing:
+            if text:
+                sel = si.select_supplier_template(
+                    text, existing, path=path or None,
+                    match_learning=learning, supplier=supplier,
+                )
+                if not sel.get("ambiguous") and isinstance(sel.get("variant"), dict):
+                    found = sel.get("found") or {}
+                    variant = sel["variant"]
+                    matches_confirmed = False
+                    if inv_nr and want_total > 0:
+                        nr_ok = str(found.get("invoice_number", "")).strip() == inv_nr
+                        try:
+                            amt_ok = abs(
+                                float(found.get("total_amount") or 0) - want_total
+                            ) <= 0.005
+                        except (TypeError, ValueError):
+                            amt_ok = False
+                        matches_confirmed = nr_ok and amt_ok
+                    elif sel.get("claimed"):
+                        matches_confirmed = True
+                    if matches_confirmed:
+                        matched_template = variant
+                        accepted_fields = si.confirmed_template_fields(
+                            variant, found, row
+                        )
+                        variants = si.template_variants(existing)
+                        if len(variants) > 1:
+                            matched_sig = si.template_confirmation_signature(variant)
+                            last_sig = si.template_confirmation_signature(variants[-1])
+                            if matched_sig and matched_sig != last_sig:
+                                si.store_supplier_template(
+                                    templates, supplier, variant,
+                                    max_templates=si.MAX_TEMPLATES_PER_SUPPLIER,
+                                )
+                                si.save_templates(
+                                    self._templates_file(), templates
+                                )
+            elif si._template_has_core_fields(existing):
+                variants = si.template_variants(existing)
+                matched_template = variants[-1] if variants else existing
+
+        if matched_template is None and text and inv_nr and want_total > 0:
+            if not si._builtin_format_extracts_confirmed(
+                text, supplier, inv_nr, want_total
+            ):
+                candidate = si.derive_template_from_confirmation(
+                    text, inv_nr, want_total
+                )
+                if candidate:
+                    snapshot = {
+                        k: (dict(v) if isinstance(v, dict) else v)
+                        for k, v in templates.items()
+                    }
+                    replace_primary = bool(
+                        existing is not None
+                        and not si._template_has_core_fields(existing)
+                    )
+                    tkey, _saved, _added = si.store_supplier_template(
+                        templates, supplier, candidate,
+                        max_templates=si.MAX_TEMPLATES_PER_SUPPLIER,
+                        replace_primary=replace_primary,
+                    )
+                    if si.save_templates(self._templates_file(), templates):
+                        matched_template = candidate
+                        template_name = tkey or supplier
+                        accepted_fields = list(
+                            (candidate.get("fields") or {}).keys()
+                        )
+                        derived_template = True
+                        row["template"] = template_name
+                        row["template_match"] = {
+                            "status": "matched",
+                            "template": template_name,
+                            "candidates": [],
+                            "uncertain": False,
+                            "reason": "user_confirmation",
+                            "signature": si.template_confirmation_signature(
+                                candidate
+                            ),
+                        }
+                        self._refresh_templates_btn()
+                    else:
+                        templates.clear()
+                        templates.update(snapshot)
+
+        if matched_template is None and existing:
+            # Om varken ny variant härleddes eller en fullträff fanns,
+            # använd befintlig mall som referens när fält ändå matchade.
+            try:
+                found = si.template_values(path or None, text, existing)
+                accepted_fields = si.confirmed_template_fields(
+                    existing, found, row
+                )
+            except Exception:
+                accepted_fields = []
+            variants = si.template_variants(existing)
+            matched_template = variants[-1] if variants else existing
+
+        return template_name, matched_template, accepted_fields, derived_template
+
+    def _learn_from_match(self, row: dict, chosen: str) -> str:
+        """Lär leverantörskännetecken och sparar verifierad mall direkt vid matchning.
+
+        Varje manuell matchning härleder och sparar leverantörens mall
+        direkt (upp till ``MAX_TEMPLATES_PER_SUPPLIER`` = 15 varianter per
+        leverantör) när etiketterna läser tillbaka de bekräftade värdena
+        och ingen befintlig variant/inbyggt format redan täcker layouten.
 
         Inlärningen får aldrig fälla matchningen — fel loggas
         och tystas. Returnerar en kort notis för statusraden.
@@ -3732,7 +3887,6 @@ class ScanImportView(QWidget):
             si = _scan_module()
             pages = self._row_pages(row)
             learning = self._get_match_learning()
-            templates = self._get_templates()
             entry_before = si.learning_entry(learning, chosen)
             try:
                 confirmations_before = int(
@@ -3740,6 +3894,13 @@ class ScanImportView(QWidget):
                 )
             except (TypeError, ValueError):
                 confirmations_before = 0
+            (
+                template_name,
+                matched_template,
+                accepted_fields,
+                derived_template,
+            ) = self._ensure_verified_template_from_row(row, chosen)
+            templates = self._get_templates()
             logo_signature = ""
             logo_count_before = 0
             path = str(row.get("_path", "") or "")
@@ -3765,9 +3926,27 @@ class ScanImportView(QWidget):
                 text=str(row.get("_text", "") or ""),
                 logo_signature=logo_signature,
                 confirmation_id=confirmation_id, source_path=path,
+                template_name=template_name if matched_template else "",
+                template=matched_template,
+                template_fields=accepted_fields,
             )
+            if derived_template and isinstance(entry, dict):
+                entry["template_learned"] = True
             row["_supplier_learning_recorded"] = True
+            if matched_template and isinstance(row.get("template_match"), dict):
+                tmpl_entry = si.template_confirmation_entry(
+                    learning, chosen, matched_template
+                )
+                try:
+                    t_count = int(tmpl_entry.get("confirmed", 0) or 0)
+                except (TypeError, ValueError):
+                    t_count = 0
+                if t_count:
+                    row["template_match"]["confirmed"] = t_count
+                    row["template_match"]["unconfirmed"] = False
             notes: list[str] = []
+            if derived_template:
+                notes.append(tr("scan.learned_template", supplier=chosen))
             if pages >= 2:
                 notes.append(tr(
                     "scan.learning_progress",
@@ -3838,48 +4017,22 @@ class ScanImportView(QWidget):
         try:
             si = _scan_module()
             supplier = str(row.get("supplier", "") or "").strip()
-            template_name = str(row.get("template", "") or supplier)
-            templates = self._get_templates()
-            template = si.find_template(
-                templates, template_name, self._suppliers()
-            )
             if not supplier:
                 return ""
-            path = str(row.get("_path", "") or "")
-            text = str(row.get("_text", "") or "")
-            derived_template = False
-            if not template and not si.has_builtin_format(supplier):
-                candidate = si.derive_template_from_confirmation(
-                    text, str(row.get("invoice_number", "") or ""),
-                    row.get("total_amount"),
-                )
-                if candidate:
-                    templates[supplier] = candidate
-                    if si.save_templates(self._templates_file(), templates):
-                        template = candidate
-                        template_name = supplier
-                        row["template"] = supplier
-                        row["template_match"] = {
-                            "status": "matched", "template": supplier,
-                            "candidates": [], "uncertain": False,
-                            "reason": "user_confirmation",
-                        }
-                        self._refresh_templates_btn()
-                        derived_template = True
-                    else:
-                        templates.pop(supplier, None)
+            (
+                template_name,
+                template,
+                accepted_fields,
+                derived_template,
+            ) = self._ensure_verified_template_from_row(row, supplier)
             if not template:
                 return ""
+            templates = self._get_templates()
+            path = str(row.get("_path", "") or "")
+            text = str(row.get("_text", "") or "")
             notes: list[str] = []
             if derived_template:
                 notes.append(tr("scan.learned_template", supplier=supplier))
-            try:
-                found = si.template_values(path or None, text, template)
-                accepted_fields = si.confirmed_template_fields(
-                    template, found, row
-                )
-            except Exception:
-                accepted_fields = []
             logo_signature = si.confirmed_supplier_logo_signature(
                 path, supplier, templates, suppliers=self._suppliers()
             )
@@ -5149,10 +5302,13 @@ class ScanImportView(QWidget):
                         spec["below"] = True
                     else:
                         spec.pop("below", None)
-                templates[template_name] = new_template
+                _, saved_entry, _ = si.store_supplier_template(
+                    templates, template_name, new_template,
+                    max_templates=si.MAX_TEMPLATES_PER_SUPPLIER,
+                )
                 self._save_templates_file()
                 count = self._reread_rows_with_template(
-                    template_name, new_template
+                    template_name, saved_entry
                 )
                 self._lbl_status.setText(
                     tr(
@@ -5426,13 +5582,22 @@ class ScanImportView(QWidget):
         )
         if not dlg.exec() or not dlg.result_template:
             return
-        supplier = dlg.result_template["supplier"]
-        if existing_name and existing_name != supplier:
-            templates.pop(existing_name, None)
-        templates[supplier] = {
+        candidate = {
             key: value for key, value in dlg.result_template.items()
             if key != "supplier"
         }
+        if existing_name and existing_name != supplier:
+            templates.pop(existing_name, None)
+        replace_primary = bool(
+            existing is not None
+            and (not existing_name or existing_name == supplier)
+            and not si._template_has_core_fields(existing)
+        )
+        supplier, _, _ = si.store_supplier_template(
+            templates, supplier, candidate,
+            max_templates=si.MAX_TEMPLATES_PER_SUPPLIER,
+            replace_primary=replace_primary,
+        )
         if not self._save_templates_file():
             self._lbl_status.setText(
                 tr("tmpl.save_failed", supplier=supplier)
@@ -5490,12 +5655,17 @@ class ScanImportView(QWidget):
         if not dlg.exec() or not dlg.result_template:
             return
         supplier = dlg.result_template["supplier"]
-        if supplier != name:
-            templates.pop(name, None)
-        templates[supplier] = {
+        candidate = {
             key: value for key, value in dlg.result_template.items()
             if key != "supplier"
         }
+        if supplier != name:
+            templates.pop(name, None)
+        si.store_supplier_template(
+            templates, supplier, candidate,
+            max_templates=si.MAX_TEMPLATES_PER_SUPPLIER,
+            replace_primary=True,
+        )
         if not self._save_templates_file():
             self._lbl_status.setText(
                 tr("tmpl.save_failed", supplier=supplier)

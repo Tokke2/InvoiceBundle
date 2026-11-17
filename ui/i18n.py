@@ -994,6 +994,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "tmpl.manager_title": {"sv": "🧩  Sparade fakturamallar", "en": "🧩  Saved invoice templates"},
     "tmpl.manager_empty": {"sv": "Inga mallar ännu. Öppna en tolkad rad och välj 'Mall för rad …'.", "en": "No templates yet. Open a parsed row and choose 'Template for row …'."},
     "tmpl.manager_entry": {"sv": "{supplier} — {n} fält: {fields}", "en": "{supplier} — {n} fields: {fields}"},
+    "tmpl.variant_count": {"sv": "{n}/{max} mallar", "en": "{n}/{max} templates"},
     "tmpl.delete": {"sv": "🗑  Ta bort vald mall", "en": "🗑  Delete selected template"},
     "tmpl.edit": {"sv": "✏️  Redigera vald mall", "en": "✏️  Edit selected template"},
     "tmpl.new": {"sv": "➕  Ny mall …", "en": "➕  New template …"},

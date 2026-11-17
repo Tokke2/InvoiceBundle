@@ -3509,26 +3509,72 @@ class InvoicesView(QWidget):
                 template if isinstance(template, dict)
                 else si.find_template(templates, template_name, suppliers)
             )
+            existing_template = (
+                matched_template
+                or si.find_template(templates, supplier, suppliers)
+            )
             notes: list[str] = []
+            matched_variant: dict | None = None
+            if existing_template and text:
+                sel = si.select_supplier_template(
+                    text, existing_template, path=path or None,
+                    match_learning=learning, supplier=supplier,
+                )
+                if not sel.get("ambiguous") and isinstance(
+                    sel.get("variant"), dict
+                ):
+                    f = sel.get("found") or {}
+                    nr_ok = (
+                        str(f.get("invoice_number", "")).strip()
+                        == str(invoice_number or "").strip()
+                    )
+                    try:
+                        amt_ok = abs(
+                            float(f.get("total_amount") or 0)
+                            - float(total or 0)
+                        ) <= 0.005
+                    except (TypeError, ValueError):
+                        amt_ok = False
+                    if (nr_ok and amt_ok) or sel.get("claimed"):
+                        matched_variant = sel["variant"]
+            elif existing_template and si._template_has_core_fields(
+                existing_template
+            ):
+                variants = si.template_variants(existing_template)
+                matched_variant = variants[-1] if variants else existing_template
+
             if (
-                not matched_template
-                and not si.find_template(templates, supplier, suppliers)
-                and not si.has_builtin_format(supplier)
+                matched_variant is None
+                and text
+                and str(invoice_number or "").strip()
+                and float(total or 0) > 0
+                and not si._builtin_format_extracts_confirmed(
+                    text, supplier, str(invoice_number or ""), total
+                )
             ):
                 candidate = si.derive_template_from_confirmation(
                     text, invoice_number, total
                 )
                 if candidate:
-                    templates[supplier] = candidate
+                    replace_primary = bool(
+                        existing_template is not None
+                        and not si._template_has_core_fields(existing_template)
+                    )
+                    tkey, _saved, _added = si.store_supplier_template(
+                        templates, supplier, candidate,
+                        max_templates=si.MAX_TEMPLATES_PER_SUPPLIER,
+                        replace_primary=replace_primary,
+                    )
                     if si.save_templates(
                         data_dir / "invoice_templates.json", templates
                     ):
-                        matched_template = candidate
-                        template_name = supplier
+                        matched_variant = candidate
+                        template_name = tkey or supplier
                         notes.append(tr(
                             "invoices.manual_match_learned",
                             supplier=supplier,
                         ))
+            matched_template = matched_variant or existing_template
             found: dict = {}
             if matched_template:
                 try:

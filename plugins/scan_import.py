@@ -1406,6 +1406,7 @@ def parse_invoice_text(
     template_name = ""
     template_fields: list[str] = []
     template_key = ""
+    matched_variant: dict | None = None
 
     if templates:
         template = None
@@ -1447,21 +1448,57 @@ def parse_invoice_text(
                     cand_texts = region_texts
                 if not cand_texts:
                     continue
-                found_regions = template_values_from_regions(
-                    cand, cand_texts
+                cand_variants = template_variants(cand) or [cand]
+                per_sig = (
+                    cand_texts.get("__variants__")
+                    if isinstance(cand_texts, dict)
+                    and isinstance(cand_texts.get("__variants__"), dict)
+                    else None
                 )
-                if found_regions.get("invoice_number") and (
-                    found_regions.get("total_amount") or credit
-                ):
+                matched_regions: dict | None = None
+                cand_outcomes: set[tuple[str, float]] = set()
+                for v in cand_variants:
+                    v_sig = template_confirmation_signature(v)
+                    v_texts = (
+                        per_sig.get(v_sig) if per_sig is not None else cand_texts
+                    )
+                    if not v_texts:
+                        continue
+                    found_regions = template_values_from_regions(v, v_texts)
+                    if found_regions.get("invoice_number") and (
+                        found_regions.get("total_amount") or credit
+                    ):
+                        matched_regions = found_regions
+                        try:
+                            amt = round(
+                                float(found_regions.get("total_amount") or 0),
+                                2,
+                            )
+                        except (TypeError, ValueError):
+                            amt = 0.0
+                        cand_outcomes.add((
+                            str(found_regions.get("invoice_number") or "").strip(),
+                            amt,
+                        ))
+                if len(cand_outcomes) > 1:
                     region_claims.append((
-                        str(cand_name), cand, found_regions,
+                        str(cand_name), cand, {}, dict(cand_texts),
+                    ))
+                    region_claims.append((
+                        str(cand_name), cand, {}, dict(cand_texts),
+                    ))
+                elif matched_regions is not None:
+                    region_claims.append((
+                        str(cand_name), cand, matched_regions,
                         dict(cand_texts),
                     ))
             if len(region_claims) > 1:
                 match_uncertain = True
-                match_candidates = [
-                    claim[0] for claim in region_claims
-                ]
+                seen_rc: list[str] = []
+                for claim in region_claims:
+                    if claim[0] not in seen_rc:
+                        seen_rc.append(claim[0])
+                match_candidates = seen_rc
                 match_reason = "region_ambiguous"
                 match_kind = "template"
                 template = None
@@ -1494,38 +1531,42 @@ def parse_invoice_text(
                     match_reason = ""
                     match_kind = ""
         if template:
-            found = apply_template(text or "", template)
-            if selected_region_texts:
-                # Utpekade rutor på fakturabilden vinner över
-                # etikettläsningen — platsen är explicit angiven.
-                found.update(
-                    template_values_from_regions(
-                        template, selected_region_texts
-                    )
-                )
-            for field, value in found.items():
-                if field == "total_amount":
-                    total = float(value)
-                elif field == "invoice_number":
-                    inv_nr = str(value)
-                elif field == "ocr":
-                    ocr = str(value)
-                elif field == "date":
-                    date = str(value)
-                elif field == "due_date":
-                    due = str(value)
-                template_fields.append(field)
-            if found.get("invoice_number") and (
-                found.get("total_amount") or is_credit_note(text or "")
-            ):
-                # Mallanspråk kräver att mallen SJÄLV läser
-                # fakturanummer + att betala (kreditnotor:
-                # Tillgodo-vägen i stället). En mall som bara
-                # fyller enstaka fält får aldrig låta en generisk
-                # beloppsgissning registreras automatiskt —
-                # delträffarna visas för granskning, men filen
-                # parkeras som mallös tills mallen verkligen tar den.
-                template_name = supplier
+            sel = select_supplier_template(
+                text or "", template,
+                region_texts=selected_region_texts,
+                match_learning=match_learning,
+                supplier=supplier or template_key,
+            )
+            if sel["ambiguous"]:
+                match_uncertain = True
+                match_candidates = [supplier or template_key]
+                match_reason = "template_ambiguous"
+                match_kind = "template"
+                template = None
+            else:
+                matched_variant = sel["variant"]
+                found = sel["found"]
+                for field, value in found.items():
+                    if field == "total_amount":
+                        total = float(value)
+                    elif field == "invoice_number":
+                        inv_nr = str(value)
+                    elif field == "ocr":
+                        ocr = str(value)
+                    elif field == "date":
+                        date = str(value)
+                    elif field == "due_date":
+                        due = str(value)
+                    template_fields.append(field)
+                if sel["claimed"]:
+                    # Mallanspråk kräver att mallen SJÄLV läser
+                    # fakturanummer + att betala (kreditnotor:
+                    # Tillgodo-vägen i stället). En mall som bara
+                    # fyller enstaka fält får aldrig låta en generisk
+                    # beloppsgissning registreras automatiskt —
+                    # delträffarna visas för granskning, men filen
+                    # parkeras som mallös tills mallen verkligen tar den.
+                    template_name = supplier
 
     if not template_name:
         builtin_candidates = _builtin_format_candidates(text or "")
@@ -1667,12 +1708,22 @@ def parse_invoice_text(
         "uncertain": bool(match_uncertain and match_kind != "supplier"),
         "reason": match_reason if match_kind != "supplier" else "",
     }
+    if template_name and isinstance(matched_variant, dict):
+        sig = template_confirmation_signature(matched_variant)
+        if sig:
+            result["template_match"]["signature"] = sig
     if match_learning and template_name:
         try:
             confirmed_template = (
-                (templates or {}).get(template_key)
-                if template_key
-                else find_template(templates or {}, template_name, suppliers)
+                matched_variant
+                if isinstance(matched_variant, dict)
+                else (
+                    (templates or {}).get(template_key)
+                    if template_key
+                    else find_template(
+                        templates or {}, template_name, suppliers
+                    )
+                )
             )
             confirmations = template_confirmation_entry(
                 match_learning, template_name, confirmed_template
@@ -1789,7 +1840,25 @@ def _apply_supplier_logo_match(
             if len(template_names) == 1:
                 template_name = template_names[0]
                 template = templates.get(template_name, {})
-                found = template_values(path, text, template)
+                sel = select_supplier_template(
+                    text or "", template, path=path,
+                    match_learning=match_learning, supplier=supplier,
+                )
+                if sel["ambiguous"]:
+                    result["match_uncertain"] = True
+                    result["match_candidates"] = [supplier]
+                    result["match_reason"] = "template_ambiguous"
+                    result["match_kind"] = "template"
+                    result["template_match"] = {
+                        "status": "uncertain",
+                        "template": template_name,
+                        "candidates": [supplier],
+                        "uncertain": True,
+                        "reason": "template_ambiguous",
+                    }
+                    return result
+                found = sel["found"]
+                matched_variant = sel["variant"]
                 for field in (
                     "invoice_number", "total_amount", "date",
                     "due_date", "ocr",
@@ -1820,6 +1889,10 @@ def _apply_supplier_logo_match(
                     "candidates": [], "uncertain": False,
                     "reason": "learned_logo",
                 }
+                if isinstance(matched_variant, dict):
+                    sig = template_confirmation_signature(matched_variant)
+                    if sig:
+                        result["template_match"]["signature"] = sig
                 result.pop("match_uncertain", None)
                 result.pop("match_candidates", None)
                 result.pop("match_reason", None)
@@ -1902,15 +1975,25 @@ def parse_invoice_file(
     for _name, cand in tpl.items():
         if not isinstance(cand, dict):
             continue
-        fields = cand.get("fields", {}) or {}
-        if not any(
-            isinstance(spec, dict) and spec.get("region")
-            for spec in fields.values()
-        ):
+        variants = template_variants(cand)
+        region_variants = [v for v in variants if _region_specs(v)]
+        if not region_variants:
             continue
-        region_texts_by_template[str(_name)] = extract_region_texts(
-            path, cand
-        )
+        if len(variants) <= 1:
+            region_texts_by_template[str(_name)] = extract_region_texts(
+                path, region_variants[0]
+            )
+        else:
+            per_sig = {
+                template_confirmation_signature(v): extract_region_texts(
+                    path, v
+                )
+                for v in region_variants
+            }
+            primary_sig = template_confirmation_signature(variants[-1])
+            merged_rt = dict(per_sig.get(primary_sig) or {})
+            merged_rt["__variants__"] = per_sig
+            region_texts_by_template[str(_name)] = merged_rt
     if region_texts_by_template:
         # Varje regionsmall bedöms för sig: exakt en mall som
         # själv läser fakturanummer + att betala får avgöra.
@@ -2878,6 +2961,13 @@ def template_values(
 ) -> dict[str, Any]:
     """Mallens fältvärden för en konkret fil: etikettläsning ur
     texten + bildrutorna (rutorna vinner — de är utpekade)."""
+    variants = template_variants(template)
+    if len(variants) > 1:
+        return dict(
+            select_supplier_template(
+                text or "", template, path=path
+            )["found"]
+        )
     found = apply_template(text or "", template or {})
     if path:
         found.update(
@@ -3967,6 +4057,306 @@ def has_builtin_format(supplier: str) -> bool:
     )
 
 
+#: Högsta antalet sparade mallar/varianter per leverantör.
+MAX_TEMPLATES_PER_SUPPLIER = 15
+
+
+def _template_has_core_fields(template: dict | None) -> bool:
+    """True när mallen innehåller både fakturanummer och att betala."""
+    fields = (template or {}).get("fields", {}) or {}
+    return (
+        isinstance(fields, dict)
+        and bool(fields.get("invoice_number"))
+        and bool(fields.get("total_amount"))
+    )
+
+
+def template_variants(
+    template: dict | None,
+    *,
+    max_templates: int = MAX_TEMPLATES_PER_SUPPLIER,
+) -> list[dict[str, Any]]:
+    """Alla sparade mallvarianter för en leverantör (högst max_templates).
+
+    Läser både nyare `variants`-listan och äldre ensam `fields`-spec,
+    deduplicerar per mallversion och ser till att primära `fields`
+    alltid ingår.
+    """
+    if not isinstance(template, dict):
+        return []
+    limit = max(1, int(max_templates or MAX_TEMPLATES_PER_SUPPLIER))
+    raw_items: list[dict[str, Any]] = []
+    variants = template.get("variants")
+    if isinstance(variants, list):
+        for item in variants:
+            if isinstance(item, dict) and isinstance(item.get("fields"), dict) and item["fields"]:
+                raw_items.append(item)
+    primary_fields = template.get("fields")
+    if isinstance(primary_fields, dict) and primary_fields:
+        raw_items.append({"fields": primary_fields})
+
+    by_sig: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for item in raw_items:
+        fields = dict(item.get("fields") or {})
+        if not fields:
+            continue
+        variant: dict[str, Any] = {"fields": fields}
+        if item.get("last_used"):
+            variant["last_used"] = str(item["last_used"])
+        sig = template_confirmation_signature(variant)
+        if not sig:
+            continue
+        if sig in by_sig:
+            if variant.get("last_used") and not by_sig[sig].get("last_used"):
+                by_sig[sig]["last_used"] = variant["last_used"]
+            continue
+        by_sig[sig] = variant
+        order.append(sig)
+    return [by_sig[sig] for sig in order[-limit:]]
+
+
+def store_supplier_template(
+    templates: dict,
+    supplier: str,
+    candidate: dict,
+    *,
+    max_templates: int = MAX_TEMPLATES_PER_SUPPLIER,
+    replace_primary: bool = False,
+) -> tuple[str, dict[str, Any], bool]:
+    """Sparar eller uppdaterar en mallvariant för leverantören (max 15 st).
+
+    Behåller befintliga logotypvarianter (också begränsade till max 15)
+    och slår aldrig ihop separata toppnycklar. När gränsen nås ersätts
+    den äldsta/minst använda mallen automatiskt så nya fakturor alltid
+    kan fortsätta sparas. Returnerar ``(nyckel, sparad_post, ny_variant)``.
+    """
+    name = str(supplier or "").strip()
+    if not name or not isinstance(candidate, dict):
+        return "", {}, False
+    limit = max(1, int(max_templates or MAX_TEMPLATES_PER_SUPPLIER))
+
+    key = name
+    if key not in templates:
+        existing_names = template_candidate_names(templates, name)
+        if len(existing_names) == 1:
+            key = existing_names[0]
+
+    old_entry = templates.get(key)
+    old_dict = dict(old_entry) if isinstance(old_entry, dict) else {}
+    merged: dict[str, Any] = {}
+
+    variants = template_variants(old_dict, max_templates=limit)
+    new_fields = candidate.get("fields")
+    added_new = False
+    now_stamp = datetime.datetime.now().isoformat(timespec="seconds")
+
+    if isinstance(new_fields, dict) and new_fields:
+        new_variant: dict[str, Any] = {
+            "fields": {
+                str(f): dict(spec)
+                for f, spec in new_fields.items()
+                if isinstance(spec, dict)
+            },
+            "last_used": now_stamp,
+        }
+        new_sig = template_confirmation_signature(new_variant)
+        existing_sigs = [
+            template_confirmation_signature(v) for v in variants
+        ]
+        if replace_primary and variants:
+            primary_sig = template_confirmation_signature(
+                {"fields": old_dict.get("fields", {})}
+            )
+            replace_idx = (
+                existing_sigs.index(primary_sig)
+                if primary_sig in existing_sigs
+                else len(variants) - 1
+            )
+            variants.pop(replace_idx)
+            existing_sigs.pop(replace_idx)
+            if new_sig in existing_sigs:
+                variants.pop(existing_sigs.index(new_sig))
+            variants.append(new_variant)
+            added_new = new_sig != primary_sig
+        elif new_sig and new_sig in existing_sigs:
+            idx = existing_sigs.index(new_sig)
+            variants.pop(idx)
+            variants.append(new_variant)
+            added_new = False
+        else:
+            variants.append(new_variant)
+            added_new = True
+        if len(variants) > limit:
+            variants = variants[-limit:]
+        merged["fields"] = dict(variants[-1]["fields"])
+        if len(variants) > 1:
+            merged["variants"] = [dict(v) for v in variants]
+    else:
+        existing_fields = old_dict.get("fields")
+        merged["fields"] = (
+            dict(existing_fields) if isinstance(existing_fields, dict) else {}
+        )
+        if len(variants) > 1:
+            merged["variants"] = [dict(v) for v in variants]
+
+    merged_logos = supplier_logo_specs({
+        "supplier_logos": [
+            *supplier_logo_specs(old_dict),
+            *supplier_logo_specs(candidate),
+        ]
+    })
+    if merged_logos:
+        merged_logos = merged_logos[-limit:]
+        merged["supplier_logos"] = [dict(spec) for spec in merged_logos]
+        merged["supplier_logo"] = dict(merged_logos[0])
+
+    templates[key] = merged
+    return key, merged, added_new
+
+
+def select_supplier_template(
+    text: str,
+    template: dict | None,
+    *,
+    region_texts: dict | None = None,
+    path: Any = None,
+    match_learning: dict | None = None,
+    supplier: str = "",
+) -> dict[str, Any]:
+    """Väljer den sparade mallvariant som läser fakturan entydigt.
+
+    Om flera sparade mallvarianter för leverantören läser olika
+    fakturanummer eller slutbelopp markeras resultatet som tvetydigt
+    (``ambiguous=True``) så användaren får avgöra i stället för en gissning.
+    """
+    variants = template_variants(template)
+    if not variants:
+        variants = [template] if isinstance(template, dict) else []
+    if not variants:
+        return {
+            "variant": None, "found": {}, "claimed": False,
+            "ambiguous": False,
+        }
+
+    credit = is_credit_note(text or "")
+    by_variant_regions = (
+        region_texts.get("__variants__")
+        if isinstance(region_texts, dict)
+        and isinstance(region_texts.get("__variants__"), dict)
+        else None
+    )
+    direct_regions = (
+        {k: v for k, v in region_texts.items() if k != "__variants__"}
+        if isinstance(region_texts, dict)
+        else None
+    )
+
+    evaluated: list[dict[str, Any]] = []
+    for idx, variant in enumerate(variants):
+        sig = template_confirmation_signature(variant)
+        found = apply_template(text or "", variant)
+        v_regions = (
+            by_variant_regions.get(sig)
+            if by_variant_regions is not None
+            else None
+        )
+        if not v_regions and direct_regions and _region_specs(variant):
+            v_regions = direct_regions
+        if not v_regions and path and _region_specs(variant):
+            v_regions = extract_region_texts(path, variant)
+        if v_regions:
+            found.update(template_values_from_regions(variant, v_regions))
+        claims = bool(
+            found.get("invoice_number")
+            and (found.get("total_amount") or credit)
+        )
+        confirmed = 0
+        if match_learning and supplier:
+            try:
+                confirmed = int(
+                    template_confirmation_entry(
+                        match_learning, supplier, variant
+                    ).get("confirmed", 0) or 0
+                )
+            except (TypeError, ValueError):
+                confirmed = 0
+        evaluated.append({
+            "idx": idx,
+            "variant": variant,
+            "found": found,
+            "claims": claims,
+            "confirmed": confirmed,
+            "sig": sig,
+        })
+
+    claiming = [item for item in evaluated if item["claims"]]
+    if claiming:
+        outcomes: set[tuple[str, float]] = set()
+        for item in claiming:
+            f = item["found"]
+            try:
+                amt = round(float(f.get("total_amount") or 0), 2)
+            except (TypeError, ValueError):
+                amt = 0.0
+            outcomes.add((str(f.get("invoice_number") or "").strip(), amt))
+        if len(outcomes) > 1:
+            return {
+                "variant": None, "found": {}, "claimed": False,
+                "ambiguous": True,
+            }
+        best = max(
+            claiming,
+            key=lambda item: (
+                1 if item["confirmed"] > 0 else 0,
+                len(item["found"]),
+                item["idx"],
+            ),
+        )
+        return {
+            "variant": best["variant"],
+            "found": best["found"],
+            "claimed": True,
+            "ambiguous": False,
+        }
+
+    best_partial = max(
+        evaluated,
+        key=lambda item: (len(item["found"]), item["idx"]),
+    )
+    return {
+        "variant": best_partial["variant"],
+        "found": best_partial["found"],
+        "claimed": False,
+        "ambiguous": False,
+    }
+
+
+def _builtin_format_extracts_confirmed(
+    text: str, supplier: str, invoice_number: str, total: Any,
+) -> bool:
+    """True när ett inbyggt verifierat format redan läser exakta värden."""
+    if not text or not has_builtin_format(supplier):
+        return False
+    want_nr = str(invoice_number or "").strip()
+    try:
+        want_total = float(total or 0)
+    except (TypeError, ValueError):
+        return False
+    if not want_nr or want_total <= 0:
+        return False
+    for cand in _builtin_format_candidates(text):
+        if not _builtin_format_matches_supplier(cand["format"], supplier):
+            continue
+        found = apply_template(text, cand["template"])
+        if (
+            str(found.get("invoice_number", "")).strip() == want_nr
+            and abs(float(found.get("total_amount") or 0) - want_total) <= 0.005
+        ):
+            return True
+    return False
+
+
 def load_templates(path: Path) -> dict:
     """Läser mall-JSON tolerant ({} vid saknad/trasig fil)."""
     try:
@@ -4688,6 +5078,20 @@ def record_template_confirmation(
         template_entry["last_confirmed"] = (
             datetime.datetime.now().isoformat(timespec="seconds")
         )
+    if len(template_entries) > MAX_TEMPLATES_PER_SUPPLIER:
+        ordered = [
+            (
+                str((v or {}).get("last_confirmed", "") if isinstance(v, dict) else ""),
+                idx,
+                k,
+            )
+            for idx, (k, v) in enumerate(template_entries.items())
+            if k != signature
+        ]
+        ordered.sort(key=lambda item: (item[0], item[1]))
+        excess = len(template_entries) - MAX_TEMPLATES_PER_SUPPLIER
+        for _, _, old_sig in ordered[:excess]:
+            template_entries.pop(old_sig, None)
     return template_entry
 
 
@@ -4878,22 +5282,28 @@ def require_template_confirmation(
         return parsed
 
     supplier = str(parsed.get("supplier", "") or template_name).strip()
+    match = parsed.get("template_match")
+    if not isinstance(match, dict):
+        match = {}
+        parsed["template_match"] = match
+    check_template: dict | None = template
+    matched_sig = str(match.get("signature", "") or "").strip()
+    if matched_sig:
+        for variant in template_variants(template):
+            if template_confirmation_signature(variant) == matched_sig:
+                check_template = variant
+                break
     confirmation = template_confirmation_entry(
-        learning or {}, supplier, template
+        learning or {}, supplier, check_template
     )
     if not confirmation and supplier.casefold() != template_name.casefold():
         confirmation = template_confirmation_entry(
-            learning or {}, template_name, template
+            learning or {}, template_name, check_template
         )
     try:
         confirmed = int(confirmation.get("confirmed", 0) or 0)
     except (TypeError, ValueError):
         confirmed = 0
-
-    match = parsed.get("template_match")
-    if not isinstance(match, dict):
-        match = {}
-        parsed["template_match"] = match
     match["confirmed"] = confirmed
     match["unconfirmed"] = confirmed <= 0
     if confirmed > 0 or parsed.get("match_uncertain"):
