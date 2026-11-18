@@ -3090,6 +3090,17 @@ class MainWindow(QMainWindow):
             if timer is not None:
                 timer.stop()
             log.info("SYSTEM_TRAY_ICON_SHOWN: app icon registered")
+            if (
+                getattr(self, "_startup_hide_guard_active", False)
+                and getattr(self, "_startup_minimized_to_taskbar", False)
+                and self._minimize_to_tray_enabled()
+            ):
+                self._startup_minimized_to_taskbar = False
+                self.hide()
+                log.info(
+                    "SYSTEM_TRAY_LATE_HIDE: fönstret gömdes till systemfältet "
+                    "efter fördröjd tray-start"
+                )
         else:
             self._schedule_tray_setup_retry(
                 "Qt did not report the tray icon visible after show()"
@@ -3231,8 +3242,12 @@ class MainWindow(QMainWindow):
     def _bring_to_front(self) -> None:
         """Visar och fokuserar fönstret."""
         self._startup_hide_guard_active = False
+        self._startup_minimized_to_taskbar = False
         if self.isMinimized():
-            self.showNormal()
+            if self.isMaximized():
+                self.showMaximized()
+            else:
+                self.showNormal()
         elif not self.isVisible():
             # show() respekterar sparat tillstånd (maximerat/normalt) —
             # showNormal() skulle tvinga ner ett maximerat fönster.
@@ -3275,15 +3290,16 @@ class MainWindow(QMainWindow):
         """
         super().changeEvent(event)
         try:
-            if (
-                event.type() == QEvent.Type.WindowStateChange
-                and self.isMinimized()
-                and self._minimize_to_tray_enabled()
-            ):
-                # Skjut upp gömmandet tills tillståndsbytet är
-                # klart — att gömma mitt i det kan lämna en
-                # spökikon kvar i aktivitetsfältet på Windows.
-                QTimer.singleShot(0, self._hide_minimized_to_tray)
+            if event.type() == QEvent.Type.WindowStateChange:
+                if self.isMinimized():
+                    if self._minimize_to_tray_enabled():
+                        # Skjut upp gömmandet tills tillståndsbytet är
+                        # klart — att gömma mitt i det kan lämna en
+                        # spökikon kvar i aktivitetsfältet på Windows.
+                        QTimer.singleShot(0, self._hide_minimized_to_tray)
+                else:
+                    self._startup_hide_guard_active = False
+                    self._startup_minimized_to_taskbar = False
         except Exception:
             pass
 

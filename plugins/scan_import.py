@@ -38,6 +38,8 @@ import logging
 import os
 import re
 import shutil
+import subprocess
+import sys
 import threading
 import unicodedata
 from contextlib import contextmanager
@@ -87,6 +89,76 @@ try:
     HAS_TESS = True
 except Exception:
     pass
+
+
+def _is_windows_runtime() -> bool:
+    return os.name == "nt" or sys.platform == "win32"
+
+
+def _windows_no_console_kwargs(kwargs: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Suppress console windows when spawning tesseract.exe on Windows."""
+    merged = dict(kwargs or {})
+    if not _is_windows_runtime():
+        return merged
+    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    merged["creationflags"] = int(merged.get("creationflags", 0) or 0) | int(create_no_window)
+    startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+    if startupinfo_cls is not None:
+        info = merged.get("startupinfo")
+        if info is None:
+            info = startupinfo_cls()
+        info.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 1)
+        info.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        merged["startupinfo"] = info
+    return merged
+
+
+class _NoConsoleSubprocessProxy:
+    """Proxy around subprocess used by pytesseract so OCR never flashes a terminal."""
+
+    def __init__(self, target: Any) -> None:
+        self._target = target
+        self._fb_no_console_wrapped = True
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target, name)
+
+    def Popen(self, *args: Any, **kwargs: Any) -> Any:  # noqa: N802
+        return self._target.Popen(*args, **_windows_no_console_kwargs(kwargs))
+
+    def run(self, *args: Any, **kwargs: Any) -> Any:
+        return self._target.run(*args, **_windows_no_console_kwargs(kwargs))
+
+    def check_output(self, *args: Any, **kwargs: Any) -> Any:
+        return self._target.check_output(*args, **_windows_no_console_kwargs(kwargs))
+
+    def check_call(self, *args: Any, **kwargs: Any) -> Any:
+        return self._target.check_call(*args, **_windows_no_console_kwargs(kwargs))
+
+    def call(self, *args: Any, **kwargs: Any) -> Any:
+        return self._target.call(*args, **_windows_no_console_kwargs(kwargs))
+
+
+def _install_pytesseract_no_console_hooks() -> None:
+    """Ensure get_tesseract_version() and image_to_string() hide Windows consoles."""
+    if not HAS_TESS or not _is_windows_runtime():
+        return
+    engine = getattr(pytesseract, "pytesseract", None)
+    if engine is None:
+        return
+    orig_sub = getattr(engine, "subprocess", None)
+    if orig_sub is not None and not getattr(orig_sub, "_fb_no_console_wrapped", False):
+        engine.subprocess = _NoConsoleSubprocessProxy(orig_sub)
+    orig_args = getattr(engine, "subprocess_args", None)
+    if callable(orig_args) and not getattr(orig_args, "_fb_no_console_wrapped", False):
+        def _wrapped_subprocess_args(include_stdout: bool = True, _orig=orig_args):
+            return _windows_no_console_kwargs(_orig(include_stdout=include_stdout))
+
+        _wrapped_subprocess_args._fb_no_console_wrapped = True  # type: ignore[attr-defined]
+        engine.subprocess_args = _wrapped_subprocess_args
+
+
+_install_pytesseract_no_console_hooks()
 
 COPYRIGHT_YEAR: int = datetime.date.today().year
 
@@ -191,6 +263,7 @@ def _configure_tesseract_binary() -> bool:
     """Hittar standardinstallationer även om Tesseract saknas i PATH."""
     if not HAS_TESS:
         return False
+    _install_pytesseract_no_console_hooks()
     engine = getattr(pytesseract, "pytesseract", None)
     command = str(getattr(engine, "tesseract_cmd", "tesseract") or "")
     if command and (shutil.which(command) or Path(command).is_file()):

@@ -9,6 +9,111 @@ $AppDir = Split-Path -Parent $PSScriptRoot
 # when an alias or version specifier is executed. Discovery must be read-only.
 $env:PYTHON_MANAGER_AUTOMATIC_INSTALL = '0'
 
+function Test-LauncherInteractiveGui {
+    return (
+        (-not $NoMain) -and
+        (-not [Console]::IsOutputRedirected) -and
+        (-not [Console]::IsInputRedirected) -and
+        ($env:FAKTURA_HEADLESS -ne '1')
+    )
+}
+
+function Hide-LauncherConsole {
+    if (-not (Test-LauncherInteractiveGui)) { return }
+    try {
+        if (-not ('Fakturabunten.NativeConsole' -as [type])) {
+            Add-Type -Namespace Fakturabunten -Name NativeConsole -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern System.IntPtr GetConsoleWindow();
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern uint GetConsoleProcessList(uint[] processList, uint processCount);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
+'@ | Out-Null
+        }
+        $hwnd = [Fakturabunten.NativeConsole]::GetConsoleWindow()
+        $pids = New-Object uint[] 8
+        $count = [Fakturabunten.NativeConsole]::GetConsoleProcessList($pids, 8)
+        # Re-spawn windowless if launched from Explorer into Windows Terminal (<=2 console procs)
+        # so the terminal tab closes immediately, or hide the classic console window in place.
+        if ($count -gt 0 -and $count -le 2) {
+            if ($env:WT_SESSION -and ($env:FB_DETACHED_LAUNCHER -ne '1')) {
+                $scriptPath = if ($PSCommandPath) { $PSCommandPath } else { Join-Path $PSScriptRoot 'start_fakturabunten.ps1' }
+                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                $psi.FileName = (Join-Path $PSHOME 'powershell.exe')
+                if (-not (Test-Path -LiteralPath $psi.FileName -PathType Leaf)) {
+                    $psi.FileName = 'powershell.exe'
+                }
+                $psi.Arguments = ('-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $scriptPath)
+                $psi.WorkingDirectory = $AppDir
+                $psi.UseShellExecute = $false
+                $psi.CreateNoWindow = $true
+                $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+                $psi.EnvironmentVariables['FB_DETACHED_LAUNCHER'] = '1'
+                [System.Diagnostics.Process]::Start($psi) | Out-Null
+                exit 0
+            }
+            if ($hwnd -ne [IntPtr]::Zero) {
+                [Fakturabunten.NativeConsole]::ShowWindow($hwnd, 0) | Out-Null
+            }
+        }
+    } catch { }
+}
+
+function Invoke-HiddenProcess([string]$FilePath, [string[]]$ArgumentList, [int]$TimeoutMs = 15000) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FilePath
+    $escaped = @()
+    foreach ($arg in $ArgumentList) {
+        if ($arg -match '[\s"]') {
+            $escaped += ('"' + ($arg -replace '(\\*)"', '$1$1\"') + '"')
+        } else {
+            $escaped += $arg
+        }
+    }
+    $psi.Arguments = ($escaped -join ' ')
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    if ($null -eq $proc) {
+        return [pscustomobject]@{ ExitCode = -1; StdoutLines = @() }
+    }
+    $errTask = $proc.StandardError.ReadToEndAsync()
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    if (-not $proc.WaitForExit($TimeoutMs)) {
+        try { $proc.Kill() } catch { }
+        return [pscustomobject]@{ ExitCode = -1; StdoutLines = @() }
+    }
+    try { $null = $errTask.GetAwaiter().GetResult() } catch { }
+    $lines = @()
+    if ($stdout) {
+        $lines = @($stdout -split "\r?\n" | Where-Object { $_ -ne '' })
+    }
+    return [pscustomobject]@{ ExitCode = $proc.ExitCode; StdoutLines = $lines }
+}
+
+function Show-LauncherMessage([string]$Text, [bool]$IsError = $false) {
+    if (Test-LauncherInteractiveGui) {
+        try {
+            Add-Type -AssemblyName System.Windows.Forms | Out-Null
+            $icon = if ($IsError) { [System.Windows.Forms.MessageBoxIcon]::Warning } else { [System.Windows.Forms.MessageBoxIcon]::Information }
+            $owner = New-Object System.Windows.Forms.Form
+            $owner.TopMost = $true
+            $owner.ShowInTaskbar = $false
+            try {
+                [System.Windows.Forms.MessageBox]::Show($owner, $Text, 'Fakturabunten', [System.Windows.Forms.MessageBoxButtons]::OK, $icon) | Out-Null
+            } finally {
+                $owner.Dispose()
+            }
+            return
+        } catch { }
+    }
+    Write-Host $Text
+}
+
 function Test-AppLocalPython([string]$Path) {
     try {
         $base = [IO.Path]::GetFullPath($AppDir).TrimEnd('\') + '\'
@@ -77,10 +182,12 @@ function Get-InstalledPython {
     $launcher = Get-Command py.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($launcher) {
         try {
-            $lines = @(& $launcher.Source -0p 2>$null)
-            foreach ($line in $lines) {
-                if ([string]$line -match '(?i)((?:[a-z]:\\|\\\\)[^\r\n]*?python(?:w)?\.exe)\s*$') {
-                    $paths.Add($Matches[1])
+            $probeRes = Invoke-HiddenProcess $launcher.Source @('-0p')
+            if ($probeRes.ExitCode -eq 0) {
+                foreach ($line in $probeRes.StdoutLines) {
+                    if ([string]$line -match '(?i)((?:[a-z]:\\|\\\\)[^\r\n]*?python(?:w)?\.exe)\s*$') {
+                        $paths.Add($Matches[1])
+                    }
                 }
             }
         } catch { }
@@ -169,9 +276,9 @@ function Get-InstalledPython {
         $found = $true
         if (Test-AppLocalPython $path) { continue }
         try {
-            $result = @(& $path -c $probe 2>$null)
-            if ($LASTEXITCODE -ne 0 -or $result.Count -eq 0) { continue }
-            $versionText = ([string]$result[-1]).Trim()
+            $probeRes = Invoke-HiddenProcess $path @('-c', $probe)
+            if ($probeRes.ExitCode -ne 0 -or $probeRes.StdoutLines.Count -eq 0) { continue }
+            $versionText = ([string]$probeRes.StdoutLines[-1]).Trim()
             $version = [version]$versionText
             if ($version -ge [version]'3.10' -and $version -gt $bestVersion) {
                 $best = $path
@@ -183,6 +290,27 @@ function Get-InstalledPython {
 }
 
 function Ask-ToOpenPythonDownload {
+    if (Test-LauncherInteractiveGui) {
+        try {
+            Add-Type -AssemblyName System.Windows.Forms | Out-Null
+            $owner = New-Object System.Windows.Forms.Form
+            $owner.TopMost = $true
+            $owner.ShowInTaskbar = $false
+            try {
+                $reply = [System.Windows.Forms.MessageBox]::Show(
+                    $owner,
+                    "Ingen Python hittades.`n`nVill du öppna Python.org för att installera senaste stabila Python?",
+                    'Fakturabunten',
+                    [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                    [System.Windows.Forms.MessageBoxIcon]::Question,
+                    [System.Windows.Forms.MessageBoxDefaultButton]::Button1
+                )
+            } finally {
+                $owner.Dispose()
+            }
+            return ($reply -eq [System.Windows.Forms.DialogResult]::Yes)
+        } catch { }
+    }
     Write-Host 'Ingen Python hittades.'
     $answer = Read-Host 'Vill du oppna Python.org for att installera senaste stabila Python? [j/N]'
     return ($answer -match '^(?i:j|ja|y|yes)$')
@@ -192,9 +320,9 @@ function Open-PythonDownload {
     $url = 'https://www.python.org/downloads/windows/'
     try {
         Start-Process -FilePath $url | Out-Null
-        Write-Host 'Installera Python fran den officiella sidan och starta sedan Fakturabunten igen.'
+        Show-LauncherMessage 'Installera Python från den officiella sidan och starta sedan Fakturabunten igen.' $false
     } catch {
-        Write-Host "Kunde inte oppna webblasaren. Oppna sjalv: $url"
+        Show-LauncherMessage "Kunde inte öppna webbläsaren. Öppna själv: $url" $true
     }
 }
 
@@ -206,47 +334,54 @@ function Start-Application([string]$PythonExe) {
         (Test-Path -LiteralPath $pyw -PathType Leaf)) {
         $executable = $windowless
         $file = $pyw
-    } else {
-        $executable = $PythonExe
-        $file = $py
+        $arguments = '"{0}" --minimized' -f $file
+        Start-Process -FilePath $executable -ArgumentList $arguments `
+            -WorkingDirectory $AppDir -WindowStyle Hidden | Out-Null
+        return
     }
-    $arguments = '"{0}" --minimized' -f $file
-    Start-Process -FilePath $executable -ArgumentList $arguments `
-        -WorkingDirectory $AppDir -WindowStyle Hidden | Out-Null
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $PythonExe
+    $psi.Arguments = '"{0}" --minimized' -f $py
+    $psi.WorkingDirectory = $AppDir
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    [System.Diagnostics.Process]::Start($psi) | Out-Null
 }
 
 function Start-Fakturabunten {
     if (-not (Test-Path -LiteralPath (Join-Path $AppDir 'main.py') -PathType Leaf)) {
-        Write-Host 'Fakturabunten saknas i startfilens mapp.'
+        Show-LauncherMessage 'Fakturabunten saknas i startfilens mapp.' $true
         return 1
     }
     $python = Get-InstalledPython
     if ($python.Executable) {
         try { Start-Application $python.Executable; return 0 }
-        catch { Write-Host ("Kunde inte starta Fakturabunten: " + $_.Exception.Message); return 1 }
+        catch { Show-LauncherMessage ("Kunde inte starta Fakturabunten: " + $_.Exception.Message) $true; return 1 }
     }
     if ($python.Found) {
-        Write-Host 'Python hittades, men ingen tillganglig systemtolk kan starta Fakturabunten.'
-        Write-Host 'Programmet kraver Python 3.10 eller senare. Befintlig Python har inte andrats.'
+        Show-LauncherMessage ("Python hittades, men ingen tillgänglig systemtolk kan starta Fakturabunten.`nProgrammet kräver Python 3.10 eller senare. Befintlig Python har inte ändrats.") $true
         return 1
     }
     if (-not (Ask-ToOpenPythonDownload)) {
-        Write-Host 'Ingen Python installerades. Starta filen igen nar Python finns.'
+        Show-LauncherMessage 'Ingen Python installerades. Starta filen igen när Python finns.' $false
         return 2
     }
     # An interpreter can appear while the question is on screen.
     $python = Get-InstalledPython
     if ($python.Executable) {
         try { Start-Application $python.Executable; return 0 }
-        catch { Write-Host ("Kunde inte starta Fakturabunten: " + $_.Exception.Message); return 1 }
+        catch { Show-LauncherMessage ("Kunde inte starta Fakturabunten: " + $_.Exception.Message) $true; return 1 }
     }
     if ($python.Found) {
-        Write-Host 'Python hittades, men ingen tillganglig systemtolk kan starta Fakturabunten.'
-        Write-Host 'Programmet kraver Python 3.10 eller senare. Befintlig Python har inte andrats.'
+        Show-LauncherMessage ("Python hittades, men ingen tillgänglig systemtolk kan starta Fakturabunten.`nProgrammet kräver Python 3.10 eller senare. Befintlig Python har inte ändrats.") $true
         return 1
     }
     Open-PythonDownload
     return 2
 }
 
-if (-not $NoMain) { exit (Start-Fakturabunten) }
+if (-not $NoMain) {
+    Hide-LauncherConsole
+    exit (Start-Fakturabunten)
+}

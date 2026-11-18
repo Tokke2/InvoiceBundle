@@ -172,6 +172,21 @@ def wait_for_active_update(base_dir: Path, *, poll_seconds: float = 2.0) -> bool
     return True
 
 
+def _windows_no_console_kwargs() -> dict[str, Any]:
+    if os.name != "nt" and not sys.platform.startswith("win"):
+        return {}
+    kwargs: dict[str, Any] = {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+    }
+    startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+    if startupinfo_cls is not None:
+        info = startupinfo_cls()
+        info.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 1)
+        info.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        kwargs["startupinfo"] = info
+    return kwargs
+
+
 def _worker_command(
     base_dir: Path,
     python_exe: str,
@@ -194,7 +209,7 @@ def _worker_command(
         slot_text,
     ]
     if os.name == "nt":
-        return args, {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+        return args, _windows_no_console_kwargs()
     return args, {"start_new_session": True}
 
 
@@ -250,11 +265,13 @@ def run_package_worker(
         proc = subprocess.Popen(
             cmd,
             cwd=str(base_dir),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
+            **_windows_no_console_kwargs(),
         )
         assert proc.stdout is not None
         for line in proc.stdout:

@@ -208,3 +208,52 @@ def test_toggle_minimize_to_tray_persists():
         assert win.status_messages  # statusraden bekräftar valet
     finally:
         win.deleteLater()
+
+
+def test_late_tray_setup_hides_startup_minimized_window(monkeypatch):
+    from PySide6.QtWidgets import QSystemTrayIcon
+
+    win = _make_window(tray="hidden")
+    try:
+        win.showMinimized()
+        _pump()
+        win._startup_hide_guard_active = True
+        win._startup_minimized_to_taskbar = True
+
+        class _FakeTray:
+            def __init__(self, *_a, **_k):
+                self._vis = False
+            def show(self):
+                self._vis = True
+            def isVisible(self):  # noqa: N802
+                return self._vis
+            def setIcon(self, *_a):  # noqa: N802
+                pass
+            def setToolTip(self, *_a):  # noqa: N802
+                pass
+            def setContextMenu(self, *_a):  # noqa: N802
+                pass
+
+        monkeypatch.setattr(QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True))
+        win.tray = _FakeTray()
+        win._build_tray_menu = lambda: None
+        win._setup_tray()
+        assert win.tray.isVisible() is True
+        assert not win.isVisible()
+        assert win._startup_minimized_to_taskbar is False
+    finally:
+        win.deleteLater()
+
+
+def test_user_restore_clears_startup_minimized_guard():
+    win = _make_window()
+    try:
+        win._startup_hide_guard_active = True
+        win._startup_minimized_to_taskbar = True
+        win._min = False
+        win.changeEvent(_state_change_event())
+        assert win._startup_hide_guard_active is False
+        assert win._startup_minimized_to_taskbar is False
+    finally:
+        win.deleteLater()
+

@@ -60,19 +60,29 @@ def schedule_restart(root: Path, delay_seconds: float = 2.5) -> bool:
         getattr(subprocess, "CREATE_NO_WINDOW", 0)
         if sys.platform.startswith("win") else 0
     )
+    extra_win: dict = {}
+    if sys.platform.startswith("win"):
+        extra_win["creationflags"] = no_window
+        startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+        if startupinfo_cls is not None:
+            info = startupinfo_cls()
+            info.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 1)
+            info.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+            extra_win["startupinfo"] = info
     helper = (
         "import subprocess, sys, time;"
         f"time.sleep({float(delay_seconds)});"
-        f"subprocess.Popen([sys.executable, {str(entry)!r}], "
+        f"subprocess.Popen([sys.executable, {str(entry)!r}, '--minimized'], "
         f"cwd={str(root)!r}, creationflags={int(no_window)})"
     )
     try:
         subprocess.Popen(
             [str(exe), "-c", helper],
             cwd=str(root),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=no_window,
+            **extra_win,
         )
         return True
     except Exception as exc:

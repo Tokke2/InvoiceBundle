@@ -377,6 +377,22 @@ def _windowless_python(executable: str | None = None) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+def _windows_no_console_kwargs() -> dict[str, Any]:
+    """Returnerar Windows-flaggor som undertrycker konsolfönster."""
+    if CURRENT_PLATFORM != "windows":
+        return {}
+    kwargs: dict[str, Any] = {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+    }
+    startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+    if startupinfo_cls is not None:
+        info = startupinfo_cls()
+        info.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 1)
+        info.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        kwargs["startupinfo"] = info
+    return kwargs
+
+
 def _relaunch_windowless() -> bool:
     """Startar om appen fönsterlöst om den råkade startas med python.exe.
 
@@ -409,7 +425,7 @@ def _relaunch_windowless() -> bool:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            **_windows_no_console_kwargs(),
         )
         log.info(
             "FONSTERLOS_OMSTART: python.exe -> %s %s",
@@ -537,7 +553,7 @@ def _inspect_python(command: list[str]) -> tuple[str, tuple[int, ...]] | None:
             timeout=10,
             check=False,
             env=_python_child_environment(),
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            **_windows_no_console_kwargs(),
         )
         if result.returncode != 0:
             return None
@@ -559,7 +575,7 @@ def _windows_launcher_paths(launcher: str) -> list[str]:
         result = subprocess.run(
             [launcher, "-0p"], capture_output=True, text=True, timeout=10,
             check=False, env=_python_child_environment(),
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            **_windows_no_console_kwargs(),
         )
     except Exception:
         return []
@@ -713,7 +729,7 @@ def _python_has_runtime(executable: str) -> bool:
             text=True,
             timeout=35,
             check=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            **_windows_no_console_kwargs(),
         )
         usable = (
             result.returncode == 0
@@ -842,7 +858,7 @@ def _spawn_with_python(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            **_windows_no_console_kwargs(),
         )
         log.info(
             "PYTHON_RUNTIME_RELAUNCH: %s via %s (%s)",
@@ -944,15 +960,40 @@ def _windows_shortcut() -> None:
     lnk = BASE_DIR / "Fakturabunten.lnk"
     if not ico.is_file() or not script.is_file():
         return
+    arguments = f'"{script}" --minimized'
+    try:
+        import tempfile
+        from windows_shortcut import create_shortcut
+
+        with tempfile.TemporaryDirectory(
+            prefix=".lnk-", dir=str(BASE_DIR), ignore_cleanup_errors=True
+        ) as staging:
+            staged = Path(staging) / lnk.name
+            create_shortcut(
+                staged,
+                target=str(pyw),
+                arguments=arguments,
+                workdir=str(BASE_DIR),
+                icon=str(ico),
+                description="Fakturabunten",
+                show_cmd=7,
+            )
+            os.replace(staged, lnk)
+        log.info("IKON_GENVAG: %s", lnk)
+        return
+    except Exception as native_exc:
+        log.debug("IKON_GENVAG COM-fallback: %s", native_exc)
     try:
         import subprocess
+        def _ps_quote(value: object) -> str:
+            return "'" + str(value).replace("'", "''") + "'"
         ps = (
             "$w = New-Object -ComObject WScript.Shell; "
-            f"$s = $w.CreateShortcut('{lnk}'); "
-            f"$s.TargetPath = '{pyw}'; "
-            f"$s.Arguments = '\"{script}\"'; "
-            f"$s.WorkingDirectory = '{BASE_DIR}'; "
-            f"$s.IconLocation = '{ico},0'; "
+            f"$s = $w.CreateShortcut({_ps_quote(lnk)}); "
+            f"$s.TargetPath = {_ps_quote(pyw)}; "
+            f"$s.Arguments = {_ps_quote(arguments)}; "
+            f"$s.WorkingDirectory = {_ps_quote(BASE_DIR)}; "
+            f"$s.IconLocation = {_ps_quote(str(ico) + ',0')}; "
             "$s.WindowStyle = 7; "
             "$s.Description = 'Fakturabunten'; "
             "$s.Save()"
@@ -963,9 +1004,7 @@ def _windows_shortcut() -> None:
             check=False,
             timeout=20,
             capture_output=True,
-            # PowerShell är ett konsolprogram — utan flaggan blinkar
-            # ett konsolfönster till vid varje appstart.
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            **_windows_no_console_kwargs(),
         )
         log.info("IKON_GENVAG: %s", lnk)
     except Exception as exc:
@@ -1445,6 +1484,15 @@ def _verify_window_visible(window: Any) -> None:
 
     def _check() -> None:
         try:
+            if getattr(window, "_startup_minimized_to_taskbar", False):
+                if (
+                    bool(window.isMinimized())
+                    or not getattr(window, "_startup_hide_guard_active", False)
+                ):
+                    return
+                if hasattr(window, "showMinimized"):
+                    window.showMinimized()
+                    return
             geo = window.frameGeometry()
             visible = bool(window.isVisible()) and not window.isMinimized()
             alog_fn = _get_alog()
@@ -1568,6 +1616,7 @@ def _start_minimized_or_show(
         # Vakten får inte ångra ett uttryckligt tray-/fokusöppnande.
         try:
             setattr(window, "_startup_hide_guard_active", True)
+            setattr(window, "_startup_minimized_to_taskbar", False)
         except Exception:
             pass
         # Göm före event-loopen så ingen synlig fönsterblinkning sker.
@@ -1593,9 +1642,29 @@ def _start_minimized_or_show(
         _verify_window_hidden(window)
         return
 
-    # Utan tray får appen inte försvinna från användaren.
+    # Utan tray får appen inte försvinna från användaren — starta då
+    # minimerat i aktivitetsfältet i stället för att öppna över skärmen,
+    # och flytta till tray om systemfältet blir redo strax efteråt.
+    if hasattr(window, "showMinimized"):
+        try:
+            setattr(window, "_startup_hide_guard_active", True)
+            setattr(window, "_startup_minimized_to_taskbar", True)
+        except Exception:
+            pass
+        window.showMinimized()
+        log.info(
+            "Startar MINIMERAT i aktivitetsfältet eftersom systemfält saknas "
+            "(autostart=%s, tray=%s)",
+            autostart_launch,
+            tray_ready,
+            extra={"action": "START_MIN_NO_TRAY"},
+        )
+        _verify_window_visible(window)
+        return
+
     try:
         setattr(window, "_startup_hide_guard_active", False)
+        setattr(window, "_startup_minimized_to_taskbar", False)
     except Exception:
         pass
     window.show()

@@ -253,14 +253,32 @@ class _Progress:
             pass
 
 
+def _windows_no_console_kwargs() -> dict[str, object]:
+    """Döljer Windows-konsolfönster när pip startas från pythonw.exe."""
+    if os.name != "nt" and not sys.platform.startswith("win"):
+        return {}
+    kwargs: dict[str, object] = {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+    }
+    startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+    if startupinfo_cls is not None:
+        info = startupinfo_cls()
+        info.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 1)
+        info.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        kwargs["startupinfo"] = info
+    return kwargs
+
+
 def _run_pip(cmd: list[str], progress: _Progress | None, status: str) -> int:
     proc = subprocess.Popen(
         cmd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         encoding="utf-8",
         errors="replace",
+        **_windows_no_console_kwargs(),
     )
     assert proc.stdout is not None
     for line in proc.stdout:

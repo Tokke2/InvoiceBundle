@@ -171,3 +171,49 @@ def test_settings_cannot_disable_always_minimized_start():
     assert "Every normal launch" in (PROJECT_DIR / "README.md").read_text(
         encoding="utf-8"
     )
+
+
+def test_no_tray_still_minimizes_real_window_to_taskbar(monkeypatch):
+    class _MinimizableWindow(_Window):
+        def showMinimized(self):  # noqa: N802
+            self.calls.append("showMinimized")
+
+    for tray, tray_avail in ((True, False), (False, True), (True, True)):
+        win = _MinimizableWindow(tray=tray)
+        if tray and tray_avail:
+            win.tray.isVisible = lambda: False
+        _run(monkeypatch, win, _Core(False), autostart=False, tray_available=tray_avail)
+        assert "showMinimized" in win.calls
+        assert "hide" not in win.calls
+        assert "show" not in win.calls
+        assert "activate" not in win.calls
+        assert getattr(win, "_startup_minimized_to_taskbar", False) is True
+        assert getattr(win, "_startup_hide_guard_active", False) is True
+
+
+def test_verify_window_visible_preserves_startup_minimized_state(monkeypatch):
+    _install_qt_stub(monkeypatch)
+    sys.modules["PySide6.QtWidgets"].QApplication = object
+    core = types.ModuleType("PySide6.QtCore")
+
+    class _Timer:
+        @staticmethod
+        def singleShot(_delay, callback):  # noqa: N802
+            callback()
+
+    core.QTimer = _Timer
+    monkeypatch.setitem(sys.modules, "PySide6.QtCore", core)
+    import main as app_main
+
+    class _MinimizedWindow:
+        _startup_minimized_to_taskbar = True
+        _startup_hide_guard_active = True
+
+        def isMinimized(self):  # noqa: N802
+            return True
+
+        def showNormal(self):  # noqa: N802
+            raise AssertionError("startup-minimized window must stay minimized")
+
+    app_main._verify_window_visible(_MinimizedWindow())
+

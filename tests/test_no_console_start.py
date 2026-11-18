@@ -120,3 +120,133 @@ def test_update_restart_prefers_pyw_and_pythonw(
     assert cmd[0] == str(bindir / "pythonw.exe")   # aldrig python.exe
     assert "main.pyw" in cmd[2]                    # aldrig main.py
     assert "main.py'" not in cmd[2]
+    assert "--minimized" in cmd[2]
+
+
+def test_scan_import_suppresses_console_in_pytesseract_checks_and_ocr(monkeypatch):
+    """Tesseract version probe and OCR must both inject CREATE_NO_WINDOW on Windows."""
+    import types
+    import plugins.scan_import as si
+
+    recorded = []
+
+    class _FakeSubprocess:
+        CREATE_NO_WINDOW = 0x08000000
+        STARTF_USESHOWWINDOW = 1
+        SW_HIDE = 0
+
+        @staticmethod
+        def check_output(*args, **kwargs):
+            recorded.append(("check_output", args, kwargs))
+            return b"tesseract 5.4.0\n"
+
+        @staticmethod
+        def Popen(*args, **kwargs):  # noqa: N802
+            recorded.append(("Popen", args, kwargs))
+            return types.SimpleNamespace(returncode=0)
+
+    def _orig_subprocess_args(include_stdout=True):
+        return {"stdin": -1, "stderr": -1, "include_stdout": include_stdout}
+
+    fake_engine = types.SimpleNamespace(
+        tesseract_cmd="tesseract.exe",
+        subprocess=_FakeSubprocess,
+        subprocess_args=_orig_subprocess_args,
+    )
+    fake_pyt = types.SimpleNamespace(pytesseract=fake_engine)
+    monkeypatch.setattr(si, "HAS_TESS", True)
+    monkeypatch.setattr(si, "pytesseract", fake_pyt, raising=False)
+    monkeypatch.setattr(si.sys, "platform", "win32")
+
+    si._install_pytesseract_no_console_hooks()
+    fake_engine.subprocess.check_output(["tesseract.exe", "--version"])
+    fake_engine.subprocess.Popen(["tesseract.exe", "in.png", "out"])
+    args_dict = fake_engine.subprocess_args()
+
+    assert recorded[0][0] == "check_output"
+    assert recorded[0][2]["creationflags"] & 0x08000000
+    assert recorded[1][0] == "Popen"
+    assert recorded[1][2]["creationflags"] & 0x08000000
+    assert args_dict["creationflags"] & 0x08000000
+
+
+def test_ensure_packages_and_scheduler_hide_windows_consoles(tmp_path, monkeypatch):
+    import ensure_packages as ep
+    from plugins import python_update_scheduler as sched
+
+    pip_calls = []
+
+    class _FakeProc:
+        stdout = iter(())
+
+        @staticmethod
+        def wait():
+            return 0
+
+    monkeypatch.setattr(ep.sys, "platform", "win32")
+    monkeypatch.setattr(
+        ep.subprocess,
+        "Popen",
+        lambda cmd, **kw: pip_calls.append((cmd, kw)) or _FakeProc(),
+    )
+    assert ep._run_pip(["python.exe", "-m", "pip", "install"], None, "x") == 0
+    assert pip_calls[0][1]["creationflags"] & 0x08000000
+    assert pip_calls[0][1]["stdin"] is ep.subprocess.DEVNULL
+
+    (tmp_path / "requirements.txt").write_text("PySide6>=6.6\n", encoding="utf-8")
+    (tmp_path / "ensure_packages.py").write_text("# test\n", encoding="utf-8")
+    worker_calls = []
+    monkeypatch.setattr(sched.sys, "platform", "win32")
+    monkeypatch.setattr(sched, "_wait_for_pid", lambda _pid: None)
+    monkeypatch.setattr(sched, "_append_log", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        sched.subprocess,
+        "Popen",
+        lambda cmd, **kw: worker_calls.append((cmd, kw)) or _FakeProc(),
+    )
+    assert sched.run_package_worker(tmp_path, 1, "python.exe", "2026-10-12T08:00:00") == 0
+    assert worker_calls[0][1]["creationflags"] & 0x08000000
+    assert worker_calls[0][1]["stdin"] is sched.subprocess.DEVNULL
+
+
+def test_windows_shortcut_prefers_native_com_without_powershell(tmp_path, monkeypatch):
+    import main as m
+    import windows_shortcut as ws
+
+    (tmp_path / "app_icon.ico").write_bytes(b"ico")
+    (tmp_path / "main.pyw").write_text("# app", encoding="utf-8")
+    pyw = tmp_path / "pythonw.exe"
+    pyw.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(m, "CURRENT_PLATFORM", "windows")
+    monkeypatch.setattr(m, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(m.sys, "executable", str(pyw))
+    monkeypatch.setattr(
+        m.subprocess,
+        "run",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("PowerShell must not run")),
+    )
+    created = []
+    monkeypatch.setattr(
+        ws,
+        "create_shortcut",
+        lambda dest, **kw: (Path(dest).write_bytes(b"lnk"), created.append((Path(dest), kw))),
+    )
+    m._windows_shortcut()
+    assert (tmp_path / "Fakturabunten.lnk").is_file()
+    assert len(created) == 1
+    assert "--minimized" in created[0][1]["arguments"]
+    assert created[0][1]["show_cmd"] == 7
+
+
+def test_launcher_scripts_hide_consoles():
+    bat = (PROJECT_DIR / "Starta Fakturabunten.bat").read_text(encoding="utf-8")
+    ps1 = (PROJECT_DIR / "autostart" / "start_fakturabunten.ps1").read_text(encoding="utf-8")
+    sh = (PROJECT_DIR / "Starta Fakturabunten.sh").read_text(encoding="utf-8")
+    assert "-WindowStyle Hidden" in bat
+    assert "pause" not in bat.lower()
+    assert "Hide-LauncherConsole" in ps1
+    assert "Invoke-HiddenProcess" in ps1
+    assert "CreateNoWindow = $true" in ps1
+    assert "nohup" in sh
+

@@ -75,6 +75,14 @@ discover_python() {
 
 start_application() {
     cd "$APP_DIR" || return 1
+    if [ -t 0 ] && [ -t 1 ] && [ "${FB_FOREGROUND:-0}" != "1" ]; then
+        mkdir -p "$APP_DIR/logs" 2>/dev/null || :
+        nohup "$PY_SELECTED" "$APP_DIR/main.py" --minimized >>"$APP_DIR/logs/launcher.log" 2>&1 </dev/null &
+        if [ "$SYSTEM" = Darwin ] && [ "${TERM_PROGRAM:-}" = Apple_Terminal ] && command -v osascript >/dev/null 2>&1; then
+            (sleep 0.3 && osascript -e 'tell application "Terminal" to close (every window whose busy is false)' >/dev/null 2>&1) </dev/null >/dev/null 2>&1 &
+        fi
+        exit 0
+    fi
     exec "$PY_SELECTED" "$APP_DIR/main.py" --minimized
 }
 

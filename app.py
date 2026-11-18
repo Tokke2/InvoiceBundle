@@ -1925,6 +1925,12 @@ class AutostartManager:
                     "capture_output": True,
                     "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 }
+                startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+                if os.name == "nt" and startupinfo_cls is not None:
+                    info = startupinfo_cls()
+                    info.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 1)
+                    info.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+                    common["startupinfo"] = info
 
                 def activate() -> None:
                     if not staged_link.is_file() or staged_link.stat().st_size == 0:
