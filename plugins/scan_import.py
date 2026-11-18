@@ -38,11 +38,22 @@ import logging
 import os
 import re
 import shutil
+import threading
 import unicodedata
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("ScanImport")
+_FITZ_LOCK = threading.RLock()
+OCR_PAGE_TIMEOUT_SECONDS = 60
+
+
+@contextmanager
+def _open_fitz(path: Any):
+    with _FITZ_LOCK:
+        with fitz.open(str(path)) as doc:
+            yield doc
 
 # ── Valfria beroenden (fail-safe) ──────────────────────────────────────
 HAS_PYPDF = False
@@ -127,7 +138,7 @@ def _extract_pdf_page_text_sources(
     )
     if HAS_FITZ and needs_fitz:
         try:
-            with fitz.open(str(path)) as doc:
+            with _open_fitz(path) as doc:
                 pages = []
                 for index, page in enumerate(doc):
                     try:
@@ -228,9 +239,14 @@ def _ocr_image_text(image, *, engine_checked: bool = False) -> tuple[str, str]:
     last_exc: Exception | None = None
     for language in ("swe+eng", "eng", "swe"):
         try:
-            text = pytesseract.image_to_string(
-                image, lang=language
-            ) or ""
+            try:
+                text = pytesseract.image_to_string(
+                    image, lang=language, timeout=OCR_PAGE_TIMEOUT_SECONDS
+                ) or ""
+            except TypeError:
+                text = pytesseract.image_to_string(
+                    image, lang=language
+                ) or ""
             return text.strip(), "ocr-tesseract"
         except Exception as exc:
             last_exc = exc
@@ -299,7 +315,7 @@ def extract_scanned_pdf_pages(path: Path) -> tuple[str, str]:
     texts: list[str] = []
     failed = False
     try:
-        with fitz.open(str(path)) as doc:
+        with _open_fitz(path) as doc:
             for page in doc:
                 text, method = _ocr_pdf_page(page)
                 texts.append(text)
@@ -346,7 +362,7 @@ def extract_pdf_pages(path: Path) -> tuple[str, str]:
     if needs_ocr:
         if HAS_FITZ and tesseract_available():
             try:
-                with fitz.open(str(path)) as doc:
+                with _open_fitz(path) as doc:
                     for index in needs_ocr:
                         if index >= len(doc):
                             ocr_failed = True
@@ -822,11 +838,15 @@ def _supplier_match_candidates(
         tokens = _name_tokens(name)
         token_set = set(tokens)
         if name_fold and f" {name_fold} " in f" {folded} ":
-            score += 6
-            signals.append("full_name")
+            if len(name_fold) >= 5 or len(tokens) >= 2:
+                score += 6
+                signals.append("full_name")
+            else:
+                score += 3
+                signals.append("short_name_only")
         elif token_set and token_set <= folded_tokens and (
             len(token_set) >= 2
-            or (tokens and len(tokens[0]) >= 4)
+            or (tokens and len(tokens[0]) >= 5)
         ):
             score += 5
             signals.append("name_words")
@@ -841,9 +861,14 @@ def _supplier_match_candidates(
             alias_fold = _fold_text(alias)
             alias_tokens = set(_name_tokens(alias))
             if alias_fold and f" {alias_fold} " in f" {folded} ":
-                score += 6
-                if "alias_full_name" not in signals:
-                    signals.append("alias_full_name")
+                if len(alias_fold) >= 5 or len(alias_tokens) >= 2:
+                    score += 6
+                    if "alias_full_name" not in signals:
+                        signals.append("alias_full_name")
+                else:
+                    score += 3
+                    if "short_alias_only" not in signals:
+                        signals.append("short_alias_only")
             elif alias_tokens and alias_tokens <= folded_tokens and (
                 len(alias_tokens) >= 2
                 or (
@@ -891,15 +916,77 @@ def _supplier_match_candidates(
     )
 
 
+_STRONG_SUPPLIER_SIGNALS = frozenset({
+    "org_number", "bankgiro", "plusgiro", "iban",
+})
+
+
+def supplier_has_strong_identifier(
+    text: str, supplier_name: str, suppliers: list[dict] | None,
+) -> bool:
+    """True if ``text`` matches a verified org.nr or payment account for ``supplier_name``."""
+    if not text or not supplier_name or not suppliers:
+        return False
+    invoice_ids = _supplier_invoice_identifiers(text)
+    for sup in suppliers:
+        if not isinstance(sup, dict):
+            continue
+        name = str(sup.get("name", "") or "").strip()
+        if not name or not _same_registered_supplier_name(
+            name, supplier_name, suppliers
+        ):
+            continue
+        for field, keys in _SUPPLIER_ID_PROFILE_KEYS.items():
+            expected = {
+                normalized
+                for key in keys
+                if (normalized := _normalize_supplier_identifier(
+                    field, sup.get(key, "")
+                ))
+            }
+            if expected & invoice_ids.get(field, set()):
+                return True
+    return False
+
+
+def supplier_org_conflict(
+    text: str, supplier_name: str, suppliers: list[dict] | None,
+) -> bool:
+    """True when invoice text prints valid org numbers, the supplier has a
+    registered valid org number, and none of the printed ones match it."""
+    if not text or not supplier_name or not suppliers:
+        return False
+    invoice_orgs = set(invoice_org_number_values(text))
+    if not invoice_orgs:
+        return False
+    expected_orgs: set[str] = set()
+    for sup in suppliers:
+        if not isinstance(sup, dict):
+            continue
+        name = str(sup.get("name", "") or "").strip()
+        if not name or not _same_registered_supplier_name(
+            name, supplier_name, suppliers
+        ):
+            continue
+        for key in _SUPPLIER_ID_PROFILE_KEYS["org"]:
+            normalized = _normalize_supplier_identifier("org", sup.get(key, ""))
+            if normalized:
+                expected_orgs.add(normalized)
+    if not expected_orgs:
+        return False
+    return not bool(expected_orgs & invoice_orgs)
+
+
 def assess_supplier_match(
     text: str, suppliers: list[dict]
 ) -> dict[str, Any]:
     """Bedöm leverantörsmatchningen utan att gissa vid osäkerhet.
 
     Returnerar ``supplier`` bara vid en unik stark träff. En ensam
-    svag förstanamnsträff, lika starka kandidater eller en annan
-    stark kandidat ger ``uncertain=True`` och hela kandidatlistan,
-    så att gränssnittet kan fråga användaren i stället.
+    svag förstanamnsträff, lika starka kandidater, en annan
+    konkurrerande kandidat eller motstridigt organisationsnummer
+    ger ``uncertain=True`` och hela kandidatlistan, så att
+    gränssnittet kan fråga användaren i stället.
     """
     candidates = _supplier_match_candidates(text, suppliers)
     if not candidates:
@@ -912,6 +999,26 @@ def assess_supplier_match(
         }
     top = candidates[0]
     second = candidates[1] if len(candidates) > 1 else None
+    top_strong = bool(
+        set(top.get("signals", []) or []) & _STRONG_SUPPLIER_SIGNALS
+    )
+    if int(top["score"]) >= 5 and not top_strong:
+        if supplier_org_conflict(text, str(top["name"]), suppliers):
+            return {
+                "status": "uncertain",
+                "supplier": "",
+                "candidates": candidates,
+                "uncertain": True,
+                "reason": "identifier_conflict",
+            }
+        if second is not None and int(second["score"]) >= 3:
+            return {
+                "status": "uncertain",
+                "supplier": "",
+                "candidates": candidates,
+                "uncertain": True,
+                "reason": "competing",
+            }
     if int(top["score"]) >= 5 and (
         second is None or int(second["score"]) < 5
     ):
@@ -1390,14 +1497,25 @@ def parse_invoice_text(
             text or "", match_learning
         )
         if len(learned) == 1:
-            supplier = learned[0]
-            learned_connect = supplier
-            log.info(
-                "SCAN_IMPORT: inlärd koppling — fakturan kopplas "
-                "till %s på sina kännetecken (appen har lärt sig "
-                "leverantören av användarens matchningar)",
-                supplier,
-            )
+            if (
+                not supplier_has_strong_identifier(
+                    text or "", learned[0], suppliers
+                )
+                and supplier_org_conflict(text or "", learned[0], suppliers)
+            ):
+                match_uncertain = True
+                match_candidates = [learned[0]]
+                match_reason = "identifier_conflict"
+                match_kind = "supplier"
+            else:
+                supplier = learned[0]
+                learned_connect = supplier
+                log.info(
+                    "SCAN_IMPORT: inlärd koppling — fakturan kopplas "
+                    "till %s på sina kännetecken (appen har lärt sig "
+                    "leverantören av användarens matchningar)",
+                    supplier,
+                )
         elif len(learned) > 1:
             match_uncertain = True
             match_candidates = learned
@@ -2989,7 +3107,7 @@ def _words_in_region_fitz(
 ) -> str:
     x0, y0, x1, y1 = rect
     try:
-        with fitz.open(str(path)) as doc:
+        with _open_fitz(path) as doc:
             if not len(doc):
                 return ""
             page = doc[min(max(page_index, 0), len(doc) - 1)]
@@ -3063,7 +3181,7 @@ def _ocr_crop_text(path: Path, page_index: int, rect: tuple) -> str:
         if path.suffix.lower() == ".pdf":
             if not HAS_FITZ:
                 return ""
-            with fitz.open(str(path)) as doc:
+            with _open_fitz(path) as doc:
                 if not len(doc):
                     return ""
                 page = doc[min(max(page_index, 0), len(doc) - 1)]
@@ -3079,7 +3197,12 @@ def _ocr_crop_text(path: Path, page_index: int, rect: tuple) -> str:
                 int(x0 * img.width), int(y0 * img.height),
                 int(x1 * img.width), int(y1 * img.height),
             ))
-        text = pytesseract.image_to_string(img, lang="swe+eng")
+        try:
+            text = pytesseract.image_to_string(
+                img, lang="swe+eng", timeout=OCR_PAGE_TIMEOUT_SECONDS
+            )
+        except TypeError:
+            text = pytesseract.image_to_string(img, lang="swe+eng")
         return (text or "").strip()
     except Exception as exc:
         log.warning("region-ocr %s: %s", path, exc)
@@ -3130,7 +3253,7 @@ def page_image_count(path: Any) -> int:
     if p.suffix.lower() == ".pdf":
         try:
             if HAS_FITZ:
-                with fitz.open(str(p)) as doc:
+                with _open_fitz(p) as doc:
                     return len(doc)
             if HAS_PYPDF:
                 return len(PdfReader(str(p)).pages)
@@ -3164,7 +3287,7 @@ def render_page_image(
         if not HAS_FITZ:
             return None
         try:
-            with fitz.open(str(p)) as doc:
+            with _open_fitz(p) as doc:
                 if not len(doc):
                     return None
                 page = doc[min(max(page_index, 0), len(doc) - 1)]
@@ -3295,9 +3418,11 @@ def supplier_logo_region_candidates(
     if pdf_path.suffix.casefold() != ".pdf":
         return []
     candidates: list[dict[str, Any]] = []
+    _FITZ_LOCK.acquire()
     try:
         document = fitz.open(str(pdf_path))
     except Exception as exc:
+        _FITZ_LOCK.release()
         log.debug("supplier logo regions open %s: %s", pdf_path, exc)
         return []
 
@@ -3548,6 +3673,7 @@ def supplier_logo_region_candidates(
             document.close()
         except Exception:
             pass
+        _FITZ_LOCK.release()
     return sorted(
         candidates,
         key=lambda item: (

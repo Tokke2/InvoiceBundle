@@ -327,6 +327,31 @@ def parse_watched_file(
                 )
             )
         )
+        template_key = str(parsed.get("template", "") or "").strip()
+        template_mismatch = False
+        if template_key:
+            tpl_candidates_fn = getattr(
+                si, "supplier_template_candidate_names", None
+            )
+            if callable(tpl_candidates_fn) and templates:
+                allowed = {
+                    str(n).strip().lower()
+                    for n in tpl_candidates_fn(
+                        templates, folder_supplier, suppliers
+                    )
+                }
+                if allowed and template_key.lower() not in allowed:
+                    template_mismatch = True
+                elif not allowed:
+                    same_tmpl = (
+                        template_key.lower() == folder_supplier.lower()
+                        or (
+                            callable(names_match)
+                            and names_match(template_key, folder_supplier)
+                        )
+                    )
+                    if not same_tmpl:
+                        template_mismatch = True
         if parsed.get("match_uncertain"):
             # Mappens leverantör är bara ännu en kandidat när
             # tolkningen själv är osäker — den får inte tyst
@@ -344,17 +369,41 @@ def parse_watched_file(
             parsed["folder_supplier_candidate"] = folder_supplier
             if "leverantör" not in parsed.get("missing", []):
                 parsed.setdefault("missing", []).append("leverantör")
-        elif parsed_supplier and not same_supplier:
+        elif (parsed_supplier and not same_supplier) or template_mismatch:
             # Fakturans egen starka leverantörsträff och mappens
             # kopplade leverantör pekar åt olika håll. Det är en
             # konflikt användaren ska avgöra, inte något
             # mappinställningen får köra över i tysthet.
+            other = parsed_supplier or template_key
             parsed["supplier"] = ""
+            parsed["template"] = ""
             parsed["match_uncertain"] = True
             parsed["match_candidates"] = [
-                parsed_supplier, folder_supplier,
+                c for c in (other, folder_supplier) if c
             ]
             parsed["match_reason"] = "competing"
+            parsed["match_kind"] = "supplier"
+            parsed["folder_supplier_candidate"] = folder_supplier
+            if "leverantör" not in parsed.get("missing", []):
+                parsed.setdefault("missing", []).append("leverantör")
+        elif (
+            not parsed_supplier
+            and not template_key
+            and callable(getattr(si, "supplier_org_conflict", None))
+            and not (
+                callable(getattr(si, "supplier_has_strong_identifier", None))
+                and si.supplier_has_strong_identifier(
+                    text or "", folder_supplier, suppliers
+                )
+            )
+            and si.supplier_org_conflict(
+                text or "", folder_supplier, suppliers
+            )
+        ):
+            parsed["supplier"] = ""
+            parsed["match_uncertain"] = True
+            parsed["match_candidates"] = [folder_supplier]
+            parsed["match_reason"] = "identifier_conflict"
             parsed["match_kind"] = "supplier"
             parsed["folder_supplier_candidate"] = folder_supplier
             if "leverantör" not in parsed.get("missing", []):
@@ -803,6 +852,7 @@ class WatchManager(QObject):
     file_recovered = Signal(str)
     changed = Signal()
     scan_started = Signal()
+    scan_progress = Signal(int, int, str)
     scan_finished = Signal(dict)
 
     def __init__(
@@ -851,9 +901,19 @@ class WatchManager(QObject):
         self._scan_again = False
         self._scan_again_force = False
         self._scan_generator = None
+        self._scan_phase = "idle"
+        self._scan_discovery_folders: list[dict] = []
+        self._scan_discovery_gen = None
+        self._scan_discovered_batches: list[tuple[dict, list[Path]]] = []
+        self._scan_total = 0
+        self._scan_done = 0
+        self._scan_current_file = ""
         self._scan_folders: list[dict] = []
         self._scan_token = 0
         self._scan_pending_token = 0
+        self._ignoring_watcher = False
+        self._scan_pool = QThreadPool(self)
+        self._scan_pool.setMaxThreadCount(max(3, min(4, os.cpu_count() or 3)))
         # Varje skanning har en egen epok. Redan köade
         # händelseloop-anrop från en avbruten/ersatt skanning ignoreras,
         # så två pumpar aldrig kan mata samma generator samtidigt.
@@ -878,7 +938,7 @@ class WatchManager(QObject):
 
         self._watcher = QFileSystemWatcher(self)
         self._watcher.directoryChanged.connect(
-            lambda _p: self._debounce.start()
+            self._on_watcher_directory_changed
         )
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -890,7 +950,9 @@ class WatchManager(QObject):
         # inte invänta säkerhetspollningen på 30 sekunder.
         self._settle_timer = QTimer(self)
         self._settle_timer.setSingleShot(True)
-        self._settle_timer.setInterval(FILE_STABILITY_RECHECK_MS)
+        self._settle_timer.setInterval(
+            max(FILE_STABILITY_RECHECK_MS, int(FILE_STABILITY_SECONDS * 1000) + 100)
+        )
         self._settle_timer.timeout.connect(self.start_scan)
 
         # Säkerhetspoll (nätverksdiskar missar ibland watcher-events)
@@ -906,6 +968,14 @@ class WatchManager(QObject):
 
         self._rewatch()
         QTimer.singleShot(2000, self.start_scan)
+
+    def _on_watcher_directory_changed(self, _path: str) -> None:
+        if self._ignoring_watcher:
+            return
+        self._debounce.start()
+
+    def _clear_ignoring_watcher(self) -> None:
+        self._ignoring_watcher = False
 
     # ── Konfiguration ─────────────────────────────────────────────────
 
@@ -1075,6 +1145,7 @@ class WatchManager(QObject):
             return str(source)
 
         archive_dir = matching_root / f"{year:04d}"
+        self._ignoring_watcher = True
         try:
             if source.parent.resolve() == archive_dir.resolve():
                 return str(source)
@@ -1094,6 +1165,8 @@ class WatchManager(QObject):
                 source, exc,
             )
             return str(source)
+        finally:
+            QTimer.singleShot(250, self._clear_ignoring_watcher)
 
         old_key = _norm_path_key(str(source))
         new_path = str(target)
@@ -1144,32 +1217,33 @@ class WatchManager(QObject):
                     raise ValueError("invoice year out of archive range")
             except (TypeError, ValueError):
                 archive_date = ""
-                try:
+                if not self._scan_running:
                     try:
-                        default_year = datetime.fromtimestamp(
-                            path.stat().st_mtime
-                        ).year
-                    except (OSError, OverflowError, ValueError):
-                        default_year = datetime.now().year
-                    parent = self.parent()
-                    if not isinstance(parent, QWidget):
-                        parent = None
-                    year, accepted = QInputDialog.getInt(
-                        parent,
-                        tr("watch.archive_year_title"),
-                        tr("watch.archive_year_prompt"),
-                        default_year,
-                        1900,
-                        9999,
-                        1,
-                    )
-                    if accepted and 1900 <= int(year) <= 9999:
-                        archive_date = f"{int(year):04d}-01-01"
-                except Exception as prompt_exc:
-                    log.warning(
-                        "SCAN_WATCH: could not ask for an archive year "
-                        "for %s: %s", path, prompt_exc,
-                    )
+                        try:
+                            default_year = datetime.fromtimestamp(
+                                path.stat().st_mtime
+                            ).year
+                        except (OSError, OverflowError, ValueError):
+                            default_year = datetime.now().year
+                        parent = self.parent()
+                        if not isinstance(parent, QWidget):
+                            parent = None
+                        year, accepted = QInputDialog.getInt(
+                            parent,
+                            tr("watch.archive_year_title"),
+                            tr("watch.archive_year_prompt"),
+                            default_year,
+                            1900,
+                            9999,
+                            1,
+                        )
+                        if accepted and 1900 <= int(year) <= 9999:
+                            archive_date = f"{int(year):04d}-01-01"
+                    except Exception as prompt_exc:
+                        log.warning(
+                            "SCAN_WATCH: could not ask for an archive year "
+                            "for %s: %s", path, prompt_exc,
+                        )
             archived = self.archive_processed_file(path, archive_date)
             if _norm_path_key(archived) == source_key:
                 return str(path)
@@ -1261,7 +1335,10 @@ class WatchManager(QObject):
             targets: set[str] = set()
             if root.is_dir():
                 for dirpath, dirs, _names in os.walk(root):
-                    dirs[:] = [d for d in dirs if d.lower() != "arkiv"]
+                    dirs[:] = [
+                        d for d in dirs
+                        if d.lower() != "arkiv" and not d.startswith(".")
+                    ]
                     targets.add(str(Path(dirpath)))
                 wanted.update(targets)
             targets_by_root[root_key] = targets
@@ -1436,6 +1513,52 @@ class WatchManager(QObject):
         self._waiting_reasons = {}
         self._control_diffs = []
 
+    def _context_fingerprint(self) -> str:
+        """Compact hash of suppliers, templates, learning, and OCR availability."""
+        try:
+            si = self._scan_module()
+            tess_ok = bool(si.tesseract_available())
+        except Exception:
+            tess_ok = False
+        suppliers_norm = [
+            (
+                str(s.get("name", "") or "").strip(),
+                str(s.get("org_number", "") or "").strip(),
+                str(s.get("bg", s.get("bankgiro", "")) or "").strip(),
+                str(s.get("pg", s.get("plusgiro", "")) or "").strip(),
+                str(s.get("iban", "") or "").strip(),
+                bool(s.get("ocr_as_invoice_number")),
+                str(s.get("aliases", "") or "").strip(),
+            )
+            for s in (self._suppliers() or [])
+            if isinstance(s, dict)
+        ]
+        templates: dict = {}
+        if self._templates_provider is not None:
+            try:
+                templates = self._templates_provider() or {}
+            except Exception:
+                templates = {}
+        learning: dict = {}
+        if self._learning_provider is not None:
+            try:
+                learning = self._learning_provider() or {}
+            except Exception:
+                learning = {}
+        payload = json.dumps(
+            {
+                "suppliers": sorted(suppliers_norm),
+                "templates": templates,
+                "learning": learning,
+                "auto_create": bool(self.auto_create),
+                "tesseract": tess_ok,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+
     @property
     def is_scanning(self) -> bool:
         """True medan en bakgrundsskanning pågår."""
@@ -1455,6 +1578,7 @@ class WatchManager(QObject):
         """
         self._abort_async_scan()
         self._reset_scan_stats()
+        self._scan_context_fp = self._context_fingerprint()
         self._last_scan_force = bool(force)
         self._heal_missing_imports()
         for entry in self.folders:
@@ -1490,19 +1614,62 @@ class WatchManager(QObject):
         self._scan_again = False
         self._scan_again_force = False
         self._scan_generator = None
+        self._scan_phase = "discover"
+        self._scan_discovery_folders = list(self.folders)
+        self._scan_discovery_gen = None
+        self._scan_discovered_batches = []
+        self._scan_total = 0
+        self._scan_done = 0
+        self._scan_current_file = ""
         self._scan_token += 1
         self._scan_pending_token = 0
         self._scan_folders = list(self.folders)
         self._scan_context = self._scan_context_snapshot()
+        self._scan_context_fp = self._context_fingerprint()
         try:
             self._heal_missing_imports()
         except Exception as exc:
             log.warning("SCAN_WATCH självläkning: %s", exc)
         self.scan_started.emit()
+        self.scan_progress.emit(0, 0, "")
         epoch = self._scan_epoch
         QTimer.singleShot(
             0, lambda: self._drive_scan(None, epoch=epoch)
         )
+
+    def _on_file_progress(self, filename: str) -> None:
+        if not self._scan_running:
+            return
+        self._scan_done = min(
+            self._scan_done + 1,
+            max(self._scan_total, self._scan_done + 1),
+        )
+        self._scan_current_file = str(filename or "")
+        self.scan_progress.emit(
+            self._scan_done, self._scan_total, self._scan_current_file
+        )
+
+    def _iter_discover_folder(self, entry: dict):
+        """Samla kandidatfiler i en mapp utan att blockera händelseloopen."""
+        folder = Path(str(entry.get("path", "")))
+        if not folder.is_dir():
+            key = str(folder)
+            if key not in self._warned_missing:
+                self._warned_missing.add(key)
+                log.warning(
+                    "SCAN_WATCH: bevakad mapp saknas — %s "
+                    "(leverantör %s) hoppas över",
+                    folder, entry.get("supplier", "?"),
+                )
+            return
+        found: list[Path] = []
+        last_pause = time.monotonic()
+        for count, cand in enumerate(iter_invoice_files(folder), start=1):
+            found.append(cand)
+            if count % 40 == 0 or time.monotonic() - last_pause > 0.02:
+                last_pause = time.monotonic()
+                yield {"kind": "pause"}
+        self._scan_discovered_batches.append((entry, found))
 
     def _scan_context_snapshot(self) -> dict[str, Any]:
         """Kopior som arbetstråden får läsa — aldrig appens live-objekt."""
@@ -1542,7 +1709,21 @@ class WatchManager(QObject):
         self._scan_again = False
         self._scan_again_force = False
         self._scan_pending_token = 0
+        self._scan_phase = "idle"
+        if self._scan_generator is not None:
+            try:
+                self._scan_generator.close()
+            except Exception:
+                pass
+        if self._scan_discovery_gen is not None:
+            try:
+                self._scan_discovery_gen.close()
+            except Exception:
+                pass
         self._scan_generator = None
+        self._scan_discovery_gen = None
+        self._scan_discovery_folders = []
+        self._scan_discovered_batches = []
         self._scan_folders = []
         self._scan_epoch += 1
 
@@ -1558,14 +1739,55 @@ class WatchManager(QObject):
         if epoch is not None and epoch != self._scan_epoch:
             return
         deadline = time.monotonic() + SCAN_SLICE_SECONDS
+        if self._scan_phase == "discover":
+            while True:
+                if self._scan_discovery_gen is None:
+                    if not self._scan_discovery_folders:
+                        self._scan_total = sum(
+                            len(files)
+                            for _e, files in self._scan_discovered_batches
+                        )
+                        self._scan_done = 0
+                        self._scan_phase = "scan"
+                        self.scan_progress.emit(0, self._scan_total, "")
+                        break
+                    entry = self._scan_discovery_folders.pop(0)
+                    self._scan_discovery_gen = self._iter_discover_folder(
+                        entry
+                    )
+                try:
+                    req = next(self._scan_discovery_gen)
+                except StopIteration:
+                    self._scan_discovery_gen = None
+                    continue
+                except Exception:
+                    log.error(
+                        "SCAN_WATCH: kataloglistning misslyckades",
+                        exc_info=True,
+                    )
+                    self._scan_discovery_gen = None
+                    continue
+                if (
+                    isinstance(req, dict)
+                    and req.get("kind") == "pause"
+                    and time.monotonic() >= deadline
+                ):
+                    cur_epoch = self._scan_epoch
+                    QTimer.singleShot(
+                        0, lambda: self._drive_scan(None, epoch=cur_epoch)
+                    )
+                    return
         while True:
             if self._scan_generator is None:
-                if not self._scan_folders:
+                if not self._scan_discovered_batches:
                     self._finish_scan()
                     return
-                entry = self._scan_folders.pop(0)
+                entry, files = self._scan_discovered_batches.pop(0)
                 self._scan_generator = self._iter_scan_folder(
-                    entry, force=self._scan_force
+                    entry,
+                    force=self._scan_force,
+                    files=files,
+                    progress_cb=self._on_file_progress,
                 )
                 send_value, throw_exc = None, None
             try:
@@ -1612,9 +1834,11 @@ class WatchManager(QObject):
         self._scan_pending_token = token
         context = self._scan_context or {}
         entry = request.get("entry") or {}
+        req_path = Path(str(request.get("path", "")))
+        self._scan_current_file = req_path.name
         task = _AnalyzeFileTask(
             token,
-            Path(str(request.get("path", ""))),
+            req_path,
             str(entry.get("supplier", "") or ""),
             list(context.get("suppliers") or []),
             dict(context.get("templates") or {}),
@@ -1624,7 +1848,7 @@ class WatchManager(QObject):
         )
         self._arm_scan_watchdog()
         try:
-            QThreadPool.globalInstance().start(task)
+            self._scan_pool.start(task)
         except Exception as exc:
             log.warning("SCAN_WATCH: kunde inte starta tolkning: %s", exc)
             self._scan_pending_token = 0
@@ -1656,24 +1880,32 @@ class WatchManager(QObject):
             self._watchdog.start(ANALYSIS_TIMEOUT_MS)
 
     def _on_scan_watchdog(self) -> None:
-        """En tolkning har hängt — avbryt hellre än att låsa appen."""
+        """En tolkning har hängt — hoppa över bara den filen så resten av
+        bevakningen fortsätter utan att låsa appen."""
         if not self._scan_running:
             return
+        req_file = self._scan_current_file or "?"
         log.error(
-            "SCAN_WATCH: en fil tog mer än %d sekunder att tolka — "
-            "skanningen avbryts och filen prövas nästa gång",
-            ANALYSIS_TIMEOUT_MS // 1000,
+            "SCAN_WATCH: %s tog mer än %d sekunder att tolka — "
+            "hoppar vidare till nästa fil och prövar denna igen senare",
+            req_file, ANALYSIS_TIMEOUT_MS // 1000,
         )
         self._scan_pending_token = 0
         self._scan_token += 1
-        self._scan_stats["errors"] = self._scan_stats.get("errors", 0) + 1
+        timeout_s = ANALYSIS_TIMEOUT_MS // 1000
+        epoch = self._scan_epoch
         if self._scan_generator is not None:
-            try:
-                self._scan_generator.close()
-            except Exception:
-                pass
-        self._scan_generator = None
-        self._scan_folders = []
+            QTimer.singleShot(
+                0,
+                lambda: self._drive_scan(
+                    None,
+                    TimeoutError(
+                        f"tolkningen tog mer än {timeout_s} sekunder"
+                    ),
+                    epoch=epoch,
+                ),
+            )
+            return
         self._finish_scan()
 
     def _finish_scan(self) -> None:
@@ -1681,7 +1913,11 @@ class WatchManager(QObject):
         again = bool(self._scan_again)
         again_force = bool(self._scan_again_force)
         self._scan_running = False
+        self._scan_phase = "idle"
         self._scan_generator = None
+        self._scan_discovery_gen = None
+        self._scan_discovery_folders = []
+        self._scan_discovered_batches = []
         self._scan_folders = []
         self._scan_again = False
         self._scan_again_force = False
@@ -1894,17 +2130,25 @@ class WatchManager(QObject):
             for digest, info in list(
                 self._config.get("processed", {}).items()
             ):
-                if info.get("result") != "imported":
+                res = info.get("result")
+                if res not in ("imported", "duplicate-invoice"):
+                    continue
+                if res == "duplicate-invoice" and info.get("verified_duplicate"):
                     continue
                 fpath = str(info.get("path", "") or "")
-                if not fpath or not Path(fpath).is_file():
+                if not fpath:
                     continue
                 if _norm_path_key(fpath) in known_paths:
                     continue
                 nr = str(
                     info.get("invoice_number", "") or ""
                 ).strip().lower()
-                if nr and (_supplier_of(fpath), nr) in known_numbers:
+                sup_known = str(
+                    info.get("supplier", "") or _supplier_of(fpath)
+                ).strip().lower()
+                if nr and (sup_known, nr) in known_numbers:
+                    continue
+                if not Path(fpath).is_file():
                     continue
                 pending.append((digest, info, fpath, nr))
             known_hashes: set[str] = set()
@@ -1959,7 +2203,10 @@ class WatchManager(QObject):
         return False
 
     def reprocess_parked(
-        self, entry: dict | None = None, background: bool = False,
+        self,
+        entry: dict | None = None,
+        background: bool = False,
+        only_stale_context: bool = False,
     ) -> int:
         """Läser OM parkerade tolkningsfiler med dagens mallar.
 
@@ -1974,21 +2221,34 @@ class WatchManager(QObject):
         ``background=True`` lägger skanningen i bakgrunden
         (``start_scan``) i stället för att läsa färdigt i
         anropande tråd — GUI:t får aldrig vänta på tolkningen.
-        Bakgrundsläget går genom alla bevakade mappar, eftersom det
-        är samma bakgrundsskanning som bevakningen använder.
+        ``only_stale_context=True`` används av knappen Skanna nu /
+        försök igen för att pröva om tidigare blockerade filer utan
+        att om-OCR:a oförändrade ``no-template``-filer när inget ändrats.
         """
         folder_key = ""
         if entry is not None:
             folder_key = _norm_path_key(str(entry.get("path", "")))
+        current_fp = (
+            self._context_fingerprint() if only_stale_context else ""
+        )
         targets: list[dict] = []
         for parked in list(self._config.get("parked", [])):
             reason = str(parked.get("reason", "") or "")
-            if not (
+            is_retryable = (
                 reason == "no-template"
                 or reason == "uncertain-supplier"
                 or reason == "ocr-warning"
                 or reason == "payment-details"
                 or reason.startswith("missing")
+                or reason.startswith("possible-duplicate")
+                or (reason == "review" and self.auto_create)
+            )
+            if not is_retryable:
+                continue
+            if (
+                only_stale_context
+                and reason == "no-template"
+                and parked.get("context_fp") == current_fp
             ):
                 continue
             if folder_key:
@@ -2000,11 +2260,40 @@ class WatchManager(QObject):
             targets.append(parked)
         for parked in targets:
             self._config["parked"].remove(parked)
-        if targets:
+
+        # Rensa ev. gamla overifierade dubblettmarkeringar från äldre
+        # versioner så att de får en säker omprövning vid manuellt omförsök.
+        cleared_dups = 0
+        known_attachments = {
+            _norm_path_key(str(inv.get("attachment", "") or ""))
+            for inv in self._invoices()
+            if inv.get("attachment")
+        }
+        for digest, info in list(self._config.get("processed", {}).items()):
+            if info.get("result") != "duplicate-invoice":
+                continue
+            if info.get("verified_duplicate"):
+                continue
+            fpath = str(info.get("path", "") or "")
+            if folder_key:
+                pkey = _norm_path_key(fpath)
+                if pkey != folder_key and not pkey.startswith(
+                    folder_key + "/"
+                ):
+                    continue
+            if _norm_path_key(fpath) in known_attachments:
+                continue
+            if fpath and Path(fpath).is_file():
+                self._config["processed"].pop(digest, None)
+                self._processed_path_keys.discard(_norm_path_key(fpath))
+                cleared_dups += 1
+
+        if targets or cleared_dups:
             self._save()
             log.info(
-                "SCAN_WATCH: läser om %d parkerade filer med "
-                "dagens mallar%s", len(targets),
+                "SCAN_WATCH: läser om %d parkerade filer (%d tid. "
+                "overifierade dubbletter)%s",
+                len(targets), cleared_dups,
                 " (i bakgrunden)" if background else "",
             )
         if background:
@@ -2015,7 +2304,7 @@ class WatchManager(QObject):
             self.scan_folder(entry)
         else:
             self.scan_all()
-        return len(targets)
+        return len(targets) + cleared_dups
 
     def _schedule_stability_check(self) -> None:
         if not self._settle_timer.isActive():
@@ -2093,7 +2382,13 @@ class WatchManager(QObject):
         except StopIteration:
             return
 
-    def _iter_scan_folder(self, entry: dict, force: bool = False):
+    def _iter_scan_folder(
+        self,
+        entry: dict,
+        force: bool = False,
+        files: list[Path] | None = None,
+        progress_cb: Callable[[str], None] | None = None,
+    ):
         """Stegvis skanning av en mapp.
 
         Yieldar ``{"kind": "analyze", ...}`` när en fil behöver tolkas
@@ -2115,157 +2410,165 @@ class WatchManager(QObject):
             return
         seen = 0
         last_pause = time.monotonic()
-        for path in iter_invoice_files(folder):
+        file_iter = files if files is not None else iter_invoice_files(folder)
+        for path in file_iter:
             seen += 1
             if seen % 20 == 0 or time.monotonic() - last_pause > 0.02:
                 last_pause = time.monotonic()
                 yield {"kind": "pause"}
             try:
-                before = path.stat()
-            except FileNotFoundError:
-                # En fil kan försvinna mellan os.walk och stat.
-                continue
-            except OSError as exc:
-                self._record_scan_error(str(path), "hasha", "", exc)
-                continue
-            signature = (
-                int(before.st_size),
-                int(before.st_mtime_ns),
-                int(before.st_ctime_ns),
-            )
-            path_key = _norm_path_key(str(path))
-            # Redan hashad version → ingen väntan på skrivslut och ingen
-            # omhashning. Det här är vad som gör pollningen billig även
-            # med tusentals redan inlästa original.
-            digest = self._cached_digest(path, signature)
-            # Redan registrerade original behöver ingen väntan på
-            # skrivslut — de ska bara hashas (ur cachen när de är
-            # oförändrade) och räknas som redan bearbetade.
-            if not self._file_is_stable(
-                path,
-                signature,
-                known=(
-                    digest is not None
-                    or path_key in self._processed_path_keys
-                ),
-            ):
-                continue
-            if digest is None:
-                try:
-                    digest = file_hash(path)
-                    after = path.stat()
-                except FileNotFoundError:
-                    self._stable_signatures.pop(path_key, None)
-                    continue
-                except Exception as exc:
-                    self._record_scan_error(str(path), "hasha", "", exc)
-                    continue
-                after_signature = (
-                    int(after.st_size),
-                    int(after.st_mtime_ns),
-                    int(after.st_ctime_ns),
-                )
-                if after_signature != signature:
-                    # Filen började ändras medan hashen lästes. Kasta
-                    # resultatet och starta om stabilitetsfönstret.
-                    self._stable_signatures.pop(path_key, None)
-                    self._stability_samples[path_key] = (
-                        after_signature, time.monotonic()
-                    )
-                    self._scan_stats["settling"] = (
-                        self._scan_stats.get("settling", 0) + 1
-                    )
-                    self._schedule_stability_check()
-                    continue
-                self._remember_digest(path, signature, digest)
+                yield from self._iter_scan_single_file(entry, path, force)
+            finally:
+                if progress_cb is not None:
+                    progress_cb(path.name)
 
-            if digest in self._config["processed"]:
-                if force:
-                    info = (
-                        self._config["processed"].get(digest) or {}
-                    )
-                    inv = self._find_invoice_for_file(
-                        entry, path, digest, info
-                    )
-                    if inv is None:
-                        log.info(
-                            "SCAN_WATCH kontroll: %s är bearbetad men "
-                            "fakturan saknas i registret — läses in "
-                            "på nytt",
-                            path.name,
-                        )
-                        self.unprocess(digest)
-                    else:
-                        try:
-                            text, method, parsed = yield {
-                                "kind": "analyze",
-                                "path": str(path),
-                                "entry": entry,
-                                "stage": "kontrolläsa",
-                            }
-                        except Exception as exc:
-                            self._record_scan_error(
-                                str(path), "kontrolläsa", digest, exc
-                            )
-                            continue
-                        self._control_check_parsed(inv, path, digest, parsed)
-                        continue
-                else:
-                    self._reported_file_errors.pop(str(path), None)
-                    self.file_recovered.emit(str(path))
-                    self._scan_stats["already"] += 1
-                    continue
-            parked_entry = next(
-                (
-                    p for p in self._config.get("parked", [])
-                    if p.get("hash") == digest
-                ),
-                None,
-            )
-            if parked_entry is not None:
-                if not self._should_retry_parked(parked_entry, digest):
-                    # Aldrig tyst: skanningen räknar filen bland
-                    # "väntar i parkering" och sammanfattningen
-                    # säger varför (orsaken syns också i
-                    # felsökningspaketet per fil).
-                    self._scan_stats["waiting"] = (
-                        self._scan_stats.get("waiting", 0) + 1
-                    )
-                    raw_reason = str(
-                        parked_entry.get("reason", "") or ""
-                    )
-                    bucket = (
-                        "missing"
-                        if raw_reason.startswith("missing")
-                        else (raw_reason or "?")
-                    )
-                    self._waiting_reasons[bucket] = (
-                        self._waiting_reasons.get(bucket, 0) + 1
-                    )
-                    continue
-                log.info(
-                    "SCAN_WATCH: %s var parkerad (%s) — prövar "
-                    "igen, appen kan ha lärt sig formatet",
-                    path.name, parked_entry.get("reason", ""),
-                )
-                self._config["parked"].remove(parked_entry)
-                self._save()
+    def _iter_scan_single_file(self, entry: dict, path: Path, force: bool):
+        try:
+            before = path.stat()
+        except FileNotFoundError:
+            # En fil kan försvinna mellan os.walk och stat.
+            return
+        except OSError as exc:
+            self._record_scan_error(str(path), "hasha", "", exc)
+            return
+        signature = (
+            int(before.st_size),
+            int(before.st_mtime_ns),
+            int(before.st_ctime_ns),
+        )
+        path_key = _norm_path_key(str(path))
+        # Redan hashad version → ingen väntan på skrivslut och ingen
+        # omhashning. Det här är vad som gör pollningen billig även
+        # med tusentals redan inlästa original.
+        digest = self._cached_digest(path, signature)
+        # Redan registrerade original behöver ingen väntan på
+        # skrivslut — de ska bara hashas (ur cachen när de är
+        # oförändrade) och räknas som redan bearbetade.
+        if not self._file_is_stable(
+            path,
+            signature,
+            known=(
+                digest is not None
+                or path_key in self._processed_path_keys
+            ),
+        ):
+            return
+        if digest is None:
             try:
-                text, method, parsed = yield {
-                    "kind": "analyze",
-                    "path": str(path),
-                    "entry": entry,
-                    "stage": "läsa/tolka",
-                }
+                digest = file_hash(path)
+                after = path.stat()
+            except FileNotFoundError:
+                self._stable_signatures.pop(path_key, None)
+                return
             except Exception as exc:
-                # Ett trasigt/skyddat original får aldrig stoppa resten av
-                # mappen eller markeras som bearbetat. Nästa skanning prövar
-                # filen igen; övriga original fortsätter normalt.
-                self._record_scan_error(str(path), "läsa/tolka", digest, exc)
-                continue
-            self._process_parsed(entry, path, digest, text, method, parsed)
-            self._reported_file_errors.pop(str(path), None)
-            self.file_recovered.emit(str(path))
+                self._record_scan_error(str(path), "hasha", "", exc)
+                return
+            after_signature = (
+                int(after.st_size),
+                int(after.st_mtime_ns),
+                int(after.st_ctime_ns),
+            )
+            if after_signature != signature:
+                # Filen började ändras medan hashen lästes. Kasta
+                # resultatet och starta om stabilitetsfönstret.
+                self._stable_signatures.pop(path_key, None)
+                self._stability_samples[path_key] = (
+                    after_signature, time.monotonic()
+                )
+                self._scan_stats["settling"] = (
+                    self._scan_stats.get("settling", 0) + 1
+                )
+                self._schedule_stability_check()
+                return
+            self._remember_digest(path, signature, digest)
+
+        if digest in self._config["processed"]:
+            if force:
+                info = (
+                    self._config["processed"].get(digest) or {}
+                )
+                inv = self._find_invoice_for_file(
+                    entry, path, digest, info
+                )
+                if inv is None:
+                    log.info(
+                        "SCAN_WATCH kontroll: %s är bearbetad men "
+                        "fakturan saknas i registret — läses in "
+                        "på nytt",
+                        path.name,
+                    )
+                    self.unprocess(digest)
+                else:
+                    try:
+                        text, method, parsed = yield {
+                            "kind": "analyze",
+                            "path": str(path),
+                            "entry": entry,
+                            "stage": "kontrolläsa",
+                        }
+                    except Exception as exc:
+                        self._record_scan_error(
+                            str(path), "kontrolläsa", digest, exc
+                        )
+                        return
+                    self._control_check_parsed(inv, path, digest, parsed)
+                    return
+            else:
+                self._reported_file_errors.pop(str(path), None)
+                self.file_recovered.emit(str(path))
+                self._scan_stats["already"] += 1
+                return
+        parked_entry = next(
+            (
+                p for p in self._config.get("parked", [])
+                if p.get("hash") == digest
+            ),
+            None,
+        )
+        if parked_entry is not None:
+            if not self._should_retry_parked(parked_entry, digest):
+                # Aldrig tyst: skanningen räknar filen bland
+                # "väntar i parkering" och sammanfattningen
+                # säger varför (orsaken syns också i
+                # felsökningspaketet per fil).
+                self._scan_stats["waiting"] = (
+                    self._scan_stats.get("waiting", 0) + 1
+                )
+                raw_reason = str(
+                    parked_entry.get("reason", "") or ""
+                )
+                bucket = (
+                    "missing"
+                    if raw_reason.startswith("missing")
+                    else (raw_reason or "?")
+                )
+                self._waiting_reasons[bucket] = (
+                    self._waiting_reasons.get(bucket, 0) + 1
+                )
+                return
+            log.info(
+                "SCAN_WATCH: %s var parkerad (%s) — prövar "
+                "igen, appen kan ha lärt sig formatet",
+                path.name, parked_entry.get("reason", ""),
+            )
+            self._config["parked"].remove(parked_entry)
+            self._save()
+        try:
+            text, method, parsed = yield {
+                "kind": "analyze",
+                "path": str(path),
+                "entry": entry,
+                "stage": "läsa/tolka",
+            }
+        except Exception as exc:
+            # Ett trasigt/skyddat original får aldrig stoppa resten av
+            # mappen eller markeras som bearbetat. Nästa skanning prövar
+            # filen igen; övriga original fortsätter normalt.
+            self._record_scan_error(str(path), "läsa/tolka", digest, exc)
+            return
+        self._process_parsed(entry, path, digest, text, method, parsed)
+        self._reported_file_errors.pop(str(path), None)
+        self.file_recovered.emit(str(path))
 
     def _parse_file(
         self, si: Any, entry: dict, path: Path
@@ -2458,13 +2761,35 @@ class WatchManager(QObject):
             "ts": now,
         }
 
-        # Dubblett mot registret → importera inte. Om originalet redan
-        # är exakt länkat till registerposten kan den gamla placeringen
-        # årsarkiveras säkert och attachment-sökvägen uppdateras.
-        if invoice_exists(
-            self._invoices(),
-            parsed.get("supplier", ""),
-            parsed.get("invoice_number", ""),
+        untaught = not parsed.get("template")
+        uncertain = bool(parsed.get("match_uncertain"))
+        ocr_warning = bool(parsed.get("ocr_warning"))
+        payment_warning = bool(parsed.get("payment_details_warning"))
+        confident_parse = not (
+            untaught
+            or uncertain
+            or ocr_warning
+            or payment_warning
+            or parsed.get("missing")
+        )
+        source_key = _norm_path_key(str(path))
+        invoices = self._invoices()
+        exact_attachment = any(
+            _norm_path_key(str(inv.get("attachment", "") or "")) == source_key
+            for inv in invoices
+        )
+
+        # Dubblett mot registret → importera inte. Men en osäker,
+        # olärd eller ofullständig tolkning får aldrig tyst slängas
+        # bort som "dubblett" bara för att en gissning råkar krocka
+        # med ett befintligt fakturanummer.
+        if exact_attachment or (
+            confident_parse
+            and invoice_exists(
+                invoices,
+                parsed.get("supplier", ""),
+                parsed.get("invoice_number", ""),
+            )
         ):
             final_path = self._archive_existing_registered_original(
                 path, parsed
@@ -2474,6 +2799,9 @@ class WatchManager(QObject):
                 "path": final_path,
                 "file": Path(final_path).name,
                 "result": "duplicate-invoice",
+                "verified_duplicate": True,
+                "supplier": str(parsed.get("supplier", "") or ""),
+                "invoice_number": str(parsed.get("invoice_number", "") or ""),
             }
             self._processed_path_keys.add(
                 _norm_path_key(str(final_path))
@@ -2503,7 +2831,7 @@ class WatchManager(QObject):
                         find_possible_duplicate,
                     )
                 possible_dup = find_possible_duplicate(
-                    self._invoices(), parsed
+                    invoices, parsed
                 )
             except Exception as exc:
                 log.debug("possible-duplicate check: %s", exc)
@@ -2514,10 +2842,6 @@ class WatchManager(QObject):
         # Osäker leverantörs-/mallmatchning parkeras alltid med
         # sin egen orsak så att Import-vyn kan FRÅGA användaren —
         # appen gissar aldrig och registrerar aldrig automatiskt.
-        untaught = not parsed.get("template")
-        uncertain = bool(parsed.get("match_uncertain"))
-        ocr_warning = bool(parsed.get("ocr_warning"))
-        payment_warning = bool(parsed.get("payment_details_warning"))
         if (
             uncertain or ocr_warning or payment_warning or parsed.get("missing")
             or possible_dup or not self.auto_create or untaught
@@ -2549,6 +2873,7 @@ class WatchManager(QObject):
                 # sista sidan — spara hela texten (3-sidorsbudget)
                 "text": (text or "")[:30_000],
                 "parsed": parsed, "method": method,
+                "context_fp": getattr(self, "_scan_context_fp", ""),
             }
             self._config["parked"].append(parked)
             self._save()

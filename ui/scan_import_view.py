@@ -31,6 +31,7 @@ import datetime
 import html
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -40,9 +41,11 @@ from PySide6.QtWidgets import (
     QGroupBox, QTextEdit, QMessageBox, QFileDialog, QFrame,
     QLineEdit, QCheckBox, QApplication, QInputDialog,
     QDialog, QListWidget, QPlainTextEdit, QComboBox, QMenu,
-    QGridLayout, QScrollArea, QBoxLayout,
+    QGridLayout, QScrollArea, QBoxLayout, QProgressBar,
 )
-from PySide6.QtCore import Qt, QTimer, QUrl, Signal, QRectF, QSizeF, QSize
+from PySide6.QtCore import (
+    Qt, QTimer, QUrl, Signal, QRectF, QSizeF, QSize, QEventLoop,
+)
 from PySide6.QtGui import (
     QColor, QDesktopServices, QFont, QIcon, QImage, QPixmap,
     QPainter, QPen,
@@ -1619,6 +1622,9 @@ class TemplatesManagerDialog(QDialog):
         self._refresh_list()
 
 
+_PAGE_COUNT_CACHE: dict[tuple[str, int, int], int] = {}
+
+
 class ScanImportView(QWidget):
     """
     Import-vy för skannade fakturor.
@@ -1627,6 +1633,8 @@ class ScanImportView(QWidget):
     aldrig något över nätet. En osäker matchning registreras först
     efter användarens uttryckliga val och när obligatoriska fält finns.
     """
+
+    _file_scan_step = Signal()
 
     def __init__(
         self, app: Any = None, parent: QWidget | None = None,
@@ -1643,6 +1651,9 @@ class ScanImportView(QWidget):
         self._templates_cache: dict | None = None
         self._learning_cache: dict | None = None
         self._automatic_registering = False
+        self._scanning_files = False
+        self._scan_cancel_requested = False
+        self._watch_list_signature: tuple | None = None
         self._watch = None
         self._build_ui()
         self._init_watch()
@@ -1761,14 +1772,26 @@ class ScanImportView(QWidget):
         wr2.addWidget(self._btn_control_scan)
         wr2.addStretch(1)
         bw.addLayout(wr2)
+        self._watch_progress = QProgressBar()
+        self._watch_progress.setTextVisible(True)
+        self._watch_progress.setVisible(False)
+        bw.addWidget(self._watch_progress)
         box_watch.setLayout(bw)
         root.addWidget(box_watch)
 
         self._lbl_status = QLabel(tr("scan.ready"))
         self._lbl_status.setStyleSheet("color:#8b949e;background:transparent;")
         row2.addWidget(btn_scan)
+        self._btn_cancel_scan = QPushButton(tr("scan.cancel"))
+        self._btn_cancel_scan.setVisible(False)
+        self._btn_cancel_scan.clicked.connect(self._cancel_scan_files)
+        row2.addWidget(self._btn_cancel_scan)
         row2.addWidget(self._lbl_status, stretch=1)
         bf.addLayout(row2)
+        self._scan_progress = QProgressBar()
+        self._scan_progress.setTextVisible(True)
+        self._scan_progress.setVisible(False)
+        bf.addWidget(self._scan_progress)
         root.addWidget(box_files)
 
         # ── 2. Klistra in text (manuell fallback) ─────────────────────
@@ -1918,6 +1941,8 @@ class ScanImportView(QWidget):
         if not self._paths:
             self._lbl_files.setText(tr("scan.no_files"))
         self._btn_scan.setText(tr("scan.scan"))
+        if hasattr(self, "_btn_cancel_scan"):
+            self._btn_cancel_scan.setText(tr("scan.cancel"))
         self._btn_parse.setText(tr("scan.parse"))
         self._chk_auto.setText(tr("scan.auto_open"))
         self._btn_create.setText(tr("scan.create"))
@@ -1983,6 +2008,10 @@ class ScanImportView(QWidget):
             self._watch.scan_started.connect(
                 self._on_watch_scan_started
             )
+            if hasattr(self._watch, "scan_progress"):
+                self._watch.scan_progress.connect(
+                    self._on_watch_scan_progress
+                )
             self._watch.scan_finished.connect(
                 self._on_watch_scan_finished
             )
@@ -1996,16 +2025,21 @@ class ScanImportView(QWidget):
 
     def _on_watch_parked(self, info: dict) -> None:
         """Ny parkerad fil från bevakningen — samla till en
-        gemensam informationsdialog (startar om nedräkningen
+        gemensam informationsdialog (väntar tills skanningen är klar
         så en skanningsrunda ger exakt en dialog)."""
         self._refresh_watch_ui()
         # Import-raden ska finnas direkt, inte först när den samlade
-        # informationsdialogen visas några sekunder senare.
+        # informationsdialogen visas senare.
         self._add_parked_rows_to_table([dict(info or {})])
         if not hasattr(self, "_parked_notify"):
             return
         self._parked_notify.append(dict(info or {}))
-        self._parked_timer.start(2500)
+        if self._watch is not None and getattr(
+            self._watch, "is_scanning", False
+        ):
+            self._parked_timer.stop()
+        else:
+            self._parked_timer.start(2500)
 
     def _on_watch_file_error(self, info: dict) -> None:
         """Visar varje bevakat originalfel som ej registrerbar Import-rad."""
@@ -2165,9 +2199,12 @@ class ScanImportView(QWidget):
             if (
                 row.get("match_uncertain") or row.get("ocr_warning")
                 or row.get("payment_details_warning")
+                or row.get("_possible_duplicate")
+                or row.get("missing")
             ):
-                # Behåll osäkra/OCR-degraderade/betalningsavvikande
-                # original i parkeringen tills de faktiskt är granskade.
+                # Behåll osäkra/ofullständiga/OCR-degraderade/betalnings-
+                # avvikande original i parkeringen tills de faktiskt
+                # kompletterats eller granskats.
                 continue
             if any(current is row for current in self._rows):
                 self._unpark_row(row)
@@ -2284,13 +2321,11 @@ class ScanImportView(QWidget):
         if not hasattr(self, "_lst_watch"):
             return
         watch = self._watch
-        selected_row = self._lst_watch.currentRow()
-        scroll_position = self._lst_watch.verticalScrollBar().value()
-        self._lst_watch.clear()
-        if not watch or not watch.folders:
-            self._lst_watch.addItem(tr("watch.no_folders"))
+        entries: list[tuple[str, str]] = []
+        if not watch or not getattr(watch, "folders", None):
+            entries.append((tr("watch.no_folders"), ""))
         else:
-            statuses = watch.folder_watch_statuses
+            statuses = getattr(watch, "folder_watch_statuses", []) or []
             for index, f in enumerate(watch.folders):
                 sup = f.get("supplier") or tr("watch.folder_no_supplier")
                 path = str(f.get("path", ""))
@@ -2318,13 +2353,25 @@ class ScanImportView(QWidget):
                         watched=status.get("watched", 0),
                         total=status.get("directories", 0),
                     )
+                entries.append((text, tooltip))
+        signature = tuple(entries)
+        if signature != getattr(self, "_watch_list_signature", None):
+            selected_row = self._lst_watch.currentRow()
+            scroll_position = self._lst_watch.verticalScrollBar().value()
+            self._lst_watch.clear()
+            for text, tooltip in entries:
                 self._lst_watch.addItem(text)
-                item = self._lst_watch.item(self._lst_watch.count() - 1)
-                item.setToolTip(tooltip)
-        n = len(watch.parked) if watch else 0
-        stats = watch.last_scan_stats if watch else {}
+                if tooltip:
+                    item = self._lst_watch.item(self._lst_watch.count() - 1)
+                    item.setToolTip(tooltip)
+            self._watch_list_signature = signature
+            if 0 <= selected_row < self._lst_watch.count():
+                self._lst_watch.setCurrentRow(selected_row)
+            self._lst_watch.verticalScrollBar().setValue(scroll_position)
+        n = len(getattr(watch, "parked", []) or []) if watch else 0
+        stats = getattr(watch, "last_scan_stats", {}) or {} if watch else {}
         settling = stats.get("settling", 0)
-        errors = watch.active_error_count if watch else 0
+        errors = getattr(watch, "active_error_count", 0) if watch else 0
         labels = []
         if watch and getattr(watch, "is_scanning", False):
             labels.append(tr("watch.scanning_short"))
@@ -2334,17 +2381,15 @@ class ScanImportView(QWidget):
             labels.append(tr("watch.settling", n=settling))
         if errors:
             labels.append(tr("watch.scan_errors_status", n=errors))
-        if watch and watch.last_scan_at:
+        last_scan_at = getattr(watch, "last_scan_at", "") if watch else ""
+        if last_scan_at:
             labels.append(tr(
-                "watch.last_scan", time=watch.last_scan_at.split()[-1]
+                "watch.last_scan", time=str(last_scan_at).split()[-1]
             ))
-        elif watch and watch.folders:
+        elif watch and getattr(watch, "folders", None):
             labels.append(tr("watch.waiting_first_scan"))
         self._lbl_watch_parked.setText("  ·  ".join(labels))
         self._btn_review_parked.setEnabled(bool(n))
-        if 0 <= selected_row < self._lst_watch.count():
-            self._lst_watch.setCurrentRow(selected_row)
-        self._lst_watch.verticalScrollBar().setValue(scroll_position)
 
     def _add_watch_folder(self) -> None:
         if not self._watch:
@@ -2375,8 +2420,9 @@ class ScanImportView(QWidget):
 
         Skanningen körs i bakgrunden (tolkningen sker i en arbetstråd)
         så att fönstret aldrig låser sig medan stora mappar gås igenom.
-        Resultatet visas i statusraden när den är klar. Detaljer per fil
-        hamnar i loggen (SCAN_WATCH)."""
+        Om tidigare filer väntar/parkerats eller misslyckats prövas de
+        samtidigt om. Resultatet visas i statusraden när den är klar.
+        """
         if not self._watch:
             return
         if not self._watch.folders:
@@ -2384,7 +2430,18 @@ class ScanImportView(QWidget):
             return
         self._manual_scan_kind = "scan"
         self._lbl_status.setText(tr("watch.scanning"))
-        self._watch.start_scan()
+        if (
+            not getattr(self._watch, "is_scanning", False)
+            and callable(getattr(self._watch, "reprocess_parked", None))
+        ):
+            try:
+                self._watch.reprocess_parked(
+                    background=True, only_stale_context=True
+                )
+            except TypeError:
+                self._watch.start_scan()
+        else:
+            self._watch.start_scan()
         self._refresh_watch_ui()
 
     def _control_scan_now(self) -> None:
@@ -2414,7 +2471,36 @@ class ScanImportView(QWidget):
         sekund ska inte skriva över användarens senaste besked. Att en
         skanning pågår syns i stället i bevakningsraden.
         """
+        if hasattr(self, "_watch_progress"):
+            self._watch_progress.setRange(0, 0)
+            self._watch_progress.setFormat(tr("watch.progress_discovering"))
+            self._watch_progress.setVisible(True)
         self._refresh_watch_ui()
+
+    def _on_watch_scan_progress(
+        self, done: int, total: int, filename: str = ""
+    ) -> None:
+        """Uppdaterar progressbaren för bevakad bakgrundsskanning."""
+        if not hasattr(self, "_watch_progress"):
+            return
+        self._watch_progress.setVisible(True)
+        if total <= 0:
+            self._watch_progress.setRange(0, 0)
+            self._watch_progress.setFormat(tr("watch.progress_discovering"))
+            return
+        done_clamped = max(0, min(int(done), int(total)))
+        self._watch_progress.setRange(0, int(total))
+        self._watch_progress.setValue(done_clamped)
+        pct = int(round((done_clamped * 100.0) / total))
+        self._watch_progress.setFormat(
+            tr(
+                "watch.progress_scanning",
+                done=done_clamped,
+                total=int(total),
+                pct=pct,
+                file=str(filename or ""),
+            )
+        )
 
     def _on_watch_scan_finished(self, stats: dict | None = None) -> None:
         """Bakgrundsskanningen är klar.
@@ -2425,15 +2511,22 @@ class ScanImportView(QWidget):
         """
         if self._watch is None:
             return
-        stats = stats or self._watch.last_scan_stats
+        if hasattr(self, "_watch_progress"):
+            self._watch_progress.setVisible(False)
+        stats = stats or getattr(self._watch, "last_scan_stats", {}) or {}
         stats = dict(stats)
         manual_kind = getattr(self, "_manual_scan_kind", None)
         self._manual_scan_kind = None
         self._refresh_watch_ui()
+        if getattr(self, "_parked_notify", None) and hasattr(
+            self, "_parked_timer"
+        ):
+            self._parked_timer.start(200)
         if not manual_kind:
             return
         errors = max(
-            stats.get("errors", 0), self._watch.active_error_count
+            stats.get("errors", 0),
+            getattr(self._watch, "active_error_count", 0),
         )
         if manual_kind == "control":
             self._lbl_status.setText(
@@ -2459,6 +2552,7 @@ class ScanImportView(QWidget):
                     imported=stats.get("imported", 0),
                     duplicate=stats.get("duplicate", 0),
                     parked=stats.get("parked", 0),
+                    waiting=stats.get("waiting", 0),
                     already=stats.get("already", 0),
                     settling=stats.get("settling", 0),
                     errors=errors,
@@ -3532,6 +3626,7 @@ class ScanImportView(QWidget):
             "learned_ambiguous": "scan.match_reason_learned",
             "supplier_logo": "scan.match_reason_supplier_logo",
             "logo_conflict": "scan.match_reason_logo_conflict",
+            "identifier_conflict": "scan.match_reason_identifier_conflict",
         }.get(reason, "scan.match_reason_generic")
         reason_lbl = QLabel(tr(reason_key))
         reason_lbl.setWordWrap(True)
@@ -4181,110 +4276,144 @@ class ScanImportView(QWidget):
             "match_uncertain", "match_candidates",
             "match_reason", "match_kind",
         )
-        for other in list(self._rows):
-            if (
-                other is exclude or not isinstance(other, dict)
-                or other.get("_scan_error")
-            ):
-                continue
-            previous_match = other.get("supplier_match", {}) or {}
-            if (
-                isinstance(previous_match, dict)
-                and previous_match.get("reason") == "user_choice"
-            ):
-                continue
-            previous_template_match = (
-                other.get("template_match", {}) or {}
+        rows_snapshot = list(self._rows)
+        total_rows = len(rows_snapshot)
+        show_prog = (
+            total_rows > 10
+            and hasattr(self, "_scan_progress")
+            and not getattr(self, "_scanning_files", False)
+        )
+        if show_prog:
+            self._scan_progress.setRange(0, total_rows)
+            self._scan_progress.setValue(0)
+            self._scan_progress.setFormat(
+                tr("scan.progress_reread", done=0, total=total_rows, pct=0)
             )
-            previously_uncertain = bool(
-                other.get("match_uncertain")
-                or (
+            self._scan_progress.setVisible(True)
+        try:
+            for row_idx, other in enumerate(rows_snapshot, start=1):
+                if show_prog:
+                    self._scan_progress.setValue(row_idx)
+                    pct = int(round((row_idx * 100.0) / total_rows))
+                    self._scan_progress.setFormat(
+                        tr(
+                            "scan.progress_reread",
+                            done=row_idx,
+                            total=total_rows,
+                            pct=pct,
+                        )
+                    )
+                    if row_idx % 8 == 0:
+                        app = QApplication.instance()
+                        if app is not None:
+                            app.processEvents()
+                if (
+                    other is exclude or not isinstance(other, dict)
+                    or other.get("_scan_error")
+                ):
+                    continue
+                previous_match = other.get("supplier_match", {}) or {}
+                if (
                     isinstance(previous_match, dict)
-                    and (
-                        previous_match.get("uncertain")
-                        or previous_match.get("status") == "uncertain"
+                    and previous_match.get("reason") == "user_choice"
+                ):
+                    continue
+                previous_template_match = (
+                    other.get("template_match", {}) or {}
+                )
+                previously_uncertain = bool(
+                    other.get("match_uncertain")
+                    or (
+                        isinstance(previous_match, dict)
+                        and (
+                            previous_match.get("uncertain")
+                            or previous_match.get("status") == "uncertain"
+                        )
+                    )
+                    or (
+                        isinstance(previous_template_match, dict)
+                        and (
+                            previous_template_match.get("uncertain")
+                            or previous_template_match.get("status")
+                            == "uncertain"
+                        )
                     )
                 )
-                or (
-                    isinstance(previous_template_match, dict)
-                    and (
-                        previous_template_match.get("uncertain")
-                        or previous_template_match.get("status") == "uncertain"
+                previously_ready = bool(
+                    not previously_uncertain
+                    and not other.get("missing")
+                    and str(other.get("supplier", "") or "").strip()
+                )
+                text = str(other.get("_text", "") or "")
+                path = str(other.get("_path", "") or "")
+                if not text and not path:
+                    continue
+                try:
+                    if path:
+                        parsed = si.parse_invoice_file(
+                            path, text, suppliers, templates,
+                            match_learning=learning,
+                        )
+                    else:
+                        parsed = si.parse_invoice_text(
+                            text, suppliers, templates,
+                            match_learning=learning,
+                        )
+                except Exception as exc:
+                    log.warning(
+                        "reread after manual match %s: %s",
+                        other.get("file", ""), exc,
                     )
-                )
-            )
-            previously_ready = bool(
-                not previously_uncertain
-                and not other.get("missing")
-                and str(other.get("supplier", "") or "").strip()
-            )
-            text = str(other.get("_text", "") or "")
-            path = str(other.get("_path", "") or "")
-            if not text and not path:
-                continue
-            try:
-                if path:
-                    parsed = si.parse_invoice_file(
-                        path, text, suppliers, templates,
-                        match_learning=learning,
+                    continue
+                if not isinstance(parsed, dict):
+                    continue
+                try:
+                    parsed = si.require_template_confirmation(
+                        parsed, templates, learning, suppliers
                     )
-                else:
-                    parsed = si.parse_invoice_text(
-                        text, suppliers, templates,
-                        match_learning=learning,
+                except Exception as exc:
+                    log.warning(
+                        "reread template confirmation %s: %s",
+                        other.get("file", ""), exc,
                     )
-            except Exception as exc:
-                log.warning(
-                    "reread after manual match %s: %s",
-                    other.get("file", ""), exc,
-                )
-                continue
-            if not isinstance(parsed, dict):
-                continue
-            try:
-                parsed = si.require_template_confirmation(
-                    parsed, templates, learning, suppliers
-                )
-            except Exception as exc:
-                log.warning(
-                    "reread template confirmation %s: %s",
-                    other.get("file", ""), exc,
-                )
 
-            other.update(parsed)
-            self._refresh_payment_details(
-                other, text=text, source=parsed
-            )
-            for key in uncertain_keys:
-                if key not in parsed:
-                    other.pop(key, None)
-            if "missing" not in parsed:
-                self._recalc_missing(other)
-            other["status"] = self._compute_status(
-                other, bool(text or path)
-            )
-            reread_count += 1
+                other.update(parsed)
+                self._refresh_payment_details(
+                    other, text=text, source=parsed
+                )
+                for key in uncertain_keys:
+                    if key not in parsed:
+                        other.pop(key, None)
+                if "missing" not in parsed:
+                    self._recalc_missing(other)
+                other["status"] = self._compute_status(
+                    other, bool(text or path)
+                )
+                reread_count += 1
 
-            supplier_match = other.get("supplier_match", {}) or {}
-            template_match = other.get("template_match", {}) or {}
-            still_uncertain = bool(
-                other.get("match_uncertain")
-                or (
-                    isinstance(supplier_match, dict)
-                    and supplier_match.get("uncertain")
+                supplier_match = other.get("supplier_match", {}) or {}
+                template_match = other.get("template_match", {}) or {}
+                still_uncertain = bool(
+                    other.get("match_uncertain")
+                    or (
+                        isinstance(supplier_match, dict)
+                        and supplier_match.get("uncertain")
+                    )
+                    or (
+                        isinstance(template_match, dict)
+                        and template_match.get("uncertain")
+                    )
                 )
-                or (
-                    isinstance(template_match, dict)
-                    and template_match.get("uncertain")
-                )
-            )
-            if (
-                not previously_ready
-                and not still_uncertain
-                and not other.get("missing")
-                and str(other.get("supplier", "") or "").strip()
-            ):
-                ready.append(other)
+                if (
+                    not previously_ready
+                    and not still_uncertain
+                    and not other.get("missing")
+                    and str(other.get("supplier", "") or "").strip()
+                ):
+                    ready.append(other)
+        finally:
+            if show_prog and hasattr(self, "_scan_progress"):
+                self._scan_progress.setVisible(False)
 
         if reread_count:
             self._refresh_table()
@@ -4662,6 +4791,7 @@ class ScanImportView(QWidget):
 
     def _add_parked_rows_to_table(
         self, infos: list[dict], on_done: "Any" = None,
+        *, force_all: bool = False,
     ) -> list[dict]:
         """Lägger osäkra, OCR-degraderade och oläsliga original i Import.
 
@@ -4685,7 +4815,9 @@ class ScanImportView(QWidget):
             return []
         lookup = self._parked_lookup(getattr(self, "_watch", None))
         if len(pending) <= PARKED_INSERT_CHUNK or not self._can_batch_insert():
-            added, updated = self._insert_parked_infos(pending, lookup)
+            added, updated = self._insert_parked_infos(
+                pending, lookup, force_all=force_all
+            )
             if added or updated:
                 self._refresh_table()
             self._log_parked_insert(added)
@@ -4703,6 +4835,10 @@ class ScanImportView(QWidget):
             # och ingen dubblett skapas — raderna slås upp på sökväg.
             self._parked_insert_queue.extend(pending)
             self._parked_insert_total += len(pending)
+            self._parked_insert_force_all = (
+                bool(getattr(self, "_parked_insert_force_all", False))
+                or bool(force_all)
+            )
             if on_done is not None:
                 self._parked_insert_callbacks.append(on_done)
             log.debug(
@@ -4720,6 +4856,14 @@ class ScanImportView(QWidget):
         self._parked_insert_total = len(queue)
         self._parked_insert_callbacks = [on_done] if on_done else []
         self._parked_insert_updated = False
+        self._parked_insert_force_all = bool(force_all)
+        if hasattr(self, "_scan_progress") and not getattr(
+            self, "_scanning_files", False
+        ):
+            self._scan_progress.setRange(0, self._parked_insert_total)
+            self._scan_progress.setValue(0)
+            self._scan_progress.setFormat("%v / %m (%p%)")
+            self._scan_progress.setVisible(True)
         log.info(
             "SCAN_IMPORT: %d parkerade original läggs in i Import i "
             "omgångar om %d — fönstret förblir svarande",
@@ -4748,7 +4892,11 @@ class ScanImportView(QWidget):
         del queue[:PARKED_INSERT_CHUNK]
         try:
             added, updated = self._insert_parked_infos(
-                chunk, getattr(self, "_parked_insert_lookup", None)
+                chunk,
+                getattr(self, "_parked_insert_lookup", None),
+                force_all=bool(
+                    getattr(self, "_parked_insert_force_all", False)
+                ),
             )
             self._parked_insert_added.extend(added)
             self._parked_insert_updated = (
@@ -4756,10 +4904,17 @@ class ScanImportView(QWidget):
                 or updated
             )
             self._append_table_rows(added)
+            done = self._parked_insert_total - len(queue)
+            if hasattr(self, "_scan_progress") and not getattr(
+                self, "_scanning_files", False
+            ):
+                self._scan_progress.setValue(
+                    min(done, max(1, self._parked_insert_total))
+                )
             if queue:
                 self._lbl_status.setText(tr(
                     "scan.parked_loading",
-                    done=self._parked_insert_total - len(queue),
+                    done=done,
                     total=self._parked_insert_total,
                 ))
                 QTimer.singleShot(0, self._insert_parked_chunk)
@@ -4776,6 +4931,11 @@ class ScanImportView(QWidget):
         self._parked_insert_lookup = None
         self._parked_insert_total = 0
         self._parked_insert_updated = False
+        self._parked_insert_force_all = False
+        if hasattr(self, "_scan_progress") and not getattr(
+            self, "_scanning_files", False
+        ):
+            self._scan_progress.setVisible(False)
         callbacks = list(
             getattr(self, "_parked_insert_callbacks", []) or []
         )
@@ -4804,6 +4964,7 @@ class ScanImportView(QWidget):
 
     def _insert_parked_infos(
         self, infos: list[dict], lookup: "Any" = None,
+        *, force_all: bool = False,
     ) -> tuple[list[dict], bool]:
         """Bygger rader för parkerade original (utan att rita tabellen)."""
         added: list[dict] = []
@@ -4823,8 +4984,11 @@ class ScanImportView(QWidget):
                 continue
             parsed = dict(source.get("parsed", {}) or {})
             method = str(source.get("method", "") or parsed.get("method", ""))
+            reason = str(source.get("reason", "") or "")
             if "ocr-saknas" in method or "ocr-fel" in method:
                 parsed.setdefault("ocr_warning", method)
+            if reason.startswith("possible-duplicate:"):
+                parsed["_possible_duplicate"] = reason
             digest = str(
                 source.get("hash", "") or info.get("hash", "") or ""
             )
@@ -4856,6 +5020,8 @@ class ScanImportView(QWidget):
                     existing, text=text, supplier_name=chosen,
                     source=parsed,
                 )
+                if reason.startswith("possible-duplicate:"):
+                    existing["_possible_duplicate"] = reason
                 if digest:
                     existing.setdefault("_parked_hash", digest)
                 if text:
@@ -4865,12 +5031,15 @@ class ScanImportView(QWidget):
                 )
                 updated_existing = True
                 continue
-            if not (
+            auto_visible = (
                 parsed.get("match_uncertain")
                 or parsed.get("ocr_warning")
                 or parsed.get("payment_details_warning")
                 or parsed.get("_scan_error")
-            ):
+                or reason.startswith("possible-duplicate:")
+                or (reason.startswith("missing:") and reason != "no-template")
+            )
+            if not force_all and not auto_visible:
                 continue
             parsed["file"] = source.get("file", "") or Path(path).name
             parsed["_path"] = path
@@ -4997,27 +5166,54 @@ class ScanImportView(QWidget):
             self._refresh_watch_ui()
 
     def _apply_template_to_row(self, parsed: dict, text: str) -> dict:
-        """Applicerar leverantörsmallen på en (parkerad) rad.
+        """Applicerar leverantörsmallen (inkl. upp till 15 varianter) på en rad.
 
         Mallen kan ha lärts in EFTER att filen parkerades — då ska
         granskningen visa mallens värden (och mallmarkören), inte
         den gamla heuristik-tolkningen från parkeringstillfället.
         """
         supplier = str(parsed.get("supplier", "") or "")
-        if not supplier or not text:
+        if not supplier:
             return parsed
         try:
             si = _scan_module()
-            tmpl = si.find_template(
-                self._get_templates(), supplier, self._suppliers()
-            )
-            if not tmpl:
+            templates = self._get_templates()
+            suppliers = self._suppliers()
+            tmpl = si.find_template(templates, supplier, suppliers)
+            tmpl_name = supplier
+            if tmpl and supplier not in templates:
+                candidates = si.supplier_template_candidate_names(
+                    templates, supplier, suppliers
+                )
+                if len(candidates) == 1:
+                    tmpl_name = candidates[0]
+            if not tmpl and text:
                 builtin = si.builtin_template_for(text)
-                tmpl = builtin[1] if builtin else None
+                if builtin:
+                    tmpl_name, tmpl = builtin[0], builtin[1]
             if not tmpl:
                 return parsed
             path = str(parsed.get("_path", "") or "")
-            found = si.template_values(path or None, text, tmpl)
+            credit = si.is_credit_note(text or "")
+            selector = getattr(si, "select_supplier_template", None)
+            if callable(selector):
+                sel = selector(
+                    text or "",
+                    tmpl,
+                    path=path or None,
+                    match_learning=self._get_match_learning(),
+                    supplier=supplier,
+                )
+                if sel.get("ambiguous"):
+                    parsed["match_uncertain"] = True
+                    parsed["match_kind"] = "template"
+                    parsed["match_reason"] = "template_ambiguous"
+                    return parsed
+                found = sel.get("found") or {}
+            else:
+                found = si.template_values(
+                    path or None, text or "", tmpl, credit=credit
+                )
         except Exception as exc:
             log.warning("apply template on parked: %s", exc)
             return parsed
@@ -5025,11 +5221,9 @@ class ScanImportView(QWidget):
             if value not in (None, "", 0, 0.0):
                 parsed[field] = value
         if found:
-            parsed["template"] = supplier
+            parsed["template"] = tmpl_name
             try:
-                amount_ok = (
-                    float(parsed.get("total_amount") or 0) > 0
-                )
+                amount_ok = float(parsed.get("total_amount") or 0) != 0
             except (TypeError, ValueError):
                 amount_ok = False
             parsed["missing"] = [
@@ -5046,12 +5240,40 @@ class ScanImportView(QWidget):
         """Flyttar parkerade filer till granskningstabellen.
 
         Filer som parkerades före inlärningen tolkas om med den
-        mall som eventuellt finns nu (se _apply_template_to_row).
+        mall som eventuellt finns nu (se _apply_template_to_row). Stora
+        mängder laddas i omgångar med progress bar så GUI:t aldrig låser sig.
         """
         if not self._watch:
             return
+        parked_list = list(self._watch.parked)
+        if (
+            len(parked_list) > PARKED_INSERT_CHUNK
+            and self._can_batch_insert()
+        ):
+            def _after_parked_review(added_rows: list[dict]) -> None:
+                self._ask_uncertain_rows(added_rows)
+                for row in added_rows:
+                    if (
+                        any(current is row for current in self._rows)
+                        and not row.get("match_uncertain")
+                        and not row.get("ocr_warning")
+                        and not row.get("payment_details_warning")
+                        and not row.get("_possible_duplicate")
+                    ):
+                        self._unpark_row(row)
+                pending_rows = [
+                    row for row in added_rows
+                    if any(current is row for current in self._rows)
+                ]
+                self._offer_template_repairs(pending_rows)
+
+            self._add_parked_rows_to_table(
+                parked_list, on_done=_after_parked_review, force_all=True
+            )
+            return
+
         start = len(self._rows)
-        for parked in list(self._watch.parked):
+        for parked in parked_list:
             digest = str(parked.get("hash", "") or "")
             existing = next((
                 r for r in self._rows
@@ -5078,6 +5300,7 @@ class ScanImportView(QWidget):
                     not existing.get("payment_details_warning")
                     and not existing.get("match_uncertain")
                     and not existing.get("ocr_warning")
+                    and not existing.get("_possible_duplicate")
                 ):
                     self._watch.remove_parked(digest)
                 # Redan i Import-tabellen: uppdatera varningen men
@@ -5087,6 +5310,9 @@ class ScanImportView(QWidget):
             parsed["file"] = parked.get("file", "")
             parsed["_path"] = parked.get("path", "")
             parsed["_parked_hash"] = digest
+            reason = str(parked.get("reason", "") or "")
+            if reason.startswith("possible-duplicate:"):
+                parsed["_possible_duplicate"] = reason
             method = str(parked.get("method", "") or parsed.get("method", ""))
             parsed["method"] = method
             if "ocr-saknas" in method or "ocr-fel" in method:
@@ -5125,6 +5351,7 @@ class ScanImportView(QWidget):
                 parsed.get("ocr_warning")
                 or parsed.get("payment_details_warning")
                 or parsed.get("match_uncertain")
+                or parsed.get("_possible_duplicate")
             ):
                 self._watch.remove_parked(parked.get("hash", ""))
         self._refresh_table()
@@ -5879,9 +6106,17 @@ class ScanImportView(QWidget):
             if not row.get("template"):
                 break
 
+    def _cancel_scan_files(self) -> None:
+        self._scan_cancel_requested = True
+        if hasattr(self, "_btn_cancel_scan"):
+            self._btn_cancel_scan.setEnabled(False)
+
     def _scan_files(self) -> None:
-        """Läser och tolkar valda filer."""
+        """Läser och tolkar valda filer i bakgrundstråd med progress bar."""
         import sys
+
+        if getattr(self, "_scanning_files", False):
+            return
 
         sys.path.insert(0, str(Path(__file__).parent.parent / "plugins"))
         import scan_import as si
@@ -5906,39 +6141,40 @@ class ScanImportView(QWidget):
             )
             return
 
-        suppliers = self._suppliers()
+        suppliers = [dict(s) for s in self._suppliers()]
         try:
-            templates = self._get_templates()
+            templates = copy.deepcopy(self._get_templates())
         except Exception:
             log.exception("SCAN_IMPORT: kunde inte läsa leverantörsmallar")
             templates = {}
         try:
-            learning = self._get_match_learning()
+            learning = copy.deepcopy(self._get_match_learning())
         except Exception:
             log.exception("SCAN_IMPORT: kunde inte läsa inlärningsminnet")
             learning = {}
 
-        new_rows: list[dict] = []
-        error_files: set[str] = set()
-        for path in raw_paths:
+        def _parse_one_file(path: Path) -> tuple[dict, bool]:
             text = ""
             method = ""
             extraction_failed = False
             try:
                 if not path.exists():
-                    row = self._scan_error_row(
-                        path, status="scan_invalid", method="saknas"
+                    return (
+                        self._scan_error_row(
+                            path, status="scan_invalid", method="saknas"
+                        ),
+                        True,
                     )
-                    error_files.add(str(path))
-                    new_rows.append(row)
-                    continue
-                if not path.is_file() or path.suffix.lower() not in si.SCAN_EXTENSIONS:
-                    row = self._scan_error_row(
-                        path, status="scan_invalid", method="filtyp"
+                if (
+                    not path.is_file()
+                    or path.suffix.lower() not in si.SCAN_EXTENSIONS
+                ):
+                    return (
+                        self._scan_error_row(
+                            path, status="scan_invalid", method="filtyp"
+                        ),
+                        True,
                     )
-                    error_files.add(str(path))
-                    new_rows.append(row)
-                    continue
 
                 try:
                     text, method = si.extract_text(path)
@@ -5950,7 +6186,6 @@ class ScanImportView(QWidget):
                     )
                     method = "extract-fel"
                     extraction_failed = True
-                    error_files.add(str(path))
 
                 try:
                     parsed = si.parse_invoice_file(
@@ -5959,7 +6194,9 @@ class ScanImportView(QWidget):
                         match_learning=learning,
                     )
                     if not isinstance(parsed, dict):
-                        raise TypeError("parse_invoice_file returnerade inte dict")
+                        raise TypeError(
+                            "parse_invoice_file returnerade inte dict"
+                        )
                 except Exception:
                     log.exception(
                         "SCAN_IMPORT: kunde inte tolka originalfilen %s", path
@@ -5967,7 +6204,7 @@ class ScanImportView(QWidget):
                     parsed = self._scan_error_row(
                         path, status="scan_error", method="tolkningsfel"
                     )
-                    error_files.add(str(path))
+                    extraction_failed = True
 
                 try:
                     parsed = si.require_template_confirmation(
@@ -6005,15 +6242,24 @@ class ScanImportView(QWidget):
                 parsed["file"] = path.name
                 parsed["_path"] = str(path)
                 parsed["method"] = method or parsed.get("method") or "—"
-                if "ocr-saknas" in parsed["method"] \
-                        or "ocr-fel" in parsed["method"]:
+                if (
+                    "ocr-saknas" in parsed["method"]
+                    or "ocr-fel" in parsed["method"]
+                ):
                     parsed["ocr_warning"] = parsed["method"]
                 parsed["_text"] = (text or "")[:30_000]
+                try:
+                    parsed["_page_count"] = si.page_image_count(path)
+                except Exception:
+                    parsed["_page_count"] = 0
 
                 if parsed.get("_scan_error"):
                     status = "scan_error"
-                elif not text and not parsed.get("total_amount") \
-                        and not parsed.get("invoice_number"):
+                elif (
+                    not text
+                    and not parsed.get("total_amount")
+                    and not parsed.get("invoice_number")
+                ):
                     status = "ingen text hittad"
                 else:
                     status = (
@@ -6021,7 +6267,6 @@ class ScanImportView(QWidget):
                         else "saknas: " + ", ".join(parsed["missing"])
                     )
                 parsed["status"] = status
-                new_rows.append(parsed)
                 log.info(
                     "SCAN_IMPORT: %s → metod=%s belopp=%s "
                     "fakturanr=%s status=%s",
@@ -6029,26 +6274,117 @@ class ScanImportView(QWidget):
                     parsed.get("total_amount"),
                     parsed.get("invoice_number") or "-", status,
                 )
+                return parsed, extraction_failed
             except Exception:
                 # En ogiltig path eller oväntat filfel blir en synlig rad;
                 # resten av den valda batchen fortsätter att läsas.
                 log.exception(
                     "SCAN_IMPORT: oväntat fel vid inläsning av %s", path
                 )
-                error_files.add(str(path))
-                new_rows.append(self._scan_error_row(
-                    path, status="scan_error", method="inläsningsfel"
-                ))
+                return (
+                    self._scan_error_row(
+                        path, status="scan_error", method="inläsningsfel"
+                    ),
+                    True,
+                )
 
-        self._rows.extend(new_rows)
-        self._refresh_table()
+        self._scanning_files = True
+        self._scan_cancel_requested = False
+        total = len(raw_paths)
+        if hasattr(self, "_btn_scan"):
+            self._btn_scan.setEnabled(False)
+        if hasattr(self, "_btn_cancel_scan"):
+            self._btn_cancel_scan.setEnabled(True)
+            self._btn_cancel_scan.setVisible(True)
+        if hasattr(self, "_scan_progress"):
+            self._scan_progress.setRange(0, total)
+            self._scan_progress.setValue(0)
+            self._scan_progress.setFormat(
+                tr("scan.progress_files", done=0, total=total, pct=0, file="")
+            )
+            self._scan_progress.setVisible(True)
+
+        new_rows: list[dict] = []
+        error_files: set[str] = set()
+        cancelled = False
+        app = QApplication.instance()
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                for idx, path in enumerate(raw_paths, start=1):
+                    if self._scan_cancel_requested:
+                        cancelled = True
+                        break
+                    if hasattr(self, "_scan_progress"):
+                        pct = int(round(((idx - 1) * 100.0) / total))
+                        self._scan_progress.setFormat(
+                            tr(
+                                "scan.progress_files",
+                                done=idx - 1,
+                                total=total,
+                                pct=pct,
+                                file=path.name,
+                            )
+                        )
+                    fut = executor.submit(_parse_one_file, path)
+                    if app is not None:
+                        loop = QEventLoop(self)
+                        fut.add_done_callback(
+                            lambda _f: self._file_scan_step.emit()
+                        )
+                        self._file_scan_step.connect(
+                            loop.quit, Qt.ConnectionType.QueuedConnection
+                        )
+                        timer = QTimer(self)
+                        timer.setInterval(40)
+                        timer.timeout.connect(
+                            lambda: loop.quit() if fut.done() else None
+                        )
+                        timer.start()
+                        try:
+                            while not fut.done():
+                                loop.exec()
+                        finally:
+                            timer.stop()
+                            try:
+                                self._file_scan_step.disconnect(loop.quit)
+                            except Exception:
+                                pass
+                    parsed, had_error = fut.result()
+                    if had_error:
+                        error_files.add(str(path))
+                    new_rows.append(parsed)
+                    self._rows.append(parsed)
+                    self._append_table_rows([parsed])
+                    if hasattr(self, "_scan_progress"):
+                        self._scan_progress.setValue(idx)
+                        pct = int(round((idx * 100.0) / total))
+                        self._scan_progress.setFormat(
+                            tr(
+                                "scan.progress_files",
+                                done=idx,
+                                total=total,
+                                pct=pct,
+                                file=path.name,
+                            )
+                        )
+        finally:
+            self._scanning_files = False
+            if hasattr(self, "_btn_scan"):
+                self._btn_scan.setEnabled(True)
+            if hasattr(self, "_btn_cancel_scan"):
+                self._btn_cancel_scan.setVisible(False)
+            if hasattr(self, "_scan_progress"):
+                self._scan_progress.setVisible(False)
+
+        self._tbl.resizeRowsToContents()
         # Vid minsta osäkerhet om leverantör/mall: fråga
         # användaren direkt i stället för att gissa.
         self._ask_uncertain_rows(new_rows)
         # Kunde fakturan inte matchas mot någon mall alls öppnas
         # mallskapandet direkt för den — användaren ska inte
         # behöva leta fram rätt knapp själv.
-        self._open_template_for_unmatched(new_rows)
+        if not cancelled:
+            self._open_template_for_unmatched(new_rows)
         ok = sum(
             1 for r in new_rows
             if not r.get("missing") and not r.get("_scan_error")
@@ -6057,10 +6393,13 @@ class ScanImportView(QWidget):
             not any(current is row for current in self._rows)
             for row in new_rows
         )
-        summary = (
-            f"{len(new_rows)} fil(er) tolkade — {ok} kompletta, "
-            f"{len(new_rows) - ok} behöver kompletteras"
-        )
+        if cancelled:
+            summary = tr("scan.cancelled", done=len(new_rows), total=total)
+        else:
+            summary = (
+                f"{len(new_rows)} fil(er) tolkade — {ok} kompletta, "
+                f"{len(new_rows) - ok} behöver kompletteras"
+            )
         if registered:
             summary += " · " + tr("scan.auto_registered", n=registered)
         if error_files:
@@ -6381,16 +6720,35 @@ class ScanImportView(QWidget):
                 "scan.template_confirmation_count",
                 n=confirmed_templates,
             )
+        if row.get("_possible_duplicate"):
+            text += "  ·  " + tr("scan.possible_dup_status")
         if row.get("match_uncertain"):
             text += "  ·  " + tr("scan.match_uncertain_status")
         # Flersidiga fakturor syns direkt: totalen står ofta på
         # sista sidan, så 2+ sidor är viktig granskningsinfo.
-        try:
-            _pages = _scan_module().page_image_count(
-                str(row.get("_path", "") or "")
-            )
-        except Exception:
+        _cached_pages = row.get("_page_count")
+        if _cached_pages is not None:
+            _pages = int(_cached_pages or 0)
+        else:
+            _path_str = str(row.get("_path", "") or "")
             _pages = 0
+            if _path_str:
+                try:
+                    _st = Path(_path_str).stat()
+                    _ck = (_path_str, int(_st.st_size), int(_st.st_mtime_ns))
+                except OSError:
+                    _ck = None
+                if _ck is not None and _ck in _PAGE_COUNT_CACHE:
+                    _pages = _PAGE_COUNT_CACHE[_ck]
+                else:
+                    try:
+                        _pages = _scan_module().page_image_count(_path_str)
+                    except Exception:
+                        _pages = 0
+                    if _ck is not None:
+                        if len(_PAGE_COUNT_CACHE) > 2000:
+                            _PAGE_COUNT_CACHE.clear()
+                        _PAGE_COUNT_CACHE[_ck] = _pages
         if _pages >= 2:
             text += "  ·  " + tr("scan.pages_status", n=_pages)
         # Dålig kontrollsiffra syns direkt i listan — fångas här
