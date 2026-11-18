@@ -147,9 +147,8 @@ def test_dialog_amount_chips_update_swish_qr_and_paypal():
     decoded = _decode_pixmap_qr(dlg._lbl_swish_qr.pixmap())
     if decoded is not None:
         assert decoded == "C0721817177;50,00;Fakturabunten;6"
-    pp_decoded = _decode_pixmap_qr(dlg._lbl_paypal_qr.pixmap())
-    if pp_decoded is not None:
-        assert pp_decoded == "https://paypal.me/Rickard3dPrint/50SEK"
+    assert not hasattr(dlg, "_lbl_paypal_qr")
+    assert not hasattr(dlg, "_lbl_kofi_qr")
 
     dlg._custom_amount_edit.setText("125")
     dlg._custom_amount_edit.textEdited.emit("125")
@@ -163,7 +162,7 @@ def test_dialog_amount_chips_update_swish_qr_and_paypal():
     dlg.reject()
 
 
-def test_dialog_has_personal_message_and_optional_paypal_kofi_qr():
+def test_dialog_has_personal_message_and_paypal_kofi_buttons_without_qr():
     _qapp()
     from PySide6.QtWidgets import QLabel
     from ui import i18n
@@ -179,26 +178,15 @@ def test_dialog_has_personal_message_and_optional_paypal_kofi_qr():
         assert story is not None
         assert needle in story.text()
 
-        # Valfri QR-vy för PayPal och Ko-fi är hopfälld från start och går att fälla ut
-        assert dlg._web_qr_panel.isVisible() is False
-        dlg._btn_toggle_web_qr.click()
-        _qapp().processEvents()
-        assert dlg._web_qr_panel.isVisible() is True
-
-        pp_qr = dlg._lbl_paypal_qr.pixmap()
-        kf_qr = dlg._lbl_kofi_qr.pixmap()
-        assert pp_qr is not None and not pp_qr.isNull()
-        assert kf_qr is not None and not kf_qr.isNull()
-        pp_decoded = _decode_pixmap_qr(pp_qr)
-        kf_decoded = _decode_pixmap_qr(kf_qr)
-        if pp_decoded is not None:
-            assert pp_decoded == "https://paypal.me/Rickard3dPrint"
-        if kf_decoded is not None:
-            assert kf_decoded == "https://ko-fi.com/tokke2"
-
-        dlg._btn_toggle_web_qr.click()
-        _qapp().processEvents()
-        assert dlg._web_qr_panel.isVisible() is False
+        # Endast Swish har QR-kod — inga QR-koder för PayPal eller Ko-fi (endast knappar)
+        qr_labels = dlg.findChildren(QLabel, "DonateQrImage")
+        assert qr_labels == [dlg._lbl_swish_qr]
+        assert not hasattr(dlg, "_web_qr_panel")
+        assert not hasattr(dlg, "_btn_toggle_web_qr")
+        assert not hasattr(dlg, "_lbl_paypal_qr")
+        assert not hasattr(dlg, "_lbl_kofi_qr")
+        assert dlg._btn_paypal.toolTip() == "https://paypal.me/Rickard3dPrint"
+        assert dlg._btn_kofi.toolTip() == "https://ko-fi.com/tokke2"
 
         # Hero CTA, Impact-kort, Trust-badges, FAQ-dragspel och Slut-CTA
         assert dlg.findChild(QLabel, "DonateTrustPill") is not None

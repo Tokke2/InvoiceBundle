@@ -59,8 +59,8 @@ Programmet är gratis att använda, både privat och kommersiellt. En donation k
 Vill du stödja utvecklingen öppnar du **Hjälp → 💖 Donationer…** (eller använder guldknappen i verktygsfältet, knappen i statusfältet, högerklick på flikraden, Om-dialogen eller fliken Inställningar). Dialogen visar snabbknappar, valfritt belopp, nyttokort, förtroendemärken och vanliga frågor direkt inne i appen utan separat webbsida. Mottagaruppgifterna är låsta och går inte att ändra:
 
 - 💚 **Swish:** Swish-QR enligt Swish-standard i appens donationsruta (mottagaren är låst och numret visas aldrig i klartext)
-- 💙 **PayPal:** https://paypal.me/Rickard3dPrint (knapp samt valfri skanningsbar QR-kod)
-- ☕ **Ko-fi:** https://ko-fi.com/tokke2 (knapp samt valfri skanningsbar QR-kod)
+- 💙 **PayPal:** https://paypal.me/Rickard3dPrint (direktknapp i appen, följer valt belopp)
+- ☕ **Ko-fi:** https://ko-fi.com/tokke2 (direktknapp i appen för engångs- eller månadsstöd)
 
 Betalningen sker via Swish, PayPal eller Ko-fi. Programmet ser inga betalningsuppgifter.
 
@@ -162,8 +162,8 @@ The app is free to use for both private and commercial purposes. A donation is n
 If you would like to support development, open **Help → 💖 Donations…** inside the app (or use the gold toolbar button, the status-bar button, right-clicking the tab bar, the About dialog, or the Settings tab). The dialog includes quick actions, optional amount chips, impact cards, trust badges, and collapsible FAQs directly inside the app with no separate webpage. Recipient details are locked inside the app and cannot be changed:
 
 - 💚 **Swish:** Swish QR code following the Swish standard inside the app dialog (the recipient is locked and the number is never shown in plain text)
-- 💙 **PayPal:** https://paypal.me/Rickard3dPrint (button plus optional scannable QR code)
-- ☕ **Ko-fi:** https://ko-fi.com/tokke2 (button plus optional scannable QR code)
+- 💙 **PayPal:** https://paypal.me/Rickard3dPrint (direct button in the app, carrying over any selected SEK amount)
+- ☕ **Ko-fi:** https://ko-fi.com/tokke2 (direct button in the app for one-time or monthly support)
 
 Payment takes place via Swish, PayPal or Ko-fi. The app never sees any payment details.
 
