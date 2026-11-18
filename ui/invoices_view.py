@@ -2394,6 +2394,7 @@ class InvoicesView(QWidget):
         inv = self._selected_invoice()
         if not inv:
             return
+        before_inv = dict(inv)
         dlg = InvoiceDialog(
             parent=self,
             existing=inv,
@@ -2412,8 +2413,69 @@ class InvoicesView(QWidget):
                 self, "Fel", f"Kunde inte uppdatera:\n{exc}"
             )
             return
+        learn_note = self._learn_from_edited_invoice(before_inv, data)
         self._do_refresh()
-        self._status(f"✅  '{data['invoice_number']}' uppdaterad")
+        msg = f"✅  '{data['invoice_number']}' uppdaterad"
+        if learn_note:
+            msg += f"  ·  {learn_note}"
+        self._status(msg)
+
+    def _learn_from_edited_invoice(
+        self, before_inv: dict, after_data: dict
+    ) -> str:
+        """Lär från redigering i Fakturor-fliken (t.ex. rättad automatchning)."""
+        try:
+            try:
+                from ui.scan_import_view import _scan_module
+            except ImportError:
+                from scan_import_view import _scan_module  # type: ignore[no-redef]
+            si = _scan_module()
+            learn_fn = getattr(si, "learn_from_edited_auto_match", None)
+            if not callable(learn_fn):
+                return ""
+            data_dir = self._scan_data_dir()
+            learning_path = data_dir / "match_memory.json"
+            templates_path = data_dir / "invoice_templates.json"
+            templates = self._load_scan_templates(si)
+            learning = si.load_match_learning(learning_path)
+            try:
+                suppliers = list(self._app.get_suppliers() or [])
+            except Exception:
+                suppliers = []
+            att = str(
+                after_data.get("attachment")
+                or before_inv.get("attachment")
+                or ""
+            ).strip()
+            res = learn_fn(
+                templates,
+                learning,
+                str(before_inv.get("supplier") or ""),
+                before_inv,
+                after_data,
+                path=att,
+                suppliers=suppliers,
+                templates_path=templates_path,
+                learning_path=learning_path,
+                source="invoices_edit",
+            )
+            if not res.get("changed"):
+                return ""
+            parts: list[str] = ["självlärande uppdaterat"]
+            if res.get("counter_reset"):
+                parts.append(tr(
+                    "scan.match_correction_reset",
+                    supplier=before_inv.get("supplier", ""),
+                    n=si.LEARNED_SUPPLIER_CONFIRMATIONS,
+                ))
+            if res.get("template_action") == "ny_variant_sparad":
+                parts.append(
+                    f"ny mallvariant sparad ({res.get('template_count', 0)}/15)"
+                )
+            return ", ".join(parts)
+        except Exception as exc:
+            log.debug("learn from edited invoice: %s", exc)
+            return ""
 
     def _on_delete_key(self) -> None:
         """Delete-tangenten: ta bort markerad faktura eller radgrupp.
@@ -3552,9 +3614,17 @@ class InvoicesView(QWidget):
                     text, supplier, str(invoice_number or ""), total
                 )
             ):
-                candidate = si.derive_template_from_confirmation(
-                    text, invoice_number, total
-                )
+                try:
+                    candidate = si.derive_template_from_confirmation(
+                        text, invoice_number, total,
+                        date=str(confirmed.get("date", "") or "").strip(),
+                        due_date=str(confirmed.get("due_date", "") or "").strip(),
+                        ocr=str(confirmed.get("ocr", "") or "").strip(),
+                    )
+                except TypeError:
+                    candidate = si.derive_template_from_confirmation(
+                        text, invoice_number, total
+                    )
                 if candidate:
                     replace_primary = bool(
                         existing_template is not None
@@ -3622,6 +3692,35 @@ class InvoicesView(QWidget):
             )
             si.save_match_learning(learning_path, learning)
             confirmed_count = int(entry.get("confirmed", 0) or 0)
+            try:
+                ll = si._learning_logger() if hasattr(si, "_learning_logger") else None
+                if ll is not None:
+                    tcount = len(si.template_variants(
+                        si.find_template(templates, supplier, suppliers)
+                    ))
+                    ll.log_manual_match(
+                        source="invoices_manual_match",
+                        file=Path(path).name if path else "",
+                        pages=int(pages or 0),
+                        supplier=supplier,
+                        after=confirmed,
+                        template_saved=bool(matched_variant and any(
+                            "manual_match_learned" in str(n) or supplier in str(n)
+                            for n in notes
+                        )),
+                        template_variant=matched_template,
+                        template_count=tcount,
+                        confirmations_before=confirmations_before,
+                        confirmations_after=confirmed_count,
+                        multipage_confirmed=int(entry.get("multipage_confirmed", 0) or 0),
+                        graduated=(
+                            confirmations_before < si.LEARNED_SUPPLIER_CONFIRMATIONS
+                            <= confirmed_count
+                        ),
+                        logo_learned=bool(logo_signature),
+                    )
+            except Exception:
+                pass
             notes.append(tr(
                 "scan.learning_count", supplier=supplier,
                 n=confirmed_count,

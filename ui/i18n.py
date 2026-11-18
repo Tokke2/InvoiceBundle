@@ -745,6 +745,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     "scan.match_secure_tip": {"sv": "✔ säker matchning — leverantören/mallen är säkert identifierad", "en": "✔ confident match — the supplier/template is identified with confidence"},
     "scan.match_unresolved": {"sv": "Följande rader har fortfarande osäker leverantörs-/mallmatchning och registrerades inte:\n\n{files}\n\nVälj leverantör/mall för dem först (appen gissar aldrig).", "en": "The following rows still have an uncertain supplier/template match and were not registered:\n\n{files}\n\nChoose a supplier/template for them first (the app never guesses)."},
     "scan.pages_status": {"sv": "📄 {n} sidor", "en": "📄 {n} pages"},
+    "scan.batch_queued": {"sv": "{n} väntar i kö (nästa {next_n} läses in när dessa flyttats till Fakturor)", "en": "{n} queued (next {next_n} load once these move to Invoices)"},
+    "scan.auto_edit_learned": {"sv": "🧠 Självlärande uppdaterat från ändring av {file}", "en": "🧠 Self-learning updated from edits to {file}"},
 
     "scan.no_text": {"sv": "ingen text hittad", "en": "no text found"},
     "scan.text_sources": {"sv": "Textkällor: {sources}", "en": "Text sources: {sources}"},
@@ -943,6 +945,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "log.marker_text": {"sv": "Användarmarkering — återskapa felet nu, kopiera sedan loggen efter markeringen", "en": "User marker — reproduce the error now, then copy the log after the marker"},
     "log.copy_marked": {"sv": "📋  Kopiera efter markering", "en": "📋  Copy after marker"},
     "log.copy_diag": {"sv": "📋  Kopiera felsökningspaket", "en": "📋  Copy diagnostics"},
+    "log.copy_learning": {"sv": "🧠  Kopiera självlärandelogg", "en": "🧠  Copy learning log"},
     "log.open_dir": {"sv": "📁  Öppna loggmapp", "en": "📁  Open log folder"},
     "log.collect_errors": {"sv": "🧰  Samla alla fel", "en": "🧰  Collect all errors"},
     "log.collect_done": {"sv": "🧰  {total} fel samlade ({added} nya) i logs/felsamling.log — alla fel på ett ställe för snabb felsökning", "en": "🧰  {total} errors collected ({added} new) in logs/felsamling.log — every error in one place for quick troubleshooting"},

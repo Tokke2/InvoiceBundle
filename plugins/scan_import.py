@@ -51,6 +51,22 @@ _FITZ_LOCK = threading.RLock()
 OCR_PAGE_TIMEOUT_SECONDS = 60
 
 
+def _learning_logger():
+    for mod_name in ("plugins.learning_logger", "learning_logger"):
+        mod = sys.modules.get(mod_name)
+        if mod is not None:
+            return mod
+    try:
+        from plugins import learning_logger as _ll
+        return _ll
+    except Exception:
+        try:
+            import learning_logger as _ll  # type: ignore
+            return _ll
+        except Exception:
+            return None
+
+
 @contextmanager
 def _open_fitz(path: Any):
     with _FITZ_LOCK:
@@ -1656,19 +1672,21 @@ def parse_invoice_text(
                     if not v_texts:
                         continue
                     found_regions = template_values_from_regions(v, v_texts)
-                    if found_regions.get("invoice_number") and (
-                        found_regions.get("total_amount") or credit
+                    combined = apply_template(text or "", v)
+                    combined.update(found_regions)
+                    if combined.get("invoice_number") and (
+                        combined.get("total_amount") or credit
                     ):
-                        matched_regions = found_regions
+                        matched_regions = combined
                         try:
                             amt = round(
-                                float(found_regions.get("total_amount") or 0),
+                                float(combined.get("total_amount") or 0),
                                 2,
                             )
                         except (TypeError, ValueError):
                             amt = 0.0
                         cand_outcomes.add((
-                            str(found_regions.get("invoice_number") or "").strip(),
+                            str(combined.get("invoice_number") or "").strip(),
                             amt,
                         ))
                 if len(cand_outcomes) > 1:
@@ -2138,6 +2156,66 @@ def _apply_supplier_logo_match(
     return result
 
 
+def _summarize_template_checks(
+    path: Any,
+    text: str,
+    templates: dict | None,
+    region_texts_by_template: dict | None = None,
+) -> list[dict[str, Any]]:
+    """Sammanställer alla jämförda mallar och varianter (1..15, 1–flersidiga)."""
+    if not isinstance(templates, dict) or not templates:
+        return []
+    credit = is_credit_note(text or "")
+    checked: list[dict[str, Any]] = []
+    for tname, entry in templates.items():
+        if not isinstance(entry, dict):
+            continue
+        variants = template_variants(entry) or [entry]
+        rt_entry = (
+            region_texts_by_template.get(str(tname))
+            if isinstance(region_texts_by_template, dict) else None
+        )
+        per_sig = (
+            rt_entry.get("__variants__")
+            if isinstance(rt_entry, dict)
+            and isinstance(rt_entry.get("__variants__"), dict)
+            else None
+        )
+        for v_idx, variant in enumerate(variants, start=1):
+            sig = template_confirmation_signature(variant)
+            found = apply_template(text or "", variant)
+            has_reg = bool(_region_specs(variant))
+            has_lbl = any(
+                isinstance(s, dict) and s.get("label")
+                for s in (variant.get("fields") or {}).values()
+            )
+            if has_reg and isinstance(rt_entry, dict):
+                v_rt = (
+                    per_sig.get(sig) if per_sig is not None else rt_entry
+                )
+                if isinstance(v_rt, dict):
+                    found.update(template_values_from_regions(variant, v_rt))
+            kind = (
+                "hybrid" if (has_reg and has_lbl)
+                else ("region" if has_reg else "label")
+            )
+            claimed = bool(
+                found.get("invoice_number")
+                and (found.get("total_amount") or credit)
+            )
+            checked.append({
+                "supplier": str(tname),
+                "variant": f"{v_idx}/{len(variants)}",
+                "signature": sig[:12],
+                "kind": kind,
+                "claimed": claimed,
+                "fields": sorted(found.keys()),
+            })
+            if len(checked) >= 30:
+                return checked
+    return checked
+
+
 def parse_invoice_file(
     path: Any,
     text: str,
@@ -2149,17 +2227,10 @@ def parse_invoice_file(
 
     Mallar vars fält pekar ut rutor på fakturabilden (region)
     läses ur själva filen (textlager i rutan, annars OCR) och
-    får avgöra fälten. Första mallen vars rutor ger ett
-    fakturanummer eller ett att betala-belopp används — resten
-    av tolkningen är exakt densamma som för ren text.
-
-    `match_learning` (inlärningsminnet ur match_memory.json)
-    används bara av flersidighetsvakten: en leverantör vars
-    flersidiga fakturor bekräftats upprepade gånger av användaren
-    OCH vars total dessutom stäms av mot texten får passera utan
-    ny bekräftelse — alla andra flersidiga fakturor flaggas så
-    att appen ber användaren matcha dem manuellt (se
-    _apply_multipage_guard).
+    får avgöra fälten. Alla leverantörers sparade mallvarianter
+    (1-sidiga och flersidiga, upp till 15 per leverantör) prövas
+    och jämförs; alternativ PDF-läsare prövas alltid när ingen
+    mall tar det första textuttaget.
     """
     tpl = templates or {}
     region_texts_by_template: dict[str, dict] = {}
@@ -2185,43 +2256,83 @@ def parse_invoice_file(
             merged_rt = dict(per_sig.get(primary_sig) or {})
             merged_rt["__variants__"] = per_sig
             region_texts_by_template[str(_name)] = merged_rt
-    if region_texts_by_template:
-        # Varje regionsmall bedöms för sig: exakt en mall som
-        # själv läser fakturanummer + att betala får avgöra.
-        # Flera träffar blir en fråga till användaren — aldrig
-        # första mallen i listan.
-        result = parse_invoice_text(
-            text, suppliers, tpl,
-            region_texts_by_template=region_texts_by_template,
-            match_learning=match_learning,
-        )
-        result = _apply_supplier_logo_match(
-            result, path, text, tpl, match_learning
-        )
-        result = _apply_multipage_guard(
-            result, path, text, match_learning
-        )
-        return apply_supplier_ocr_rule(
-            assess_invoice_payment_details(
-                result, text, suppliers,
-                details=result.get("invoice_payment_details"),
-            ),
-            suppliers,
-        )
+
     result = _parse_with_reader_fallback(
-        path, text, suppliers, tpl, match_learning=match_learning
+        path, text, suppliers, tpl,
+        match_learning=match_learning,
+        region_texts_by_template=(
+            region_texts_by_template if region_texts_by_template else None
+        ),
     )
+    reader_used = str(result.pop("_reader_used", "primary") or "primary")
     result = _apply_supplier_logo_match(
         result, path, text, tpl, match_learning
     )
     result = _apply_multipage_guard(result, path, text, match_learning)
-    return apply_supplier_ocr_rule(
+    final_result = apply_supplier_ocr_rule(
         assess_invoice_payment_details(
             result, text, suppliers,
             details=result.get("invoice_payment_details"),
         ),
         suppliers,
     )
+    try:
+        ll = _learning_logger()
+        if ll is not None and (path or tpl):
+            selected_sup = str(final_result.get("supplier") or "")
+            selected_tpl = str(final_result.get("template") or "")
+            vcount = 0
+            vidx = None
+            if selected_tpl and isinstance(tpl, dict):
+                t_entry = find_template(tpl, selected_tpl, suppliers)
+                if isinstance(t_entry, dict):
+                    tvs = template_variants(t_entry)
+                    vcount = len(tvs)
+                    used_sig = str(
+                        (final_result.get("template_match") or {}).get(
+                            "signature", ""
+                        ) or ""
+                    )
+                    if used_sig and tvs:
+                        for idx_v, var_v in enumerate(tvs):
+                            if template_confirmation_signature(var_v) == used_sig:
+                                vidx = idx_v
+                                break
+            outcome = (
+                "uncertain:" + str(final_result.get("match_reason") or "?")
+                if final_result.get("match_uncertain")
+                else (
+                    "template_matched" if selected_tpl
+                    else (
+                        "learned_matched"
+                        if (final_result.get("supplier_match") or {}).get("reason")
+                        in {"learned", "learned_logo"}
+                        else ("partial_or_no_template" if final_result.get("missing") else "generic_matched")
+                    )
+                )
+            )
+            ll.log_template_evaluation(
+                file=Path(str(path)).name if path else "(text)",
+                pages=int(final_result.get("pages") or 0),
+                supplier_candidates=(
+                    (final_result.get("supplier_match") or {}).get("candidates")
+                    or final_result.get("match_candidates")
+                    or []
+                ),
+                templates_checked=_summarize_template_checks(
+                    path, text, tpl, region_texts_by_template
+                ),
+                selected_supplier=selected_sup,
+                selected_template=selected_tpl,
+                variant_index=vidx,
+                variant_count=vcount,
+                reader_used=reader_used,
+                outcome=outcome,
+                parsed=final_result,
+            )
+    except Exception:
+        pass
+    return final_result
 
 
 def _parse_with_reader_fallback(
@@ -2230,6 +2341,7 @@ def _parse_with_reader_fallback(
     suppliers: list[dict] | None,
     templates: dict,
     match_learning: dict | None = None,
+    region_texts_by_template: dict | None = None,
 ) -> dict[str, Any]:
     """Tolka texten; utan mallträff prövas övriga PDF-läsares text.
 
@@ -2241,17 +2353,21 @@ def _parse_with_reader_fallback(
     tolkningen orörd (filen parkeras som förut).
     """
     result = parse_invoice_text(
-        text, suppliers, templates, match_learning=match_learning
+        text, suppliers, templates,
+        region_texts_by_template=region_texts_by_template,
+        match_learning=match_learning,
     )
     if result.get("template") or result.get("match_uncertain"):
         # Ett osäkert resultat får aldrig ersättas av ett annat
         # textuttag i tysthet — osäkerheten ska nå användaren.
+        result["_reader_used"] = "primary"
         return result
     try:
         p = Path(path) if path else None
     except Exception:
         p = None
     if p is None or p.suffix.lower() != ".pdf":
+        result["_reader_used"] = "primary"
         return result
     seen = re.sub(r"\s+", " ", text or "").strip()
     for alt_text, method in extract_pdf_texts(p):
@@ -2259,6 +2375,7 @@ def _parse_with_reader_fallback(
             continue
         alt = parse_invoice_text(
             alt_text, suppliers, templates,
+            region_texts_by_template=region_texts_by_template,
             match_learning=match_learning,
         )
         learned_supplier = (
@@ -2274,7 +2391,9 @@ def _parse_with_reader_fallback(
                 method,
                 alt.get("supplier") or alt.get("template"),
             )
+            alt["_reader_used"] = f"fallback:{method}"
             return alt
+    result["_reader_used"] = "primary"
     return result
 
 
@@ -3282,14 +3401,27 @@ def _ocr_crop_text(path: Path, page_index: int, rect: tuple) -> str:
         return ""
 
 
+def _read_region_text_on_page(p: Path, page_index: int, rect: tuple) -> str:
+    raw = ""
+    if p.suffix.lower() == ".pdf":
+        if HAS_FITZ:
+            raw = _words_in_region_fitz(p, page_index, rect)
+        if not raw and HAS_PYPDF:
+            raw = _words_in_region_pypdf(p, page_index, rect)
+    if not raw:
+        raw = _ocr_crop_text(p, page_index, rect)
+    return raw
+
+
 def extract_region_texts(
     path: Any, template: dict | None
 ) -> dict[str, str]:
     """{fält: råtext i rutan} för mallens regionsfält.
 
     Textlager i rutan först (PyMuPDF, därefter pypdf); saknas
-    träffar provas OCR av den utklippta rutan. Aldrig undantag
-    utåt — misslyckad läsning ger bara färre nycklar.
+    träffar provas OCR av den utklippta rutan. För flersidiga
+    mallar med ``from_end`` upplöses positionen relativt dokumentets
+    sista sida när sidantalet varierar mellan fakturor.
     """
     specs = _region_specs(template)
     if not specs or not path:
@@ -3297,6 +3429,7 @@ def extract_region_texts(
     p = Path(path)
     if not p.exists():
         return {}
+    total_pages = 0
     out: dict[str, str] = {}
     for field, spec in specs.items():
         rect = _clamp_rect(spec.get("region"))
@@ -3305,14 +3438,25 @@ def extract_region_texts(
             page_index = int(spec.get("page", 0) or 0)
         except (TypeError, ValueError):
             page_index = 0
+        candidate_pages: list[int] = []
+        from_end = spec.get("from_end")
+        try:
+            saved_pages = int(spec.get("page_count", 0) or 0)
+        except (TypeError, ValueError):
+            saved_pages = 0
+        if from_end is not None and saved_pages >= 2 and page_index > 0:
+            if not total_pages:
+                total_pages = page_image_count(p)
+            if total_pages >= 2:
+                rel_page = max(0, total_pages - 1 - int(from_end))
+                candidate_pages.append(rel_page)
+        if page_index not in candidate_pages:
+            candidate_pages.append(page_index)
         raw = ""
-        if p.suffix.lower() == ".pdf":
-            if HAS_FITZ:
-                raw = _words_in_region_fitz(p, page_index, rect)
-            if not raw and HAS_PYPDF:
-                raw = _words_in_region_pypdf(p, page_index, rect)
-        if not raw:
-            raw = _ocr_crop_text(p, page_index, rect)
+        for p_idx in candidate_pages:
+            raw = _read_region_text_on_page(p, p_idx, rect)
+            if raw:
+                break
         if raw:
             out[field] = raw
     return out
@@ -5613,18 +5757,88 @@ def learned_supplier_logo(
     )
 
 
+def _candidate_labels_from_text(
+    text: str, field: str, kind: str, want_nr: str, want_total: float
+) -> list[str]:
+    """Hittar säkra etiketter direkt ur fakturatexten runt det bekräftade värdet.
+
+    Provas först efter befintliga/standardetiketter och används bara om
+    ``extract_with_label`` + full ``apply_template`` läser tillbaka EXAKT
+    rätt värde.
+    """
+    if not text:
+        return []
+    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+    if kind == "amount":
+        needles = []
+        base_dot = f"{want_total:.2f}"
+        base_comma = base_dot.replace(".", ",")
+        whole, dec = base_comma.split(",")
+        needles.extend([base_comma, base_dot])
+        if len(whole) > 3:
+            spaced = re.sub(r"(?<=\d)(?=(\d{3})+$)", " ", whole)
+            dotted = re.sub(r"(?<=\d)(?=(\d{3})+$)", ".", whole)
+            needles.extend([f"{spaced},{dec}", f"{dotted},{dec}"])
+    else:
+        if len(want_nr) < 2:
+            return []
+        needles = [want_nr]
+        if kind == "date" and len(want_nr) == 10 and "-" in want_nr:
+            needles.extend([want_nr.replace("-", "."), want_nr.replace("-", "/")])
+
+    cands: list[str] = []
+    seen: set[str] = set()
+    skip_words = {"sek", "kr", "eur", "usd", "nok", "dkk", "st", "total"}
+
+    def _add(raw_lbl: str) -> None:
+        lbl = re.sub(r"[\s:：=\-]+$", "", str(raw_lbl or "").strip())
+        if not (3 <= len(lbl) <= 36):
+            return
+        if re.search(r"\d", lbl):
+            return
+        if not re.search(r"[A-Za-zÅÄÖåäö]{3,}", lbl):
+            return
+        cf = lbl.casefold()
+        if cf in skip_words or cf in seen:
+            return
+        seen.add(cf)
+        cands.append(lbl)
+
+    for idx, line in enumerate(lines):
+        low = line.casefold()
+        matched_needle = next((n for n in needles if n.casefold() in low), "")
+        if not matched_needle:
+            continue
+        pos = low.find(matched_needle.casefold())
+        prefix = line[:pos]
+        if prefix.strip():
+            # Ta sista tydliga etikettfrasen före värdet (separerad med : eller dubbla mellanslag)
+            part = re.split(r"\s{2,}", prefix.strip())[-1]
+            _add(part)
+        if idx > 0:
+            prev = lines[idx - 1]
+            # Raden ovanför (kolumnrubrik)
+            _add(prev)
+    return cands[:8]
+
+
 def derive_template_from_confirmation(
-    text: str, invoice_number: str, total: Any
+    text: str, invoice_number: str, total: Any,
+    *,
+    date: str = "",
+    due_date: str = "",
+    ocr: str = "",
+    extra_labels: dict[str, list[str]] | None = None,
 ) -> dict | None:
     """Härled en leverantörsmall ur användarens BEKRÄFTADE värden.
 
-    När en faktura matchats för hand och leverantören saknar mall
-    prövas vanliga etiketter mot fakturans egen text: en etikett
-    som läser tillbaka EXAKT de värden användaren just bekräftat
-    (fakturanummer + att betala) får bli leverantörens mall.
-    Verifieringen är hela poängen — kan etiketterna inte läsa
-    tillbaka de bekräftade värdena lär sig appen ingenting alls
-    (None), i stället för att spara en gissad mall.
+    När en faktura matchats (eller rättats efter automatchning) prövas
+    kända etiketter (och vid behov verifierade rubriker ur fakturatexten)
+    mot fakturans egen text (både 1-sidig och flersidig): en etikett som
+    läser tillbaka EXAKT de bekräftade värdena (fakturanummer + att betala,
+    samt ev. fakturadatum, förfallodatum och OCR) sparas i mallen.
+    Etiketter som inte läser tillbaka det bekräftade värdet sparas aldrig
+    som gissningar.
     """
     if not text:
         return None
@@ -5637,22 +5851,43 @@ def derive_template_from_confirmation(
         return None
     fields: dict[str, dict] = {}
     for field, want in (
-        ("invoice_number", want_nr), ("total_amount", None),
+        ("invoice_number", want_nr),
+        ("total_amount", None),
+        ("date", str(date or "").strip()),
+        ("due_date", str(due_date or "").strip()),
+        ("ocr", str(ocr or "").strip()),
     ):
+        if field not in ("invoice_number", "total_amount") and not want:
+            continue
         kind = TEMPLATE_FIELD_KINDS[field]
-        for cand in _REPAIR_LABELS.get(field, ()):
+        cand_list: list[str] = []
+        if isinstance(extra_labels, dict):
+            for el in (extra_labels.get(field) or []):
+                if el and el not in cand_list:
+                    cand_list.append(str(el))
+        for rl in _REPAIR_LABELS.get(field, ()):
+            if rl not in cand_list:
+                cand_list.append(rl)
+        for dl in _candidate_labels_from_text(
+            text, field, kind, want or "", want_total
+        ):
+            if dl not in cand_list:
+                cand_list.append(dl)
+        for cand in cand_list:
             spec: dict[str, Any] = {"label": cand}
             raw = extract_with_label(text, cand, kind)
-            if not _confirmed_value_matches(raw, kind, want, want_total):
+            if not _confirmed_value_matches(
+                raw, kind, want or "", want_total
+            ):
                 below = _extract_below_label(text, cand, kind)
                 if not _confirmed_value_matches(
-                    below, kind, want, want_total
+                    below, kind, want or "", want_total
                 ):
                     continue
                 spec["below"] = True
             fields[field] = spec
             break
-    if set(fields) != {"invoice_number", "total_amount"}:
+    if not {"invoice_number", "total_amount"}.issubset(fields):
         return None
     template = {"fields": fields}
     # Hela mallen måste läsa tillbaka de bekräftade värdena —
@@ -5665,7 +5900,17 @@ def derive_template_from_confirmation(
             return None
     except (TypeError, ValueError):
         return None
-    return template
+    # Ta inte med valfria fält som vid full mall-läsning läser annat värde.
+    for opt_field, opt_want in (
+        ("date", str(date or "").strip()),
+        ("due_date", str(due_date or "").strip()),
+        ("ocr", str(ocr or "").strip()),
+    ):
+        if opt_field in fields and (
+            str(found.get(opt_field, "")).strip() != opt_want
+        ):
+            fields.pop(opt_field, None)
+    return {"fields": fields}
 
 
 def _confirmed_value_matches(
@@ -5680,6 +5925,232 @@ def _confirmed_value_matches(
         except (TypeError, ValueError):
             return False
     return str(raw).strip() == want_nr
+
+
+def learn_from_edited_auto_match(
+    templates: dict,
+    learning: dict,
+    supplier_before: str,
+    before: dict,
+    after: dict,
+    *,
+    text: str = "",
+    path: str = "",
+    suppliers: list[dict] | None = None,
+    templates_path: Path | None = None,
+    learning_path: Path | None = None,
+    source: str = "edit",
+    pages: int = 0,
+) -> dict[str, Any]:
+    """Självlärande när användaren redigerar en automatiskt matchad faktura.
+
+    Hanterar både:
+      1) leverantörsbyte (nollställer ev. felaktig automatkoppling på
+         tidigare leverantör och lär in ny leverantör + verifierad mall)
+      2) fälträttningar på samma leverantör (härleder/uppdaterar en
+         verifierad mallvariant upp till 15 per leverantör när fakturatext
+         bekräftar rättat fakturanummer/belopp/datum/förfallo/OCR).
+
+    Allt loggas detaljerat (inkl. fältdiffar och textbevis ur PDF:en) till
+    självlärandeloggen för analys i chatten.
+    """
+    before = dict(before or {})
+    after = dict(after or {})
+    old_sup = str(
+        supplier_before or before.get("supplier") or ""
+    ).strip()
+    new_sup = str(after.get("supplier") or old_sup).strip()
+
+    field_diffs: dict[str, dict[str, Any]] = {}
+    for key in (
+        "supplier", "invoice_number", "total_amount",
+        "date", "due_date", "ocr",
+    ):
+        v_old = before.get(key, "")
+        v_new = after.get(key, "")
+        if key == "total_amount":
+            try:
+                f_old = round(float(v_old or 0), 2)
+            except (TypeError, ValueError):
+                f_old = 0.0
+            try:
+                f_new = round(float(v_new or 0), 2)
+            except (TypeError, ValueError):
+                f_new = 0.0
+            if abs(f_old - f_new) > 0.005:
+                field_diffs[key] = {"before": f_old, "after": f_new}
+        else:
+            s_old = str(v_old or "").strip()
+            s_new = str(v_new or "").strip()
+            if s_old != s_new:
+                field_diffs[key] = {"before": s_old, "after": s_new}
+
+    if not field_diffs:
+        return {
+            "changed": False,
+            "field_diffs": {},
+            "counter_reset": False,
+            "template_action": "",
+            "template_count": 0,
+        }
+
+    if not text and path and Path(path).is_file():
+        try:
+            text, _ = extract_text(Path(path))
+        except Exception:
+            text = ""
+    if not pages and path and Path(path).is_file():
+        try:
+            pages = page_image_count(path)
+        except Exception:
+            pages = 0
+
+    supplier_changed = bool(
+        old_sup and new_sup and not _names_match(old_sup, new_sup)
+    )
+    counter_reset = False
+    if supplier_changed:
+        # Kontrollera om gamla leverantören hade automatkoppling/inlärning
+        old_entry = learning_entry(learning, old_sup)
+        was_auto = bool(
+            (old_entry and int(old_entry.get("confirmed", 0) or 0) > 0)
+            or str(
+                (before.get("supplier_match") or {}).get("reason", "")
+            ) in {"learned", "learned_logo"}
+        )
+        if was_auto and old_entry:
+            record_match_correction(learning, old_sup, text=text)
+            counter_reset = True
+
+    final_nr = str(after.get("invoice_number") or "").strip()
+    try:
+        final_total = float(after.get("total_amount") or 0)
+    except (TypeError, ValueError):
+        final_total = 0.0
+    final_date = str(after.get("date") or "").strip()
+    final_due = str(after.get("due_date") or "").strip()
+    final_ocr = str(after.get("ocr") or "").strip()
+
+    template_action = ""
+    saved_variant: dict | None = None
+    template_count = 0
+    accepted_fields: list[str] = []
+
+    if new_sup:
+        existing_tpl = find_template(templates, new_sup, suppliers)
+        existing_variants = template_variants(existing_tpl)
+        extra_lbls: dict[str, list[str]] = {}
+        for var_item in existing_variants:
+            vfields = var_item.get("fields") or {}
+            if isinstance(vfields, dict):
+                for fn, sp in vfields.items():
+                    if isinstance(sp, dict) and sp.get("label"):
+                        extra_lbls.setdefault(str(fn), [])
+                        lbl_s = str(sp["label"])
+                        if lbl_s not in extra_lbls[str(fn)]:
+                            extra_lbls[str(fn)].append(lbl_s)
+        if text and final_nr and final_total > 0:
+            candidate = derive_template_from_confirmation(
+                text, final_nr, final_total,
+                date=final_date, due_date=final_due, ocr=final_ocr,
+                extra_labels=extra_lbls or None,
+            )
+            if candidate:
+                replace_primary = bool(
+                    existing_tpl is not None
+                    and not _template_has_core_fields(existing_tpl)
+                )
+                _k, saved_entry, added_new = store_supplier_template(
+                    templates, new_sup, candidate,
+                    max_templates=MAX_TEMPLATES_PER_SUPPLIER,
+                    replace_primary=replace_primary,
+                )
+                saved_variant = candidate
+                template_count = len(template_variants(saved_entry))
+                accepted_fields = list((candidate.get("fields") or {}).keys())
+                template_action = (
+                    "ny_variant_sparad" if added_new
+                    else "befintlig_variant_bekräftad"
+                )
+        if saved_variant is None and existing_variants:
+            template_count = len(existing_variants)
+
+        if (
+            templates_path is not None
+            and template_action
+        ):
+            save_templates(templates_path, templates)
+
+        # Uppdatera leverantörens fältkorrigeringshistorik i minnet
+        l_entry = learning_entry(learning, new_sup)
+        if not l_entry:
+            learning[new_sup] = {}
+            l_entry = learning[new_sup]
+        fc_bucket = l_entry.setdefault("field_corrections", {})
+        if isinstance(fc_bucket, dict):
+            for fname in field_diffs:
+                fc_bucket[fname] = int(fc_bucket.get(fname, 0) or 0) + 1
+            l_entry["last_edit"] = datetime.datetime.now().isoformat(
+                timespec="seconds"
+            )
+
+        confirmation_id = match_confirmation_id(
+            new_sup, final_nr, path=path, invoice_date=final_date
+        )
+        logo_sig = ""
+        if path and Path(path).is_file():
+            try:
+                logo_sig = confirmed_supplier_logo_signature(
+                    path, new_sup, templates, suppliers=suppliers
+                )
+            except Exception:
+                logo_sig = ""
+        record_match_confirmation(
+            learning, new_sup,
+            multipage=int(pages or 0) >= 2,
+            text=text,
+            logo_signature=logo_sig,
+            confirmation_id=confirmation_id,
+            source_path=path,
+            template_name=new_sup if saved_variant else "",
+            template=saved_variant,
+            template_fields=accepted_fields,
+        )
+
+    if learning_path is not None:
+        save_match_learning(learning_path, learning)
+
+    try:
+        ll = _learning_logger()
+        if ll is not None:
+            evidence = ll.extract_text_evidence(text, after)
+            ll.log_auto_match_edit(
+                source=source,
+                file=(
+                    Path(path).name if path
+                    else str(after.get("file") or before.get("file") or "")
+                ),
+                pages=int(pages or 0),
+                supplier_before=old_sup,
+                supplier_after=new_sup,
+                field_diffs=field_diffs,
+                counter_reset=counter_reset,
+                template_action=template_action,
+                template_count=template_count,
+                template_summary=saved_variant,
+                text_evidence=evidence,
+            )
+    except Exception:
+        pass
+
+    return {
+        "changed": True,
+        "field_diffs": field_diffs,
+        "counter_reset": counter_reset,
+        "template_action": template_action,
+        "template_count": template_count,
+        "supplier_changed": supplier_changed,
+    }
 
 
 # ═════════════════════════════════════════════════════════════════════

@@ -306,6 +306,14 @@ def format_diagnostics(
             "bevakningsskanning har loggats i den här loggfilen)"
         )
 
+    learning_lines = [
+        str(x) for x in (meta.get("learning_lines") or [])
+    ]
+    if learning_lines:
+        lines.append("")
+        lines.append("── Självlärande & malljämförelse ──")
+        lines.extend(learning_lines)
+
     if marker:
         lines.append("")
         lines.append("── Logg efter markering ──")
@@ -428,6 +436,8 @@ class LogView(QWidget):
         self._btn_copy_marked.clicked.connect(self._copy_after_marker)
         self._btn_copy_diag = QPushButton()
         self._btn_copy_diag.clicked.connect(self._copy_diagnostics)
+        self._btn_copy_learning = QPushButton()
+        self._btn_copy_learning.clicked.connect(self._copy_learning_log)
         self._btn_open_dir = QPushButton()
         self._btn_open_dir.clicked.connect(self._open_log_dir)
         self._btn_errors = QPushButton()
@@ -438,6 +448,7 @@ class LogView(QWidget):
         self._btn_reset.clicked.connect(self._reset_filters)
         for b in (self._btn_refresh, self._btn_pause, self._btn_mark,
                   self._btn_copy_marked, self._btn_copy_diag,
+                  self._btn_copy_learning,
                   self._btn_open_dir, self._btn_errors,
                   self._btn_export, self._btn_reset):
             b.setMinimumHeight(34)
@@ -741,6 +752,23 @@ class LogView(QWidget):
             meta["watch_lines"] = watch_diagnostic_lines(
                 wcfg, suppliers=_suppliers, templates=_templates
             )
+            try:
+                _learning = _si.load_match_learning(
+                    _data_dir / "match_memory.json"
+                )
+            except Exception:
+                _learning = {}
+            try:
+                from plugins import learning_logger as _ll
+
+                report_txt = _ll.format_learning_report(
+                    _learning, _templates, _suppliers,
+                    root=self._log_file.parent.parent,
+                    max_events=20,
+                )
+                meta["learning_lines"] = report_txt.splitlines()
+            except Exception:
+                pass
         except Exception:
             pass
         meta["log_file"] = str(self._log_file)
@@ -759,6 +787,52 @@ class LogView(QWidget):
                 self._all_entries, self._diagnostics_meta()
             ),
             self._btn_copy_diag, "log.copied",
+        )
+
+    def _copy_learning_log(self) -> None:
+        """Sammanställer och kopierar den avancerade självlärandeloggen
+        för enkel delning i chatten."""
+        try:
+            import scan_import as _si
+        except Exception:
+            try:
+                from plugins import scan_import as _si  # type: ignore
+            except Exception:
+                _si = None
+        try:
+            from plugins import learning_logger as _ll
+        except Exception:
+            sys.path.insert(
+                0, str(Path(__file__).resolve().parent.parent / "plugins")
+            )
+            import learning_logger as _ll  # type: ignore
+
+        suppliers: list = []
+        try:
+            suppliers = list(self._app.get_suppliers() or [])
+        except Exception:
+            pass
+        templates: dict = {}
+        learning: dict = {}
+        try:
+            from app import DATA_DIR as _data_dir
+            if _si is not None:
+                templates = _si.load_templates(
+                    _data_dir / "invoice_templates.json"
+                )
+                learning = _si.load_match_learning(
+                    _data_dir / "match_memory.json"
+                )
+        except Exception:
+            pass
+        report = _ll.format_learning_report(
+            learning, templates, suppliers,
+            root=self._log_file.parent.parent,
+            max_events=60,
+        )
+        self._detail.setPlainText(report[-20000:])
+        self._copy_to_clipboard(
+            report, self._btn_copy_learning, "log.copied",
         )
 
     def _open_log_dir(self) -> None:
@@ -843,6 +917,7 @@ class LogView(QWidget):
         self._btn_mark.setText(tr("log.mark"))
         self._btn_copy_marked.setText(tr("log.copy_marked"))
         self._btn_copy_diag.setText(tr("log.copy_diag"))
+        self._btn_copy_learning.setText(tr("log.copy_learning"))
         self._btn_open_dir.setText(tr("log.open_dir"))
         self._btn_errors.setText(tr("log.collect_errors"))
         self._btn_export.setText(tr("log.export_shown"))

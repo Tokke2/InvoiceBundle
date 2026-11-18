@@ -75,6 +75,12 @@ log = logging.getLogger("ScanImportView")
 #: inläsningen aldrig låsa fönstret i minuter.
 PARKED_INSERT_CHUNK = 40
 
+#: Hur många nya fakturor som skannas/läses in åt gången innan appen
+#: väntar på att de matchas och flyttas till Fakturor — sedan läses
+#: 10 nya in automatiskt så datorn aldrig låser sig på stora lass.
+SCAN_INITIAL_BATCH_SIZE = 15
+SCAN_REFILL_BATCH_SIZE = 10
+
 #: Hur många osäkra rader som frågas om direkt när ett stort lass
 #: parkerade original läses in. Resten ligger kvar i tabellen.
 PARKED_ASK_LIMIT = 8
@@ -1301,10 +1307,16 @@ class TemplateDialog(QDialog):
         for field in _TEMPLATE_FIELDS:
             if field in self._regions:
                 page, rect = self._regions[field]
-                rules[field] = {
+                page_idx = int(page or 0)
+                rule: dict[str, Any] = {
                     "region": [round(float(v), 4) for v in rect],
-                    "page": page,
+                    "page": page_idx,
                 }
+                total_pages = int(getattr(self, "_page_count", 0) or 0)
+                if total_pages >= 2:
+                    rule["page_count"] = total_pages
+                    rule["from_end"] = max(0, total_pages - 1 - page_idx)
+                rules[field] = rule
             else:
                 spec = self._existing_fields.get(field)
                 if (
@@ -1653,6 +1665,8 @@ class ScanImportView(QWidget):
         self._automatic_registering = False
         self._scanning_files = False
         self._scan_cancel_requested = False
+        self._pending_scan_queue: list[Path] = []
+        self._populating_table = False
         self._watch_list_signature: tuple | None = None
         self._watch = None
         self._build_ui()
@@ -1849,6 +1863,7 @@ class ScanImportView(QWidget):
         )
         self._tbl.setWordWrap(False)
         self._tbl.doubleClicked.connect(self._open_row_dialog)
+        self._tbl.itemChanged.connect(self._on_table_item_changed)
         self._tbl.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu
         )
@@ -2546,18 +2561,22 @@ class ScanImportView(QWidget):
                 stats, self._watch.last_control_diffs,
             )
         else:
-            self._lbl_status.setText(
-                tr(
-                    "watch.scan_done",
-                    imported=stats.get("imported", 0),
-                    duplicate=stats.get("duplicate", 0),
-                    parked=stats.get("parked", 0),
-                    waiting=stats.get("waiting", 0),
-                    already=stats.get("already", 0),
-                    settling=stats.get("settling", 0),
-                    errors=errors,
-                )
+            status_txt = tr(
+                "watch.scan_done",
+                imported=stats.get("imported", 0),
+                duplicate=stats.get("duplicate", 0),
+                parked=stats.get("parked", 0),
+                waiting=stats.get("waiting", 0),
+                already=stats.get("already", 0),
+                settling=stats.get("settling", 0),
+                errors=errors,
             )
+            deferred = int(stats.get("deferred", 0) or 0)
+            if deferred > 0:
+                status_txt += " · " + tr(
+                    "scan.batch_queued", n=deferred, next_n=SCAN_REFILL_BATCH_SIZE
+                )
+            self._lbl_status.setText(status_txt)
             log.info(
                 "SCAN_WATCH: skanning klar — %s",
                 stats,
@@ -2634,6 +2653,7 @@ class ScanImportView(QWidget):
                 if removed:
                     self._rows = kept
                     self._refresh_table()
+                    self._maybe_load_next_scan_batch()
             self._lbl_status.setText(
                 tr("watch.imported", file=row.get("file", ""))
             )
@@ -3912,9 +3932,28 @@ class ScanImportView(QWidget):
             if not si._builtin_format_extracts_confirmed(
                 text, supplier, inv_nr, want_total
             ):
-                candidate = si.derive_template_from_confirmation(
-                    text, inv_nr, want_total
-                )
+                extra_lbls: dict[str, list[str]] = {}
+                for ev in si.template_variants(existing):
+                    vf = ev.get("fields") or {}
+                    if isinstance(vf, dict):
+                        for fn, sp in vf.items():
+                            if isinstance(sp, dict) and sp.get("label"):
+                                extra_lbls.setdefault(str(fn), [])
+                                ls = str(sp["label"])
+                                if ls not in extra_lbls[str(fn)]:
+                                    extra_lbls[str(fn)].append(ls)
+                try:
+                    candidate = si.derive_template_from_confirmation(
+                        text, inv_nr, want_total,
+                        date=str(row.get("date", "") or "").strip(),
+                        due_date=str(row.get("due_date", "") or "").strip(),
+                        ocr=str(row.get("ocr", "") or "").strip(),
+                        extra_labels=extra_lbls or None,
+                    )
+                except TypeError:
+                    candidate = si.derive_template_from_confirmation(
+                        text, inv_nr, want_total
+                    )
                 if candidate:
                     snapshot = {
                         k: (dict(v) if isinstance(v, dict) else v)
@@ -4077,6 +4116,37 @@ class ScanImportView(QWidget):
                     "scan.learned_auto_logo", supplier=chosen
                 ))
             self._save_match_learning()
+            try:
+                ll = si._learning_logger() if hasattr(si, "_learning_logger") else None
+                if ll is not None:
+                    tpl_entry = si.find_template(templates, chosen, self._suppliers())
+                    tcount = len(si.template_variants(tpl_entry)) if tpl_entry else 0
+                    ll.log_manual_match(
+                        source="import_manual_match",
+                        file=str(row.get("file", "") or ""),
+                        pages=pages,
+                        supplier=chosen,
+                        after={
+                            "invoice_number": str(row.get("invoice_number", "") or ""),
+                            "total_amount": row.get("total_amount", 0.0),
+                            "date": str(row.get("date", "") or ""),
+                            "due_date": str(row.get("due_date", "") or ""),
+                            "ocr": str(row.get("ocr", "") or ""),
+                        },
+                        template_saved=bool(derived_template),
+                        template_variant=matched_template,
+                        template_count=tcount,
+                        confirmations_before=confirmations_before,
+                        confirmations_after=confirmed,
+                        multipage_confirmed=int(entry.get("multipage_confirmed", 0) or 0),
+                        graduated=(
+                            confirmations_before < si.LEARNED_SUPPLIER_CONFIRMATIONS
+                            <= confirmed
+                        ),
+                        logo_learned=bool(logo_signature),
+                    )
+            except Exception:
+                pass
             if confirmed < si.LEARNED_SUPPLIER_CONFIRMATIONS:
                 # Synligt hur många egna matchningar som återstår
                 # innan appen får koppla leverantören själv.
@@ -4154,6 +4224,33 @@ class ScanImportView(QWidget):
                 entry["template_learned"] = True
             self._save_match_learning()
             row["_match_learning_recorded"] = True
+            try:
+                ll = si._learning_logger() if hasattr(si, "_learning_logger") else None
+                if ll is not None:
+                    tpl_entry = si.find_template(templates, supplier, self._suppliers())
+                    tcount = len(si.template_variants(tpl_entry)) if tpl_entry else 0
+                    ll.log_manual_match(
+                        source="import_create_confirmed",
+                        file=str(row.get("file", "") or ""),
+                        pages=self._row_pages(row),
+                        supplier=supplier,
+                        after={
+                            "invoice_number": str(row.get("invoice_number", "") or ""),
+                            "total_amount": row.get("total_amount", 0.0),
+                            "date": str(row.get("date", "") or ""),
+                            "due_date": str(row.get("due_date", "") or ""),
+                            "ocr": str(row.get("ocr", "") or ""),
+                        },
+                        template_saved=bool(derived_template),
+                        template_variant=template,
+                        template_count=tcount,
+                        confirmations_before=before_count,
+                        confirmations_after=int(entry.get("confirmed", 0) or 0),
+                        multipage_confirmed=int(entry.get("multipage_confirmed", 0) or 0),
+                        logo_learned=bool(logo_signature),
+                    )
+            except Exception:
+                pass
             template_entry = si.template_confirmation_entry(
                 learning, supplier, template
             )
@@ -5615,6 +5712,7 @@ class ScanImportView(QWidget):
 
     def _clear_paths(self) -> None:
         self._paths = []
+        self._pending_scan_queue = []
         self._txt_paths.clear()
         self._lbl_files.setText("Inga filer valda")
 
@@ -6112,18 +6210,10 @@ class ScanImportView(QWidget):
             self._btn_cancel_scan.setEnabled(False)
 
     def _scan_files(self) -> None:
-        """Läser och tolkar valda filer i bakgrundstråd med progress bar."""
-        import sys
-
+        """Startar inläsning i batchar (max 15 först, sedan 10 efter flytt)."""
         if getattr(self, "_scanning_files", False):
             return
 
-        sys.path.insert(0, str(Path(__file__).parent.parent / "plugins"))
-        import scan_import as si
-
-        # Textrutan är den uttryckliga källan när den innehåller sökvägar.
-        # En felaktig/otillgänglig sökväg får aldrig falla tillbaka till
-        # en gammal markering och skanna en annan originalfaktura i tysthet.
         path_text = self._txt_paths.toPlainText().strip()
         if path_text:
             raw_paths = [
@@ -6140,6 +6230,75 @@ class ScanImportView(QWidget):
                 "Välj en eller flera filer först (ruta 1).",
             )
             return
+
+        if len(raw_paths) > SCAN_INITIAL_BATCH_SIZE:
+            batch = raw_paths[:SCAN_INITIAL_BATCH_SIZE]
+            self._pending_scan_queue = raw_paths[SCAN_INITIAL_BATCH_SIZE:]
+            try:
+                si = _scan_module()
+                ll = si._learning_logger() if hasattr(si, "_learning_logger") else None
+                if ll is not None:
+                    ll.log_batch_scan(
+                        mode="manual_files",
+                        batch_limit=SCAN_INITIAL_BATCH_SIZE,
+                        scanned=len(batch),
+                        queued_remaining=len(self._pending_scan_queue),
+                        trigger="initial_scan",
+                    )
+            except Exception:
+                pass
+        else:
+            batch = raw_paths
+            self._pending_scan_queue = []
+        self._run_scan_batch(batch, trigger="initial")
+
+    def _maybe_load_next_scan_batch(self) -> bool:
+        """Läser in 10 nya fakturor när föregående batch flyttats till Fakturor."""
+        if self._rows or getattr(self, "_scanning_files", False):
+            return False
+        if self._pending_scan_queue:
+            next_batch = self._pending_scan_queue[:SCAN_REFILL_BATCH_SIZE]
+            del self._pending_scan_queue[:SCAN_REFILL_BATCH_SIZE]
+            try:
+                si = _scan_module()
+                ll = si._learning_logger() if hasattr(si, "_learning_logger") else None
+                if ll is not None:
+                    ll.log_batch_scan(
+                        mode="manual_files",
+                        batch_limit=SCAN_REFILL_BATCH_SIZE,
+                        scanned=len(next_batch),
+                        queued_remaining=len(self._pending_scan_queue),
+                        trigger="refill_after_move",
+                    )
+            except Exception:
+                pass
+            if QApplication.instance() is not None:
+                QTimer.singleShot(
+                    50,
+                    lambda b=next_batch: self._run_scan_batch(
+                        b, trigger="refill"
+                    ),
+                )
+            else:
+                self._run_scan_batch(next_batch, trigger="refill")
+            return True
+        watch = getattr(self, "_watch", None)
+        req = getattr(watch, "request_next_batch", None)
+        if callable(req):
+            return bool(req())
+        return False
+
+    def _run_scan_batch(
+        self, raw_paths: list[Path], *, trigger: str = "initial"
+    ) -> None:
+        """Läser och tolkar en batch av valda filer i bakgrundstråd."""
+        import sys
+
+        if not raw_paths or getattr(self, "_scanning_files", False):
+            return
+
+        sys.path.insert(0, str(Path(__file__).parent.parent / "plugins"))
+        import scan_import as si
 
         suppliers = [dict(s) for s in self._suppliers()]
         try:
@@ -6406,7 +6565,15 @@ class ScanImportView(QWidget):
             summary += " · " + tr(
                 "scan.file_error_count", n=len(error_files)
             )
+        if self._pending_scan_queue:
+            summary += " · " + tr(
+                "scan.batch_queued",
+                n=len(self._pending_scan_queue),
+                next_n=SCAN_REFILL_BATCH_SIZE,
+            )
         self._lbl_status.setText(summary)
+        if not self._rows and self._pending_scan_queue and not cancelled:
+            self._maybe_load_next_scan_batch()
 
     @staticmethod
     def _scan_error_row(
@@ -6495,99 +6662,236 @@ class ScanImportView(QWidget):
         return ""
 
     def _refresh_table(self) -> None:
-        self._tbl.setRowCount(len(self._rows))
-        for r, row in enumerate(self._rows):
-            self._fill_table_row(r, row)
-        self._update_sum()
-        self._tbl.resizeRowsToContents()
-        self._tbl.resizeRowsToContents()
+        self._populating_table = True
+        self._tbl.blockSignals(True)
+        try:
+            self._tbl.setRowCount(len(self._rows))
+            for r, row in enumerate(self._rows):
+                self._fill_table_row(r, row)
+            self._update_sum()
+            self._tbl.resizeRowsToContents()
+        finally:
+            self._tbl.blockSignals(False)
+            self._populating_table = False
 
     def _append_table_rows(self, rows: list[dict]) -> None:
         """Ritar bara de NYA raderna — en stor inläsning får aldrig
         rita om hela tabellen för varje omgång."""
         if not rows:
             return
-        start = max(0, self._tbl.rowCount())
-        self._tbl.setRowCount(start + len(rows))
-        for offset, row in enumerate(rows):
-            self._fill_table_row(start + offset, row)
-        self._update_sum()
+        self._populating_table = True
+        self._tbl.blockSignals(True)
+        try:
+            start = max(0, self._tbl.rowCount())
+            self._tbl.setRowCount(start + len(rows))
+            for offset, row in enumerate(rows):
+                self._fill_table_row(start + offset, row)
+            self._update_sum()
+        finally:
+            self._tbl.blockSignals(False)
+            self._populating_table = False
 
     def _fill_table_row(self, r: int, row: dict) -> None:
-        for c, (_lbl, key, _w, align) in enumerate(COLUMNS):
-            if key == "total_amount":
-                text = _fmt_amount(row.get(key, 0.0))
-            elif key == "status":
-                text = self._display_status(row)
-            else:
-                text = str(row.get(key, "") or "")
-            item = QTableWidgetItem(text)
-            item.setTextAlignment(
-                align | Qt.AlignmentFlag.AlignVCenter
-            )
-            if key in {
-                "invoice_number", "date", "due_date", "ocr",
-                "total_amount",
-            }:
-                set_item_font(item, make_tabular_font(12))
-            if key == "status":
-                detail = str(row.get("error_detail", "") or "")
-                item.setToolTip(
-                    (detail + "\n\n" if detail else "") + text
-                )
-                if self._extraction_review_state(row) == "review":
-                    item.setForeground(QColor("#ef6c00"))
+        was_pop = bool(getattr(self, "_populating_table", False))
+        was_blocked = self._tbl.signalsBlocked()
+        self._populating_table = True
+        self._tbl.blockSignals(True)
+        try:
+            for c, (_lbl, key, _w, align) in enumerate(COLUMNS):
+                if key == "total_amount":
+                    text = _fmt_amount(row.get(key, 0.0))
+                elif key == "status":
+                    text = self._display_status(row)
                 else:
-                    item.setForeground(
-                        QApplication.palette().link()
+                    text = str(row.get(key, "") or "")
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(
+                    align | Qt.AlignmentFlag.AlignVCenter
+                )
+                if key in {"file", "method", "status"}:
+                    item.setFlags(
+                        item.flags() & ~Qt.ItemFlag.ItemIsEditable
                     )
-            self._tbl.setItem(r, c, item)
-        # Hela raden färgas efter matchningssäkerhet:
-        # OSÄKER matchning = röd rad, SÄKER = grön rad.
-        # Rader utan någon träff alls lämnas neutrala.
-        _state = self._row_match_state(row)
-        if _state:
-            _pair = (
-                ROW_BG_MATCH_UNCERTAIN if _state == "uncertain"
-                else ROW_BG_MATCH_SECURE
-            )
-            _bg = QColor(_pair[0] if self._dark else _pair[1])
-            _fg_pair = (
-                ROW_FG_MATCH_UNCERTAIN if _state == "uncertain"
-                else ROW_FG_MATCH_SECURE
-            )
-            _fg = QColor(_fg_pair[0] if self._dark else _fg_pair[1])
-            _tip = (
-                tr("scan.match_uncertain_status")
-                if _state == "uncertain"
-                else tr("scan.match_secure_tip")
-            )
-            _status_col = next(
-                (i for i, column in enumerate(COLUMNS)
-                 if column[1] == "status"),
-                -1,
-            )
-            for _c in range(len(COLUMNS)):
-                _cell = self._tbl.item(r, _c)
-                if _cell is not None:
-                    _cell.setBackground(_bg)
-                    # Explicit textfärg parad med radbakgrunden —
-                    # raden ska gå att läsa även omarkerad, i
-                    # båda temana (aldrig palettens textfärg).
-                    _cell.setForeground(_fg)
-                    if _c == _status_col and _cell.toolTip():
-                        _cell.setToolTip(
-                            _tip + "\n\n" + _cell.toolTip()
-                        )
+                if key in {
+                    "invoice_number", "date", "due_date", "ocr",
+                    "total_amount",
+                }:
+                    set_item_font(item, make_tabular_font(12))
+                if key == "status":
+                    detail = str(row.get("error_detail", "") or "")
+                    item.setToolTip(
+                        (detail + "\n\n" if detail else "") + text
+                    )
+                    if self._extraction_review_state(row) == "review":
+                        item.setForeground(QColor("#ef6c00"))
                     else:
-                        _cell.setToolTip(_tip)
-                    if (
-                        _c == _status_col
-                        and self._extraction_review_state(row) == "review"
-                    ):
-                        _cell.setForeground(QColor(
-                            "#ffd166" if self._dark else "#9a3412"
-                        ))
+                        item.setForeground(
+                            QApplication.palette().link()
+                        )
+                self._tbl.setItem(r, c, item)
+            # Hela raden färgas efter matchningssäkerhet:
+            # OSÄKER matchning = röd rad, SÄKER = grön rad.
+            # Rader utan någon träff alls lämnas neutrala.
+            _state = self._row_match_state(row)
+            if _state:
+                _pair = (
+                    ROW_BG_MATCH_UNCERTAIN if _state == "uncertain"
+                    else ROW_BG_MATCH_SECURE
+                )
+                _bg = QColor(_pair[0] if self._dark else _pair[1])
+                _fg_pair = (
+                    ROW_FG_MATCH_UNCERTAIN if _state == "uncertain"
+                    else ROW_FG_MATCH_SECURE
+                )
+                _fg = QColor(_fg_pair[0] if self._dark else _fg_pair[1])
+                _tip = (
+                    tr("scan.match_uncertain_status")
+                    if _state == "uncertain"
+                    else tr("scan.match_secure_tip")
+                )
+                _status_col = next(
+                    (i for i, column in enumerate(COLUMNS)
+                     if column[1] == "status"),
+                    -1,
+                )
+                for _c in range(len(COLUMNS)):
+                    _cell = self._tbl.item(r, _c)
+                    if _cell is not None:
+                        _cell.setBackground(_bg)
+                        # Explicit textfärg parad med radbakgrunden —
+                        # raden ska gå att läsa även omarkerad, i
+                        # båda temana (aldrig palettens textfärg).
+                        _cell.setForeground(_fg)
+                        if _c == _status_col and _cell.toolTip():
+                            _cell.setToolTip(
+                                _tip + "\n\n" + _cell.toolTip()
+                            )
+                        else:
+                            _cell.setToolTip(_tip)
+                        if (
+                            _c == _status_col
+                            and self._extraction_review_state(row) == "review"
+                        ):
+                            _cell.setForeground(QColor(
+                                "#ffd166" if self._dark else "#9a3412"
+                            ))
+        finally:
+            self._tbl.blockSignals(was_blocked)
+            self._populating_table = was_pop
+
+    def _learn_from_row_edit(
+        self, row: dict, before: dict, *, source: str = "import_edit"
+    ) -> dict[str, Any]:
+        """Lär från redigerad automatchning/rad i Import-vyn."""
+        try:
+            si = _scan_module()
+            learn_fn = getattr(si, "learn_from_edited_auto_match", None)
+            if not callable(learn_fn):
+                return {"changed": False}
+            old_sup = str(
+                (before.get("supplier_match") or {}).get("supplier")
+                or before.get("supplier") or ""
+            ).strip()
+            new_sup = str(row.get("supplier") or "").strip()
+            if not new_sup and not old_sup:
+                return {"changed": False}
+            res = learn_fn(
+                self._get_templates(),
+                self._get_match_learning(),
+                old_sup,
+                before,
+                row,
+                text=str(row.get("_text", "") or ""),
+                path=str(row.get("_path", "") or ""),
+                suppliers=self._suppliers(),
+                templates_path=self._templates_file(),
+                learning_path=self._learning_file(),
+                source=source,
+                pages=self._row_pages(row),
+            )
+            if res.get("changed"):
+                self._refresh_templates_btn()
+                row["_match_learning_recorded"] = True
+            return res
+        except Exception as exc:
+            log.warning("learn from edited row: %s", exc)
+            return {"changed": False}
+
+    def _on_table_item_changed(self, item: QTableWidgetItem) -> None:
+        """Direkt redigering i tabellcell synkar raden och lär appen."""
+        if getattr(self, "_populating_table", False) or item is None:
+            return
+        r = item.row()
+        c = item.column()
+        if not (0 <= r < len(self._rows)) or not (0 <= c < len(COLUMNS)):
+            return
+        key = COLUMNS[c][1]
+        if key in {"file", "method", "status"}:
+            return
+        row = self._rows[r]
+        raw_txt = item.text().strip()
+        before = copy.deepcopy(row)
+        if key == "total_amount":
+            cleaned = (
+                raw_txt.replace("\xa0", "")
+                .replace(" ", "")
+                .replace("kr", "")
+                .replace("SEK", "")
+                .replace(",", ".")
+            )
+            try:
+                new_val: Any = round(float(cleaned or 0.0), 2)
+            except ValueError:
+                self._fill_table_row(r, row)
+                return
+            if abs(float(row.get(key) or 0.0) - new_val) <= 0.005:
+                return
+        else:
+            new_val = raw_txt
+            if str(row.get(key, "") or "").strip() == new_val:
+                return
+
+        row[key] = new_val
+        row["_user_edited"] = True
+        if key == "supplier":
+            row["supplier_match"] = {
+                "status": "matched" if new_val else "none",
+                "supplier": new_val,
+                "reason": "user_choice",
+                "uncertain": False,
+            }
+            for ukey in (
+                "match_uncertain", "match_candidates",
+                "match_reason", "match_kind",
+            ):
+                row.pop(ukey, None)
+            if new_val:
+                self._apply_template_to_row(
+                    row, str(row.get("_text", "") or "")
+                )
+
+        self._refresh_payment_details(
+            row, text=str(row.get("_text", "") or ""),
+            supplier_name=str(row.get("supplier", "") or ""),
+        )
+        self._recalc_missing(row)
+        row["status"] = self._compute_status(
+            row, bool(row.get("_text") or row.get("_path"))
+        )
+        res = self._learn_from_row_edit(
+            row, before, source="import_table_edit"
+        )
+        self._fill_table_row(r, row)
+        self._update_sum()
+        if res.get("changed"):
+            msg = tr("scan.auto_edit_learned", file=row.get("file", ""))
+            if res.get("counter_reset"):
+                msg += " · " + tr(
+                    "scan.match_correction_reset",
+                    supplier=before.get("supplier", ""),
+                    n=5,
+                )
+            self._lbl_status.setText(msg)
 
     @staticmethod
     def _ocr_check_bad(row: dict) -> bool:
@@ -6892,6 +7196,7 @@ class ScanImportView(QWidget):
             self._unpark_row(self._rows[i])
             self._rows.pop(i)
         self._refresh_table()
+        self._maybe_load_next_scan_batch()
 
     # ══════════════════════════════════════════════════════════════════
     #  RÄTTA I FAKTURADIALOGEN
@@ -6983,20 +7288,29 @@ class ScanImportView(QWidget):
                 if self._save_invoice(
                     data, source=row.get("file", "")
                 ):
+                    before_row = copy.deepcopy(row)
                     training_row = dict(row)
                     training_row.update(data)
-                    learned_note = self._record_confirmed_template_row(
-                        training_row
+                    edit_res = self._learn_from_row_edit(
+                        training_row, before_row, source="import_row_dialog"
                     )
-                    if learned_note:
+                    learned_note = ""
+                    if not edit_res.get("changed"):
+                        learned_note = self._record_confirmed_template_row(
+                            training_row
+                        )
+                        if learned_note:
+                            row["_match_learning_recorded"] = True
+                    else:
                         row["_match_learning_recorded"] = True
                     self._unpark_row(row)
                     self._rows.pop(idxs[0])
                     self._refresh_table()
-                    if learned_note:
+                    if learned_note or edit_res.get("changed"):
                         # En granskad rad sparad från dialogen är en
                         # manuell bekräftelse: pröva om resten också.
                         self._rescan_everything_after_learning()
+                    self._maybe_load_next_scan_batch()
                     self._show_invoices_tab()
         except Exception as exc:
             log.error("SCAN_OPEN_DIALOG: %s", exc, exc_info=True)
@@ -7315,6 +7629,7 @@ class ScanImportView(QWidget):
                 f"✅  {created} faktura{'r' if created != 1 else ''} "
                 f"registrerade och inräknade i ATT BETALA.",
             )
+            self._maybe_load_next_scan_batch()
             self._show_invoices_tab()
 
     def _invoice_data_from_row(

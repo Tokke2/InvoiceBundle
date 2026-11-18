@@ -74,6 +74,12 @@ import time
 FILE_STABILITY_SECONDS = 2.0
 FILE_STABILITY_RECHECK_MS = 1500
 
+#: Batchstorlek för bevakning och inläsning: högst 15 nya fakturor i
+#: första omgången så att appen aldrig fryser, sedan 10 nya automatiskt
+#: så snart föregående omgång flyttats till Fakturor.
+WATCH_INITIAL_BATCH_SIZE = 15
+WATCH_REFILL_BATCH_SIZE = 10
+
 #: Filtyper som bevakningen tar (PDF/bilder — .txt räknas inte,
 #: extraktorn känner inte igen den).
 SUPPORTED_SUFFIXES: tuple[str, ...] = (
@@ -908,6 +914,11 @@ class WatchManager(QObject):
         self._scan_total = 0
         self._scan_done = 0
         self._scan_current_file = ""
+        self._scan_new_limit = WATCH_INITIAL_BATCH_SIZE
+        self._scan_analyzed_new = 0
+        self._scan_deferred_files = 0
+        self._last_deferred_files = 0
+        self._deferred_waiting = False
         self._scan_folders: list[dict] = []
         self._scan_token = 0
         self._scan_pending_token = 0
@@ -943,7 +954,7 @@ class WatchManager(QObject):
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(1200)
-        self._debounce.timeout.connect(self.start_scan)
+        self._debounce.timeout.connect(self._on_poll_scan)
 
         # Om en fil fortfarande växer görs en riktad snabb kontroll.
         # Vi blockerar aldrig GUI-tråden med sleep och behöver därför
@@ -958,7 +969,7 @@ class WatchManager(QObject):
         # Säkerhetspoll (nätverksdiskar missar ibland watcher-events)
         self._poll = QTimer(self)
         self._poll.setInterval(30_000)
-        self._poll.timeout.connect(self.start_scan)
+        self._poll.timeout.connect(self._on_poll_scan)
         self._poll.start()
 
         # Vakt: en fil som hänger i OCR får aldrig låsa appen för alltid.
@@ -1318,6 +1329,12 @@ class WatchManager(QObject):
         ]
         self._save()
         self.changed.emit()
+        if (
+            self._deferred_waiting
+            and not self._config.get("parked")
+            and not self._scan_running
+        ):
+            QTimer.singleShot(80, self.request_next_batch)
 
     def _rewatch(self) -> None:
         """Bevaka rotmappar och befintliga undermappar.
@@ -1509,7 +1526,10 @@ class WatchManager(QObject):
         self._scan_stats = {
             "imported": 0, "duplicate": 0, "parked": 0, "already": 0,
             "waiting": 0, "settling": 0, "changed": 0, "errors": 0,
+            "deferred": 0,
         }
+        self._scan_analyzed_new = 0
+        self._scan_deferred_files = 0
         self._waiting_reasons = {}
         self._control_diffs = []
 
@@ -1569,6 +1589,35 @@ class WatchManager(QObject):
         """Utfördes den senaste skanningen som kontrollskanning?"""
         return bool(self._last_scan_force)
 
+    @property
+    def deferred_file_count(self) -> int:
+        """Antal nya filer som köats till nästa batch (efter max 15/10)."""
+        if self._scan_running:
+            return int(self._last_deferred_files or self._scan_deferred_files or 0)
+        return int(self._scan_deferred_files or self._last_deferred_files or 0)
+
+    def _on_poll_scan(self) -> None:
+        """30-sekunderspollning: fyll inte på nya köade filer förrän pågående batch tömts."""
+        if self._scan_running:
+            return
+        if self._deferred_waiting:
+            if self._config.get("parked"):
+                return
+            self.start_scan(max_new_files=WATCH_REFILL_BATCH_SIZE)
+            return
+        self.start_scan()
+
+    def request_next_batch(self) -> bool:
+        """Läser in nästa 10 filer från bevakade mappar när parkerade/aktiva flyttats."""
+        if (
+            self._scan_running
+            or not self._deferred_waiting
+            or self._config.get("parked")
+        ):
+            return False
+        self.start_scan(max_new_files=WATCH_REFILL_BATCH_SIZE)
+        return True
+
     def scan_all(self, force: bool = False) -> None:
         """Skanning som körs färdigt direkt i anropande tråd.
 
@@ -1578,6 +1627,7 @@ class WatchManager(QObject):
         """
         self._abort_async_scan()
         self._reset_scan_stats()
+        self._scan_new_limit = 0
         self._scan_context_fp = self._context_fingerprint()
         self._last_scan_force = bool(force)
         self._heal_missing_imports()
@@ -1590,14 +1640,14 @@ class WatchManager(QObject):
                 )
         self._complete_scan(announce=True)
 
-    def start_scan(self, force: bool = False) -> None:
+    def start_scan(
+        self, force: bool = False, max_new_files: int | None = None
+    ) -> None:
         """Startar en skanning som inte låser appen.
 
-        Tolkningen av varje fil (PDF-läsning, OCR, mallmatchning) körs i
-        en arbetstråd. GUI-tråden sköter bokföringen en fil i taget och
-        hinner därför rita om fönstret och svara på klick under hela
-        skanningen. En begäran som kommer medan en skanning pågår slås
-        ihop med den pågående i stället för att starta en till.
+        Läser högst ``max_new_files`` nya filer åt gången (standard 15
+        vid inläsning, 10 vid påfyllning efter flytt till Fakturor) så att
+        appen aldrig fryser på stora fakturahögar.
         """
         if self._scan_running:
             self._scan_again = True
@@ -1608,6 +1658,11 @@ class WatchManager(QObject):
             )
             return
         self._reset_scan_stats()
+        self._scan_new_limit = (
+            WATCH_INITIAL_BATCH_SIZE
+            if max_new_files is None
+            else max(0, int(max_new_files))
+        )
         self._scan_running = True
         self._scan_force = bool(force)
         self._last_scan_force = bool(force)
@@ -1923,7 +1978,18 @@ class WatchManager(QObject):
         self._scan_again_force = False
         self._complete_scan(announce=True)
         if again:
-            self.start_scan(force=again_force)
+            if (
+                self._deferred_waiting
+                and self._config.get("parked")
+                and not again_force
+            ):
+                log.debug(
+                    "SCAN_WATCH: hoppar över köad omgång medan nuvarande "
+                    "batch (%d st) fortfarande väntar i parkeringen",
+                    len(self._config.get("parked", [])),
+                )
+            else:
+                self.start_scan(force=again_force)
 
     def _complete_scan(self, announce: bool = True) -> None:
         """Loggar sammanfattningen och meddelar vyn att skanningen är klar."""
@@ -2018,9 +2084,41 @@ class WatchManager(QObject):
             )
         # Uppdatera senast kontrollerad tid och fel-/väntestatus även när
         # skanningen inte hittade någon ny faktura.
+        self._deferred_waiting = self._scan_deferred_files > 0
+        self._last_deferred_files = int(self._scan_deferred_files or 0)
+        if self._scan_deferred_files > 0:
+            log.info(
+                "SCAN_WATCH batch: %d nya fakturor lästes in i denna "
+                "omgång (gräns %d); %d köade tills dessa flyttats till "
+                "Fakturor (då läses 10 nya in)",
+                self._scan_analyzed_new,
+                self._scan_new_limit,
+                self._scan_deferred_files,
+            )
+            try:
+                from plugins import learning_logger as _ll
+                _ll.log_batch_scan(
+                    mode="watch",
+                    batch_limit=self._scan_new_limit,
+                    scanned=self._scan_analyzed_new,
+                    queued_remaining=self._scan_deferred_files,
+                    trigger="watch_batch_limit",
+                )
+            except Exception:
+                pass
         self.changed.emit()
         if announce:
             self.scan_finished.emit(dict(self._scan_stats))
+        if (
+            self._deferred_waiting
+            and self.auto_create
+            and not self._config.get("parked")
+            and not self._scan_running
+            and self._scan_stats.get("imported", 0) > 0
+        ):
+            QTimer.singleShot(
+                60, lambda: self.start_scan(max_new_files=WATCH_REFILL_BATCH_SIZE)
+            )
 
     def _record_scan_error(
         self, path: str, stage: str, digest: str, exc: Exception,
@@ -2546,6 +2644,10 @@ class WatchManager(QObject):
                     self._waiting_reasons.get(bucket, 0) + 1
                 )
                 return
+            if self._scan_new_limit > 0 and self._scan_analyzed_new >= self._scan_new_limit:
+                self._scan_deferred_files += 1
+                self._scan_stats["deferred"] = self._scan_deferred_files
+                return
             log.info(
                 "SCAN_WATCH: %s var parkerad (%s) — prövar "
                 "igen, appen kan ha lärt sig formatet",
@@ -2553,6 +2655,14 @@ class WatchManager(QObject):
             )
             self._config["parked"].remove(parked_entry)
             self._save()
+        if (
+            self._scan_new_limit > 0
+            and self._scan_analyzed_new >= self._scan_new_limit
+        ):
+            self._scan_deferred_files += 1
+            self._scan_stats["deferred"] = self._scan_deferred_files
+            return
+        self._scan_analyzed_new += 1
         try:
             text, method, parsed = yield {
                 "kind": "analyze",

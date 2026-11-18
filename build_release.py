@@ -52,6 +52,7 @@ RELEASE_FILES: tuple[str, ...] = (
     "main.pyw",
     "plugins/advanced_logger.py",
     "plugins/error_collect.py",
+    "plugins/learning_logger.py",
     "plugins/log_archive.py",
     "plugins/pdf_export.py",
     "plugins/pdf_export_helpers.py",
