@@ -373,6 +373,7 @@ if _QT_AVAILABLE:
             scroll.setHorizontalScrollBarPolicy(
                 Qt.ScrollBarPolicy.ScrollBarAlwaysOff
             )
+            self._scroll = scroll
 
             content = QWidget(scroll)
             content.setObjectName("DonateContent")
@@ -435,6 +436,41 @@ if _QT_AVAILABLE:
                 pill.setObjectName("DonateHeroPill")
                 pills_flow.addWidget(pill)
             hero_lay.addLayout(pills_flow)
+
+            hero_ctas = _FlowLayout(spacing=7)
+            btn_hero_swish = QPushButton(tr("donate.hero_cta_swish"), hero)
+            btn_hero_swish.setObjectName("DonateHeroBtnSwish")
+            btn_hero_swish.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_hero_swish.clicked.connect(
+                lambda: self._scroll_to_widget(getattr(self, "_swish_card", None))
+            )
+            hero_ctas.addWidget(btn_hero_swish)
+
+            self._btn_hero_paypal = QPushButton(tr("donate.hero_cta_paypal"), hero)
+            self._btn_hero_paypal.setObjectName("DonateHeroBtnPayPal")
+            self._btn_hero_paypal.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._btn_hero_paypal.clicked.connect(
+                lambda: self._open(paypal_donate_url(self._amount_sek))
+            )
+            hero_ctas.addWidget(self._btn_hero_paypal)
+
+            btn_hero_kofi = QPushButton(tr("donate.hero_cta_kofi"), hero)
+            btn_hero_kofi.setObjectName("DonateHeroBtnKofi")
+            btn_hero_kofi.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_hero_kofi.setToolTip(self._locked_config.kofi_url)
+            btn_hero_kofi.clicked.connect(
+                lambda: self._open(self._locked_config.kofi_url)
+            )
+            hero_ctas.addWidget(btn_hero_kofi)
+
+            btn_hero_amt = QPushButton(tr("donate.hero_cta_amount"), hero)
+            btn_hero_amt.setObjectName("DonateHeroBtnGhost")
+            btn_hero_amt.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_hero_amt.clicked.connect(
+                lambda: self._scroll_to_widget(getattr(self, "_amt_card", None))
+            )
+            hero_ctas.addWidget(btn_hero_amt)
+            hero_lay.addLayout(hero_ctas)
             root.addWidget(hero)
 
             # ── 2. Personlig, varm text om stödet ─────────────────────
@@ -464,6 +500,7 @@ if _QT_AVAILABLE:
             # ── 3. Beloppsväljare (valfritt belopp till Swish & PayPal) ──
             amt_card = QFrame(content)
             amt_card.setObjectName("DonateAmountCard")
+            self._amt_card = amt_card
             amt_lay = QVBoxLayout(amt_card)
             amt_lay.setContentsMargins(14, 9, 14, 9)
             amt_lay.setSpacing(5)
@@ -558,6 +595,7 @@ if _QT_AVAILABLE:
             # Vänster kort: endast Swish QR (Swish-standard, låst mottagare)
             swish_card = QFrame(content)
             swish_card.setObjectName("DonateSwishCard")
+            self._swish_card = swish_card
             swish_lay = QVBoxLayout(swish_card)
             swish_lay.setContentsMargins(14, 10, 14, 10)
             swish_lay.setSpacing(6)
@@ -734,6 +772,199 @@ if _QT_AVAILABLE:
 
             root.addLayout(self._payments_layout)
 
+            # ── 5. Varför din hjälp gör skillnad + förtroendemärken ──
+            impact_card = QFrame(content)
+            impact_card.setObjectName("DonateImpactCard")
+            impact_lay = QVBoxLayout(impact_card)
+            impact_lay.setContentsMargins(14, 10, 14, 11)
+            impact_lay.setSpacing(6)
+
+            imp_kicker = QLabel(tr("donate.impact_kicker"), impact_card)
+            imp_kicker.setObjectName("DonateKicker")
+            impact_lay.addWidget(imp_kicker)
+
+            imp_title = QLabel(tr("donate.impact_title"), impact_card)
+            imp_title.setObjectName("DonateSectionTitle")
+            imp_title.setWordWrap(True)
+            impact_lay.addWidget(imp_title)
+
+            imp_intro = QLabel(tr("donate.impact_intro"), impact_card)
+            imp_intro.setObjectName("DonateMuted")
+            imp_intro.setWordWrap(True)
+            impact_lay.addWidget(imp_intro)
+
+            self._impact_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+            self._impact_layout.setSpacing(8)
+            impact_specs = (
+                ("🧾", "#1e8449", "donate.impact_1_title", "donate.impact_1_body"),
+                ("⚙️", "#2980b9", "donate.impact_2_title", "donate.impact_2_body"),
+                ("📄", "#b7791f", "donate.impact_3_title", "donate.impact_3_body"),
+            )
+            for ico, accent, t_key, b_key in impact_specs:
+                item = QFrame(impact_card)
+                item.setObjectName("DonateImpactItem")
+                item_lay = QHBoxLayout(item)
+                item_lay.setContentsMargins(10, 9, 10, 9)
+                item_lay.setSpacing(9)
+
+                ico_lbl = QLabel(ico, item)
+                ico_lbl.setObjectName("DonateImpactIcon")
+                ico_lbl.setFixedSize(34, 34)
+                ico_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                ico_lbl.setStyleSheet(
+                    f"background-color: {accent}; color: #ffffff; "
+                    "border-radius: 10px; font-size: 15px;"
+                )
+                item_lay.addWidget(ico_lbl, 0, Qt.AlignmentFlag.AlignTop)
+
+                txt_col = QVBoxLayout()
+                txt_col.setSpacing(2)
+                raw_title = tr(t_key)
+                if raw_title.startswith(ico):
+                    raw_title = raw_title[len(ico):].lstrip()
+                it_title = QLabel(raw_title, item)
+                it_title.setObjectName("DonateImpactItemTitle")
+                it_title.setWordWrap(True)
+                txt_col.addWidget(it_title)
+                it_body = QLabel(tr(b_key), item)
+                it_body.setObjectName("DonateImpactItemBody")
+                it_body.setWordWrap(True)
+                txt_col.addWidget(it_body)
+                item_lay.addLayout(txt_col, 1)
+                self._impact_layout.addWidget(item, 1)
+            impact_lay.addLayout(self._impact_layout)
+
+            trust_flow = _FlowLayout(spacing=6)
+            for t_key in (
+                "donate.trust_1",
+                "donate.trust_2",
+                "donate.trust_3",
+                "donate.trust_4",
+            ):
+                pill = QLabel(tr(t_key), impact_card)
+                pill.setObjectName("DonateTrustPill")
+                trust_flow.addWidget(pill)
+            impact_lay.addLayout(trust_flow)
+            root.addWidget(impact_card)
+
+            # ── 6. Vanliga frågor (kollapsbara, lugnt & tryggt) ───────
+            faq_card = QFrame(content)
+            faq_card.setObjectName("DonateFaqCard")
+            faq_lay = QVBoxLayout(faq_card)
+            faq_lay.setContentsMargins(14, 10, 14, 11)
+            faq_lay.setSpacing(6)
+
+            faq_kicker = QLabel(tr("donate.faq_kicker"), faq_card)
+            faq_kicker.setObjectName("DonateKicker")
+            faq_lay.addWidget(faq_kicker)
+
+            faq_title = QLabel(tr("donate.faq_title"), faq_card)
+            faq_title.setObjectName("DonateSectionTitle")
+            faq_title.setWordWrap(True)
+            faq_lay.addWidget(faq_title)
+
+            self._faq_items: list[tuple[QPushButton, QLabel, str]] = []
+            for idx, (q_key, a_key) in enumerate((
+                ("donate.faq_1_q", "donate.faq_1_a"),
+                ("donate.faq_2_q", "donate.faq_2_a"),
+                ("donate.faq_3_q", "donate.faq_3_a"),
+                ("donate.faq_4_q", "donate.faq_4_a"),
+            )):
+                q_box = QFrame(faq_card)
+                q_box.setObjectName("DonateFaqItem")
+                q_lay = QVBoxLayout(q_box)
+                q_lay.setContentsMargins(10, 6, 10, 7)
+                q_lay.setSpacing(4)
+
+                q_text = tr(q_key)
+                btn_q = QPushButton(q_box)
+                btn_q.setObjectName("DonateFaqBtn")
+                btn_q.setCheckable(True)
+                btn_q.setChecked(idx == 0)
+                btn_q.setCursor(Qt.CursorShape.PointingHandCursor)
+
+                lbl_a = QLabel(tr(a_key), q_box)
+                lbl_a.setObjectName("DonateFaqAnswer")
+                lbl_a.setWordWrap(True)
+                lbl_a.setVisible(idx == 0)
+
+                def _make_toggle(btn: QPushButton, ans: QLabel, title_txt: str):
+                    def _update(checked: bool) -> None:
+                        arrow = "▴" if checked else "▾"
+                        btn.setText(f"{title_txt}   {arrow}")
+                        ans.setVisible(bool(checked))
+                    return _update
+
+                updater = _make_toggle(btn_q, lbl_a, q_text)
+                updater(idx == 0)
+                btn_q.toggled.connect(updater)
+                q_lay.addWidget(btn_q)
+                q_lay.addWidget(lbl_a)
+                self._faq_items.append((btn_q, lbl_a, q_text))
+                faq_lay.addWidget(q_box)
+            root.addWidget(faq_card)
+
+            # ── 7. Avslutande stöd-kort (slut-CTA) ───────────────────
+            footer_cta = QFrame(content)
+            footer_cta.setObjectName("DonateFooterCta")
+            fc_lay = QVBoxLayout(footer_cta)
+            fc_lay.setContentsMargins(14, 12, 14, 12)
+            fc_lay.setSpacing(6)
+
+            fc_title = QLabel(
+                f"💖  {tr('donate.footer_title')}", footer_cta
+            )
+            fc_title.setObjectName("DonateFooterTitle")
+            fc_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            fc_title.setWordWrap(True)
+            fc_lay.addWidget(fc_title)
+
+            fc_sub = QLabel(tr("donate.footer_sub"), footer_cta)
+            fc_sub.setObjectName("DonateFooterSub")
+            fc_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            fc_sub.setWordWrap(True)
+            fc_lay.addWidget(fc_sub)
+
+            fc_row = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+            self._footer_cta_row = fc_row
+            fc_row.setSpacing(8)
+            fc_row.addStretch(1)
+            btn_fc_swish = QPushButton(tr("donate.hero_cta_swish"), footer_cta)
+            btn_fc_swish.setObjectName("DonateHeroBtnSwish")
+            btn_fc_swish.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_fc_swish.clicked.connect(
+                lambda: self._scroll_to_widget(getattr(self, "_swish_card", None))
+            )
+            fc_row.addWidget(btn_fc_swish)
+
+            self._btn_fc_paypal = QPushButton(
+                tr("donate.hero_cta_paypal"), footer_cta
+            )
+            self._btn_fc_paypal.setObjectName("DonateHeroBtnPayPal")
+            self._btn_fc_paypal.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._btn_fc_paypal.clicked.connect(
+                lambda: self._open(paypal_donate_url(self._amount_sek))
+            )
+            fc_row.addWidget(self._btn_fc_paypal)
+
+            btn_fc_kofi = QPushButton(tr("donate.hero_cta_kofi"), footer_cta)
+            btn_fc_kofi.setObjectName("DonateHeroBtnKofi")
+            btn_fc_kofi.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_fc_kofi.setToolTip(self._locked_config.kofi_url)
+            btn_fc_kofi.clicked.connect(
+                lambda: self._open(self._locked_config.kofi_url)
+            )
+            fc_row.addWidget(btn_fc_kofi)
+            fc_row.addStretch(1)
+            fc_lay.addLayout(fc_row)
+
+            fc_note = QLabel(tr("donate.footer_note"), footer_cta)
+            fc_note.setObjectName("DonateFooterNote")
+            fc_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            fc_note.setWordWrap(True)
+            fc_lay.addWidget(fc_note)
+            root.addWidget(footer_cta)
+
             scroll.setWidget(content)
             outer.addWidget(scroll, 1)
 
@@ -883,10 +1114,133 @@ if _QT_AVAILABLE:
                     font-size: 11px;
                     font-weight: 700;
                 }}
-                QFrame#DonateAmountCard, QFrame#DonateMessageCard {{
+                QFrame#DonateAmountCard, QFrame#DonateMessageCard,
+                QFrame#DonateImpactCard, QFrame#DonateFaqCard {{
                     background-color: {card_bg};
                     border: 1px solid {border};
                     border-radius: 14px;
+                }}
+                QFrame#DonateImpactCard {{
+                    border-top: 4px solid #1e8449;
+                }}
+                QFrame#DonateFaqCard {{
+                    border-top: 4px solid #8e44ad;
+                }}
+                QFrame#DonateImpactItem, QFrame#DonateFaqItem {{
+                    background-color: {sub_card_bg};
+                    border: 1px solid {border};
+                    border-radius: 11px;
+                }}
+                QLabel#DonateImpactItemTitle {{
+                    color: {text_strong};
+                    font-size: 12.5px;
+                    font-weight: 800;
+                    background: transparent;
+                }}
+                QLabel#DonateImpactItemBody {{
+                    color: {text_muted};
+                    font-size: 11.5px;
+                    font-weight: 500;
+                    background: transparent;
+                }}
+                QLabel#DonateTrustPill {{
+                    background-color: {sub_card_bg};
+                    border: 1px solid {border};
+                    border-radius: 10px;
+                    padding: 4px 10px;
+                    color: {text_muted};
+                    font-size: 11px;
+                    font-weight: 700;
+                }}
+                QPushButton#DonateFaqBtn {{
+                    background: transparent;
+                    border: none;
+                    color: {text_strong};
+                    font-size: 12.5px;
+                    font-weight: 800;
+                    text-align: left;
+                    padding: 2px 0;
+                }}
+                QLabel#DonateFaqAnswer {{
+                    color: {text_muted};
+                    font-size: 11.5px;
+                    font-weight: 500;
+                    background: transparent;
+                    padding-top: 2px;
+                }}
+                QPushButton#DonateHeroBtnSwish {{
+                    background-color: #00b06c;
+                    color: #ffffff;
+                    border: 1px solid #00915a;
+                    border-radius: 10px;
+                    font-size: 12px;
+                    font-weight: 800;
+                    padding: 6px 12px;
+                }}
+                QPushButton#DonateHeroBtnSwish:hover {{
+                    background-color: #00c97c;
+                }}
+                QPushButton#DonateHeroBtnPayPal {{
+                    background-color: #0070ba;
+                    color: #ffffff;
+                    border: 1px solid #005c99;
+                    border-radius: 10px;
+                    font-size: 12px;
+                    font-weight: 800;
+                    padding: 6px 12px;
+                }}
+                QPushButton#DonateHeroBtnPayPal:hover {{
+                    background-color: #0b84d4;
+                }}
+                QPushButton#DonateHeroBtnKofi {{
+                    background-color: #d94340;
+                    color: #ffffff;
+                    border: 1px solid #b3322f;
+                    border-radius: 10px;
+                    font-size: 12px;
+                    font-weight: 800;
+                    padding: 6px 12px;
+                }}
+                QPushButton#DonateHeroBtnKofi:hover {{
+                    background-color: #ef5653;
+                }}
+                QPushButton#DonateHeroBtnGhost {{
+                    background-color: rgba(255, 255, 255, 0.22);
+                    color: #ffffff;
+                    border: 1px solid rgba(255, 255, 255, 0.45);
+                    border-radius: 10px;
+                    font-size: 12px;
+                    font-weight: 800;
+                    padding: 6px 12px;
+                }}
+                QPushButton#DonateHeroBtnGhost:hover {{
+                    background-color: rgba(255, 255, 255, 0.32);
+                }}
+                QFrame#DonateFooterCta {{
+                    background: qlineargradient(
+                        x1:0, y1:0, x2:1, y2:1,
+                        stop:0 #22313f, stop:0.55 #17212c, stop:1 #27384a
+                    );
+                    border: 1px solid #35475c;
+                    border-radius: 14px;
+                }}
+                QLabel#DonateFooterTitle {{
+                    color: #ffffff;
+                    font-size: 15px;
+                    font-weight: 800;
+                    background: transparent;
+                }}
+                QLabel#DonateFooterSub {{
+                    color: #cbd5e1;
+                    font-size: 12px;
+                    font-weight: 500;
+                    background: transparent;
+                }}
+                QLabel#DonateFooterNote {{
+                    color: #94a3b8;
+                    font-size: 11px;
+                    font-weight: 600;
+                    background: transparent;
                 }}
                 QLabel#DonateStoryBody {{
                     color: {text_muted};
@@ -1094,6 +1448,20 @@ if _QT_AVAILABLE:
                 if width >= 580 else QBoxLayout.Direction.TopToBottom
             )
             self._payments_layout.setDirection(direction)
+            if hasattr(self, "_impact_layout"):
+                self._impact_layout.setDirection(
+                    QBoxLayout.Direction.LeftToRight
+                    if width >= 620 else QBoxLayout.Direction.TopToBottom
+                )
+            if hasattr(self, "_footer_cta_row"):
+                self._footer_cta_row.setDirection(
+                    QBoxLayout.Direction.LeftToRight
+                    if width >= 480 else QBoxLayout.Direction.TopToBottom
+                )
+
+        def _scroll_to_widget(self, target: Optional[QWidget]) -> None:
+            if target is not None and hasattr(self, "_scroll"):
+                self._scroll.ensureWidgetVisible(target, 16, 20)
 
         def _toggle_web_qr_panel(self, checked: bool) -> None:
             self._web_qr_panel.setVisible(bool(checked))
@@ -1161,6 +1529,10 @@ if _QT_AVAILABLE:
             # Uppdatera PayPal-knappen, PayPal-QR, Ko-fi-QR och info-raden
             pp_url = paypal_donate_url(parsed)
             self._btn_paypal.setToolTip(pp_url)
+            if hasattr(self, "_btn_hero_paypal"):
+                self._btn_hero_paypal.setToolTip(pp_url)
+            if hasattr(self, "_btn_fc_paypal"):
+                self._btn_fc_paypal.setToolTip(pp_url)
             self._paypal_qr_payload = pp_url
             self._kofi_qr_payload = self._locked_config.kofi_url
 

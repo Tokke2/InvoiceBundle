@@ -56,7 +56,7 @@ All grafik finns som **vektorgrafik (SVG)** i [`brand/`](brand/README.md): ikon,
 
 Programmet är gratis att använda, både privat och kommersiellt. En donation krävs inte och låser inte upp något.
 
-Vill du stödja utvecklingen öppnar du **Hjälp → 💖 Donationer…** (eller använder guldknappen i verktygsfältet, knappen i statusfältet, högerklick på flikraden, Om-dialogen eller fliken Inställningar). Mottagaruppgifterna är låsta i appen och går inte att ändra:
+Vill du stödja utvecklingen öppnar du **Hjälp → 💖 Donationer…** (eller använder guldknappen i verktygsfältet, knappen i statusfältet, högerklick på flikraden, Om-dialogen eller fliken Inställningar). Dialogen visar snabbknappar, valfritt belopp, nyttokort, förtroendemärken och vanliga frågor direkt inne i appen utan separat webbsida. Mottagaruppgifterna är låsta och går inte att ändra:
 
 - 💚 **Swish:** Swish-QR enligt Swish-standard i appens donationsruta (mottagaren är låst och numret visas aldrig i klartext)
 - 💙 **PayPal:** https://paypal.me/Rickard3dPrint (knapp samt valfri skanningsbar QR-kod)
@@ -159,7 +159,7 @@ All artwork ships as **vector graphics (SVG)** in [`brand/`](brand/README.md): t
 
 The app is free to use for both private and commercial purposes. A donation is never required and unlocks nothing.
 
-If you would like to support development, open **Help → 💖 Donations…** inside the app (or use the gold toolbar button, the status-bar button, right-clicking the tab bar, the About dialog, or the Settings tab). Recipient details are locked inside the app and cannot be changed:
+If you would like to support development, open **Help → 💖 Donations…** inside the app (or use the gold toolbar button, the status-bar button, right-clicking the tab bar, the About dialog, or the Settings tab). The dialog includes quick actions, optional amount chips, impact cards, trust badges, and collapsible FAQs directly inside the app with no separate webpage. Recipient details are locked inside the app and cannot be changed:
 
 - 💚 **Swish:** Swish QR code following the Swish standard inside the app dialog (the recipient is locked and the number is never shown in plain text)
 - 💙 **PayPal:** https://paypal.me/Rickard3dPrint (button plus optional scannable QR code)

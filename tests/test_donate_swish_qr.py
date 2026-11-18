@@ -199,6 +199,26 @@ def test_dialog_has_personal_message_and_optional_paypal_kofi_qr():
         dlg._btn_toggle_web_qr.click()
         _qapp().processEvents()
         assert dlg._web_qr_panel.isVisible() is False
+
+        # Hero CTA, Impact-kort, Trust-badges, FAQ-dragspel och Slut-CTA
+        assert dlg.findChild(QLabel, "DonateTrustPill") is not None
+        assert dlg.findChild(QLabel, "DonateImpactItemTitle") is not None
+        assert dlg.findChild(QLabel, "DonateFooterTitle") is not None
+        assert len(dlg._faq_items) == 4
+        btn0, ans0, _ = dlg._faq_items[0]
+        btn1, ans1, _ = dlg._faq_items[1]
+        assert btn0.isChecked() is True and ans0.isVisible() is True
+        assert btn1.isChecked() is False and ans1.isVisible() is False
+        btn1.click()
+        _qapp().processEvents()
+        assert btn1.isChecked() is True and ans1.isVisible() is True
+        btn1.click()
+        _qapp().processEvents()
+        assert btn1.isChecked() is False and ans1.isVisible() is False
+
+        dlg._amount_buttons[100].click()
+        assert dlg._btn_hero_paypal.toolTip() == "https://paypal.me/Rickard3dPrint/100SEK"
+        assert dlg._btn_fc_paypal.toolTip() == "https://paypal.me/Rickard3dPrint/100SEK"
         dlg.reject()
 
     i18n.set_language("sv", notify=False)
