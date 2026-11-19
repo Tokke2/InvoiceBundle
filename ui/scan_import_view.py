@@ -5818,6 +5818,8 @@ class ScanImportView(QWidget):
         rörs inte. Returnerar antalet omlästa rader.
         """
         si = _scan_module()
+        learning = self._get_match_learning()
+        selector = getattr(si, "select_supplier_template", None)
         count = 0
         for other in self._rows:
             if exclude is not None and other is exclude:
@@ -5827,9 +5829,20 @@ class ScanImportView(QWidget):
             if not text and not path:
                 continue
             try:
-                found = si.template_values(
-                    path or None, text, template
-                )
+                if callable(selector):
+                    sel = selector(
+                        text or "", template,
+                        path=path or None,
+                        match_learning=learning,
+                        supplier=supplier,
+                    )
+                    if sel.get("ambiguous"):
+                        continue
+                    found = dict(sel.get("found") or {})
+                else:
+                    found = si.template_values(
+                        path or None, text, template
+                    )
             except Exception as exc:
                 log.warning("reread row: %s", exc)
                 continue
@@ -5847,7 +5860,7 @@ class ScanImportView(QWidget):
             )
             miss: list[str] = []
             try:
-                amount_ok = float(other.get("total_amount") or 0) > 0
+                amount_ok = abs(float(other.get("total_amount") or 0)) > 0
             except (TypeError, ValueError):
                 amount_ok = False
             if not amount_ok:
@@ -5867,6 +5880,13 @@ class ScanImportView(QWidget):
                 "mallen för %s", count, supplier,
             )
         return count
+
+    def reload_learning_and_rescan(self) -> str:
+        """Laddar om mall-/inlärningsminnet från disk och prövar om väntande."""
+        self._templates_cache = None
+        self._learning_cache = None
+        self._refresh_templates_btn()
+        return self._rescan_everything_after_learning()
 
     def _open_template_dialog(self, row: dict | None = None) -> None:
         """Skapa/redigera mall för markerad rad + tolka om raden."""
@@ -5906,6 +5926,9 @@ class ScanImportView(QWidget):
             path=path or None,
         )
         if not dlg.exec() or not dlg.result_template:
+            return
+        supplier = str(dlg.result_template.get("supplier", "") or "").strip()
+        if not supplier:
             return
         candidate = {
             key: value for key, value in dlg.result_template.items()
@@ -5996,6 +6019,27 @@ class ScanImportView(QWidget):
                 tr("tmpl.save_failed", supplier=supplier)
             )
             return
+        try:
+            ll = si._learning_logger() if hasattr(si, "_learning_logger") else None
+            if ll is not None:
+                learning = self._get_match_learning()
+                entry = si.learning_entry(learning, supplier)
+                confs = int(entry.get("confirmed", 0) or 0)
+                tcount = len(si.template_variants(templates.get(supplier)))
+                ll.log_manual_match(
+                    source="template_manager_edit",
+                    file=Path(path).name if path else "",
+                    pages=si.page_image_count(path) if path else 0,
+                    supplier=supplier,
+                    template_saved=True,
+                    template_variant=candidate,
+                    template_count=tcount,
+                    confirmations_before=confs,
+                    confirmations_after=confs,
+                    multipage_confirmed=int(entry.get("multipage_confirmed", 0) or 0),
+                )
+        except Exception:
+            pass
         self._lbl_status.setText(tr("tmpl.saved", supplier=supplier))
         log.info("SCAN_TEMPLATE: mall redigerad för %s", supplier)
 
@@ -6891,6 +6935,17 @@ class ScanImportView(QWidget):
                     supplier=before.get("supplier", ""),
                     n=5,
                 )
+            if (
+                res.get("template_action")
+                or res.get("counter_reset")
+                or res.get("replaced_variants")
+                or res.get("unconfirmed_variants")
+            ):
+                rescan_note = self._rescan_everything_after_learning(
+                    exclude=row
+                )
+                if rescan_note:
+                    msg += " · " + rescan_note
             self._lbl_status.setText(msg)
 
     @staticmethod

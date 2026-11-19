@@ -53,6 +53,7 @@ Copyright © dynamiskt år Rickard Längkvist
 """
 
 import datetime
+import inspect
 import logging
 import re
 from pathlib import Path
@@ -2420,6 +2421,20 @@ class InvoicesView(QWidget):
             msg += f"  ·  {learn_note}"
         self._status(msg)
 
+    def _sync_import_view_learning(self) -> None:
+        """Synkar Import-flikens mall-/inlärningscache och prövar om parkerat."""
+        try:
+            win = self.window()
+            if win is None or win is self:
+                return
+            for child in win.findChildren(QWidget):
+                fn = getattr(child, "reload_learning_and_rescan", None)
+                if callable(fn):
+                    fn()
+                    break
+        except Exception:
+            pass
+
     def _learn_from_edited_invoice(
         self, before_inv: dict, after_data: dict
     ) -> str:
@@ -2468,10 +2483,24 @@ class InvoicesView(QWidget):
                     supplier=before_inv.get("supplier", ""),
                     n=si.LEARNED_SUPPLIER_CONFIRMATIONS,
                 ))
-            if res.get("template_action") == "ny_variant_sparad":
+            if res.get("replaced_variants"):
+                parts.append(
+                    f"ersatte {len(res['replaced_variants'])} krockande mallvariant(er) "
+                    f"({res.get('template_count', 0)}/15)"
+                )
+            elif res.get("template_action") == "ny_variant_sparad":
                 parts.append(
                     f"ny mallvariant sparad ({res.get('template_count', 0)}/15)"
                 )
+            if res.get("unconfirmed_variants"):
+                parts.append("äldre variant avbekräftad för kontroll")
+            if (
+                res.get("template_action")
+                or res.get("counter_reset")
+                or res.get("replaced_variants")
+                or res.get("unconfirmed_variants")
+            ):
+                self._sync_import_view_learning()
             return ", ".join(parts)
         except Exception as exc:
             log.debug("learn from edited invoice: %s", exc)
@@ -3066,9 +3095,26 @@ class InvoicesView(QWidget):
                 suppliers = list(self._app.get_suppliers() or [])
             except Exception:
                 suppliers = []
+            load_ml = getattr(si, "load_match_learning", None)
+            learning = (
+                load_ml(self._scan_data_dir() / "match_memory.json")
+                if callable(load_ml) else None
+            )
+            parse_kwargs: dict[str, Any] = {
+                "templates": self._load_scan_templates(si),
+            }
+            if learning is not None:
+                try:
+                    sig = inspect.signature(si.parse_invoice_file)
+                    if "match_learning" in sig.parameters or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD
+                        for p in sig.parameters.values()
+                    ):
+                        parse_kwargs["match_learning"] = learning
+                except (TypeError, ValueError):
+                    parse_kwargs["match_learning"] = learning
             parsed = si.parse_invoice_file(
-                path, text or "", suppliers,
-                templates=self._load_scan_templates(si),
+                path, text or "", suppliers, **parse_kwargs
             )
         except Exception as exc:
             log.warning("rescan invoice %s: %s", nr, exc)
@@ -3202,6 +3248,12 @@ class InvoicesView(QWidget):
             suppliers = []
         templates = self._load_scan_templates(si)
         try:
+            template_learning = si.load_match_learning(
+                self._scan_data_dir() / "match_memory.json"
+            )
+        except Exception:
+            template_learning = {}
+        try:
             pages = si.page_image_count(Path(path))
         except Exception:
             pages = 0
@@ -3261,24 +3313,35 @@ class InvoicesView(QWidget):
             found: dict[str, Any] = {}
             if tmpl:
                 try:
-                    found = dict(si.apply_template(text, tmpl) or {})
+                    selector = getattr(si, "select_supplier_template", None)
+                    if callable(selector):
+                        sel = selector(
+                            text, tmpl, path=path or None,
+                            match_learning=template_learning,
+                            supplier=name,
+                        )
+                        if not sel.get("ambiguous"):
+                            found = dict(sel.get("found") or {})
+                    else:
+                        found = dict(si.apply_template(text, tmpl) or {})
                 except Exception as exc:
                     log.debug("manual match apply: %s", exc)
                     found = {}
-                try:
-                    fields = tmpl.get("fields", {}) or {}
-                    if any(
-                        isinstance(spec, dict) and spec.get("region")
-                        for spec in fields.values()
-                    ):
-                        found.update(
-                            si.template_values_from_regions(
-                                tmpl,
-                                si.extract_region_texts(path, tmpl),
+                if not found:
+                    try:
+                        fields = tmpl.get("fields", {}) or {}
+                        if any(
+                            isinstance(spec, dict) and spec.get("region")
+                            for spec in fields.values()
+                        ):
+                            found.update(
+                                si.template_values_from_regions(
+                                    tmpl,
+                                    si.extract_region_texts(path, tmpl),
+                                )
                             )
-                        )
-                except Exception as exc:
-                    log.debug("manual match regions: %s", exc)
+                    except Exception as exc:
+                        log.debug("manual match regions: %s", exc)
             try:
                 base = si.parse_invoice_text(
                     text, suppliers, templates={}
@@ -3374,12 +3437,6 @@ class InvoicesView(QWidget):
         state: dict[str, Any] = {
             "after": {}, "template": None, "template_fields": [],
         }
-        try:
-            template_learning = si.load_match_learning(
-                self._scan_data_dir() / "match_memory.json"
-            )
-        except Exception:
-            template_learning = {}
 
         def _refresh_preview() -> None:
             name = combo.currentText().strip()
@@ -3538,6 +3595,7 @@ class InvoicesView(QWidget):
         )
         if learned:
             msg += "  ·  " + learned
+            self._sync_import_view_learning()
         self._status(msg, timeout=8000)
 
     def _learn_manual_match(

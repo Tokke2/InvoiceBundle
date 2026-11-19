@@ -5927,6 +5927,148 @@ def _confirmed_value_matches(
     return str(raw).strip() == want_nr
 
 
+def _variant_reads_on_invoice(
+    variant: dict, text: str, path: str = ""
+) -> dict[str, Any]:
+    """Läser en enskild mallvariant mot fakturans text + eventuella rutor."""
+    found = apply_template(text or "", variant)
+    if path and _region_specs(variant) and Path(path).is_file():
+        try:
+            reg_texts = extract_region_texts(path, variant)
+            if reg_texts:
+                found.update(template_values_from_regions(variant, reg_texts))
+        except Exception:
+            pass
+    return found
+
+
+def _variant_contradicts_confirmation(
+    variant: dict,
+    text: str,
+    path: str,
+    *,
+    want_nr: str,
+    want_total: float,
+) -> bool:
+    """True när en variant aktivt läser fel fakturanr/belopp på fakturan."""
+    if not text and not (path and Path(path).is_file()):
+        return False
+    fields = variant.get("fields") or {}
+    has_nr_spec = isinstance(fields, dict) and "invoice_number" in fields
+    has_amt_spec = isinstance(fields, dict) and "total_amount" in fields
+    if not has_nr_spec and not has_amt_spec:
+        return False
+
+    found = _variant_reads_on_invoice(variant, text, path)
+    credit = is_credit_note(text or "")
+    got_nr = str(found.get("invoice_number") or "").strip()
+    try:
+        got_amt = round(float(found.get("total_amount") or 0), 2)
+    except (TypeError, ValueError):
+        got_amt = 0.0
+
+    if has_nr_spec and has_amt_spec:
+        if not got_nr or not (got_amt > 0 or credit):
+            return False
+    elif has_nr_spec:
+        if not got_nr:
+            return False
+    elif has_amt_spec:
+        if not (got_amt > 0 or credit):
+            return False
+
+    if has_nr_spec and got_nr and want_nr and got_nr != want_nr:
+        return True
+    if (
+        has_amt_spec
+        and (got_amt > 0 or credit)
+        and want_total > 0
+        and abs(got_amt - round(want_total, 2)) > 0.005
+    ):
+        return True
+    return False
+
+
+def _reconcile_contradicting_variants(
+    templates: dict,
+    learning: dict,
+    supplier_key: str,
+    *,
+    text: str,
+    path: str,
+    want_nr: str,
+    want_total: float,
+    keep_sig: str = "",
+    prune: bool = False,
+) -> tuple[list[str], list[str], int]:
+    """Hanterar äldre varianter som bevisligen läste fel på just den här fakturan.
+
+    * När ``prune=True`` (en ny verifierad variant just härleddes som ersätter
+      den felaktiga tolkningen) rensas motstridiga varianter bort så att nästa
+      likadana faktura inte fastnar som ``template_ambiguous``. Genuina
+      varianter för andra fakturalayouter berörs aldrig.
+    * När ``prune=False`` (ingen ny ersättningsetikett gick att härleda)
+      nollställs bekräftelsen på den felaktiga varianten i inlärningsminnet så
+      att appen ber användaren kontrollera nästa faktura av samma typ.
+    """
+    entry = templates.get(supplier_key)
+    if not isinstance(entry, dict):
+        return [], [], 0
+    variants = template_variants(entry)
+    if not variants:
+        return [], [], 0
+
+    l_entry = learning_entry(learning, supplier_key)
+    tconf = (
+        l_entry.get("templates")
+        if isinstance(l_entry, dict) else None
+    )
+
+    surviving: list[dict[str, Any]] = []
+    replaced: list[str] = []
+    unconfirmed: list[str] = []
+
+    for var in variants:
+        sig = template_confirmation_signature(var)
+        if keep_sig and sig == keep_sig:
+            surviving.append(var)
+            continue
+        contradicts = _variant_contradicts_confirmation(
+            var, text, path, want_nr=want_nr, want_total=want_total,
+        )
+        if not contradicts:
+            surviving.append(var)
+            continue
+        if prune and keep_sig:
+            replaced.append(sig)
+            if isinstance(tconf, dict):
+                tconf.pop(sig, None)
+        else:
+            surviving.append(var)
+            if isinstance(tconf, dict) and isinstance(tconf.get(sig), dict):
+                if int(tconf[sig].get("confirmed", 0) or 0) > 0:
+                    tconf[sig]["confirmed"] = 0
+                    tconf[sig]["demoted_after_edit"] = (
+                        datetime.datetime.now().isoformat(timespec="seconds")
+                    )
+                    unconfirmed.append(sig)
+
+    if replaced and surviving:
+        updated: dict[str, Any] = {
+            "fields": dict(surviving[-1].get("fields") or {}),
+        }
+        if len(surviving) > 1:
+            updated["variants"] = [dict(v) for v in surviving]
+        logos = supplier_logo_specs(entry)
+        if logos:
+            updated["supplier_logos"] = [dict(sp) for sp in logos]
+            updated["supplier_logo"] = dict(logos[0])
+        templates[supplier_key] = updated
+        variants = surviving
+
+    return replaced, unconfirmed, len(variants)
+
+
 def learn_from_edited_auto_match(
     templates: dict,
     learning: dict,
@@ -5949,7 +6091,9 @@ def learn_from_edited_auto_match(
          tidigare leverantör och lär in ny leverantör + verifierad mall)
       2) fälträttningar på samma leverantör (härleder/uppdaterar en
          verifierad mallvariant upp till 15 per leverantör när fakturatext
-         bekräftar rättat fakturanummer/belopp/datum/förfallo/OCR).
+         bekräftar rättat fakturanummer/belopp/datum/förfallo/OCR — och
+         rensar bort eller avbekräftar en äldre variant som krockar på
+         samma faktura så nästa likadana faktura träffar direkt).
 
     Allt loggas detaljerat (inkl. fältdiffar och textbevis ur PDF:en) till
     självlärandeloggen för analys i chatten.
@@ -5992,6 +6136,8 @@ def learn_from_edited_auto_match(
             "counter_reset": False,
             "template_action": "",
             "template_count": 0,
+            "replaced_variants": [],
+            "unconfirmed_variants": [],
         }
 
     if not text and path and Path(path).is_file():
@@ -6010,14 +6156,28 @@ def learn_from_edited_auto_match(
     )
     counter_reset = False
     if supplier_changed:
-        # Kontrollera om gamla leverantören hade automatkoppling/inlärning
-        old_entry = learning_entry(learning, old_sup)
-        was_auto = bool(
-            (old_entry and int(old_entry.get("confirmed", 0) or 0) > 0)
-            or str(
-                (before.get("supplier_match") or {}).get("reason", "")
-            ) in {"learned", "learned_logo"}
+        # Kontrollera om gamla leverantören hade automatkoppling/inlärning;
+        # ett tidigare manuellt användarval (user_choice) räknas aldrig som
+        # appens felaktiga automatchning.
+        old_match_reason = str(
+            (before.get("supplier_match") or {}).get("reason", "") or ""
         )
+        old_entry = learning_entry(learning, old_sup)
+        was_auto = False
+        if old_match_reason != "user_choice":
+            old_tconf = (
+                old_entry.get("templates")
+                if isinstance(old_entry, dict) else None
+            )
+            has_confirmed_tpl = isinstance(old_tconf, dict) and any(
+                isinstance(v, dict) and int(v.get("confirmed", 0) or 0) > 0
+                for v in old_tconf.values()
+            )
+            was_auto = bool(
+                (old_entry and int(old_entry.get("confirmed", 0) or 0) > 0)
+                or old_match_reason in {"learned", "learned_logo"}
+                or (before.get("template") and has_confirmed_tpl)
+            )
         if was_auto and old_entry:
             record_match_correction(learning, old_sup, text=text)
             counter_reset = True
@@ -6035,9 +6195,17 @@ def learn_from_edited_auto_match(
     saved_variant: dict | None = None
     template_count = 0
     accepted_fields: list[str] = []
+    replaced_variants: list[str] = []
+    unconfirmed_variants: list[str] = []
 
     if new_sup:
-        existing_tpl = find_template(templates, new_sup, suppliers)
+        existing_names = (
+            supplier_template_candidate_names(templates, new_sup, suppliers)
+            if suppliers is not None
+            else template_candidate_names(templates, new_sup)
+        )
+        existing_key = existing_names[0] if len(existing_names) == 1 else ""
+        existing_tpl = templates.get(existing_key) if existing_key else None
         existing_variants = template_variants(existing_tpl)
         extra_lbls: dict[str, list[str]] = {}
         for var_item in existing_variants:
@@ -6049,6 +6217,7 @@ def learn_from_edited_auto_match(
                         lbl_s = str(sp["label"])
                         if lbl_s not in extra_lbls[str(fn)]:
                             extra_lbls[str(fn)].append(lbl_s)
+        stored_key = existing_key
         if text and final_nr and final_total > 0:
             candidate = derive_template_from_confirmation(
                 text, final_nr, final_total,
@@ -6060,7 +6229,7 @@ def learn_from_edited_auto_match(
                     existing_tpl is not None
                     and not _template_has_core_fields(existing_tpl)
                 )
-                _k, saved_entry, added_new = store_supplier_template(
+                stored_key, saved_entry, added_new = store_supplier_template(
                     templates, new_sup, candidate,
                     max_templates=MAX_TEMPLATES_PER_SUPPLIER,
                     replace_primary=replace_primary,
@@ -6072,12 +6241,40 @@ def learn_from_edited_auto_match(
                     "ny_variant_sparad" if added_new
                     else "befintlig_variant_bekräftad"
                 )
+                if not supplier_changed and stored_key:
+                    keep_sig = template_confirmation_signature(candidate)
+                    replaced_variants, _, template_count = (
+                        _reconcile_contradicting_variants(
+                            templates, learning, stored_key,
+                            text=text, path=path,
+                            want_nr=final_nr, want_total=final_total,
+                            keep_sig=keep_sig, prune=True,
+                        )
+                    )
+                    if replaced_variants and added_new:
+                        template_action = "motstridig_variant_ersatt"
         if saved_variant is None and existing_variants:
             template_count = len(existing_variants)
+            if (
+                not supplier_changed
+                and existing_key
+                and (
+                    "invoice_number" in field_diffs
+                    or "total_amount" in field_diffs
+                )
+            ):
+                _, unconfirmed_variants, template_count = (
+                    _reconcile_contradicting_variants(
+                        templates, learning, existing_key,
+                        text=text, path=path,
+                        want_nr=final_nr, want_total=final_total,
+                        keep_sig="", prune=False,
+                    )
+                )
 
         if (
             templates_path is not None
-            and template_action
+            and (template_action or replaced_variants)
         ):
             save_templates(templates_path, templates)
 
@@ -6139,6 +6336,8 @@ def learn_from_edited_auto_match(
                 template_count=template_count,
                 template_summary=saved_variant,
                 text_evidence=evidence,
+                replaced_variants=replaced_variants,
+                unconfirmed_variants=unconfirmed_variants,
             )
     except Exception:
         pass
@@ -6150,6 +6349,8 @@ def learn_from_edited_auto_match(
         "template_action": template_action,
         "template_count": template_count,
         "supplier_changed": supplier_changed,
+        "replaced_variants": replaced_variants,
+        "unconfirmed_variants": unconfirmed_variants,
     }
 
 

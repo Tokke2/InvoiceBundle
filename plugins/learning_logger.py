@@ -325,17 +325,28 @@ def log_auto_match_edit(
     template_count: int = 0,
     template_summary: dict | None = None,
     text_evidence: dict[str, Any] | None = None,
+    replaced_variants: list[str] | None = None,
+    unconfirmed_variants: list[str] | None = None,
 ) -> None:
     diffs = dict(field_diffs or {})
     diff_str = ", ".join(
         f"{k}: {v.get('before', '')}->{v.get('after', '')}"
         for k, v in diffs.items()
     ) or "inga"
+    rep = list(replaced_variants or [])
+    unconf = list(unconfirmed_variants or [])
+    extra_parts: list[str] = []
+    if rep:
+        extra_parts.append(f"ersatta_varianter={len(rep)}")
+    if unconf:
+        extra_parts.append(f"obekräftade_varianter={len(unconf)}")
+    extra_txt = (" " + " ".join(extra_parts)) if extra_parts else ""
     summary = (
         f"källa={source} fil={file or '-'} sidor={pages} "
         f"lev={supplier_before or '-'}->{supplier_after or '-'} "
         f"ändringar=[{diff_str}] reset={counter_reset} "
         f"mall={template_action or 'ingen'} ({template_count}/15)"
+        f"{extra_txt}"
     )
     _append_event(
         {
@@ -353,6 +364,8 @@ def log_auto_match_edit(
                 _compact_variant_summary(template_summary)
                 if isinstance(template_summary, dict) else {}
             ),
+            "replaced_variants": rep,
+            "unconfirmed_variants": unconf,
             "text_evidence": dict(text_evidence or {}),
         },
         summary,
@@ -504,11 +517,19 @@ def format_learning_report(
         etype = ev.get("event", "?")
         ts = ev.get("ts", "")
         if etype == "auto_match_edit":
+            rep_v = ev.get("replaced_variants") or []
+            unc_v = ev.get("unconfirmed_variants") or []
+            var_note = ""
+            if rep_v:
+                var_note += f" ersatte={len(rep_v)}"
+            if unc_v:
+                var_note += f" obekräftade={len(unc_v)}"
             lines.append(
                 f"{ts}  [RÄTTAD AUTOMATCH] {ev.get('file', '-')} "
                 f"(sidor={ev.get('pages', 0)}, {ev.get('source', '')}) "
                 f"lev={ev.get('supplier_before', '-')}->{ev.get('supplier_after', '-')} "
                 f"reset={ev.get('counter_reset')} mall={ev.get('template_action', '-')}"
+                f"{var_note}"
             )
             for fname, diff in (ev.get("field_diffs") or {}).items():
                 lines.append(
