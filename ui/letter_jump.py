@@ -209,7 +209,15 @@ def handle_key(obj, event) -> bool:
         return False
     if not combo.property("_jump_hint") and not combo.isEditable():
         combo.setProperty("_jump_hint", True)
-        extra = "Tryck en bokstav för att hoppa, t.ex. D."
+        try:
+            from ui.i18n import tr as _tr
+        except ImportError:
+            try:
+                from i18n import tr as _tr  # type: ignore[no-redef]
+            except ImportError:
+                def _tr(_k: str) -> str:
+                    return "Tryck en bokstav för att hoppa, t.ex. D."
+        extra = _tr("common.letter_jump_tip")
         tip = combo.toolTip()
         if extra not in tip:
             combo.setToolTip((tip + "\n" + extra).strip() if tip else extra)

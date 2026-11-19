@@ -77,14 +77,17 @@ class InvoiceTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ToolTipRole:
             if section == 0:
                 return tr("invoices.export_check_tip")
-            full = {
-                "Fakturanr": "Fakturanummer",
-                "Förfaller": "Förfallodatum",
-                "Betaldatum": "Betalningsdatum",
-                "Notering": "Anteckning",
+            key = COL_KEYS[section - 1]
+            tip_keys = {
+                "invoice_number": "invdialog.col_number_tip",
+                "due_date": "invdialog.col_due_tip",
+                "payment_date": "invdialog.col_paydate_tip",
+                "note": "invdialog.col_note_tip",
             }
-            label = self._headers[section - 1]
-            return full.get(label, label)
+            tk = tip_keys.get(key)
+            if tk:
+                return tr(tk)
+            return self._headers[section - 1]
         if role == Qt.ItemDataRole.AccessibleTextRole:
             if section == 0:
                 return tr("invoices.export_check_header_accessible")

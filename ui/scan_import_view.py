@@ -42,13 +42,14 @@ from PySide6.QtWidgets import (
     QLineEdit, QCheckBox, QApplication, QInputDialog,
     QDialog, QListWidget, QPlainTextEdit, QComboBox, QMenu,
     QGridLayout, QScrollArea, QBoxLayout, QProgressBar,
+    QSplitter, QStackedWidget,
 )
 from PySide6.QtCore import (
     Qt, QTimer, QUrl, Signal, QRectF, QSizeF, QSize, QEventLoop,
 )
 from PySide6.QtGui import (
-    QColor, QDesktopServices, QFont, QIcon, QImage, QPixmap,
-    QPainter, QPen,
+    QColor, QDesktopServices, QFont, QIcon, QImage, QKeySequence,
+    QPixmap, QPainter, QPen, QShortcut,
 )
 
 try:
@@ -292,25 +293,40 @@ class _RegionImageView(QWidget):
     page_clear_requested = Signal()
     zoom_changed = Signal(float)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, parent: QWidget | None = None, *, read_only: bool = False
+    ) -> None:
         super().__init__(parent)
         # The editor can be opened on compact/high-DPI displays. Keep the
         # canvas useful but let the dialog scroll instead of enforcing a
         # 350×420 minimum that can push the footer off screen.
         self.setMinimumSize(220, 200)
+        self._read_only = bool(read_only)
         self._pixmap: QPixmap | None = None
         self._page = 0
         self._regions: dict[str, tuple[int, tuple]] = {}
         self._active = ""
+        self._empty_text = ""
+        self._canvas_bg = "#dde2e8"
+        self._empty_text_color = "#5b6470"
         self._drag_a: tuple[float, float] | None = None
         self._drag_b: tuple[float, float] | None = None
         # Zoom: 1.0 = hela sidan anpassad; _focus = bildandelen
-        # i vycentret. Panorera med höger musknapp.
+        # i vycentret. Panorera med höger musknapp (eller vänster i förhandsvisning).
         self._zoom = 1.0
         self._focus: tuple[float, float] = (0.5, 0.5)
         self._pan_last = None
         self._pan_start = None
         self._pan_moved = False
+
+    def set_empty_text(self, text: str) -> None:
+        self._empty_text = str(text or "")
+        self.update()
+
+    def set_theme_colors(self, canvas_bg: str, empty_color: str) -> None:
+        self._canvas_bg = canvas_bg
+        self._empty_text_color = empty_color
+        self.update()
 
     def set_page(self, pixmap: QPixmap | None, page: int) -> None:
         self._pixmap = pixmap
@@ -422,13 +438,13 @@ class _RegionImageView(QWidget):
     # ── Rita ──────────────────────────────────────────────────
     def paintEvent(self, _event) -> None:  # noqa: N802 (Qt-namn)
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#dde2e8"))
+        painter.fillRect(self.rect(), QColor(self._canvas_bg))
         img = self._img_rect()
         if img is None:
-            painter.setPen(QColor("#5b6470"))
+            painter.setPen(QColor(self._empty_text_color))
             painter.drawText(
                 self.rect(), Qt.AlignmentFlag.AlignCenter,
-                tr("tmpl.no_image"),
+                self._empty_text or tr("tmpl.no_image"),
             )
             return
         painter.fillRect(img, QColor("white"))
@@ -485,6 +501,18 @@ class _RegionImageView(QWidget):
 
     # ── Mus ───────────────────────────────────────────────────
     def mousePressEvent(self, event) -> None:  # noqa: N802
+        if self._read_only:
+            if (
+                event.button() in (
+                    Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton
+                )
+                and self._zoom > 1.0
+            ):
+                self._pan_last = event.position()
+                self._pan_start = event.position()
+                self._pan_moved = False
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
+            return
         if event.button() == Qt.MouseButton.RightButton:
             self._pan_last = event.position()
             self._pan_start = event.position()
@@ -521,7 +549,7 @@ class _RegionImageView(QWidget):
             self._pan_last = pos
             self.update()
             return
-        if self._drag_a is None:
+        if self._read_only or self._drag_a is None:
             return
         frac = self._fraction(event.position())
         if frac is not None:
@@ -529,6 +557,13 @@ class _RegionImageView(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._read_only:
+            if self._pan_last is not None:
+                self._pan_last = None
+                self._pan_start = None
+                self._pan_moved = False
+                self.unsetCursor()
+            return
         if (
             event.button() == Qt.MouseButton.RightButton
             and self._pan_last is not None
@@ -1919,7 +1954,28 @@ class ScanImportView(QWidget):
         self._populating_table = False
         self._watch_list_signature: tuple | None = None
         self._watch = None
+        self._preview_cache: dict[tuple[str, int, int, int], QPixmap] = {}
+        self._preview_row_index: int = -1
+        self._preview_page_index: int = 0
+        self._preview_page_count: int = 0
+        self._preview_visible: bool = self._load_preview_visible()
         self._build_ui()
+        self._sc_move_ready = QShortcut(QKeySequence("Ctrl+Return"), self)
+        self._sc_move_ready.setContext(
+            Qt.ShortcutContext.WidgetWithChildrenShortcut
+        )
+        self._sc_move_ready.activated.connect(
+            self._mark_ready_and_move_selected
+        )
+        self._sc_move_ready_numpad = QShortcut(
+            QKeySequence("Ctrl+Enter"), self
+        )
+        self._sc_move_ready_numpad.setContext(
+            Qt.ShortcutContext.WidgetWithChildrenShortcut
+        )
+        self._sc_move_ready_numpad.activated.connect(
+            self._mark_ready_and_move_selected
+        )
         self._init_watch()
         self._log_status()
 
@@ -1980,10 +2036,7 @@ class ScanImportView(QWidget):
         self._txt_paths = QTextEdit()
         self._txt_paths.setReadOnly(True)
         self._txt_paths.setMaximumHeight(70)
-        self._txt_paths.setPlaceholderText(
-            "Valda filer visas här (du kan också klistra in sökvägar, "
-            "en per rad)"
-        )
+        self._txt_paths.setPlaceholderText(tr("scan.files_ph"))
         bf.addWidget(self._txt_paths)
 
         row2 = QHBoxLayout()
@@ -2073,12 +2126,7 @@ class ScanImportView(QWidget):
         bt = QVBoxLayout(box_txt)
         bt.setSpacing(6)
         self._txt_paste = QTextEdit()
-        self._txt_paste.setPlaceholderText(
-            "Klistra in texten från fakturan här om OCR inte är "
-            "installerat eller misslyckas.\n\n"
-            "Exempel:\nFakturanr: 2026-144\nFakturadatum: 2026-08-17\n"
-            "Förfallodatum: 2026-09-16\nAtt betala: 45 546,00"
-        )
+        self._txt_paste.setPlaceholderText(tr("scan.paste_ph"))
         self._txt_paste.setMaximumHeight(110)
         bt.addWidget(self._txt_paste)
 
@@ -2101,6 +2149,19 @@ class ScanImportView(QWidget):
         self._box_res = box_res
         br = QVBoxLayout(box_res)
         br.setSpacing(8)
+
+        preview_top = QHBoxLayout()
+        preview_top.setSpacing(6)
+        preview_top.addStretch(1)
+        self._btn_toggle_preview = QPushButton(tr("scan.toggle_preview"))
+        self._btn_toggle_preview.setObjectName("scanTogglePreviewButton")
+        self._btn_toggle_preview.setCheckable(True)
+        self._btn_toggle_preview.setChecked(self._preview_visible)
+        self._btn_toggle_preview.setToolTip(tr("scan.toggle_preview_tip"))
+        bind_icon(self._btn_toggle_preview, "eye", size=14)
+        self._btn_toggle_preview.clicked.connect(self._toggle_preview_panel)
+        preview_top.addWidget(self._btn_toggle_preview)
+        br.addLayout(preview_top)
 
         self._tbl = QTableWidget(0, len(COLUMNS))
         _scan_headers = tr_list("scan.columns")
@@ -2129,6 +2190,9 @@ class ScanImportView(QWidget):
         self._tbl.setWordWrap(False)
         self._tbl.doubleClicked.connect(self._open_row_dialog)
         self._tbl.itemChanged.connect(self._on_table_item_changed)
+        self._tbl.itemSelectionChanged.connect(
+            self._on_table_selection_changed
+        )
         self._tbl.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu
         )
@@ -2152,7 +2216,107 @@ class ScanImportView(QWidget):
             )
         hh.setStretchLastSection(True)
         self._tbl.setMinimumHeight(220)
-        br.addWidget(self._tbl, stretch=1)
+
+        # Inbyggd sidopanel för PDF-/bildförhandsvisning bredvid tabellen
+        self._preview_panel = QFrame()
+        self._preview_panel.setObjectName("ScanPreviewPanel")
+        self._preview_panel.setMinimumWidth(260)
+        pv_lay = QVBoxLayout(self._preview_panel)
+        pv_lay.setContentsMargins(8, 8, 8, 8)
+        pv_lay.setSpacing(6)
+
+        pv_hdr = QHBoxLayout()
+        pv_hdr.setSpacing(6)
+        self._lbl_preview_title = QLabel(tr("scan.preview_title"))
+        self._lbl_preview_title.setFont(make_tabular_font(12, bold=True))
+        self._lbl_preview_file = QLabel("")
+        self._lbl_preview_file.setStyleSheet(
+            "color:#8b949e;background:transparent;"
+        )
+        self._lbl_preview_file.setWordWrap(False)
+        self._btn_preview_open = QPushButton(tr("scan.open_original"))
+        self._btn_preview_open.setToolTip(tr("scan.preview_open_tip"))
+        bind_icon(self._btn_preview_open, "folder", size=14)
+        self._btn_preview_open.clicked.connect(self._open_original_row)
+        self._btn_preview_open.setEnabled(False)
+        pv_hdr.addWidget(self._lbl_preview_title)
+        pv_hdr.addWidget(self._lbl_preview_file, stretch=1)
+        pv_hdr.addWidget(self._btn_preview_open)
+        pv_lay.addLayout(pv_hdr)
+
+        pv_ctrl = QHBoxLayout()
+        pv_ctrl.setSpacing(4)
+        self._btn_prev_page = QPushButton("◀")
+        self._btn_prev_page.setFixedWidth(30)
+        self._btn_prev_page.setToolTip(tr("scan.preview_prev_tip"))
+        self._btn_prev_page.clicked.connect(self._preview_prev_page)
+        self._lbl_preview_page = QLabel("")
+        self._lbl_preview_page.setFont(make_tabular_font(11))
+        self._lbl_preview_page.setStyleSheet(
+            "color:#8b949e;background:transparent;"
+        )
+        self._btn_next_page = QPushButton("▶")
+        self._btn_next_page.setFixedWidth(30)
+        self._btn_next_page.setToolTip(tr("scan.preview_next_tip"))
+        self._btn_next_page.clicked.connect(self._preview_next_page)
+
+        self._btn_zoom_out = QPushButton("−")
+        self._btn_zoom_out.setFixedWidth(30)
+        self._btn_zoom_out.setToolTip(tr("scan.preview_zoom_out_tip"))
+        self._lbl_zoom_pct = QLabel("100%")
+        self._lbl_zoom_pct.setFont(make_tabular_font(11))
+        self._lbl_zoom_pct.setStyleSheet(
+            "color:#8b949e;background:transparent;"
+        )
+        self._btn_zoom_in = QPushButton("+")
+        self._btn_zoom_in.setFixedWidth(30)
+        self._btn_zoom_in.setToolTip(tr("scan.preview_zoom_in_tip"))
+        self._btn_zoom_fit = QPushButton(tr("scan.preview_zoom_fit"))
+
+        pv_ctrl.addWidget(self._btn_prev_page)
+        pv_ctrl.addWidget(self._lbl_preview_page)
+        pv_ctrl.addWidget(self._btn_next_page)
+        pv_ctrl.addStretch(1)
+        pv_ctrl.addWidget(self._btn_zoom_out)
+        pv_ctrl.addWidget(self._lbl_zoom_pct)
+        pv_ctrl.addWidget(self._btn_zoom_in)
+        pv_ctrl.addWidget(self._btn_zoom_fit)
+        pv_lay.addLayout(pv_ctrl)
+
+        self._preview_stack = QStackedWidget()
+        self._preview_empty = QLabel(tr("scan.preview_empty"))
+        self._preview_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview_empty.setWordWrap(True)
+        self._preview_empty.setStyleSheet(
+            "color:#8b949e;background:transparent;padding:16px;"
+        )
+        self._preview_image = _RegionImageView(read_only=True)
+        self._preview_image.setMinimumSize(220, 220)
+        self._preview_image.zoom_changed.connect(
+            self._on_preview_zoom_changed
+        )
+        self._btn_zoom_out.clicked.connect(self._preview_image.zoom_out)
+        self._btn_zoom_in.clicked.connect(self._preview_image.zoom_in)
+        self._btn_zoom_fit.clicked.connect(self._preview_image.zoom_fit)
+
+        self._preview_text = QPlainTextEdit()
+        self._preview_text.setReadOnly(True)
+        self._preview_text.setFont(make_tabular_font(10))
+
+        self._preview_stack.addWidget(self._preview_empty)  # idx 0
+        self._preview_stack.addWidget(self._preview_image)  # idx 1
+        self._preview_stack.addWidget(self._preview_text)   # idx 2
+        pv_lay.addWidget(self._preview_stack, stretch=1)
+
+        self._res_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._res_splitter.setChildrenCollapsible(False)
+        self._res_splitter.addWidget(self._tbl)
+        self._res_splitter.addWidget(self._preview_panel)
+        self._res_splitter.setStretchFactor(0, 3)
+        self._res_splitter.setStretchFactor(1, 2)
+        self._res_splitter.setSizes([620, 380])
+        self._preview_panel.setVisible(self._preview_visible)
+        br.addWidget(self._res_splitter, stretch=1)
 
         self._lbl_sum = QLabel()
         self._lbl_sum.setFont(make_tabular_font(12, bold=True))
@@ -2166,6 +2330,14 @@ class ScanImportView(QWidget):
         btn_create.setMinimumHeight(40)
         bind_icon(btn_create, "check", size=14, role="on_accent")
         btn_create.clicked.connect(self._create_invoices)
+        self._btn_mark_ready_move = QPushButton(
+            tr("scan.mark_ready_move_btn")
+        )
+        self._btn_mark_ready_move.setToolTip(tr("scan.mark_ready_move_tip"))
+        bind_icon(self._btn_mark_ready_move, "check", size=14)
+        self._btn_mark_ready_move.clicked.connect(
+            lambda: self._mark_ready_and_move_selected()
+        )
         btn_open_dlg = QPushButton(tr("scan.open_dialog"))
         self._btn_open_dlg = btn_open_dlg
         bind_icon(btn_open_dlg, "edit", size=14)
@@ -2189,6 +2361,7 @@ class ScanImportView(QWidget):
         bind_icon(self._btn_templates, "settings", size=14)
         self._btn_templates.clicked.connect(self._open_templates_manager)
         row3.addWidget(btn_create)
+        row3.addWidget(self._btn_mark_ready_move)
         row3.addWidget(btn_open_dlg)
         row3.addWidget(btn_print)
         row3.addWidget(btn_open_orig)
@@ -2208,13 +2381,231 @@ class ScanImportView(QWidget):
         root.addWidget(self._lbl_log)
 
         footer = QLabel(
-            f"© {COPYRIGHT_YEAR} Rickard Längkvist  —  "
-            f"Fakturabunten  ·  allt körs lokalt"
+            tr("common.footer_local", year=COPYRIGHT_YEAR)
         )
         footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         footer.setStyleSheet("color:#8b949e;background:transparent;")
         self._footer = footer
         root.addWidget(footer)
+        self._update_preview_panel()
+
+    def _load_preview_visible(self) -> bool:
+        val = None
+        getter = getattr(self._app, "get_setting", None)
+        if callable(getter):
+            try:
+                val = getter("import_preview_visible", True)
+            except Exception:
+                val = None
+        if val is None and hasattr(self._app, "settings"):
+            try:
+                val = self._app.settings.get("import_preview_visible", True)
+            except Exception:
+                val = True
+        return True if val is None else bool(val)
+
+    def _save_preview_visible(self, visible: bool) -> None:
+        setter = getattr(self._app, "set_setting", None)
+        if callable(setter):
+            try:
+                setter("import_preview_visible", bool(visible))
+                return
+            except Exception:
+                pass
+        if hasattr(self._app, "settings"):
+            try:
+                if hasattr(self._app.settings, "set"):
+                    self._app.settings.set(
+                        "import_preview_visible", bool(visible)
+                    )
+                elif isinstance(self._app.settings, dict):
+                    self._app.settings["import_preview_visible"] = bool(
+                        visible
+                    )
+            except Exception:
+                pass
+
+    def _toggle_preview_panel(self, checked: bool | None = None) -> None:
+        if checked is None:
+            checked = not self._preview_visible
+        self._preview_visible = bool(checked)
+        self._save_preview_visible(self._preview_visible)
+        if hasattr(self, "_btn_toggle_preview"):
+            self._btn_toggle_preview.setChecked(self._preview_visible)
+        if hasattr(self, "_preview_panel"):
+            self._preview_panel.setVisible(self._preview_visible)
+        if self._preview_visible:
+            self._update_preview_panel(reset_page=False)
+
+    def _on_preview_zoom_changed(self, zoom: float) -> None:
+        if hasattr(self, "_lbl_zoom_pct"):
+            self._lbl_zoom_pct.setText(f"{int(round(zoom * 100))}%")
+
+    def _on_table_selection_changed(self) -> None:
+        if getattr(self, "_populating_table", False):
+            return
+        self._update_preview_panel(reset_page=True)
+
+    def _load_preview_pixmap(
+        self, path: str, page_index: int
+    ) -> QPixmap | None:
+        p = Path(path or "")
+        if not path or not p.exists():
+            return None
+        try:
+            st = p.stat()
+            cache_key = (
+                str(p), int(st.st_size), int(st.st_mtime_ns), int(page_index)
+            )
+        except OSError:
+            return None
+        if cache_key in self._preview_cache:
+            pix = self._preview_cache.pop(cache_key)
+            self._preview_cache[cache_key] = pix
+            return pix
+        pix = QPixmap()
+        try:
+            png_bytes = _scan_module().render_page_image(
+                str(p), page_index=int(page_index), dpi=135
+            )
+            if png_bytes:
+                pix.loadFromData(png_bytes)
+        except Exception as exc:
+            log.debug("render_page_image preview failed: %s", exc)
+        if pix.isNull() and p.suffix.lower() in {
+            ".png", ".jpg", ".jpeg", ".bmp", ".webp",
+        }:
+            pix = QPixmap(str(p))
+        if pix.isNull():
+            return None
+        if len(self._preview_cache) >= 24:
+            oldest = next(iter(self._preview_cache))
+            self._preview_cache.pop(oldest, None)
+        self._preview_cache[cache_key] = pix
+        return pix
+
+    def _preview_prev_page(self) -> None:
+        if self._preview_page_index > 0:
+            self._preview_page_index -= 1
+            self._update_preview_panel(
+                row_index=self._preview_row_index, reset_page=False
+            )
+
+    def _preview_next_page(self) -> None:
+        if self._preview_page_index + 1 < self._preview_page_count:
+            self._preview_page_index += 1
+            self._update_preview_panel(
+                row_index=self._preview_row_index, reset_page=False
+            )
+
+    def _update_preview_panel(
+        self, row_index: int | None = None, *, reset_page: bool = True
+    ) -> None:
+        if not hasattr(self, "_preview_stack"):
+            return
+        if not self._preview_visible:
+            return
+        if row_index is None:
+            idxs = self._selected_rows()
+            if idxs:
+                cur = self._tbl.currentRow()
+                row_index = cur if cur in idxs else idxs[0]
+            else:
+                row_index = -1
+
+        if not (0 <= row_index < len(self._rows)):
+            self._preview_row_index = -1
+            self._preview_page_index = 0
+            self._preview_page_count = 0
+            self._lbl_preview_file.setText("")
+            self._lbl_preview_page.setText("")
+            self._lbl_zoom_pct.setText("100%")
+            self._btn_preview_open.setEnabled(False)
+            self._btn_prev_page.setEnabled(False)
+            self._btn_next_page.setEnabled(False)
+            self._btn_zoom_out.setEnabled(False)
+            self._btn_zoom_in.setEnabled(False)
+            self._btn_zoom_fit.setEnabled(False)
+            self._preview_image.set_page(None, 0)
+            self._preview_empty.setText(tr("scan.preview_empty"))
+            self._preview_stack.setCurrentIndex(0)
+            return
+
+        if reset_page or row_index != self._preview_row_index:
+            self._preview_page_index = 0
+        self._preview_row_index = row_index
+        row = self._rows[row_index]
+        path = str(row.get("_path", "") or "")
+        file_name = str(
+            row.get("file", "") or (Path(path).name if path else "")
+        )
+        self._lbl_preview_file.setText(file_name)
+        has_file = bool(path and Path(path).exists())
+        self._btn_preview_open.setEnabled(has_file)
+
+        page_count = 0
+        if has_file:
+            page_count = max(0, int(self._row_pages(row) or 0))
+            if page_count == 0 and Path(path).suffix.lower() in {
+                ".png", ".jpg", ".jpeg", ".bmp", ".webp",
+            }:
+                page_count = 1
+        self._preview_page_count = page_count
+        if page_count > 0:
+            self._preview_page_index = min(
+                max(self._preview_page_index, 0), page_count - 1
+            )
+            self._lbl_preview_page.setText(
+                tr(
+                    "scan.preview_page",
+                    page=self._preview_page_index + 1,
+                    total=page_count,
+                )
+            )
+        else:
+            self._preview_page_index = 0
+            self._lbl_preview_page.setText("")
+
+        self._btn_prev_page.setEnabled(
+            page_count > 1 and self._preview_page_index > 0
+        )
+        self._btn_next_page.setEnabled(
+            page_count > 1 and self._preview_page_index + 1 < page_count
+        )
+
+        pix = (
+            self._load_preview_pixmap(path, self._preview_page_index)
+            if has_file else None
+        )
+        if pix is not None and not pix.isNull():
+            self._preview_image.set_page(pix, self._preview_page_index)
+            self._btn_zoom_out.setEnabled(True)
+            self._btn_zoom_in.setEnabled(True)
+            self._btn_zoom_fit.setEnabled(True)
+            self._preview_stack.setCurrentIndex(1)
+            return
+
+        self._preview_image.set_page(None, 0)
+        self._btn_zoom_out.setEnabled(False)
+        self._btn_zoom_in.setEnabled(False)
+        self._btn_zoom_fit.setEnabled(False)
+        self._lbl_zoom_pct.setText("100%")
+        text_val = str(row.get("_text", "") or "").strip()
+        if text_val:
+            note = (
+                tr("scan.preview_no_render", file=file_name) + "\n\n"
+                if has_file else ""
+            )
+            self._preview_text.setPlainText(note + text_val)
+            self._preview_stack.setCurrentIndex(2)
+        else:
+            msg = (
+                tr("scan.preview_no_render", file=file_name)
+                if has_file
+                else tr("scan.preview_no_text")
+            )
+            self._preview_empty.setText(msg)
+            self._preview_stack.setCurrentIndex(0)
 
     def retranslate(self) -> None:
         """Uppdaterar vyns texter efter språkbyte (utan omstart)."""
@@ -2225,20 +2616,47 @@ class ScanImportView(QWidget):
         self._box_res.setTitle(tr("scan.step3"))
         self._btn_pick.setText(tr("scan.pick"))
         self._btn_clear.setText(tr("scan.clear"))
+        self._txt_paths.setPlaceholderText(tr("scan.files_ph"))
+        self._txt_paste.setPlaceholderText(tr("scan.paste_ph"))
         if not self._paths:
             self._lbl_files.setText(tr("scan.no_files"))
+        else:
+            self._lbl_files.setText(
+                tr("scan.files_selected", n=len(self._paths))
+            )
         self._btn_scan.setText(tr("scan.scan"))
         if hasattr(self, "_btn_cancel_scan"):
             self._btn_cancel_scan.setText(tr("scan.cancel"))
         self._btn_parse.setText(tr("scan.parse"))
         self._chk_auto.setText(tr("scan.auto_open"))
         self._btn_create.setText(tr("scan.create"))
+        if hasattr(self, "_btn_mark_ready_move"):
+            self._btn_mark_ready_move.setText(tr("scan.mark_ready_move_btn"))
+            self._btn_mark_ready_move.setToolTip(
+                tr("scan.mark_ready_move_tip")
+            )
         self._btn_open_dlg.setText(tr("scan.open_dialog"))
         self._btn_print.setText(tr("scan.print"))
         self._btn_open_orig.setText(tr("scan.open_original"))
         self._btn_del.setText(tr("scan.remove_row"))
         self._btn_template.setText(tr("scan.template_btn"))
         self._refresh_templates_btn()
+        if hasattr(self, "_btn_toggle_preview"):
+            self._btn_toggle_preview.setText(tr("scan.toggle_preview"))
+            self._btn_toggle_preview.setToolTip(tr("scan.toggle_preview_tip"))
+        if hasattr(self, "_lbl_preview_title"):
+            self._lbl_preview_title.setText(tr("scan.preview_title"))
+            self._btn_preview_open.setText(tr("scan.open_original"))
+            self._btn_preview_open.setToolTip(tr("scan.preview_open_tip"))
+            self._btn_prev_page.setToolTip(tr("scan.preview_prev_tip"))
+            self._btn_next_page.setToolTip(tr("scan.preview_next_tip"))
+            self._btn_zoom_out.setToolTip(tr("scan.preview_zoom_out_tip"))
+            self._btn_zoom_in.setToolTip(tr("scan.preview_zoom_in_tip"))
+            self._btn_zoom_fit.setText(tr("scan.preview_zoom_fit"))
+        if hasattr(self, "_footer"):
+            self._footer.setText(
+                tr("common.footer_local", year=COPYRIGHT_YEAR)
+            )
         _scan_headers = tr_list("scan.columns")
         if len(_scan_headers) == len(COLUMNS):
             self._tbl.setHorizontalHeaderLabels(_scan_headers)
@@ -2253,6 +2671,7 @@ class ScanImportView(QWidget):
             self._btn_control_scan.setText(tr("watch.control_scan"))
             self._refresh_watch_ui()
         self._refresh_table()
+        self._update_preview_panel(reset_page=False)
 
     @staticmethod
     def _hline() -> QFrame:
@@ -5813,11 +6232,11 @@ class ScanImportView(QWidget):
         import copy
 
         field_names = {
-            "invoice_number": "Fakturanr",
-            "total_amount": "Att betala",
-            "date": "Fakturadatum",
-            "due_date": "Förfallodatum",
-            "ocr": "OCR",
+            "invoice_number": tr("scan.repair_field_number"),
+            "total_amount": tr("scan.repair_field_total"),
+            "date": tr("scan.repair_field_date"),
+            "due_date": tr("scan.repair_field_due"),
+            "ocr": tr("scan.repair_field_ocr"),
         }
         by_supplier: dict[str, list[dict]] = {}
         for row in rows:
@@ -5895,7 +6314,7 @@ class ScanImportView(QWidget):
                         value_text = str(value)
                     evidence = f"= {value_text}"
                     if suggestion.get("below"):
-                        evidence += ", på raden under rubriken"
+                        evidence += tr("scan.repair_below_label")
                     lines.append(
                         "• {}: {} → {} ({})".format(
                             field_names.get(
@@ -6002,10 +6421,9 @@ class ScanImportView(QWidget):
     def _pick_files(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
             self,
-            "Välj skannade fakturor",
+            tr("scan.file_dialog_title"),
             "",
-            "Fakturor (*.pdf *.png *.jpg *.jpeg *.tif *.tiff *.bmp);;"
-            "Alla filer (*)",
+            tr("scan.file_dialog_filter"),
         )
         if files:
             self._set_paths([Path(f) for f in files])
@@ -6017,14 +6435,14 @@ class ScanImportView(QWidget):
         )
         n = len(self._paths)
         self._lbl_files.setText(
-            f"{n} fil(er) valda" if n else "Inga filer valda"
+            tr("scan.files_selected", n=n) if n else tr("scan.no_files")
         )
 
     def _clear_paths(self) -> None:
         self._paths = []
         self._pending_scan_queue = []
         self._txt_paths.clear()
-        self._lbl_files.setText("Inga filer valda")
+        self._lbl_files.setText(tr("scan.no_files"))
 
     # ══════════════════════════════════════════════════════════════════
     #  TOLKNING
@@ -6593,8 +7011,7 @@ class ScanImportView(QWidget):
 
         if not raw_paths:
             QMessageBox.information(
-                self, "Import",
-                "Välj en eller flera filer först (ruta 1).",
+                self, tr("scan.dialog_title"), tr("scan.need_files_first")
             )
             return
 
@@ -6966,7 +7383,7 @@ class ScanImportView(QWidget):
         text = self._txt_paste.toPlainText().strip()
         if not text:
             QMessageBox.information(
-                self, "Import", "Klistra in fakturatext i ruta 2 först."
+                self, tr("scan.dialog_title"), tr("scan.need_pasted_text")
             )
             return
 
@@ -6980,9 +7397,9 @@ class ScanImportView(QWidget):
         parsed = si.require_template_confirmation(
             parsed, templates, learning, suppliers
         )
-        parsed["file"] = "(inklistrad text)"
+        parsed["file"] = tr("scan.pasted_file")
         parsed["_path"] = ""
-        parsed["method"] = "manuell text"
+        parsed["method"] = tr("scan.pasted_method")
         parsed["_text"] = text[:30_000]
         parsed["status"] = (
             "redo" if not parsed["missing"]
@@ -6998,11 +7415,11 @@ class ScanImportView(QWidget):
         if not any(current is parsed for current in self._rows):
             self._lbl_status.setText(tr(
                 "scan.manual_match_registered",
-                file=parsed.get("file", "(inklistrad text)"),
+                file=parsed.get("file", tr("scan.pasted_file")),
                 supplier=parsed.get("supplier", ""),
             ))
         else:
-            self._lbl_status.setText("Inklistrad text tolkad")
+            self._lbl_status.setText(tr("scan.pasted_done"))
 
     # ══════════════════════════════════════════════════════════════════
     #  TABELL
@@ -7040,6 +7457,7 @@ class ScanImportView(QWidget):
         finally:
             self._tbl.blockSignals(False)
             self._populating_table = False
+        self._update_preview_panel(reset_page=False)
 
     def _append_table_rows(self, rows: list[dict]) -> None:
         """Ritar bara de NYA raderna — en stor inläsning får aldrig
@@ -7484,6 +7902,8 @@ class ScanImportView(QWidget):
         bind_icon(act_move, "check", size=14)
         if act_move is not None:
             act_move.setEnabled(has_sel and bool(self._rows))
+            act_move.setShortcut(QKeySequence("Ctrl+Return"))
+            act_move.setToolTip(tr("scan.mark_ready_move_tip"))
         act_dlg = menu.addAction(
             tr("scan.open_dialog"), self._open_row_dialog
         )
@@ -7720,7 +8140,7 @@ class ScanImportView(QWidget):
             self._lbl_status.setText(
                 tr(
                     "scan.print_failed",
-                    error="skrivarstödet (QtPrintSupport) saknas",
+                    error=tr("scan.print_no_qt"),
                 )
             )
             return
@@ -7742,7 +8162,7 @@ class ScanImportView(QWidget):
                 self._lbl_status.setText(
                     tr(
                         "scan.print_failed",
-                        error="inga sidor kunde renderas",
+                        error=tr("scan.print_no_pages"),
                     )
                 )
         except Exception as exc:
@@ -7772,7 +8192,9 @@ class ScanImportView(QWidget):
         """
         idxs = self._selected_rows()
         if not idxs:
-            QMessageBox.information(self, "Import", "Markera en rad först.")
+            QMessageBox.information(
+                self, tr("scan.dialog_title"), tr("scan.mark_ready_needed")
+            )
             return
         row = self._rows[idxs[0]]
         if row.get("_scan_error"):
@@ -7877,7 +8299,9 @@ class ScanImportView(QWidget):
         except Exception as exc:
             log.error("SCAN_OPEN_DIALOG: %s", exc, exc_info=True)
             QMessageBox.warning(
-                self, "Import", f"Kunde inte öppna dialogen:\n{exc}"
+                self,
+                tr("scan.dialog_title"),
+                tr("scan.open_dialog_failed", error=exc),
             )
 
     # ══════════════════════════════════════════════════════════════════
@@ -8022,7 +8446,9 @@ class ScanImportView(QWidget):
         """Registrerar markerade rader som fakturor (belopp → summan)."""
         idxs = self._selected_rows()
         if not idxs:
-            QMessageBox.information(self, "Import", "Markera rader först.")
+            QMessageBox.information(
+                self, tr("scan.dialog_title"), tr("scan.no_rows_selected")
+            )
             return
         prev_in_create = bool(getattr(self, "_in_create_invoices", False))
         self._in_create_invoices = True
@@ -8101,15 +8527,16 @@ class ScanImportView(QWidget):
         ]
         if not_ready:
             QMessageBox.warning(
-                self, "Import",
-                "Dessa rader saknar obligatoriska uppgifter och kan inte "
-                "registreras direkt:\n\n"
-                + "\n".join(
-                    f"• {self._rows[i]['file']}: "
-                    f"{', '.join(self._rows[i]['missing'])}"
-                    for i in not_ready
-                )
-                + "\n\nAnvänd 'Öppna i fakturadialogen' för att komplettera.",
+                self,
+                tr("scan.dialog_title"),
+                tr(
+                    "scan.not_ready_body",
+                    rows="\n".join(
+                        f"• {self._rows[i]['file']}: "
+                        f"{tr_missing(self._rows[i]['missing'])}"
+                        for i in not_ready
+                    ),
+                ),
             )
         for i in ready:
             row = self._rows[i]
@@ -8158,11 +8585,13 @@ class ScanImportView(QWidget):
             row = self._rows[i]
             if not self._supplier_exists(row.get("supplier", "")):
                 QMessageBox.warning(
-                    self, "Import",
-                    f"Leverantören '{row.get('supplier') or '(okänd)'}' "
-                    f"finns inte i registret.\n\n"
-                    f"Skapa leverantören först, eller använd "
-                    f"'Öppna i fakturadialogen'.",
+                    self,
+                    tr("scan.unknown_supplier_title"),
+                    tr(
+                        "scan.unknown_supplier_body",
+                        name=row.get("supplier")
+                        or tr("scan.unknown_supplier"),
+                    ),
                 )
                 continue
             # Registreringen använder filens källsökväg; _save_invoice
@@ -8187,7 +8616,7 @@ class ScanImportView(QWidget):
             # matchning: pröva om resten direkt, mapparna i bakgrunden.
             reread_note = self._rescan_everything_after_learning()
         if created:
-            status = f"{created} faktura(or) registrerade"
+            status = tr("scan.created_status", n=created)
             learning_notes = template_learning_notes[:]
             if reread_note:
                 learning_notes.append(reread_note)
@@ -8195,9 +8624,9 @@ class ScanImportView(QWidget):
                 status += "  ·  " + "  ·  ".join(learning_notes)
             self._lbl_status.setText(status)
             QMessageBox.information(
-                self, "Import",
-                f"✅  {created} faktura{'r' if created != 1 else ''} "
-                f"registrerade och inräknade i ATT BETALA.",
+                self,
+                tr("scan.created_title"),
+                tr("scan.created_body", n=created, extra=""),
             )
             self._maybe_load_next_scan_batch()
             self._show_invoices_tab()
@@ -8225,8 +8654,10 @@ class ScanImportView(QWidget):
             "status": "Obetald",
             "category": "",
             "reference": "",
-            "note": f"Importerad från {row.get('file', '')}"
-                    f" ({row.get('method', '')})",
+            "note": (
+                f"{tr('scan.imported_note', file=row.get('file', ''))}"
+                f" ({row.get('method', '')})"
+            ),
             "attachment": (
                 row.get("_path", "") if attachment is None else attachment
             ),
@@ -8253,7 +8684,7 @@ class ScanImportView(QWidget):
             if self._app is None:
                 if not silent:
                     QMessageBox.warning(
-                        self, "Import", "App-kärnan saknas."
+                        self, tr("scan.dialog_title"), tr("scan.core_missing")
                     )
                 return False
 
@@ -8424,7 +8855,9 @@ class ScanImportView(QWidget):
             log.error("SCAN_CREATE misslyckades: %s", exc, exc_info=True)
             if not silent:
                 QMessageBox.warning(
-                    self, "Import", f"Kunde inte spara fakturan:\n{exc}"
+                    self,
+                    tr("scan.dialog_title"),
+                    tr("scan.save_failed", error=exc),
                 )
             return False
 
@@ -8448,11 +8881,32 @@ class ScanImportView(QWidget):
         muted_css = f"color:{muted};background:transparent;"
         for lbl_name in (
             "_info_label", "_lbl_watch_info", "_lbl_files",
-            "_lbl_status", "_footer",
+            "_lbl_status", "_footer", "_lbl_preview_file",
+            "_lbl_preview_page", "_lbl_zoom_pct",
         ):
             lbl = getattr(self, lbl_name, None)
             if lbl is not None:
                 lbl.setStyleSheet(muted_css)
+        if hasattr(self, "_preview_empty"):
+            self._preview_empty.setStyleSheet(
+                f"color:{muted};background:transparent;padding:16px;"
+            )
+        if hasattr(self, "_preview_panel"):
+            panel_bg = t.get(
+                "card_bg", "#161b22" if self._dark else "#f8fafc"
+            )
+            border_c = t.get(
+                "border", "#30363d" if self._dark else "#d0d7de"
+            )
+            self._preview_panel.setStyleSheet(
+                f"QFrame#ScanPreviewPanel{{background-color:{panel_bg};"
+                f"border:1px solid {border_c};border-radius:8px;}}"
+            )
+        if hasattr(self, "_preview_image"):
+            canvas_bg = t.get(
+                "bg_tertiary", "#11161d" if self._dark else "#dde2e8"
+            )
+            self._preview_image.set_theme_colors(canvas_bg, muted)
         if hasattr(self, "_lbl_log"):
             self._lbl_log.setStyleSheet(
                 f"color:{muted};background:transparent;font-size:11px;"

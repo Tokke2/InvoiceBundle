@@ -3995,12 +3995,11 @@ DEFAULT_SHORTCUTS: dict[str, str] = {
     "avsluta":        "Ctrl+Q",
     "tab_dashboard":  "Ctrl+1",
     "tab_fakturor":   "Ctrl+2",
-    "tab_leverantorer": "Ctrl+3",
-    "tab_betalningar":  "Ctrl+4",
+    "tab_historik":   "Ctrl+3",
+    "tab_leverantorer": "Ctrl+4",
     "tab_import":     "Ctrl+5",
-    "tab_rapporter":  "Ctrl+6",
+    "tab_logg":       "Ctrl+6",
     "tab_installningar": "Ctrl+7",
-    "tab_logg":       "Ctrl+8",
 }
 
 SHORTCUT_LABELS: dict[str, str] = {
@@ -4010,13 +4009,12 @@ SHORTCUT_LABELS: dict[str, str] = {
     "exportera_pdf":    "Exportera alla aktiva till PDF",
     "uppdatera":        "Uppdatera alla vyer",
     "avsluta":          "Avsluta programmet helt",
-    "tab_logg":         "Hoppa till Logg",
     "tab_dashboard":    "Hoppa till Dashboard",
     "tab_fakturor":     "Hoppa till Fakturor",
+    "tab_historik":     "Hoppa till Historik",
     "tab_leverantorer": "Hoppa till Leverantörer",
-    "tab_betalningar":  "Hoppa till Betalningar",
     "tab_import":       "Hoppa till Import",
-    "tab_rapporter":    "Hoppa till Rapporter",
+    "tab_logg":         "Hoppa till Logg",
     "tab_installningar": "Hoppa till Inställningar",
 }
 

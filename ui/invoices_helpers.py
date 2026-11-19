@@ -109,13 +109,16 @@ except Exception:
         fit_dialog_to_screen = None  # type: ignore[assignment]
 
 try:
-    from ui.i18n import tr, tr_status
+    from ui.i18n import tr, tr_list, tr_status
 except Exception:  # pragma: no cover - fristående körning
     try:
-        from i18n import tr, tr_status  # type: ignore[no-redef]
+        from i18n import tr, tr_list, tr_status  # type: ignore[no-redef]
     except Exception:
         def tr(key: str, **_f: object) -> str:  # type: ignore[no-redef]
             return key
+
+        def tr_list(key: str) -> list[str]:  # type: ignore[no-redef]
+            return [key]
 
         def tr_status(v: str) -> str:  # type: ignore[no-redef]
             return str(v)
@@ -1515,23 +1518,27 @@ def fit_table_columns(
     if available < 80:
         return
     n = min(len(weights), column_count)
-    parts = [max(1, int(weights[i])) for i in range(n)]
-    total = sum(parts) or 1
+    visible = [i for i in range(n) if not table.isColumnHidden(i)]
+    if not visible:
+        return
+    parts = {i: max(1, int(weights[i])) for i in visible}
+    total = sum(parts.values()) or 1
     floor = 36
-    mins = [floor] * n
+    mins = {i: floor for i in visible}
     if min_widths:
-        for i, value in enumerate(min_widths[:n]):
-            try:
-                mins[i] = max(floor, int(value))
-            except (TypeError, ValueError):
-                pass
-    widths = [
-        max(mins[i], available * parts[i] // total) for i in range(n)
-    ]
-    overflow = sum(widths) - available
+        for i in visible:
+            if i < len(min_widths):
+                try:
+                    mins[i] = max(floor, int(min_widths[i]))
+                except (TypeError, ValueError):
+                    pass
+    widths = {
+        i: max(mins[i], available * parts[i] // total) for i in visible
+    }
+    overflow = sum(widths.values()) - available
     if overflow > 0:
         order = sorted(
-            range(n), key=lambda i: widths[i] - mins[i], reverse=True
+            visible, key=lambda i: widths[i] - mins[i], reverse=True
         )
         for i in order:
             if overflow <= 0:
@@ -1541,11 +1548,11 @@ def fit_table_columns(
             widths[i] -= cut
             overflow -= cut
     elif overflow < 0:
-        widths[0] -= overflow
+        widths[visible[0]] -= overflow
     header = table.horizontalHeader()
     header.blockSignals(True)
     header.setStretchLastSection(False)
-    for i, width in enumerate(widths):
+    for i, width in widths.items():
         table.setColumnWidth(i, width)
     header.blockSignals(False)
 
@@ -2191,7 +2198,7 @@ class ExportHistoryDialog(QDialog):
         theme: dict,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("📚  Exporthistorik")
+        self.setWindowTitle(tr("history_dlg.title"))
         self.setMinimumSize(1060, 580)
         self.setSizeGripEnabled(True)
         self._history = history
@@ -2202,13 +2209,12 @@ class ExportHistoryDialog(QDialog):
         root.setContentsMargins(18, 14, 18, 14)
 
         # ── Header ────────────────────────────────────────────────────
-        hdr = QLabel("📚  Exporthistorik – alla genomförda exporter")
+        hdr = QLabel(tr("history_dlg.header"))
         hdr.setFont(make_font(16, True))
         root.addWidget(hdr)
 
         self._info_lbl = QLabel(
-            f"Totalt {history.count()} export(er). "
-            f"Dubbelklicka för att öppna PDF-filen."
+            tr("history_dlg.info", n=history.count())
         )
         self._info_lbl.setFont(make_font(11))
         self._info_lbl.setStyleSheet("color:#888;background:transparent;")
@@ -2218,9 +2224,13 @@ class ExportHistoryDialog(QDialog):
         # ── Tabell ─────────────────────────────────────────────────────
         self._table = QTableWidget()
         self._table.setColumnCount(len(self._HIST_COLS))
-        self._table.setHorizontalHeaderLabels(
-            [c[0] for c in self._HIST_COLS]
-        )
+        _h_labels = tr_list("history_dlg.columns")
+        if len(_h_labels) == len(self._HIST_COLS):
+            self._table.setHorizontalHeaderLabels(_h_labels)
+        else:
+            self._table.setHorizontalHeaderLabels(
+                [c[0] for c in self._HIST_COLS]
+            )
         self._table.setSortingEnabled(False)
         self._table.setAlternatingRowColors(True)
         self._table.setSelectionBehavior(
@@ -2255,23 +2265,22 @@ class ExportHistoryDialog(QDialog):
         btn_row.setSpacing(10)
 
         self._btn_restore = make_btn(
-            "↩️  Återställ export",
-            "Återställ fakturorna till Obetald och ta bort exporten.\n"
-            "Du kan sedan lägga till fler fakturor och exportera igen.",
+            tr("history_dlg.restore_btn"),
+            tr("history_dlg.restore_tip"),
             danger=True,
         )
         self._btn_restore.clicked.connect(self._restore_export)
         self._btn_restore.setEnabled(False)
 
         self._btn_open = make_btn(
-            "📂  Öppna exportmapp",
-            "Öppna exports/-mappen i filhanteraren",
+            tr("history_dlg.open_folder_btn"),
+            tr("history_dlg.open_folder_tip"),
         )
         self._btn_open.clicked.connect(
             lambda: open_folder(get_export_base())
         )
 
-        self._btn_close = make_btn("✖  Stäng")
+        self._btn_close = make_btn(f"✖  {tr('common.close')}")
         self._btn_close.clicked.connect(self.accept)
 
         btn_row.addWidget(self._btn_restore)
@@ -2282,8 +2291,7 @@ class ExportHistoryDialog(QDialog):
 
         # ── Footer ─────────────────────────────────────────────────────
         self._footer = QLabel(
-            f"© {COPYRIGHT_YEAR} Rickard Längkvist"
-            f" — FakturaRäknaren"
+            tr("common.footer_brand", year=COPYRIGHT_YEAR)
         )
         self._footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._footer.setFont(make_font(9))
@@ -2482,19 +2490,23 @@ class ExportHistoryDialog(QDialog):
         att = exp.get("att_betala", exp.get("netto", 0))
         n = exp.get("total_count", 0)
         datum = exp.get("export_date", "?")[:19]
-        payment_date = exp.get("payment_date", "") or "ej angivet"
+        payment_date = exp.get("payment_date", "") or tr("history_dlg.not_set")
+
+        extra = ""
+        carryovers = self._history.get_credit_carryovers(row)
+        if carryovers:
+            extra = tr("history_dlg.confirm_extra", n=len(carryovers))
 
         reply = QMessageBox.question(
             self,
-            "↩️  Återställ export",
-            f"Återställ exporten från {datum}?\n\n"
-            f"  Antal fakturor:   {n}\n"
-            f"  Att betala:       {fmt_amount(att)}\n"
-            f"  Betalningsdatum:  {payment_date}\n\n"
-            f"Alla {n} fakturor ändras tillbaka till 'Obetald'\n"
-            f"så du kan lägga till fler och göra en ny export.\n\n"
-            f"Exporten tas bort från historiken.\n"
-            f"PDF-filen på disk påverkas inte.",
+            tr("history_dlg.confirm_title"),
+            tr(
+                "history_dlg.confirm_body",
+                n=n,
+                extra=(
+                    f"{datum} ({fmt_amount(att)}, {payment_date})\n\n{extra}"
+                ),
+            ),
             QMessageBox.StandardButton.Yes
             | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -2503,7 +2515,6 @@ class ExportHistoryDialog(QDialog):
             return
 
         invoice_ids = self._history.get_invoice_ids(row)
-        carryovers = self._history.get_credit_carryovers(row)
         self._history.remove_export(row)
         if carryovers:
             self.credit_carryovers_restored.emit(carryovers)
@@ -2512,16 +2523,12 @@ class ExportHistoryDialog(QDialog):
 
         self._populate_table()
         self._info_lbl.setText(
-            f"Totalt {self._history.count()} export(er). "
-            f"Dubbelklicka för att öppna PDF-filen."
+            tr("history_dlg.info", n=self._history.count())
         )
         QMessageBox.information(
             self,
-            "✅  Export återställd",
-            f"{len(invoice_ids)} fakturor har återställts till "
-            f"'Obetald'.\n\n"
-            f"Du kan nu lägga till fler fakturor och\n"
-            f"exportera på nytt.",
+            tr("history_dlg.restored_title"),
+            tr("history_dlg.restored_body", n=len(invoice_ids)),
         )
 
 
@@ -2973,21 +2980,14 @@ class InvoiceDialog(QDialog):
         self.f_total = AmountLineEdit(placeholder="0,00")
         self.f_total.setFont(make_tabular_font(14, True))
         self.f_total.setMinimumHeight(44)
-        self.f_total.setToolTip(
-            "Belopp i kronor.\n"
-            "Fältet är helmarkerat — det är bara att skriva.\n\n"
-            "KREDIT: tryck -  (ensam tangent) FÖRST, slå sen beloppet.\n"
-            "Minustecknet hamnar aldrig i fältet — väljaren byter till −\n"
-            "direkt.  + växlar tillbaka till faktura.\n\n"
-            "Enter hoppar till nästa fält."
-        )
+        self.f_total.setToolTip(tr("invdialog.amount_tip"))
         # "-7853" i fältet → automatiskt − (kredit); "+" → +
         self.f_total.sign_requested.connect(
             lambda s: self.f_sign.setCurrentIndex(0 if s > 0 else 1)
         )
 
         # "kr"-etikett efter beloppsfältet (suffix utanför texten)
-        kr_label = QLabel("kr")
+        kr_label = QLabel(tr("dashboard.currency"))
         kr_label.setFont(make_font(14, True))
         kr_label.setStyleSheet("background:transparent;")
 
@@ -3022,7 +3022,7 @@ class InvoiceDialog(QDialog):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
 
-        self.f_ocr = make_line_edit("OCR-nummer")
+        self.f_ocr = make_line_edit(tr("invdialog.ocr_ph"))
         self.f_ocr.setFont(make_tabular_font(12))
         self.f_ref = make_line_edit(tr("invdialog.ref_ph"))
         self.f_category = make_line_edit(tr("invdialog.category_ph"))
@@ -3249,15 +3249,19 @@ class InvoiceDialog(QDialog):
         """Validerar obligatoriska fält innan dialogen accepteras."""
         supplier = self._get_supplier()
         if not supplier:
-            QMessageBox.warning(self, "Validering", "Leverantör saknas.")
+            QMessageBox.warning(
+                self,
+                tr("invdialog.validation"),
+                tr("invdialog.supplier_missing"),
+            )
             return
 
         inv_nr = self.f_inv_nr.text().strip()
         if not inv_nr:
             QMessageBox.warning(
                 self,
-                "Validering",
-                "Fakturanummer krävs.\n\nAnge ett unikt fakturanummer.",
+                tr("invdialog.validation"),
+                tr("invdialog.number_required"),
             )
             self.f_inv_nr.setFocus()
             return

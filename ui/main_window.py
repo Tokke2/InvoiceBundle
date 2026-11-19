@@ -135,19 +135,21 @@ except ImportError:
 # fungerar fristående (python ui/main_window.py).
 try:
     from ui.i18n import (
-        tr, set_language as _i18n_set_language,
+        tr, tr_list, set_language as _i18n_set_language,
         language as _i18n_language, LANGUAGE_NAMES as _LANGUAGE_NAMES,
     )
 except Exception:  # pragma: no cover
     try:
         from i18n import (  # type: ignore
-            tr, set_language as _i18n_set_language,
+            tr, tr_list, set_language as _i18n_set_language,
             language as _i18n_language, LANGUAGE_NAMES as _LANGUAGE_NAMES,
         )
     except Exception:
         _LANGUAGE_NAMES = {"sv": "Svenska", "en": "English"}
         def tr(key: str, **_f: object) -> str:  # type: ignore
             return key
+        def tr_list(key: str) -> list[str]:  # type: ignore
+            return [key]
         def _i18n_set_language(lang: str) -> str:  # type: ignore
             return "sv"
         def _i18n_language() -> str:  # type: ignore
@@ -1256,17 +1258,16 @@ def confirm_and_export_invoices(
         except ValueError:
             QMessageBox.warning(
                 parent_widget,
-                "Ogiltigt datum",
-                f"Betalningsdatumet '{due_date}' är ogiltigt.\n"
-                f"Använd formatet ÅÅÅÅ-MM-DD.",
+                tr("pdf_confirm.invalid_date_title"),
+                tr("pdf_confirm.invalid_date_body", due_date=due_date),
             )
             return False
 
     if not isinstance(due_date, datetime.date):
         QMessageBox.warning(
             parent_widget,
-            "Datum saknas",
-            "Inget giltigt betalningsdatum angivet för export.",
+            tr("pdf_confirm.missing_date_title"),
+            tr("pdf_confirm.missing_date_body"),
         )
         return False
 
@@ -1277,16 +1278,19 @@ def confirm_and_export_invoices(
 
     # ── Bygg informationstext ─────────────────────────────────────────
     if days > 0:
-        days_txt = f"{days} dagar kvar"
+        days_txt = tr("pdf_confirm.days_left", days=days)
     elif days == 0:
-        days_txt = "förfaller idag!"
+        days_txt = tr("pdf_confirm.days_today")
     else:
-        days_txt = f"⚠️  PASSERAT — {abs(days)} dagar sedan"
+        days_txt = tr("pdf_confirm.days_overdue", days=abs(days))
 
     invoice_list = ""
     for i, inv in enumerate(invoices[:10]):           # max 10 i listan
         supplier = _field(
-            inv, "supplier_name", "supplier", default=f"Faktura {i + 1}"
+            inv,
+            "supplier_name",
+            "supplier",
+            default=tr("pdf_confirm.row_item", index=i + 1),
         )
         amount = _field(inv, "amount", "total", "total_amount")
         ref = _field(inv, "invoice_number", "reference")
@@ -1299,21 +1303,20 @@ def confirm_and_export_invoices(
         invoice_list += row + "\n"
 
     if n > 10:
-        invoice_list += f"  … och {n - 10} till\n"
+        invoice_list += f"  {tr('pdf_confirm.and_more', n=n - 10)}\n"
 
-    msg = (
-        f"Du är på väg att exportera {n} faktura"
-        f"{'r' if n != 1 else ''} till PDF.\n\n"
-        f"Betalningsdatum : {due_date.isoformat()}  ({date_str})  "
-        f"[{days_txt}]\n\n"
-        f"Fakturor:\n{invoice_list}\n"
-        f"Efter export nollställs betalningsdatumet.\n\n"
-        f"Vill du fortsätta?"
+    msg = tr(
+        "pdf_confirm.confirm_body",
+        n=n,
+        due_iso=due_date.isoformat(),
+        due_short=date_str,
+        days_txt=days_txt,
+        invoice_list=invoice_list,
     )
 
     reply = QMessageBox.question(
         parent_widget,
-        "📄  Bekräfta PDF-export",
+        tr("pdf_confirm.confirm_title"),
         msg,
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         QMessageBox.StandardButton.Yes,
@@ -1331,16 +1334,17 @@ def confirm_and_export_invoices(
             exc, traceback.format_exc(),
         )
         QMessageBox.critical(
-            parent_widget, "Exportfel", f"Export misslyckades:\n{exc}"
+            parent_widget,
+            tr("pdf_confirm.export_error_title"),
+            tr("pdf_confirm.export_error_body", error=exc),
         )
         return False
 
     if not ok:
         QMessageBox.warning(
             parent_widget,
-            "Export misslyckades",
-            "Exporten kunde inte genomföras.\n"
-            "Kontrollera loggen för detaljer.",
+            tr("pdf_confirm.export_failed_title"),
+            tr("pdf_confirm.export_failed_body"),
         )
         return False
 
@@ -1360,15 +1364,22 @@ def confirm_and_export_invoices(
         f"  • {Path(f).name}" for f in (exported or [])[:8]
     )
     if len(exported or []) > 8:
-        files_txt += f"\n  … och {len(exported) - 8} till"
+        files_txt += f"\n  {tr('pdf_confirm.and_more', n=len(exported or []) - 8)}"
 
+    files_block = (
+        tr("pdf_confirm.files_block", files=files_txt)
+        if files_txt
+        else ""
+    )
     QMessageBox.information(
         parent_widget,
-        "✅  Export klar",
-        f"{n} faktura{'r' if n != 1 else ''} exporterade.\n"
-        f"Betalningsdatum {due_date.isoformat()} applicerat.\n\n"
-        + (f"Filer:\n{files_txt}\n" if files_txt else "")
-        + "\nBetalningsdatumet är nollställt.",
+        tr("pdf_confirm.done_title"),
+        tr(
+            "pdf_confirm.done_body",
+            n=n,
+            due_iso=due_date.isoformat(),
+            files_block=files_block,
+        ),
     )
     log.info(
         "PDF-export klar: %d fakturor, betaldatum=%s",
@@ -1397,12 +1408,8 @@ class MainWindow(QMainWindow):
          "🗂", "Exporterade/betalda per leverantör"),
         ("suppliers",    "Leverantörer",  "🏢  Leverantörer",
          "🏢", "Leverantörsregister"),
-        ("payments",     "Betalningar",   "💳  Betalningar",
-         "💳", "Betalbatcher och betalhistorik"),
         ("import_tab",   "Import",        "📥  Import",
          "📥", "Importera fakturor via PDF / e-post"),
-        ("reports",      "Rapporter",     "📊  Rapporter",
-         "📊", "Månads- och leverantörsrapporter"),
         ("log_tab",      "Logg",          "🪵  Logg",
          "🪵", "Systemlogg och felsökning"),
         ("settings_tab", "Inställningar", "⚙️  Inställningar",
@@ -1414,9 +1421,7 @@ class MainWindow(QMainWindow):
         "invoices":     "invoices",
         "history":      "history",
         "suppliers":    "suppliers",
-        "payments":     "payments",
         "import_tab":   "import",
-        "reports":      "reports",
         "log_tab":      "log",
         "settings_tab": "settings",
     }
@@ -1539,7 +1544,7 @@ class MainWindow(QMainWindow):
         self._theme_timer.start()
 
         self._watch_data_folder()
-        ready = "✅  Redo"
+        ready = f"✅  {tr('main.ready_default')}"
         try:
             if hasattr(self._app, "data_load_summary"):
                 ready = self._app.data_load_summary()
@@ -1928,10 +1933,7 @@ class MainWindow(QMainWindow):
         self._act_autostart = QAction(tr("menu.autostart"), self)
         self._act_autostart.setCheckable(True)
         self._act_autostart.setChecked(self._read_autostart_status())
-        self._act_autostart.setToolTip(
-            "Startar gömd vid inloggning.\n"
-            "Väntar om disken inte är redo. Arbetsmapp = appmappen."
-        )
+        self._act_autostart.setToolTip(tr("main.tip_autostart"))
         self._act_autostart.triggered.connect(self._toggle_autostart)
         m_set.addAction(self._act_autostart)
 
@@ -2005,12 +2007,7 @@ class MainWindow(QMainWindow):
         self._act_trace.setChecked(
             bool(self._settings.get("log_trace", True))
         )
-        self._act_trace.setToolTip(
-            "PÅ (standard): varje musklick, tangenttryck, fokusflytt,\n"
-            "menyval och fönsterhändelse skrivs till logs/app.log.\n"
-            "AV: detaljnivån sänks till DEBUG. Ändringen gäller direkt,\n"
-            "ingen omstart krävs."
-        )
+        self._act_trace.setToolTip(tr("main.tip_trace"))
         self._act_trace.triggered.connect(self._toggle_trace_logging)
         m_set.addAction(self._act_trace)
 
@@ -2019,11 +2016,7 @@ class MainWindow(QMainWindow):
         self._act_clean_cache.setChecked(
             bool(self._settings.get("clean_cache_on_exit", True))
         )
-        self._act_clean_cache.setToolTip(
-            "Tömmer __pycache__, *.pyc och kvarlämnade tmp-filer när\n"
-            "programmet avslutas. Data, inställningar, loggar och\n"
-            "backuper röras aldrig."
-        )
+        self._act_clean_cache.setToolTip(tr("main.tip_clean_cache"))
         self._act_clean_cache.triggered.connect(self._toggle_clean_cache)
         m_set.addAction(self._act_clean_cache)
 
@@ -2031,11 +2024,7 @@ class MainWindow(QMainWindow):
         self._act_clean_cache_old = QAction(
             tr("menu.clean_cache_old"), self
         )
-        self._act_clean_cache_old.setToolTip(
-            "Smartfilter: rensar bara cachefiler som är ÄLDRE än\n"
-            "1 dygn. Färska filer från idag rörs aldrig. Samma\n"
-            "rensning körs dessutom automatiskt 1 gång per dygn."
-        )
+        self._act_clean_cache_old.setToolTip(tr("main.tip_clean_cache_old"))
         bind_icon(self._act_clean_cache_old, "clean", size=15)
         self._act_clean_cache_old.triggered.connect(
             lambda: self._clean_cache_now("old")
@@ -2045,10 +2034,7 @@ class MainWindow(QMainWindow):
         self._act_clean_cache_all = QAction(
             tr("menu.clean_cache_all"), self
         )
-        self._act_clean_cache_all.setToolTip(
-            "Rensar ALL cache nu (__pycache__, *.pyc, *.tmp).\n"
-            "Data, inställningar, loggar och backuper röras aldrig."
-        )
+        self._act_clean_cache_all.setToolTip(tr("main.tip_clean_cache_all"))
         bind_icon(self._act_clean_cache_all, "clean", size=15)
         self._act_clean_cache_all.triggered.connect(
             lambda: self._clean_cache_now("all")
@@ -2077,11 +2063,7 @@ class MainWindow(QMainWindow):
         self._help_donate_action = a_donate
         m_help.addSeparator()
         a_diag = QAction(tr("menu.diagnostics"), self)
-        a_diag.setToolTip(
-            "Kopierar versioner, sökvägar, dataantal, plugin-hälsa,\n"
-            "inställningar och senaste loggraderna till urklipp.\n"
-            "Klistra in texten i en felrapport eller AI-chatt."
-        )
+        a_diag.setToolTip(tr("main.tip_diagnostics"))
         bind_icon(a_diag, "diagnostics", size=15)
         a_diag.triggered.connect(self._copy_diagnostics)
         m_help.addAction(a_diag)
@@ -2141,23 +2123,23 @@ class MainWindow(QMainWindow):
             tb.addAction(act)
 
         _add(tr("toolbar.new_supplier"),
-             "Registrera ny leverantör (Ctrl+L)",
+             tr("main.toolbar_tip_new_supplier"),
              self._quick_new_supplier, "suppliers")
         _add(tr("toolbar.new_invoice"),
-             "Registrera ny faktura (Ctrl+N)",
+             tr("main.toolbar_tip_new_invoice"),
              self._quick_new_invoice, "invoices")
         tb.addSeparator()
-        _add(tr("toolbar.refresh"), "Uppdatera alla vyer",
+        _add(tr("toolbar.refresh"), tr("main.toolbar_tip_refresh"),
              self._refresh_all, "refresh")
         tb.addSeparator()
-        _add(tr("toolbar.backup"), "Skapa backup (Ctrl+B)",
+        _add(tr("toolbar.backup"), tr("main.toolbar_tip_backup"),
              self._manual_backup, "backup")
-        _add(tr("toolbar.exports"), "Öppna exportmappen",
+        _add(tr("toolbar.exports"), tr("main.toolbar_tip_exports"),
              self._open_export_folder, "folder")
         tb.addSeparator()
-        _add(tr("toolbar.dark"), "Aktivera mörkt tema",
+        _add(tr("toolbar.dark"), tr("main.toolbar_tip_dark"),
              lambda: self._apply_theme("dark"), "dark")
-        _add(tr("toolbar.light"), "Aktivera ljust tema",
+        _add(tr("toolbar.light"), tr("main.toolbar_tip_light"),
              lambda: self._apply_theme("light"), "light")
         tb.addSeparator()
         # 💖 Donation — alltid synlig guldknapp (frivillig, tyst).
@@ -2179,9 +2161,9 @@ class MainWindow(QMainWindow):
                 Qt.ToolButtonStyle.ToolButtonTextBesideIcon
             )
         tb.addSeparator()
-        _add(tr("toolbar.minimize"), "Minimera till systemfältet",
+        _add(tr("toolbar.minimize"), tr("main.toolbar_tip_minimize"),
              self.hide, "minimize")
-        _add(tr("toolbar.quit"), "Avsluta helt (Ctrl+Q)",
+        _add(tr("toolbar.quit"), tr("main.toolbar_tip_quit"),
              self._force_exit, "quit")
 
     # ══════════════════════════════════════════════════════════════════
@@ -2202,11 +2184,16 @@ class MainWindow(QMainWindow):
             mark.setStyleSheet("background:transparent;")
             info_lay.addWidget(mark)
         lbl = QLabel(
-            f"{APP_NAME} v{APP_VERSION} · "
-            f"© {COPYRIGHT_YEAR} Rickard Längkvist · "
-            f"{CURRENT_PLATFORM}",
+            tr(
+                "main.statusbar_info",
+                app=tr("app.name"),
+                version=APP_VERSION,
+                year=COPYRIGHT_YEAR,
+                platform=CURRENT_PLATFORM,
+            ),
             info_wrap,
         )
+        self._status_info_lbl = lbl
         lbl.setFont(_font(10, bold=False))
         lbl.setProperty("muted", True)
         lbl.setStyleSheet("background:transparent;")
@@ -2513,7 +2500,7 @@ class MainWindow(QMainWindow):
             self._suppliers_view._add_supplier()
         else:
             QMessageBox.warning(
-                self, "Vy ej laddad", "Leverantörsvyn saknas."
+                self, tr("main.view_not_loaded"), tr("main.view_missing")
             )
 
     def _quick_new_invoice(self) -> None:
@@ -2554,7 +2541,11 @@ class MainWindow(QMainWindow):
         ):
             self._invoices_view._add_invoice()
         else:
-            QMessageBox.warning(self, "Vy ej laddad", "Fakturavyn saknas.")
+            QMessageBox.warning(
+                self,
+                tr("main.view_not_loaded"),
+                tr("main.invoice_view_missing"),
+            )
 
     # ══════════════════════════════════════════════════════════════════
     #  AUTOSTART
@@ -3099,7 +3090,17 @@ class MainWindow(QMainWindow):
         for key in list(getattr(self, "_placeholder_keys", set())):
             self.replace_tab_content(key, self._make_placeholder(key))
             self._placeholder_keys.add(key)
-        # Statusfältets donationsknapp
+        # Statusfältets text + donationsknapp
+        if hasattr(self, "_status_info_lbl"):
+            self._status_info_lbl.setText(
+                tr(
+                    "main.statusbar_info",
+                    app=tr("app.name"),
+                    version=APP_VERSION,
+                    year=COPYRIGHT_YEAR,
+                    platform=CURRENT_PLATFORM,
+                )
+            )
         if hasattr(self, "_btn_status_donate"):
             self._btn_status_donate.setText(tr("status.donate"))
         # Inställningsfliken (byggs om med nya texter + språkväljare)
@@ -3613,7 +3614,8 @@ class MainWindow(QMainWindow):
                         )
                     break
         self.set_status(
-            f"✅  {summary}" if summary else "✅  Uppdaterad", 6000
+            f"✅  {summary}" if summary else f"✅  {tr('main.updated_status')}",
+            6000,
         )
         self._update_att_betala_bar()
 
@@ -3622,21 +3624,25 @@ class MainWindow(QMainWindow):
         try:
             result = self._app.backup.create()
             if result:
-                self.set_status(f"💾  Backup: {result.name}", 5000)
+                self.set_status(
+                    tr("main.backup_status", name=result.name), 5000
+                )
                 QMessageBox.information(
-                    self, "Backup",
+                    self, tr("main.backup_title"),
                     tr("main.backup_created", path=str(result))
                 )
             else:
                 QMessageBox.warning(
-                    self, "Backup", tr("main.backup_failed")
+                    self, tr("main.backup_title"), tr("main.backup_failed")
                 )
         except AttributeError:
             QMessageBox.information(
-                self, "Backup", "Backup-modulen är inte tillgänglig."
+                self, tr("main.backup_title"), tr("main.backup_missing_mod")
             )
         except Exception as exc:
-            QMessageBox.critical(self, "Backup-fel", str(exc))
+            QMessageBox.critical(
+                self, tr("main.backup_error_title"), str(exc)
+            )
 
     def _open_export_folder(self) -> None:
         """Öppnar exports/ i appmappen. Aldrig en mapp utanför."""
@@ -3663,7 +3669,11 @@ class MainWindow(QMainWindow):
             if p.exists():
                 _open_path(p)
                 return
-        QMessageBox.information(self, "Logg", "Ingen loggfil hittades.")
+        QMessageBox.information(
+            self,
+            tr("main.log_title"),
+            tr("main.log_missing", path=PROJECT_DIR / "logs/app.log"),
+        )
 
     # ══════════════════════════════════════════════════════════════════
     #  DIAGNOSTIK  ("Kopiera diagnostik" — Hjälp-menyn)
@@ -3692,20 +3702,19 @@ class MainWindow(QMainWindow):
             )
         try:
             QApplication.clipboard().setText(text)
-            self.set_status("🩺  Diagnostik kopierad till urklipp", 6000)
+            self.set_status(tr("main.diagnostics_status"), 6000)
             QMessageBox.information(
                 self,
-                "🩺  Diagnostik kopierad",
-                "Diagnostiken ligger i urklipp.\n\n"
-                "Klistra in den i din felrapport eller AI-chatt.\n"
-                "(Versioner, sökvägar, dataantal, plugin-hälsa,\n"
-                "inställningar och de senaste loggraderna.)",
+                tr("main.diagnostics_title"),
+                tr("main.diagnostics_copied"),
             )
             log.info("DIAGNOSTICS_COPIED: %d tecken", len(text))
         except Exception as exc:
             log.error("_copy_diagnostics: %s", exc)
             QMessageBox.warning(
-                self, "Diagnostik", f"Kunde inte kopiera:\n{exc}"
+                self,
+                tr("main.diagnostics_title"),
+                tr("main.diagnostics_failed", error=exc),
             )
 
     # ══════════════════════════════════════════════════════════════════
@@ -3744,16 +3753,15 @@ class MainWindow(QMainWindow):
         tab_shortcuts = [
             ("tab_dashboard",     "dashboard"),
             ("tab_fakturor",      "invoices"),
+            ("tab_historik",      "history"),
             ("tab_leverantorer",  "suppliers"),
-            ("tab_betalningar",   "payments"),
             ("tab_import",        "import_tab"),
-            ("tab_rapporter",     "reports"),
-            ("tab_installningar", "settings_tab"),
             ("tab_logg",          "log_tab"),
+            ("tab_installningar", "settings_tab"),
         ]
         fallback = [
             "Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4",
-            "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8",
+            "Ctrl+5", "Ctrl+6", "Ctrl+7",
         ]
         for i, (action, key) in enumerate(tab_shortcuts):
             seq = self._shortcut_seq(action, fallback[i])
@@ -3896,11 +3904,16 @@ class MainWindow(QMainWindow):
 
         tbl = QTableWidget(0, 2)
         tbl.setColumnCount(2)
-        tbl.setHorizontalHeaderLabels(
-            ["Action", "Shortcut"]
-            if _i18n_language() == "en"
-            else ["Åtgärd", "Kortkommando"]
-        )
+        _sc_headers = tr_list("main.shortcuts_table_headers")
+        if len(_sc_headers) == 2:
+            tbl.setHorizontalHeaderLabels(_sc_headers)
+        for _col_idx, _tip_key in enumerate((
+            "main.shortcuts_col_action_tip",
+            "main.shortcuts_col_key_tip",
+        )):
+            _hdr_item = tbl.horizontalHeaderItem(_col_idx)
+            if _hdr_item is not None:
+                _hdr_item.setToolTip(tr(_tip_key))
         tbl.verticalHeader().setVisible(False)
         tbl.verticalHeader().setDefaultSectionSize(46)
         tbl.setEditTriggers(
@@ -3994,10 +4007,7 @@ class MainWindow(QMainWindow):
 
         plug_btn_row = QHBoxLayout()
         btn_reenable = QPushButton(tr("settings.reenable_plugins"))
-        btn_reenable.setToolTip(
-            "Nollställer kraschräknarna och lyfter bort 3-strikes-"
-            "spärren.\nPlugins försöks laddas igen vid nästa programstart."
-        )
+        btn_reenable.setToolTip(tr("main.plugin_reenable_tip"))
         bind_icon(btn_reenable, "puzzle", size=15, theme=cur_theme)
         btn_reenable.clicked.connect(self._reenable_plugins)
         plug_btn_row.addWidget(btn_reenable)
@@ -4037,15 +4047,19 @@ class MainWindow(QMainWindow):
             return
         try:
             status = self._app.plugin_loader.status()
-            loaded = ", ".join(status["loaded"]) or "(inga)"
-            lines = [f"Laddade: {loaded}"]
+            loaded = ", ".join(status["loaded"]) or tr("main.plugins_none")
+            lines = [tr("main.plugins_loaded_line", loaded=loaded)]
             if status["disabled"]:
                 lines.append(
-                    "⛔ Avaktiverade (3 krascher): "
-                    + ", ".join(status["disabled"])
+                    tr(
+                        "main.plugins_disabled_line",
+                        disabled=", ".join(status["disabled"]),
+                    )
                 )
             if status["strikes"]:
-                lines.append(f"Kraschräknare: {status['strikes']}")
+                lines.append(
+                    tr("main.plugins_strikes_line", strikes=status["strikes"])
+                )
             self._plugin_status_label.setText("\n".join(lines))
         except Exception as exc:
             self._plugin_status_label.setText(
@@ -4057,7 +4071,9 @@ class MainWindow(QMainWindow):
         mgr = getattr(self._app, "shortcuts", None)
         if mgr is None:
             QMessageBox.warning(
-                self, "Kortkommandon", "ShortcutManager saknas i app-kärnan."
+                self,
+                tr("main.shortcuts_saved_title"),
+                tr("main.shortcuts_missing_mgr"),
             )
             return
         changed = 0
@@ -4068,7 +4084,7 @@ class MainWindow(QMainWindow):
                 changed += 1
         self._build_shortcut_actions()
         self.set_status(
-            f"⌨️  {changed} kortkommando(n) sparade", 5000
+            tr("main.shortcuts_saved_status", n=changed), 5000
         )
         log.info("SHORTCUT_SAVE: %d ändring(ar) sparade", changed)
 
@@ -4089,16 +4105,16 @@ class MainWindow(QMainWindow):
             self._app.reenable_plugins()
         except Exception as exc:
             QMessageBox.warning(
-                self, "Plugins", f"Kunde inte återställa:\n{exc}"
+                self,
+                tr("main.plugins_reset_title"),
+                tr("main.plugins_reset_failed", error=exc),
             )
             return
         self._refresh_plugin_status_label()
         QMessageBox.information(
             self,
-            "🧩  Plugins återställda",
-            "Kraschräknare nollställda och spärrar borttagna.\n\n"
-            "Avaktiverade plugins försöks laddas igen\n"
-            "vid nästa programstart.",
+            tr("main.plugins_reset_title"),
+            tr("main.plugins_reset_body"),
         )
 
     # ══════════════════════════════════════════════════════════════════
@@ -4249,15 +4265,15 @@ class MainWindow(QMainWindow):
             log.warning("Om-dialog föll tillbaka till enkel ruta: %s", exc)
             QMessageBox.about(
                 self,
-                f"Om {APP_NAME}",
-                f"{APP_NAME} v{APP_VERSION}\n"
-                "Modern lokal fakturahantering för\n"
-                "Windows, Linux och macOS.\n"
-                "Licens: Privat och kommersiell användning (se LICENSE).\n\n"
-                "💚 Swish: Swish QR-kod under Hjälp → Donationer… (låst mottagare)\n"
-                f"🅿️ PayPal: {DONATE_PAYPAL}\n"
-                f"☕ Ko-fi: {DONATE_BMC}\n\n"
-                f"© {COPYRIGHT_YEAR} Rickard Längkvist",
+                tr("about.title", app=APP_NAME),
+                tr(
+                    "main.about_fallback_plain",
+                    app=APP_NAME,
+                    version=APP_VERSION,
+                    paypal=DONATE_PAYPAL,
+                    kofi=DONATE_BMC,
+                    year=COPYRIGHT_YEAR,
+                ),
             )
 
     def _copy_swish(self) -> None:
@@ -4289,7 +4305,9 @@ class MainWindow(QMainWindow):
     def _show_about_dialog(self) -> None:
         """Rik Om-dialog: info, snabbknappar, funktioner, donationer."""
         autostart_status = (
-            "✅ aktiv" if self._read_autostart_status() else "❌ inaktiv"
+            f"✅ {tr('common.active')}"
+            if self._read_autostart_status()
+            else f"❌ {tr('common.inactive')}"
         )
         dlg = QDialog(self)
         dlg.setWindowTitle(tr("about.title", app=APP_NAME))
@@ -4348,23 +4366,23 @@ class MainWindow(QMainWindow):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
 
-        btn_swish = QPushButton("💚  Swish QR")
+        btn_swish = QPushButton(tr("main.about_swish_btn"))
         btn_swish.setToolTip(tr("donate.swish_qr_tip"))
         btn_swish.clicked.connect(lambda: open_donate_dialog(dlg))
 
-        btn_paypal = QPushButton("🅿️  PayPal")
+        btn_paypal = QPushButton(tr("main.about_paypal_btn"))
         btn_paypal.setToolTip(tr("donate.paypal_tip"))
         btn_paypal.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl(DONATE_PAYPAL))
         )
 
-        btn_bmc = QPushButton("☕  Ko-fi")
+        btn_bmc = QPushButton(tr("main.about_kofi_btn"))
         btn_bmc.setToolTip(tr("donate.kofi_tip"))
         btn_bmc.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl(DONATE_BMC))
         )
 
-        btn_about = QPushButton("📖  Om programmet")
+        btn_about = QPushButton(tr("main.about_manual_btn"))
         btn_about.setToolTip(tr("donate.about_tip"))
         btn_about.clicked.connect(self._open_about_file)
 
@@ -4428,9 +4446,8 @@ if __name__ == "__main__":
                 sys.exit(0)
             QMessageBox.critical(
                 None,
-                "Fakturabunten körs redan",
-                "En annan instans är låst, men kunde inte kontaktas. "
-                "Ingen extra kopia startas.",
+                tr("main.standalone_locked_title"),
+                tr("main.standalone_locked_body"),
             )
             sys.exit(1)
 

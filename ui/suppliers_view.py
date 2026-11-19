@@ -147,6 +147,27 @@ COL_KEYS: list[str] = [c[1] for c in COLUMNS]
 COL_WIDTHS: list[int] = [c[2] for c in COLUMNS]
 COL_ALIGN: list[Qt.AlignmentFlag] = [c[3] for c in COLUMNS]
 
+#: Kolumner som döljs i kompakt vy (namn/org/BG/PG/villkor/OCR/e-post behålls)
+SUPPLIER_COMPACT_HIDDEN_KEYS: frozenset[str] = frozenset({
+    "iban", "bic", "contact_person", "phone", "address", "note",
+})
+
+_SUPPLIER_COL_TIP_KEYS: dict[str, str] = {
+    "name": "suppliers.col_name_tip",
+    "org_number": "suppliers.col_org_tip",
+    "bg": "suppliers.col_bg_tip",
+    "pg": "suppliers.col_pg_tip",
+    "iban": "suppliers.col_iban_tip",
+    "bic": "suppliers.col_bic_tip",
+    "payment_terms": "suppliers.col_terms_tip",
+    "ocr_same_as_invoice_number": "suppliers.col_ocr_tip",
+    "contact_person": "suppliers.col_contact_tip",
+    "email": "suppliers.col_email_tip",
+    "phone": "suppliers.col_phone_tip",
+    "address": "suppliers.col_address_tip",
+    "note": "suppliers.col_note_tip",
+}
+
 #: Kolumner som ska sorteras numeriskt i stället för som text.
 NUMERIC_KEYS: set[str] = {"payment_terms"}
 
@@ -291,7 +312,7 @@ class SupplierDialog(QDialog):
         is_edit = bool(existing)
 
         self.setWindowTitle(
-            "Redigera leverantör" if is_edit else "Ny leverantör"
+            tr("supplier.edit_title") if is_edit else tr("supplier.new_title")
         )
         self.setMinimumWidth(580)
         self.setMinimumHeight(400)
@@ -317,7 +338,7 @@ class SupplierDialog(QDialog):
         form.setContentsMargins(4, 4, 4, 4)
 
         # ── Namn + org ─────────────────────────────────────────────────
-        self.f_name = _le("Obligatoriskt")
+        self.f_name = _le(tr("supplier.required_ph"))
         self.f_name.setFont(_font(13, bold=True))
         self.f_name.setMinimumHeight(40)
         self.f_org = _le("XXXXXXXXXX")
@@ -327,8 +348,8 @@ class SupplierDialog(QDialog):
         self.f_aliases.setMaximumHeight(76)
         self.f_aliases.setFont(_font(11))
 
-        form.addRow("Namn *:", self.f_name)
-        form.addRow("Org.nummer:", self.f_org)
+        form.addRow(tr("supplier.name"), self.f_name)
+        form.addRow(tr("supplierdlg.reg_number"), self.f_org)
         form.addRow(tr("supplierdlg.aliases"), self.f_aliases)
         form.addRow(_h_line())
 
@@ -349,7 +370,7 @@ class SupplierDialog(QDialog):
         # ── Betalvillkor ───────────────────────────────────────────────
         self.f_terms = QSpinBox()
         self.f_terms.setRange(0, 365)
-        self.f_terms.setSuffix("  dagar")
+        self.f_terms.setSuffix(tr("supplier.terms_days"))
         self.f_terms.setValue(30)
         self.f_terms.setMinimumHeight(34)
         self.f_terms.setFont(make_tabular_font(11))
@@ -362,7 +383,7 @@ class SupplierDialog(QDialog):
             b = QPushButton(f"{d} d")
             b.setFixedHeight(30)
             b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            b.setToolTip(f"Sätt betalvillkor till {d} dagar")
+            b.setToolTip(tr("supplierdlg.terms_preset_tip", days=d))
             b.clicked.connect(
                 lambda checked=False, v=d: self.f_terms.setValue(v)
             )
@@ -373,9 +394,7 @@ class SupplierDialog(QDialog):
         terms_wrap.setStyleSheet("background:transparent;")
         form.addRow("", terms_wrap)
 
-        self.f_favorite = QCheckBox(
-            "⭐  Favorit (hamnar överst i fakturavyn)"
-        )
+        self.f_favorite = QCheckBox(tr("supplier.favorite"))
         self.f_favorite.setFont(_font(11, bold=True))
         form.addRow("", self.f_favorite)
 
@@ -387,10 +406,10 @@ class SupplierDialog(QDialog):
         form.addRow(_h_line())
 
         # ── Kontakt ────────────────────────────────────────────────────
-        self.f_contact = _le("Förnamn Efternamn")
+        self.f_contact = _le(tr("supplierdlg.contact_ph"))
         self.f_email = _le("namn@foretag.se")
         self.f_phone = _le("+46 70 XXX XX XX")
-        self.f_address = _le("Gatuadress, postnr, ort")
+        self.f_address = _le(tr("supplierdlg.address_ph"))
 
         form.addRow(tr("supplierdlg.contact"), self.f_contact)
         form.addRow(tr("supplierdlg.email"), self.f_email)
@@ -414,7 +433,11 @@ class SupplierDialog(QDialog):
             | QDialogButtonBox.StandardButton.Cancel
         )
         save_btn = btn_box.button(QDialogButtonBox.StandardButton.Save)
-        save_btn.setText("💾  Spara" if is_edit else "➕  Lägg till")
+        save_btn.setText(
+            f"💾  {tr('common.save')}"
+            if is_edit
+            else f"➕  {tr('common.add')}"
+        )
         save_btn.setMinimumHeight(40)
         save_btn.setFont(_font(12, bold=True))
         btn_box.button(QDialogButtonBox.StandardButton.Cancel).setText(
@@ -553,6 +576,7 @@ class SuppliersView(QWidget):
         self._app = app
         self._all_data: list[dict] = []
         self._current_theme: dict = {}
+        self._hidden_columns: set[str] = self._load_hidden_columns()
 
         # Debounce för live-sökning
         self._search_timer = QTimer(self)
@@ -561,6 +585,7 @@ class SuppliersView(QWidget):
         self._search_timer.timeout.connect(self._do_refresh)
 
         self._build_ui()
+        self._apply_hidden_columns()
         self._do_refresh()
 
         try:
@@ -607,6 +632,7 @@ class SuppliersView(QWidget):
 
         self._search = QLineEdit()
         self._search.setPlaceholderText(tr("suppliers.search_ph"))
+        self._search.setToolTip(tr("suppliers.search_tip"))
         self._search.setMinimumHeight(36)
         self._search.setMinimumWidth(160)
         self._search.setFont(_font(11))
@@ -615,25 +641,27 @@ class SuppliersView(QWidget):
         self._search.textChanged.connect(self._on_search_changed)
 
         self._btn_add = _make_btn(
-            tr("suppliers.new"), tr("suppliers.new"), accent=True
+            tr("suppliers.new"), tr("suppliers.add_tip"), accent=True
         )
         bind_icon(self._btn_add, "add", size=14, role="on_accent")
         self._btn_add.clicked.connect(self._add_supplier)
 
-        self._btn_edit = _make_btn(tr("suppliers.edit"), tr("suppliers.edit"))
+        self._btn_edit = _make_btn(
+            tr("suppliers.edit"), tr("suppliers.edit_tip")
+        )
         bind_icon(self._btn_edit, "edit", size=14)
         self._btn_edit.clicked.connect(self._edit_supplier)
         self._btn_edit.setEnabled(False)
 
         self._btn_duplicate = _make_btn(
-            tr("suppliers.duplicate"), tr("suppliers.duplicate")
+            tr("suppliers.duplicate"), tr("suppliers.duplicate_tip")
         )
         bind_icon(self._btn_duplicate, "duplicate", size=14)
         self._btn_duplicate.clicked.connect(self._duplicate_supplier)
         self._btn_duplicate.setEnabled(False)
 
         self._btn_delete = _make_btn(
-            tr("suppliers.delete"), tr("suppliers.delete"), danger=True
+            tr("suppliers.delete"), tr("suppliers.delete_tip"), danger=True
         )
         bind_icon(self._btn_delete, "delete", size=14, role="on_accent")
         self._btn_delete.clicked.connect(self._delete_supplier)
@@ -641,14 +669,21 @@ class SuppliersView(QWidget):
 
         self._btn_export = _make_btn(
             tr("suppliers.export"),
-            "Exportera leverantörslista till CSV / JSON",
+            tr("suppliers.export_tip"),
             info=True,
         )
         bind_icon(self._btn_export, "export", size=14, role="on_accent")
         self._btn_export.clicked.connect(self._export_suppliers)
 
+        self._btn_columns = _make_btn(
+            tr("columns.button"), tr("columns.tip")
+        )
+        self._btn_columns.setObjectName("supplierColumnsButton")
+        bind_icon(self._btn_columns, "settings", size=14)
+        self._btn_columns.clicked.connect(self._open_columns_menu)
+
         self._btn_refresh = _make_btn(
-            "🔄", "Uppdatera listan", width=42
+            "🔄", tr("suppliers.refresh_tip"), width=42
         )
         bind_icon(self._btn_refresh, "refresh", size=15)
         self._btn_refresh.clicked.connect(self._reload_from_disk)
@@ -659,6 +694,7 @@ class SuppliersView(QWidget):
         row1.addWidget(self._btn_duplicate)
         row1.addWidget(self._btn_delete)
         row1.addWidget(self._btn_export)
+        row1.addWidget(self._btn_columns)
         row1.addWidget(self._btn_refresh)
         root.addLayout(row1)
 
@@ -705,11 +741,9 @@ class SuppliersView(QWidget):
         hh.setStretchLastSection(False)
         hh.setMinimumSectionSize(36)
         hh.setTextElideMode(Qt.TextElideMode.ElideRight)
-        full = {"Villkor": "Betalvillkor", "Notering": "Anteckning"}
-        for i, label in enumerate(COL_LABELS):
-            item = self._table.horizontalHeaderItem(i)
-            if item is not None:
-                item.setToolTip(full.get(label, label))
+        hh.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        hh.customContextMenuRequested.connect(self._column_header_menu)
+        self._update_header_tooltips()
         QTimer.singleShot(0, self._fit_columns)
 
         vh = self._table.verticalHeader()
@@ -735,14 +769,119 @@ class SuppliersView(QWidget):
         # ── Footer ─────────────────────────────────────────────────────
         root.addWidget(_h_line())
         footer = QLabel(
-            f"© {COPYRIGHT_YEAR} Rickard Längkvist"
-            f"  —  Fakturabunten"
+            tr("common.footer_brand", year=COPYRIGHT_YEAR)
         )
         footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         footer.setFont(_font(9))
         footer.setStyleSheet("background:transparent; color:#718096;")
         self._footer = footer
         root.addWidget(footer)
+
+    def _load_hidden_columns(self) -> set[str]:
+        getter = getattr(self._app, "get_setting", None)
+        raw = None
+        if callable(getter):
+            try:
+                raw = getter("supplier_hidden_columns", [])
+            except Exception:
+                raw = None
+        if raw is None and hasattr(self._app, "settings"):
+            try:
+                raw = self._app.settings.get("supplier_hidden_columns", [])
+            except Exception:
+                raw = []
+        valid = set(COL_KEYS) - {"name"}
+        return {str(k) for k in (raw or []) if str(k) in valid}
+
+    def _save_hidden_columns(self) -> None:
+        vals = sorted(self._hidden_columns)
+        setter = getattr(self._app, "set_setting", None)
+        if callable(setter):
+            try:
+                setter("supplier_hidden_columns", vals)
+                return
+            except Exception:
+                pass
+        if hasattr(self._app, "settings"):
+            try:
+                self._app.settings.set("supplier_hidden_columns", vals)
+            except Exception:
+                pass
+
+    def _apply_hidden_columns(self) -> None:
+        self._hidden_columns.discard("name")
+        for idx, key in enumerate(COL_KEYS):
+            self._table.setColumnHidden(idx, key in self._hidden_columns)
+
+    def _set_column_visible(self, key: str, visible: bool) -> None:
+        if key == "name":
+            return
+        if visible:
+            self._hidden_columns.discard(key)
+        else:
+            self._hidden_columns.add(key)
+        self._save_hidden_columns()
+        self._apply_hidden_columns()
+        self._fit_columns()
+
+    def _set_compact_columns(self, compact: bool) -> None:
+        self._hidden_columns = (
+            set(SUPPLIER_COMPACT_HIDDEN_KEYS) if compact else set()
+        )
+        self._save_hidden_columns()
+        self._apply_hidden_columns()
+        self._fit_columns()
+
+    def _build_columns_menu(self) -> QMenu:
+        menu = QMenu(self)
+        act_compact = menu.addAction(tr("columns.compact"))
+        if act_compact is not None:
+            act_compact.setCheckable(True)
+            act_compact.setChecked(
+                self._hidden_columns == set(SUPPLIER_COMPACT_HIDDEN_KEYS)
+            )
+            act_compact.triggered.connect(
+                lambda: self._set_compact_columns(True)
+            )
+        act_all = menu.addAction(tr("columns.show_all"))
+        if act_all is not None:
+            act_all.setCheckable(True)
+            act_all.setChecked(not self._hidden_columns)
+            act_all.triggered.connect(
+                lambda: self._set_compact_columns(False)
+            )
+        menu.addSeparator()
+        headers = tr_list("supplier.columns")
+        labels = headers if len(headers) == len(COLUMNS) else COL_LABELS
+        for idx, (key, label) in enumerate(zip(COL_KEYS, labels)):
+            if key == "name":
+                continue
+            act = menu.addAction(label)
+            if act is not None:
+                act.setCheckable(True)
+                act.setChecked(key not in self._hidden_columns)
+                act.triggered.connect(
+                    lambda checked, k=key: self._set_column_visible(k, checked)
+                )
+        return menu
+
+    def _open_columns_menu(self) -> None:
+        menu = self._build_columns_menu()
+        pos = self._btn_columns.mapToGlobal(
+            self._btn_columns.rect().bottomLeft()
+        )
+        menu.exec(pos)
+
+    def _column_header_menu(self, pos) -> None:
+        menu = self._build_columns_menu()
+        menu.exec(self._table.horizontalHeader().mapToGlobal(pos))
+
+    def _update_header_tooltips(self) -> None:
+        for i, key in enumerate(COL_KEYS):
+            item = self._table.horizontalHeaderItem(i)
+            if item is not None:
+                tk = _SUPPLIER_COL_TIP_KEYS.get(key)
+                item.setToolTip(tr(tk) if tk else item.text())
 
     def _fit_columns(self) -> None:
         from PySide6.QtGui import QFontMetrics
@@ -823,11 +962,7 @@ class SuppliersView(QWidget):
         text += f"  ·  {where}"
         self._lbl_count.setText(text)
         self._update_empty_state(n_total, n_shown, bool(query))
-        self._lbl_count.setToolTip(
-            "Appen läser bara data/suppliers.json i appmappen.\n"
-            "Finns en kopia i ui/data slås den ihop hit när du trycker Uppdatera.\n"
-            "Spara filen i editorn först om du just skrivit i den."
-        )
+        self._lbl_count.setToolTip(tr("suppliers.count_source_tip"))
 
     def _source_label(self) -> str:
         """Relativ sökväg till filen appen faktiskt läser."""
@@ -972,7 +1107,9 @@ class SuppliersView(QWidget):
             log.info("Leverantör tillagd: %s", data["name"])
         except Exception as exc:
             log.error("add_supplier: %s", exc)
-            QMessageBox.critical(self, "Fel", f"Kunde inte spara:\n{exc}")
+            QMessageBox.critical(
+                self, tr("common.error"), tr("suppliers.save_failed", error=exc)
+            )
             return
 
         self._do_refresh()
@@ -992,11 +1129,11 @@ class SuppliersView(QWidget):
         except Exception as exc:
             log.error("update_supplier: %s", exc)
             QMessageBox.critical(
-                self, "Fel", f"Kunde inte uppdatera:\n{exc}"
+                self, tr("common.error"), tr("suppliers.update_failed", error=exc)
             )
             return
         self._do_refresh()
-        self._statusbar(f"✅  Leverantör '{data['name']}' uppdaterad.")
+        self._statusbar(tr("supplier.updated", name=data["name"]))
 
     def _delete_supplier(self) -> None:
         supplier = self._selected_supplier()
@@ -1016,11 +1153,11 @@ class SuppliersView(QWidget):
             log.info("Leverantör borttagen: %s", supplier.get("name", ""))
         except Exception as exc:
             log.error("delete_supplier: %s", exc)
-            QMessageBox.critical(self, "Fel", str(exc))
+            QMessageBox.critical(self, tr("common.error"), str(exc))
             return
         self._do_refresh()
         self._statusbar(
-            f"🗑  Leverantör '{supplier.get('name', '')}' borttagen."
+            tr("supplier.deleted", name=supplier.get("name", ""))
         )
 
     def _duplicate_supplier(self) -> None:
@@ -1032,7 +1169,7 @@ class SuppliersView(QWidget):
             for k, v in supplier.items()
             if k not in ("id", "created_at", "updated_at")
         }
-        data["name"] = data.get("name", "") + " (kopia)"
+        data["name"] = data.get("name", "") + tr("common.copy_suffix")
         dialog = SupplierDialog(parent=self, existing=data)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_data = dialog.get_data()
@@ -1041,11 +1178,11 @@ class SuppliersView(QWidget):
                 log.info("Leverantör duplicerad: %s", new_data["name"])
                 self._do_refresh()
                 self._statusbar(
-                    f"✅  Duplicerad som '{new_data['name']}'."
+                    tr("suppliers.duplicated_status", name=new_data["name"])
                 )
             except Exception as exc:
                 log.error("duplicate_supplier: %s", exc)
-                QMessageBox.critical(self, "Fel", str(exc))
+                QMessageBox.critical(self, tr("common.error"), str(exc))
 
     # ══════════════════════════════════════════════════════════════════
     #  EXPORT (CSV / JSON)
@@ -1055,7 +1192,7 @@ class SuppliersView(QWidget):
         """Exporterar leverantörslistan till CSV eller JSON."""
         if not self._all_data:
             QMessageBox.information(
-                self, "Export", tr("supplier.export_none")
+                self, tr("common.export"), tr("supplier.export_none")
             )
             return
 
@@ -1068,8 +1205,10 @@ class SuppliersView(QWidget):
         path, _filter = QFileDialog.getSaveFileName(
             self,
             tr("suppliers.export"),
-            str(day / f"leverantorer_{ts}.csv"),
-            "CSV (*.csv);;JSON (*.json)",
+            str(
+                day / f"{tr('suppliers.export_filename_prefix')}{ts}.csv"
+            ),
+            f"{tr('suppliers.export_csv_filter')};;JSON (*.json)",
         )
         if not path:
             return
@@ -1083,7 +1222,11 @@ class SuppliersView(QWidget):
                 )
             else:
                 # Semikolonseparerad CSV (svensk Excel-standard) med BOM
-                lines = [";".join(COL_LABELS)]
+                headers = tr_list("supplier.columns")
+                csv_headers = (
+                    headers if len(headers) == len(COLUMNS) else COL_LABELS
+                )
+                lines = [";".join(csv_headers)]
                 for s in self._all_data:
                     row = []
                     for key in COL_KEYS:
@@ -1098,13 +1241,15 @@ class SuppliersView(QWidget):
             self._statusbar(f"📄  {p.name}")
             QMessageBox.information(
                 self,
-                "Export klar",
+                tr("suppliers.export_done_title"),
                 tr("supplier.export_done", n=len(self._all_data))
                 + f"\n\n{path}",
             )
         except Exception as exc:
             log.error("export_suppliers: %s", exc)
-            QMessageBox.critical(self, "Export-fel", str(exc))
+            QMessageBox.critical(
+                self, tr("suppliers.export_error_title"), str(exc)
+            )
 
     # ══════════════════════════════════════════════════════════════════
     #  HÖGERKLICK-MENY
@@ -1179,7 +1324,7 @@ class SuppliersView(QWidget):
                 return result
             except Exception as exc:
                 log.error("prompt_add_supplier: %s", exc)
-                QMessageBox.critical(self, "Fel", str(exc))
+                QMessageBox.critical(self, tr("common.error"), str(exc))
         return None
 
     def refresh(self) -> None:
@@ -1220,18 +1365,33 @@ class SuppliersView(QWidget):
         """Uppdaterar alla texter efter språkbyte (utan omstart)."""
         self._hdr_label.setText(tr("suppliers.title"))
         self._search.setPlaceholderText(tr("suppliers.search_ph"))
+        self._search.setToolTip(tr("suppliers.search_tip"))
         attach_search_icon(
             self._search, size=14,
             theme=getattr(self, "_current_theme", None) or None,
         )
         self._btn_add.setText(tr("suppliers.new"))
+        self._btn_add.setToolTip(tr("suppliers.add_tip"))
         self._btn_edit.setText(tr("suppliers.edit"))
+        self._btn_edit.setToolTip(tr("suppliers.edit_tip"))
         self._btn_duplicate.setText(tr("suppliers.duplicate"))
+        self._btn_duplicate.setToolTip(tr("suppliers.duplicate_tip"))
         self._btn_delete.setText(tr("suppliers.delete"))
+        self._btn_delete.setToolTip(tr("suppliers.delete_tip"))
         self._btn_export.setText(tr("suppliers.export"))
+        self._btn_export.setToolTip(tr("suppliers.export_tip"))
+        if hasattr(self, "_btn_columns"):
+            self._btn_columns.setText(tr("columns.button"))
+            self._btn_columns.setToolTip(tr("columns.tip"))
+        self._btn_refresh.setToolTip(tr("suppliers.refresh_tip"))
         headers = tr_list("supplier.columns")
         if len(headers) == len(COLUMNS):
             self._table.setHorizontalHeaderLabels(headers)
+        self._update_header_tooltips()
+        if hasattr(self, "_footer"):
+            self._footer.setText(
+                tr("common.footer_brand", year=COPYRIGHT_YEAR)
+            )
         self._do_refresh()
 
     def apply_theme(self, theme: dict) -> None:
@@ -1317,6 +1477,7 @@ class SuppliersView(QWidget):
             (self._btn_duplicate, button_bg, button_hov, button_text),
             (self._btn_delete,    error,     "#c92a2a",  "#ffffff"),
             (self._btn_export,    info,      accent_hov, "#ffffff"),
+            (self._btn_columns,   button_bg, button_hov, button_text),
             (self._btn_refresh,   button_bg, button_hov, button_text),
         ]
         for btn, bg, hov, fg in btn_specs:
