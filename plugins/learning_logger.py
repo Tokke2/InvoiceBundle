@@ -277,12 +277,14 @@ def log_manual_match(
     graduated: bool = False,
     identifiers_learned: dict[str, Any] | None = None,
     logo_learned: bool = False,
+    logo_auto_saved: bool = False,
 ) -> None:
     summary = (
         f"källa={source} fil={file or '-'} sidor={pages} leverantör={supplier} "
         f"bekräftelser={confirmations_before}->{confirmations_after} "
         f"mallar={template_count}/15 ny_mall={template_saved} "
         f"flersidig={multipage_confirmed} auto_redo={graduated} logo={logo_learned}"
+        + (" auto_logo=True" if logo_auto_saved else "")
     )
     _append_event(
         {
@@ -302,6 +304,7 @@ def log_manual_match(
             "graduated": bool(graduated),
             "identifiers_learned": dict(identifiers_learned or {}),
             "logo_learned": bool(logo_learned),
+            "logo_auto_saved": bool(logo_auto_saved),
         },
         summary,
     )
@@ -327,6 +330,7 @@ def log_auto_match_edit(
     text_evidence: dict[str, Any] | None = None,
     replaced_variants: list[str] | None = None,
     unconfirmed_variants: list[str] | None = None,
+    logo_auto_saved: bool = False,
 ) -> None:
     diffs = dict(field_diffs or {})
     diff_str = ", ".join(
@@ -340,6 +344,8 @@ def log_auto_match_edit(
         extra_parts.append(f"ersatta_varianter={len(rep)}")
     if unconf:
         extra_parts.append(f"obekräftade_varianter={len(unconf)}")
+    if logo_auto_saved:
+        extra_parts.append("auto_logo=True")
     extra_txt = (" " + " ".join(extra_parts)) if extra_parts else ""
     summary = (
         f"källa={source} fil={file or '-'} sidor={pages} "
@@ -366,6 +372,7 @@ def log_auto_match_edit(
             ),
             "replaced_variants": rep,
             "unconfirmed_variants": unconf,
+            "logo_auto_saved": bool(logo_auto_saved),
             "text_evidence": dict(text_evidence or {}),
         },
         summary,
@@ -545,12 +552,14 @@ def format_learning_report(
                         + f"rad={curr_l!r}"
                     )
         elif etype == "manual_match":
+            auto_logo_note = " auto_logo=True" if ev.get("logo_auto_saved") else ""
             lines.append(
                 f"{ts}  [MANUELL MATCHNING] {ev.get('file', '-')} "
                 f"(sidor={ev.get('pages', 0)}, {ev.get('source', '')}) "
                 f"lev={ev.get('supplier', '-')} "
                 f"bekräftelser={ev.get('confirmations_before', 0)}->{ev.get('confirmations_after', 0)} "
                 f"mallar={ev.get('template_count', 0)}/15 ny_mall={ev.get('template_saved')}"
+                f"{auto_logo_note}"
             )
         elif etype == "scan_template_eval":
             p = ev.get("parsed") or {}

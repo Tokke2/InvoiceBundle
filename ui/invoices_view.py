@@ -2494,11 +2494,17 @@ class InvoicesView(QWidget):
                 )
             if res.get("unconfirmed_variants"):
                 parts.append("äldre variant avbekräftad för kontroll")
+            if res.get("auto_logo_saved"):
+                parts.append(tr(
+                    "scan.learned_logo_saved",
+                    supplier=after_data.get("supplier", "") or before_inv.get("supplier", ""),
+                ))
             if (
                 res.get("template_action")
                 or res.get("counter_reset")
                 or res.get("replaced_variants")
                 or res.get("unconfirmed_variants")
+                or res.get("auto_logo_saved")
             ):
                 self._sync_import_view_learning()
             return ", ".join(parts)
@@ -3650,8 +3656,8 @@ class InvoicesView(QWidget):
                     )
                     try:
                         amt_ok = abs(
-                            float(f.get("total_amount") or 0)
-                            - float(total or 0)
+                            abs(float(f.get("total_amount") or 0))
+                            - abs(float(total or 0))
                         ) <= 0.005
                     except (TypeError, ValueError):
                         amt_ok = False
@@ -3667,9 +3673,9 @@ class InvoicesView(QWidget):
                 matched_variant is None
                 and text
                 and str(invoice_number or "").strip()
-                and float(total or 0) > 0
+                and abs(float(total or 0)) > 0
                 and not si._builtin_format_extracts_confirmed(
-                    text, supplier, str(invoice_number or ""), total
+                    text, supplier, str(invoice_number or ""), abs(float(total or 0))
                 )
             ):
                 try:
@@ -3731,9 +3737,23 @@ class InvoicesView(QWidget):
                 )
             except (TypeError, ValueError):
                 confirmations_before = 0
-            logo_signature = si.confirmed_supplier_logo_signature(
-                path, supplier, templates, suppliers=suppliers
-            )
+            obs_fn = getattr(si, "observe_confirmed_supplier_logo", None)
+            auto_logo_saved = False
+            if callable(obs_fn):
+                logo_signature, auto_logo_saved = obs_fn(
+                    learning, templates, supplier, path,
+                    confirmation_id=confirmation_id,
+                    suppliers=suppliers,
+                )
+            else:
+                logo_signature = si.confirmed_supplier_logo_signature(
+                    path, supplier, templates, suppliers=suppliers
+                )
+            if auto_logo_saved:
+                si.save_templates(
+                    data_dir / "invoice_templates.json", templates
+                )
+                notes.append(tr("scan.learned_logo_saved", supplier=supplier))
             logo_count_before = int(
                 (entry_before.get("logos", {}) or {}).get(
                     logo_signature, 0
@@ -3776,6 +3796,7 @@ class InvoicesView(QWidget):
                             <= confirmed_count
                         ),
                         logo_learned=bool(logo_signature),
+                        logo_auto_saved=bool(auto_logo_saved),
                     )
             except Exception:
                 pass

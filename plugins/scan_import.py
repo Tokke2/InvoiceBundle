@@ -850,6 +850,9 @@ def _same_registered_supplier_name(
     return any(
         _names_match(alias, right)
         for alias in _registered_supplier_aliases(left, suppliers)
+    ) or any(
+        _names_match(alias, left)
+        for alias in _registered_supplier_aliases(right, suppliers)
     )
 
 
@@ -1964,6 +1967,7 @@ def _apply_supplier_logo_match(
     text: str,
     templates: dict,
     match_learning: dict | None,
+    suppliers: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Använd sparade PDF-logotyper som kandidater, aldrig som gissning.
 
@@ -1981,7 +1985,10 @@ def _apply_supplier_logo_match(
     logo_names: list[str] = []
     for candidate in candidates:
         name = str(candidate.get("name", "") or "").strip()
-        if name and not any(_names_match(name, old) for old in logo_names):
+        if name and not any(
+            _same_registered_supplier_name(name, old, suppliers)
+            for old in logo_names
+        ):
             logo_names.append(name)
 
     current = str(result.get("supplier", "") or "").strip()
@@ -2017,7 +2024,9 @@ def _apply_supplier_logo_match(
 
     conflicts = [
         name for name in logo_names
-        if current and not _names_match(name, current)
+        if current and not _same_registered_supplier_name(
+            name, current, suppliers
+        )
     ]
     if current and not conflicts:
         # Text/BG och logotyp bekräftar samma leverantör.
@@ -2040,13 +2049,59 @@ def _apply_supplier_logo_match(
         supplier = possible[0]
         candidate = next(
             (cand for cand in candidates
-             if _names_match(str(cand.get("name", "")), supplier)),
+             if _same_registered_supplier_name(
+                 str(cand.get("name", "")), supplier, suppliers
+             )),
             None,
         )
         signature = str(candidate.get("dhash", "")) if candidate else ""
-        if learned_supplier_logo(match_learning, supplier, signature):
-            template_names = template_candidate_names(templates, supplier)
+        resolved_supplier = supplier
+        logo_ok = learned_supplier_logo(match_learning, supplier, signature)
+        if not logo_ok and suppliers:
+            for reg in suppliers:
+                rname = str(reg.get("name", "") or "").strip() if isinstance(reg, dict) else ""
+                if (
+                    rname
+                    and _same_registered_supplier_name(rname, supplier, suppliers)
+                    and learned_supplier_logo(match_learning, rname, signature)
+                ):
+                    resolved_supplier = rname
+                    logo_ok = True
+                    break
+        if logo_ok:
+            if (
+                suppliers
+                and not supplier_has_strong_identifier(
+                    text or "", resolved_supplier, suppliers
+                )
+                and supplier_org_conflict(
+                    text or "", resolved_supplier, suppliers
+                )
+            ):
+                conflict_cand = [{
+                    "name": resolved_supplier, "score": 6,
+                    "signals": ["supplier_logo"],
+                }]
+                result["supplier"] = ""
+                result["match_uncertain"] = True
+                result["match_candidates"] = conflict_cand
+                result["match_reason"] = "identifier_conflict"
+                result["match_kind"] = "supplier"
+                result["supplier_match"] = {
+                    "status": "uncertain", "supplier": "",
+                    "candidates": conflict_cand, "uncertain": True,
+                    "reason": "identifier_conflict",
+                }
+                return result
+            template_names = (
+                supplier_template_candidate_names(
+                    templates, resolved_supplier, suppliers
+                )
+                if suppliers is not None
+                else template_candidate_names(templates, resolved_supplier)
+            )
             if len(template_names) == 1:
+                supplier = resolved_supplier
                 template_name = template_names[0]
                 template = templates.get(template_name, {})
                 sel = select_supplier_template(
@@ -2266,7 +2321,7 @@ def parse_invoice_file(
     )
     reader_used = str(result.pop("_reader_used", "primary") or "primary")
     result = _apply_supplier_logo_match(
-        result, path, text, tpl, match_learning
+        result, path, text, tpl, match_learning, suppliers=suppliers
     )
     result = _apply_multipage_guard(result, path, text, match_learning)
     final_result = apply_supplier_ocr_rule(
@@ -3000,6 +3055,7 @@ def _extract_below_label(text: str, label: str, kind: str) -> str:
     """
     if not text or not label:
         return ""
+    raw_lines = str(text).splitlines()
     flat = re.sub(r"[ \t]+", " ", text)
     lab = re.sub(r"\s+", " ", str(label)).strip().rstrip(":#").strip()
     if not lab:
@@ -3024,10 +3080,37 @@ def _extract_below_label(text: str, label: str, kind: str) -> str:
                 pass
             continue
         lineno = flat.count("\n", 0, m.end())
-        for below in lines[lineno + 1:]:
+        col_idx: int | None = None
+        if 0 <= lineno < len(raw_lines):
+            raw_hdr = raw_lines[lineno].strip()
+            hdr_cols = [
+                c.strip()
+                for c in re.split(r"\s{2,}|[;|]", raw_hdr)
+                if c.strip()
+            ]
+            if len(hdr_cols) >= 2:
+                want_key = _label_key(lab)
+                for idx_c, hcol in enumerate(hdr_cols):
+                    if _label_key(hcol) == want_key:
+                        col_idx = idx_c
+                        break
+        for off, below in enumerate(lines[lineno + 1:], start=lineno + 1):
             if not below.strip():
                 continue
-            hit = _extract_below_line(below, kind)
+            hit = ""
+            if col_idx is not None and off < len(raw_lines):
+                raw_below = raw_lines[off].strip()
+                below_cols = [
+                    c.strip()
+                    for c in re.split(r"\s{2,}|[;|]", raw_below)
+                    if c.strip()
+                ]
+                if len(below_cols) == len(hdr_cols):
+                    hit = _extract_below_line(below_cols[col_idx], kind)
+                    if not hit:
+                        hit = _extract_kind(" " + below_cols[col_idx], kind)
+            if not hit:
+                hit = _extract_below_line(below, kind)
             if hit:
                 if kind != "amount":
                     return hit
@@ -4206,6 +4289,264 @@ def confirmed_supplier_logo_signature(
     return str(matches[0].get("dhash", "") or "") if matches else ""
 
 
+def _merge_supplier_logo_into_templates(
+    templates: dict,
+    supplier: str,
+    spec: dict[str, Any],
+    *,
+    suppliers: list[dict] | None = None,
+    max_logos: int | None = None,
+) -> str:
+    """Lagrar/sammanfogar en verifierad logotyp på leverantörens mall (max 15)."""
+    name = str(supplier or "").strip()
+    if not name or not isinstance(templates, dict):
+        return ""
+    limit = max(1, int(max_logos or MAX_TEMPLATES_PER_SUPPLIER))
+    key = ""
+    cands = (
+        supplier_template_candidate_names(templates, name, suppliers)
+        if suppliers is not None
+        else template_candidate_names(templates, name)
+    )
+    if len(cands) == 1:
+        key = cands[0]
+    elif name in templates:
+        key = name
+    else:
+        for existing in templates:
+            if _names_match(str(existing), name):
+                key = str(existing)
+                break
+    if not key:
+        key = name
+    old = templates.get(key)
+    updated: dict[str, Any] = dict(old) if isinstance(old, dict) else {"fields": {}}
+    if "fields" not in updated or not isinstance(updated["fields"], dict):
+        updated["fields"] = {}
+    existing_logos = supplier_logo_specs(updated)
+    merged_logos = supplier_logo_specs({
+        "supplier_logos": [*existing_logos, dict(spec)],
+    })
+    if merged_logos:
+        merged_logos = merged_logos[-limit:]
+        updated["supplier_logos"] = [dict(s) for s in merged_logos]
+        updated["supplier_logo"] = dict(merged_logos[0])
+    templates[key] = updated
+    return key
+
+
+def observe_confirmed_supplier_logo(
+    learning: dict,
+    templates: dict,
+    supplier: str,
+    path: Any,
+    *,
+    confirmation_id: str = "",
+    max_distance: int | None = None,
+    suppliers: list[dict] | None = None,
+) -> tuple[str, bool]:
+    """Identifierar och lär in leverantörens riktiga PDF-logotyp automatiskt.
+
+    1) Finns redan en sparad logotyp för leverantören som matchar PDF:en
+       returneras dess signatur direkt (``template_saved = False``).
+    2) Saknas sparad logotyp ännu på leverantören kontrolleras PDF:ens
+       äkta grafiska logotyper i sidhuvudet (``embedded_image`` /
+       ``vector_art`` på sida 1, aldrig helsides-fallback ``header_area``).
+       När exakt samma logotyp har setts oberoende på minst
+       ``LEARNED_IDENTIFIER_CONFIRMATIONS`` (2) bekräftade fakturor —
+       och inte krockar med någon annan leverantörs logotyp — sparas den
+       automatiskt i leverantörens mall (``template_saved = True``) och
+       räknas in bland ``logos`` för självlärande auto-koppling.
+    """
+    sup = str(supplier or "").strip()
+    if not sup or not path:
+        return "", False
+    dist_limit = int(
+        SUPPLIER_LOGO_AUTO_MAX_DISTANCE
+        if max_distance is None
+        else max_distance
+    )
+
+    existing_sig = confirmed_supplier_logo_signature(
+        path, sup, templates,
+        max_distance=SUPPLIER_LOGO_CANDIDATE_MAX_DISTANCE,
+        suppliers=suppliers,
+    )
+    if existing_sig:
+        return existing_sig, False
+
+    if not HAS_FITZ:
+        return "", False
+    try:
+        pdf_path = Path(path)
+        if not pdf_path.is_file() or pdf_path.suffix.casefold() != ".pdf":
+            return "", False
+    except Exception:
+        return "", False
+
+    try:
+        candidates = supplier_logo_region_candidates(
+            pdf_path, max_candidates=8, max_pages=1
+        )
+    except Exception:
+        candidates = []
+    header_logos = [
+        cand for cand in candidates
+        if str(cand.get("source", "")) in {"embedded_image", "vector_art"}
+        and int(cand.get("page", 0) or 0) == 0
+        and isinstance(cand.get("region"), (list, tuple))
+        and len(cand["region"]) == 4
+        and float(cand["region"][1]) < 0.45
+    ]
+    if not header_logos:
+        return "", False
+
+    png = render_page_image(pdf_path, 0, dpi=150)
+    if not png:
+        return "", False
+
+    other_saved_hashes: set[str] = set()
+    for tname, tentry in (templates or {}).items():
+        if not isinstance(tentry, dict):
+            continue
+        if _same_registered_supplier_name(str(tname), sup, suppliers):
+            continue
+        for spec in supplier_logo_specs(tentry):
+            dh = str(spec.get("dhash", "") or "").strip()
+            if dh:
+                other_saved_hashes.add(dh)
+    other_pdf_hits = {
+        str(m.get("dhash", "") or "").strip()
+        for m in supplier_logo_match_candidates(
+            pdf_path, templates or {}, max_distance=dist_limit
+        )
+        if str(m.get("name", "") or "").strip()
+        and not _same_registered_supplier_name(
+            str(m.get("name", "")), sup, suppliers
+        )
+    }
+    other_saved_hashes.update(h for h in other_pdf_hits if h)
+
+    extracted: list[tuple[dict, str]] = []
+    for cand in header_logos[:3]:
+        h = _supplier_logo_hash_from_png(png, tuple(cand["region"]))
+        if not h:
+            continue
+        collides = any(
+            (dist := supplier_logo_distance(h, oh)) is not None
+            and dist <= dist_limit
+            for oh in other_saved_hashes
+        )
+        if collides:
+            continue
+        extracted.append((cand, h))
+        if len(extracted) >= 2:
+            break
+    if not extracted:
+        return "", False
+
+    if not isinstance(learning, dict):
+        return "", False
+    key = sup
+    if key not in learning:
+        for existing in learning:
+            if _names_match(sup, str(existing)):
+                key = str(existing)
+                break
+    entry = learning.get(key)
+    if not isinstance(entry, dict):
+        entry = {}
+        learning[key] = entry
+
+    cand_map = entry.setdefault("logo_candidates", {})
+    if not isinstance(cand_map, dict):
+        cand_map = {}
+        entry["logo_candidates"] = cand_map
+
+    conf_key = str(
+        confirmation_id
+        or f"path:{_source_path_key(str(pdf_path)) or pdf_path.name}"
+    ).strip()
+
+    promoted: tuple[dict, str, int, dict] | None = None
+    for cand, h in extracted:
+        matched_sig = ""
+        best_dist = dist_limit + 1
+        for sig_key in list(cand_map.keys()):
+            dist = supplier_logo_distance(h, str(sig_key))
+            if dist is not None and dist <= dist_limit and dist < best_dist:
+                best_dist = dist
+                matched_sig = str(sig_key)
+
+        bucket_sig = matched_sig or h
+        bucket = cand_map.get(bucket_sig)
+        if not isinstance(bucket, dict):
+            bucket = {"count": 0, "ids": [], "spec": {}}
+            cand_map[bucket_sig] = bucket
+
+        seen_ids = bucket.get("ids")
+        if not isinstance(seen_ids, list):
+            seen_ids = []
+            bucket["ids"] = seen_ids
+        if conf_key not in seen_ids:
+            seen_ids.append(conf_key)
+            bucket["count"] = int(bucket.get("count", 0) or 0) + 1
+        if not bucket.get("spec"):
+            bucket["spec"] = {
+                "page": 0,
+                "region": [round(float(v), 4) for v in cand["region"]],
+                "dhash": bucket_sig,
+                "source": str(cand["source"]),
+                "auto": True,
+            }
+        count = int(bucket.get("count", 0) or 0)
+        if promoted is None and count >= LEARNED_IDENTIFIER_CONFIRMATIONS:
+            promoted = (cand, bucket_sig, count, dict(bucket.get("spec") or {}))
+
+    if len(cand_map) > MAX_TEMPLATES_PER_SUPPLIER:
+        ordered = sorted(
+            cand_map.items(),
+            key=lambda kv: int((kv[1] or {}).get("count", 0) or 0),
+        )
+        for old_sig, _ in ordered[:len(cand_map) - MAX_TEMPLATES_PER_SUPPLIER]:
+            if promoted is None or old_sig != promoted[1]:
+                cand_map.pop(old_sig, None)
+
+    if promoted is None:
+        return "", False
+
+    chosen_cand, bucket_sig, count, spec = promoted
+    if not spec:
+        spec = {
+            "page": 0,
+            "region": [round(float(v), 4) for v in chosen_cand["region"]],
+            "dhash": bucket_sig,
+            "source": str(chosen_cand["source"]),
+            "auto": True,
+        }
+    _merge_supplier_logo_into_templates(
+        templates, sup, spec, suppliers=suppliers
+    )
+    cand_map.clear()
+    logos = entry.setdefault("logos", {})
+    if not isinstance(logos, dict):
+        logos = {}
+        entry["logos"] = logos
+    already_counted = bool(
+        confirmation_id
+        and isinstance(entry.get("confirmation_ids"), list)
+        and confirmation_id in entry["confirmation_ids"]
+    )
+    prior_count = count if already_counted else max(1, count - 1)
+    logos[bucket_sig] = max(int(logos.get(bucket_sig, 0) or 0), prior_count)
+    log.info(
+        "SCAN_IMPORT: lärde in riktig fakturalogotyp automatiskt för %s "
+        "(sedd på %d bekräftade fakturor)",
+        sup, count,
+    )
+    return bucket_sig, True
+
+
 #: Inbyggda, verifierade leverantörsformat. Varje format har
 #: matchats manuellt mot riktiga exempelfakturor tillsammans
 #: med användaren INNAN det byggdes in — det är den manuella
@@ -4793,14 +5134,16 @@ _BANKGIRO_LABEL_RE = re.compile(
 
 
 def _invoice_identifiers(text: str) -> dict[str, set[str]]:
-    """Fakturans starka kännetecken: org.nr (med giltig
-    kontrollsiffra) och bankgiro vid sin etikett.
+    """Fakturans starka kännetecken: org.nr (inkl. momsreg SE...01 med
+    giltig kontrollsiffra), bankgiro, plusgiro och verifierat IBAN.
 
     Bara signaler som är svåra att träffa av en slump tas med —
     det är dessa appen lär sig koppla leverantörer med när
     användaren matchat tillräckligt många fakturor för hand.
     """
-    ids: dict[str, set[str]] = {"org": set(), "bg": set()}
+    ids: dict[str, set[str]] = {
+        "org": set(), "bg": set(), "pg": set(), "iban": set(),
+    }
     flat = str(text or "")
     for m in re.finditer(
         r"(?<!\d)(?:(16)[-\s]?)?(\d{6})[-\s]?(\d{4})(?!\d)",
@@ -4810,10 +5153,30 @@ def _invoice_identifiers(text: str) -> dict[str, set[str]]:
         number = _normalize_supplier_identifier("org", raw_number)
         if number:
             ids["org"].add(number)
+    for m in re.finditer(
+        r"\bSE[-\s]?(\d{6})[-\s]?(\d{4})[-\s]?01\b",
+        flat, re.IGNORECASE,
+    ):
+        number = _normalize_supplier_identifier("org", m.group(1) + m.group(2))
+        if number:
+            ids["org"].add(number)
     for m in _BANKGIRO_LABEL_RE.finditer(flat):
         num = re.sub(r"\D", "", m.group(1))
         if 7 <= len(num) <= 8:
             ids["bg"].add(num)
+    details = extract_invoice_payment_details(flat)
+    for bg_raw in details.get("bg", []):
+        bg = _normalize_supplier_identifier("bg", bg_raw)
+        if bg:
+            ids["bg"].add(bg)
+    for pg_raw in details.get("pg", []):
+        pg = _normalize_supplier_identifier("pg", pg_raw)
+        if pg and 4 <= len(pg) <= 9:
+            ids["pg"].add(pg)
+    for iban_raw in details.get("iban", []):
+        iban = _normalize_supplier_identifier("iban", iban_raw)
+        if iban:
+            ids["iban"].add(iban)
     return ids
 
 
@@ -5520,7 +5883,13 @@ def record_match_confirmation(
 
 
 def record_match_correction(
-    learning: dict, supplier: str, *, text: str = "",
+    learning: dict,
+    supplier: str,
+    *,
+    text: str = "",
+    path: str = "",
+    templates: dict | None = None,
+    suppliers: list[dict] | None = None,
 ) -> dict:
     """Användaren rättade en AUTOMATISK koppling till leverantören.
 
@@ -5528,9 +5897,10 @@ def record_match_correction(
     kan få: leverantörens räknare nollställs, så det krävs fem nya
     egna matchningar innan appen kopplar den själv igen — precis som
     när appen var ny för leverantören. Dessutom stryks de
-    kännetecken (org.nr/bankgiro) som fanns på den feldömda
-    fakturan ur leverantörens minne, så exakt samma misstag inte
-    upprepas. Övrig inlärning och redan bekräftade mallar behålls.
+    kännetecken (org.nr/bankgiro/plusgiro/IBAN samt ev. matchande
+    logotypsignatur) som fanns på den feldömda fakturan ur
+    leverantörens minne, så exakt samma misstag inte upprepas.
+    Övrig inlärning och redan bekräftade mallar behålls.
 
     Returnerar leverantörens uppdaterade post (tom om okänd).
     """
@@ -5569,6 +5939,23 @@ def record_match_correction(
                 continue
             for value in values:
                 bucket.pop(value, None)
+    if path and isinstance(templates, dict):
+        try:
+            wrong_sig = confirmed_supplier_logo_signature(
+                path, key, templates, suppliers=suppliers
+            )
+        except Exception:
+            wrong_sig = ""
+        if wrong_sig:
+            logos_bucket = entry.get("logos")
+            if isinstance(logos_bucket, dict):
+                logos_bucket.pop(wrong_sig, None)
+            cand_logos = entry.get("logo_candidates")
+            if isinstance(cand_logos, dict):
+                for csig in list(cand_logos.keys()):
+                    dist = supplier_logo_distance(wrong_sig, str(csig))
+                    if dist is not None and dist <= SUPPLIER_LOGO_AUTO_MAX_DISTANCE:
+                        cand_logos.pop(csig, None)
     entry["last_correction"] = datetime.datetime.now().isoformat(
         timespec="seconds"
     )
@@ -5817,7 +6204,9 @@ def _candidate_labels_from_text(
             _add(part)
         if idx > 0:
             prev = lines[idx - 1]
-            # Raden ovanför (kolumnrubrik)
+            # Raden ovanför (kolumnrubrik — både hel rad och enskilda kolumner)
+            for col in re.split(r"\s{2,}|[;|]", prev):
+                _add(col)
             _add(prev)
     return cands[:8]
 
@@ -5844,7 +6233,7 @@ def derive_template_from_confirmation(
         return None
     want_nr = str(invoice_number or "").strip()
     try:
-        want_total = float(total or 0)
+        want_total = abs(float(total or 0))
     except (TypeError, ValueError):
         return None
     if not want_nr or want_total <= 0:
@@ -6179,7 +6568,10 @@ def learn_from_edited_auto_match(
                 or (before.get("template") and has_confirmed_tpl)
             )
         if was_auto and old_entry:
-            record_match_correction(learning, old_sup, text=text)
+            record_match_correction(
+                learning, old_sup,
+                text=text, path=path, templates=templates, suppliers=suppliers,
+            )
             counter_reset = True
 
     final_nr = str(after.get("invoice_number") or "").strip()
@@ -6197,6 +6589,7 @@ def learn_from_edited_auto_match(
     accepted_fields: list[str] = []
     replaced_variants: list[str] = []
     unconfirmed_variants: list[str] = []
+    auto_logo_saved = False
 
     if new_sup:
         existing_names = (
@@ -6218,7 +6611,7 @@ def learn_from_edited_auto_match(
                         if lbl_s not in extra_lbls[str(fn)]:
                             extra_lbls[str(fn)].append(lbl_s)
         stored_key = existing_key
-        if text and final_nr and final_total > 0:
+        if text and final_nr and abs(final_total) > 0:
             candidate = derive_template_from_confirmation(
                 text, final_nr, final_total,
                 date=final_date, due_date=final_due, ocr=final_ocr,
@@ -6247,7 +6640,7 @@ def learn_from_edited_auto_match(
                         _reconcile_contradicting_variants(
                             templates, learning, stored_key,
                             text=text, path=path,
-                            want_nr=final_nr, want_total=final_total,
+                            want_nr=final_nr, want_total=abs(final_total),
                             keep_sig=keep_sig, prune=True,
                         )
                     )
@@ -6267,14 +6660,28 @@ def learn_from_edited_auto_match(
                     _reconcile_contradicting_variants(
                         templates, learning, existing_key,
                         text=text, path=path,
-                        want_nr=final_nr, want_total=final_total,
+                        want_nr=final_nr, want_total=abs(final_total),
                         keep_sig="", prune=False,
                     )
                 )
 
+        confirmation_id = match_confirmation_id(
+            new_sup, final_nr, path=path, invoice_date=final_date
+        )
+        logo_sig = ""
+        if path and Path(path).is_file():
+            try:
+                logo_sig, auto_logo_saved = observe_confirmed_supplier_logo(
+                    learning, templates, new_sup, path,
+                    confirmation_id=confirmation_id,
+                    suppliers=suppliers,
+                )
+            except Exception:
+                logo_sig = ""
+
         if (
             templates_path is not None
-            and (template_action or replaced_variants)
+            and (template_action or replaced_variants or auto_logo_saved)
         ):
             save_templates(templates_path, templates)
 
@@ -6291,17 +6698,6 @@ def learn_from_edited_auto_match(
                 timespec="seconds"
             )
 
-        confirmation_id = match_confirmation_id(
-            new_sup, final_nr, path=path, invoice_date=final_date
-        )
-        logo_sig = ""
-        if path and Path(path).is_file():
-            try:
-                logo_sig = confirmed_supplier_logo_signature(
-                    path, new_sup, templates, suppliers=suppliers
-                )
-            except Exception:
-                logo_sig = ""
         record_match_confirmation(
             learning, new_sup,
             multipage=int(pages or 0) >= 2,
@@ -6338,6 +6734,7 @@ def learn_from_edited_auto_match(
                 text_evidence=evidence,
                 replaced_variants=replaced_variants,
                 unconfirmed_variants=unconfirmed_variants,
+                logo_auto_saved=auto_logo_saved,
             )
     except Exception:
         pass
@@ -6351,6 +6748,7 @@ def learn_from_edited_auto_match(
         "supplier_changed": supplier_changed,
         "replaced_variants": replaced_variants,
         "unconfirmed_variants": unconfirmed_variants,
+        "auto_logo_saved": auto_logo_saved,
     }
 
 

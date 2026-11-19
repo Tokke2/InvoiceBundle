@@ -931,3 +931,398 @@ def test_user_choice_not_reset_and_manager_edit_rescan_paths(tmp_path, monkeypat
             view._watch._poll.stop()
         view.close()
 
+
+def _make_logo_pdf(
+    path: Path, text_lines: list[str], *, logo_png: bytes | None = None,
+    rect: tuple[float, float, float, float] = (36.0, 24.0, 176.0, 82.0),
+) -> Path:
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    if logo_png is not None:
+        page.insert_image(fitz.Rect(*rect), stream=logo_png)
+    y = 140.0
+    for line in text_lines:
+        page.insert_text((36.0, y), line, fontsize=11)
+        y += 18.0
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def _make_distinct_logo_png(seed: int = 1) -> bytes:
+    import io
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (180, 72), "white")
+    draw = ImageDraw.Draw(img)
+    if seed == 1:
+        draw.rectangle((8, 8, 56, 64), fill=(25, 65, 140))
+        draw.ellipse((70, 14, 122, 58), fill=(220, 120, 20))
+        draw.line((132, 16, 170, 56), fill=(20, 20, 20), width=5)
+    else:
+        draw.polygon([(12, 60), (48, 10), (84, 60)], fill=(15, 130, 85))
+        draw.rectangle((96, 14, 168, 58), outline=(180, 30, 60), width=6)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_auto_learns_real_pdf_logo_after_two_confirmations_and_connects_after_five(
+    tmp_path,
+):
+    """Punkt 3: Riktig PDF-logotyp lärs automatiskt efter 2 observationer (ej text-only)
+    och kopplar faktura automatiskt först efter 5 bekräftelser — utan att stjälas."""
+    logo_a = _make_distinct_logo_png(1)
+    templates: dict = {}
+    learning: dict = {}
+    suppliers = [{"name": "BildLogo AB"}, {"name": "Konkurrent AB"}]
+
+    # 1) Text-only PDF utan embedded_image/vector_art -> får ALDRIG auto-spara header_area
+    text_only_pdf = _make_logo_pdf(
+        tmp_path / "text_only.pdf",
+        ["BildLogo AB", "Fakturanr: T-1", "Att betala: 500,00"],
+        logo_png=None,
+    )
+    for k in range(2):
+        sig, saved = si.observe_confirmed_supplier_logo(
+            learning, templates, "BildLogo AB", text_only_pdf,
+            confirmation_id=f"txt-{k}", suppliers=suppliers,
+        )
+        assert sig == ""
+        assert saved is False
+    assert "BildLogo AB" not in templates
+
+    # 2) Två riktiga PDF-fakturor med embedded_image-logotyp
+    inv1 = _make_logo_pdf(
+        tmp_path / "inv1.pdf",
+        ["Fakturanr: L-101", "Att betala: 900,00"],
+        logo_png=logo_a,
+    )
+    inv2 = _make_logo_pdf(
+        tmp_path / "inv2.pdf",
+        ["Fakturanr: L-102", "Att betala: 1 100,00"],
+        logo_png=logo_a,
+    )
+    inv3_logo_only = _make_logo_pdf(
+        tmp_path / "inv3.pdf",
+        ["Fakturanr: L-103", "Att betala: 1 350,00"],
+        logo_png=logo_a,
+    )
+
+    # Bekräftelse 1: sparas bara som logo_candidates[count=1]
+    sig1, saved1 = si.observe_confirmed_supplier_logo(
+        learning, templates, "BildLogo AB", inv1,
+        confirmation_id=si.match_confirmation_id("BildLogo AB", "L-101", path=str(inv1)),
+        suppliers=suppliers,
+    )
+    assert sig1 == ""
+    assert saved1 is False
+    assert len(learning["BildLogo AB"]["logo_candidates"]) == 1
+    assert "BildLogo AB" not in templates
+    si.record_match_confirmation(
+        learning, "BildLogo AB",
+        text="Fakturanr: L-101\nAtt betala: 900,00",
+        logo_signature=sig1,
+        confirmation_id=si.match_confirmation_id("BildLogo AB", "L-101", path=str(inv1)),
+        source_path=inv1,
+    )
+
+    # Bekräftelse 2: riktig logotyp befordras automatiskt till mallen!
+    templates["BildLogo AB"] = {
+        "fields": {
+            "invoice_number": {"label": "Fakturanr"},
+            "total_amount": {"label": "Att betala"},
+        }
+    }
+    cid2 = si.match_confirmation_id("BildLogo AB", "L-102", path=str(inv2))
+    sig2, saved2 = si.observe_confirmed_supplier_logo(
+        learning, templates, "BildLogo AB", inv2,
+        confirmation_id=cid2, suppliers=suppliers,
+    )
+    assert sig2
+    assert saved2 is True
+    assert templates["BildLogo AB"]["supplier_logo"]["source"] == "embedded_image"
+    assert templates["BildLogo AB"]["supplier_logo"]["auto"] is True
+    assert learning["BildLogo AB"].get("logo_candidates") == {}
+    si.record_match_confirmation(
+        learning, "BildLogo AB",
+        text="Fakturanr: L-102\nAtt betala: 1 100,00",
+        logo_signature=sig2,
+        confirmation_id=cid2,
+        source_path=inv2,
+    )
+    assert learning["BildLogo AB"]["logos"][sig2] == 2
+
+    # Säkerhetsregel: vid < 5 bekräftelser får loggan INTE autokoppla ännu — måste bli osäker kandidat
+    early = si.parse_invoice_file(
+        inv3_logo_only, "Fakturanr: L-103\nAtt betala: 1 350,00",
+        suppliers=suppliers, templates=templates, match_learning=learning,
+    )
+    assert early.get("supplier", "") == ""
+    assert early.get("match_uncertain") is True
+    assert early.get("supplier_match", {}).get("reason") == "supplier_logo"
+
+    # Krockskydd: en annan leverantör med samma bild i PDF:en får INTE stjäla loggan
+    theft_pdf = _make_logo_pdf(
+        tmp_path / "theft.pdf",
+        ["Konkurrent AB", "Fakturanr: K-1", "Att betala: 100,00"],
+        logo_png=logo_a,
+    )
+    for k in range(2):
+        ksig, ksaved = si.observe_confirmed_supplier_logo(
+            learning, templates, "Konkurrent AB", theft_pdf,
+            confirmation_id=f"k-{k}", suppliers=suppliers,
+        )
+        assert ksig == ""
+        assert ksaved is False
+    assert "Konkurrent AB" not in templates
+
+    # Efter 5 bekräftelser: ren logotyp-PDF (utan leverantörstext) kopplas automatiskt!
+    for k in range(3, 6):
+        si.record_match_confirmation(
+            learning, "BildLogo AB",
+            text=f"Fakturanr: L-10{k}\nAtt betala: 200,00",
+            logo_signature=sig2,
+            confirmation_id=f"c-{k}",
+        )
+    assert learning["BildLogo AB"]["confirmed"] == si.LEARNED_SUPPLIER_CONFIRMATIONS
+
+    inv6_logo_only = _make_logo_pdf(
+        tmp_path / "inv6.pdf",
+        ["Fakturanr: L-600", "Att betala: 2 450,00"],
+        logo_png=logo_a,
+    )
+    parsed = si.parse_invoice_file(
+        inv6_logo_only, "Fakturanr: L-600\nAtt betala: 2 450,00",
+        suppliers=suppliers, templates=templates, match_learning=learning,
+    )
+    assert parsed["supplier"] == "BildLogo AB"
+    assert not parsed.get("match_uncertain")
+    assert parsed["supplier_match"]["reason"] == "learned_logo"
+    assert parsed["invoice_number"] == "L-600"
+    assert parsed["total_amount"] == pytest.approx(2450.0)
+
+
+def test_logo_match_respects_aliases_and_blocks_org_conflict(tmp_path):
+    """Punkt 3: _apply_supplier_logo_match känner igen registeralias utan falsk logo_conflict
+    och stoppar auto-koppling om fakturan trycker ett annat giltigt org.nr."""
+    logo_b = _make_distinct_logo_png(2)
+    ref_pdf = _make_logo_pdf(
+        tmp_path / "ref.pdf",
+        ["Nordisk Tech", "Fakturanr: N-1", "Att betala: 100,00"],
+        logo_png=logo_b,
+    )
+    sig = si.supplier_logo_signature(ref_pdf, 0, [0.05, 0.02, 0.32, 0.12])
+    assert sig
+    templates = {
+        "Nordisk Tech": {
+            "supplier_logo": {"page": 0, "region": [0.05, 0.02, 0.32, 0.12], "dhash": sig},
+            "fields": {
+                "invoice_number": {"label": "Fakturanr"},
+                "total_amount": {"label": "Att betala"},
+            },
+        }
+    }
+    suppliers = [{"name": "Nordisk Teknik AB", "aliases": ["Nordisk Tech"], "org": "5568245806"}]
+    learning = {"Nordisk Teknik AB": {"confirmed": 5, "logos": {sig: 2}}}
+
+    # 1) Text säger "Nordisk Teknik AB" och loggan är sparad som alias "Nordisk Tech" -> ingen falsk logo_conflict!
+    alias_pdf = _make_logo_pdf(
+        tmp_path / "alias.pdf",
+        ["Nordisk Teknik AB", "Org.nr 556824-5806", "Fakturanr: N-2", "Att betala: 450,00"],
+        logo_png=logo_b,
+    )
+    res_alias = si.parse_invoice_file(
+        alias_pdf,
+        "Nordisk Teknik AB\nOrg.nr 556824-5806\nFakturanr: N-2\nAtt betala: 450,00",
+        suppliers=suppliers, templates=templates, match_learning=learning,
+    )
+    assert not res_alias.get("match_uncertain")
+    assert res_alias["supplier"] == "Nordisk Teknik AB"
+
+    # 2) Utan textnamn, bara inlärd logotyp under aliasnyckeln -> kopplar till registrerad kanonisk leverantör + mall
+    only_logo_pdf = _make_logo_pdf(
+        tmp_path / "only_logo.pdf",
+        ["Fakturanr: N-3", "Att betala: 750,00"],
+        logo_png=logo_b,
+    )
+    res_only = si.parse_invoice_file(
+        only_logo_pdf, "Fakturanr: N-3\nAtt betala: 750,00",
+        suppliers=suppliers, templates=templates, match_learning=learning,
+    )
+    assert not res_only.get("match_uncertain")
+    assert res_only["supplier"] == "Nordisk Teknik AB"
+    assert res_only["supplier_match"]["reason"] == "learned_logo"
+    assert res_only["invoice_number"] == "N-3"
+    assert res_only["total_amount"] == pytest.approx(750.0)
+
+    # 3) Tryckt annat giltigt org.nr (556703-7485) -> får INTE tyst koppla via inlärd logga!
+    conflict_pdf = _make_logo_pdf(
+        tmp_path / "conflict.pdf",
+        ["Org.nr 556703-7485", "Fakturanr: N-4", "Att betala: 990,00"],
+        logo_png=logo_b,
+    )
+    res_conflict = si.parse_invoice_file(
+        conflict_pdf, "Org.nr 556703-7485\nFakturanr: N-4\nAtt betala: 990,00",
+        suppliers=suppliers, templates=templates, match_learning=learning,
+    )
+    assert res_conflict.get("match_uncertain") is True
+    assert res_conflict.get("supplier", "") == ""
+    assert res_conflict["supplier_match"]["reason"] == "identifier_conflict"
+
+
+def test_learns_vat_se01_pg_and_iban_identifiers_and_rejects_short_pg():
+    """Punkt 3: Svenskt momsreg SE...01, Plusgiro och verifierat IBAN extraheras och
+    lärs in för automatisk koppling, medan sidnummer ('pg. 12') och ogiltiga checksums ignoreras."""
+    ids = si._invoice_identifiers(
+        "Momsreg.nr SE556824-5806-01\n"
+        "Plusgiro: 12 34 56-7\n"
+        "IBAN: SE45 5000 0000 0583 9825 7466\n"
+        "See pg. 12 for terms\n"
+        "IBAN: SE99 5000 0000 0583 9825 7466\n"
+    )
+    assert ids["org"] == {"5568245806"}
+    assert ids["pg"] == {"1234567"}
+    assert ids["iban"] == {"SE4550000000058398257466"}
+
+    # Träna 5 bekräftelser med PG/IBAN/SE-momsnr och verifiera automatchning på ensam identifierare
+    learning: dict = {}
+    for k in range(si.LEARNED_SUPPLIER_CONFIRMATIONS):
+        txt = (
+            f"Fakturanr: P-{k}\nAtt betala: 300,00\n"
+            + ("Plusgiro: 12 34 56-7\n" if k < 2 else "")
+            + ("IBAN: SE45 5000 0000 0583 9825 7466\n" if 2 <= k < 4 else "")
+            + ("VAT SE556824580601\n" if k >= 3 else "")
+        )
+        si.record_match_confirmation(learning, "MomsPgIban AB", text=txt, confirmation_id=f"p-{k}")
+
+    assert si.learned_supplier_candidates("Plusgiro 12 34 56-7", learning) == ["MomsPgIban AB"]
+    assert si.learned_supplier_candidates("IBAN SE4550000000058398257466", learning) == ["MomsPgIban AB"]
+    assert si.learned_supplier_candidates("Momsregnr SE556824580601", learning) == ["MomsPgIban AB"]
+
+
+def test_derive_template_handles_credit_notes_and_multicolumn_headers():
+    """Punkt 3: Kreditfakturor (< 0) och uppdelade flerkolumnsrubriker härleder korrekta mallar."""
+    text = (
+        "Leverans AB\n"
+        "Ordernr    Fakturanummer    Förfallodatum    Slutsumma att reglera\n"
+        "ORD-55     KR-2026-8        2026-11-30       1 250,00\n"
+        "Kreditfaktura\n"
+    )
+    col_cands = si._candidate_labels_from_text(
+        text, "invoice_number", "token", "KR-2026-8", 1250.0,
+    )
+    assert "Fakturanummer" in col_cands
+    tot_cands = si._candidate_labels_from_text(
+        text, "total_amount", "amount", "KR-2026-8", 1250.0,
+    )
+    assert "Slutsumma att reglera" in tot_cands
+
+    derived = si.derive_template_from_confirmation(
+        text, "KR-2026-8", -1250.0, due_date="2026-11-30",
+    )
+    assert derived is not None
+    assert "invoice_number" in derived["fields"]
+    assert "total_amount" in derived["fields"]
+
+    parsed = si.parse_invoice_text(
+        text,
+        suppliers=[{"name": "Leverans AB"}],
+        templates={"Leverans AB": derived},
+    )
+    assert parsed["invoice_number"] == "KR-2026-8"
+    assert parsed["total_amount"] == pytest.approx(-1250.0)
+
+
+def test_correction_resets_wrong_logo_and_ui_learns_logo_end_to_end(
+    tmp_path, monkeypatch,
+):
+    """Punkt 3: Felaktigt automatchad logotyp stryks vid korrigering och både
+    ScanImportView samt InvoicesView lär in riktig fakturalogotyp efter 2 bekräftelser."""
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    QApplication.instance() or QApplication([])
+    import ui.scan_import_view as sv
+    import ui.invoices_view as iv
+    from ui.invoices_view import InvoicesView
+    from ui.scan_import_view import ScanImportView
+    from plugins import learning_logger as ll
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(sv.QMessageBox, "information", lambda *_a, **_k: None)
+    monkeypatch.setattr(QMessageBox, "information", lambda *_a, **_k: None)
+
+    logo = _make_distinct_logo_png(1)
+    pdf1 = _make_logo_pdf(tmp_path / "f1.pdf", ["Fakturanr: E-1", "Att betala: 400,00"], logo_png=logo)
+    pdf2 = _make_logo_pdf(tmp_path / "f2.pdf", ["Fakturanr: E-2", "Att betala: 600,00"], logo_png=logo)
+    sig = si.supplier_logo_signature(pdf1, 0, [0.05, 0.02, 0.32, 0.12])
+    assert sig
+
+    # 1) Korrigering i learn_from_edited_auto_match rensar kolliderande logga från Fel AB
+    tpls = {
+        "Fel AB": {
+            "supplier_logo": {"page": 0, "region": [0.05, 0.02, 0.32, 0.12], "dhash": sig},
+            "fields": {"invoice_number": {"label": "Fakturanr"}, "total_amount": {"label": "Att betala"}},
+        }
+    }
+    mem = {"Fel AB": {"confirmed": 5, "logos": {sig: 3}}}
+    res = si.learn_from_edited_auto_match(
+        tpls, mem, "Fel AB",
+        {"supplier": "Fel AB", "invoice_number": "E-1", "total_amount": 400.0,
+         "supplier_match": {"status": "matched", "supplier": "Fel AB", "reason": "learned_logo"}},
+        {"supplier": "Rätt AB", "invoice_number": "E-1", "total_amount": 400.0},
+        text="Fakturanr: E-1\nAtt betala: 400,00",
+        path=str(pdf1),
+    )
+    assert res["counter_reset"] is True
+    assert mem["Fel AB"]["confirmed"] == 0
+    assert sig not in (mem["Fel AB"].get("logos") or {})
+
+    # 2) End-to-end i ScanImportView + InvoicesView: 2 bekräftelser av samma PDF-logotyp lär in logotypen
+    app = _FakeApp(data_dir, suppliers=[{"name": "Rätt AB"}])
+    tpl_file = data_dir / "invoice_templates.json"
+    learn_file = data_dir / "match_memory.json"
+
+    scan_view = ScanImportView(app=app, templates_path=tpl_file)
+    try:
+        row1 = {
+            "file": "f1.pdf", "_path": str(pdf1),
+            "_text": "Fakturanr: E-1\nAtt betala: 400,00", "pages": 1,
+            "invoice_number": "E-1", "total_amount": 400.0,
+            "date": "", "due_date": "", "ocr": "", "supplier": "", "missing": ["leverantör"],
+        }
+        scan_view._rows = [row1]
+        note1 = scan_view._apply_manual_match(row1, "Rätt AB")
+        assert note1
+        assert "supplier_logo" not in (si.load_templates(tpl_file).get("Rätt AB") or {})
+    finally:
+        if getattr(scan_view, "_watch", None) is not None:
+            scan_view._watch._poll.stop()
+        scan_view.close()
+
+    inv_view = InvoicesView(app)
+    try:
+        note2 = inv_view._learn_manual_match(
+            sv._scan_module(),
+            "Rätt AB",
+            "Fakturanr: E-2\nAtt betala: 600,00",
+            "E-2",
+            600.0,
+            1,
+            path=str(pdf2),
+        )
+        assert note2
+    finally:
+        inv_view.close()
+
+    saved_tpls = si.load_templates(tpl_file)
+    assert saved_tpls.get("Rätt AB", {}).get("supplier_logo", {}).get("source") == "embedded_image"
+    saved_mem = si.load_match_learning(learn_file)
+    assert saved_mem["Rätt AB"]["confirmed"] == 2
+    assert len(saved_mem["Rätt AB"].get("logos") or {}) == 1
+    events = ll.read_recent_events()
+    assert any(ev.get("logo_auto_saved") is True for ev in events)
+
+

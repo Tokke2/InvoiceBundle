@@ -3896,11 +3896,12 @@ class ScanImportView(QWidget):
                     found = sel.get("found") or {}
                     variant = sel["variant"]
                     matches_confirmed = False
-                    if inv_nr and want_total > 0:
+                    if inv_nr and abs(want_total) > 0:
                         nr_ok = str(found.get("invoice_number", "")).strip() == inv_nr
                         try:
                             amt_ok = abs(
-                                float(found.get("total_amount") or 0) - want_total
+                                abs(float(found.get("total_amount") or 0))
+                                - abs(want_total)
                             ) <= 0.005
                         except (TypeError, ValueError):
                             amt_ok = False
@@ -3928,7 +3929,7 @@ class ScanImportView(QWidget):
                 variants = si.template_variants(existing)
                 matched_template = variants[-1] if variants else existing
 
-        if matched_template is None and text and inv_nr and want_total > 0:
+        if matched_template is None and text and inv_nr and abs(want_total) > 0:
             if not si._builtin_format_extracts_confirmed(
                 text, supplier, inv_nr, want_total
             ):
@@ -4036,12 +4037,26 @@ class ScanImportView(QWidget):
             ) = self._ensure_verified_template_from_row(row, chosen)
             templates = self._get_templates()
             logo_signature = ""
+            auto_logo_saved = False
             logo_count_before = 0
             path = str(row.get("_path", "") or "")
+            confirmation_id = si.match_confirmation_id(
+                chosen, str(row.get("invoice_number", "") or ""),
+                path=path,
+                invoice_date=str(row.get("date", "") or ""),
+            )
             try:
-                logo_signature = si.confirmed_supplier_logo_signature(
-                    path, chosen, templates, suppliers=self._suppliers()
-                )
+                obs_fn = getattr(si, "observe_confirmed_supplier_logo", None)
+                if callable(obs_fn):
+                    logo_signature, auto_logo_saved = obs_fn(
+                        learning, templates, chosen, path,
+                        confirmation_id=confirmation_id,
+                        suppliers=self._suppliers(),
+                    )
+                else:
+                    logo_signature = si.confirmed_supplier_logo_signature(
+                        path, chosen, templates, suppliers=self._suppliers()
+                    )
                 if logo_signature:
                     logo_count_before = int(
                         (entry_before.get("logos", {}) or {}).get(
@@ -4050,11 +4065,8 @@ class ScanImportView(QWidget):
                     )
             except Exception as exc:
                 log.debug("confirm supplier logo: %s", exc)
-            confirmation_id = si.match_confirmation_id(
-                chosen, str(row.get("invoice_number", "") or ""),
-                path=path,
-                invoice_date=str(row.get("date", "") or ""),
-            )
+            if auto_logo_saved:
+                self._save_templates_file()
             entry = si.record_match_confirmation(
                 learning, chosen, multipage=pages >= 2,
                 text=str(row.get("_text", "") or ""),
@@ -4081,6 +4093,8 @@ class ScanImportView(QWidget):
             notes: list[str] = []
             if derived_template:
                 notes.append(tr("scan.learned_template", supplier=chosen))
+            if auto_logo_saved:
+                notes.append(tr("scan.learned_logo_saved", supplier=chosen))
             if pages >= 2:
                 notes.append(tr(
                     "scan.learning_progress",
@@ -4144,6 +4158,7 @@ class ScanImportView(QWidget):
                             <= confirmed
                         ),
                         logo_learned=bool(logo_signature),
+                        logo_auto_saved=bool(auto_logo_saved),
                     )
             except Exception:
                 pass
@@ -4198,14 +4213,26 @@ class ScanImportView(QWidget):
             notes: list[str] = []
             if derived_template:
                 notes.append(tr("scan.learned_template", supplier=supplier))
-            logo_signature = si.confirmed_supplier_logo_signature(
-                path, supplier, templates, suppliers=self._suppliers()
-            )
             confirmation_id = si.match_confirmation_id(
                 supplier, str(row.get("invoice_number", "") or ""),
                 path=path, invoice_date=str(row.get("date", "") or ""),
             )
             learning = self._get_match_learning()
+            obs_fn = getattr(si, "observe_confirmed_supplier_logo", None)
+            auto_logo_saved = False
+            if callable(obs_fn):
+                logo_signature, auto_logo_saved = obs_fn(
+                    learning, templates, supplier, path,
+                    confirmation_id=confirmation_id,
+                    suppliers=self._suppliers(),
+                )
+            else:
+                logo_signature = si.confirmed_supplier_logo_signature(
+                    path, supplier, templates, suppliers=self._suppliers()
+                )
+            if auto_logo_saved:
+                self._save_templates_file()
+                notes.append(tr("scan.learned_logo_saved", supplier=supplier))
             before_entry = si.template_confirmation_entry(
                 learning, supplier, template
             )
@@ -4248,6 +4275,7 @@ class ScanImportView(QWidget):
                         confirmations_after=int(entry.get("confirmed", 0) or 0),
                         multipage_confirmed=int(entry.get("multipage_confirmed", 0) or 0),
                         logo_learned=bool(logo_signature),
+                        logo_auto_saved=bool(auto_logo_saved),
                     )
             except Exception:
                 pass
@@ -6935,11 +6963,17 @@ class ScanImportView(QWidget):
                     supplier=before.get("supplier", ""),
                     n=5,
                 )
+            if res.get("auto_logo_saved"):
+                msg += " · " + tr(
+                    "scan.learned_logo_saved",
+                    supplier=row.get("supplier", ""),
+                )
             if (
                 res.get("template_action")
                 or res.get("counter_reset")
                 or res.get("replaced_variants")
                 or res.get("unconfirmed_variants")
+                or res.get("auto_logo_saved")
             ):
                 rescan_note = self._rescan_everything_after_learning(
                     exclude=row
