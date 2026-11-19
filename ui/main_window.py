@@ -2545,7 +2545,8 @@ class MainWindow(QMainWindow):
     def _on_auto_batch_done(self, results: list) -> None:
         """Applicerar Betald + historik + utskrift på huvudtråden."""
         from ui.invoices_helpers import (
-            ExportHistoryManager, combine_invoices, print_file,
+            ExportHistoryManager, apply_credit_carryovers, combine_invoices,
+            print_file,
         )
         messages: list[str] = []
         for item in results or []:
@@ -2567,10 +2568,12 @@ class MainWindow(QMainWindow):
             # bevakade mappen; betalda spåras i JSON.
             paid = 0
             _engine = getattr(self._app, "invoices", None)
-            _ids = [
+            _ids = list(item.get("settled_ids") or [
                 str(inv.get("id"))
                 for inv in batch["invoices"] if inv.get("id")
-            ]
+            ])
+            _carryovers = list(item.get("credit_carryovers") or [])
+            _hist_rows = list(item.get("exported_rows") or batch["invoices"])
             if _engine is not None and hasattr(
                 _engine, "mark_exported_paid"
             ):
@@ -2583,10 +2586,10 @@ class MainWindow(QMainWindow):
                 except Exception as exc:
                     log.warning("AUTOBATCH betald: %s", exc)
             else:
-                for inv in batch["invoices"]:
+                for rid in _ids:
                     try:
                         self._app.update_invoice(
-                            inv["id"],
+                            rid,
                             {
                                 "status": "Betald",
                                 "payment_date": batch["payment_date"],
@@ -2594,20 +2597,22 @@ class MainWindow(QMainWindow):
                         )
                         paid += 1
                     except Exception as exc:
-                        log.warning("AUTOBATCH betald %s: %s",
-                                    inv.get("id"), exc)
+                        log.warning("AUTOBATCH betald %s: %s", rid, exc)
+            if _carryovers:
+                apply_credit_carryovers(self._app, _carryovers)
             try:
-                summary = combine_invoices(batch["invoices"])
+                summary = combine_invoices(_hist_rows)
                 ExportHistoryManager(
                     self._auto_batch_data_dir()
                 ).record_export(
-                    invoices=batch["invoices"],
+                    invoices=_hist_rows,
                     file_path=item["file_path"],
                     total_inv=summary["total_invoices"],
                     total_cred=summary["total_credits"],
                     att_betala=summary["net"],
                     suppliers=[supplier],
                     payment_date=batch["payment_date"],
+                    credit_carryovers=_carryovers,
                 )
             except Exception as exc:
                 log.warning("AUTOBATCH historik: %s", exc)

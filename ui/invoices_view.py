@@ -120,6 +120,10 @@ try:
         DATE_COLUMN_KEYS,
         fmt_amount,
         combine_invoices,
+        plan_credit_settlement,
+        chunk_settlement_rows,
+        apply_credit_carryovers,
+        build_chunk_carryovers,
         build_export_path,
         chunk_export_rows,
         get_export_base,
@@ -151,6 +155,10 @@ except ImportError:
         DATE_COLUMN_KEYS,
         fmt_amount,
         combine_invoices,
+        plan_credit_settlement,
+        chunk_settlement_rows,
+        apply_credit_carryovers,
+        build_chunk_carryovers,
         build_export_path,
         chunk_export_rows,
         get_export_base,
@@ -676,16 +684,25 @@ class InvoicesView(QWidget):
         self._btn_pay_today.clicked.connect(self._pay_today)
         row_actions.addWidget(self._btn_pay_today, 3, 0, 1, 2)
 
+        self._btn_link_credit = make_btn(
+            tr("credit.link_button"),
+            tr("credit.link_tip"),
+            info=True,
+        )
+        self._btn_link_credit.clicked.connect(self._show_link_credit_dialog)
+        self._btn_link_credit.setEnabled(False)
+        row_actions.addWidget(self._btn_link_credit, 4, 0, 1, 2)
+
         self._btn_refresh = make_btn("🔄", "Uppdatera vyn", width=50)
         self._btn_refresh.clicked.connect(self._do_refresh)
-        row_actions.addWidget(self._btn_refresh, 4, 0)
+        row_actions.addWidget(self._btn_refresh, 5, 0)
 
         self._btn_undo = make_btn(
             "↩", tr("invoices.undo_tip"), width=50
         )
         self._btn_undo.clicked.connect(self._undo_last_status)
-        row_actions.addWidget(self._btn_undo, 4, 1)
-        row_actions.addWidget(self._btn_delete_all, 5, 0, 1, 2)
+        row_actions.addWidget(self._btn_undo, 5, 1)
+        row_actions.addWidget(self._btn_delete_all, 6, 0, 1, 2)
         side.addWidget(actions_frame)
 
         # ── Export (egen panel: ExportBar) ─────────────────────────────
@@ -1077,6 +1094,13 @@ class InvoicesView(QWidget):
         self._populate_table(filtered)
         self._update_summary(filtered)
         self._update_export_buttons()
+        if hasattr(self, "_btn_link_credit"):
+            has_credit = any(
+                _to_float(r.get("total_amount")) < 0
+                and str(r.get("status", "")) not in NON_UNPAID_STATUSES
+                for r in self._all_data
+            )
+            self._btn_link_credit.setEnabled(has_credit)
 
     def _archive_exported(
         self, chunk: list[dict], payment_date: str = ""
@@ -1715,6 +1739,16 @@ class InvoicesView(QWidget):
         self._btn_duplicate.setEnabled(single)
         self._btn_mark_paid.setEnabled(multi)
         self._btn_combine.setEnabled(len(ids) >= 2)
+        if hasattr(self, "_btn_link_credit"):
+            has_credit = any(
+                _to_float(r.get("total_amount")) < 0
+                and str(r.get("status", "")) not in NON_UNPAID_STATUSES
+                for r in self._all_data
+            ) or any(
+                _to_float(r.get("total_amount")) < 0
+                for r in self._selected_invoices()
+            )
+            self._btn_link_credit.setEnabled(has_credit)
         if len(ids) >= 2:
             summary = combine_invoices(self._selected_invoices())
             if summary["earliest_due"]:
@@ -1953,6 +1987,9 @@ class InvoicesView(QWidget):
             _btn.setToolTip(tr(f"invoices.chip_{_mode}"))
         self._btn_combine.setText(tr("combine.button"))
         self._btn_combine.setToolTip(tr("combine.tip"))
+        if hasattr(self, "_btn_link_credit"):
+            self._btn_link_credit.setText(tr("credit.link_button"))
+            self._btn_link_credit.setToolTip(tr("credit.link_tip"))
         if hasattr(self, "_btn_export_selected"):
             self._btn_export_selected.setText(
                 tr("invoices.export_selected")
@@ -2794,6 +2831,18 @@ class InvoicesView(QWidget):
             lbl_warn.setStyleSheet("color:#e8a13a;")
             lay.addWidget(lbl_warn)
 
+        combine_plan = plan_credit_settlement(rows)
+        if combine_plan["has_partial_credit"] and combine_plan["total_invoices"] > 0:
+            lbl_rem = QLabel(
+                tr(
+                    "credit.export_remaining_line",
+                    remaining=fmt_amount(combine_plan["remaining_credits"]),
+                )
+            )
+            lbl_rem.setWordWrap(True)
+            lbl_rem.setStyleSheet("color:#58a6ff;font-weight:700;")
+            lay.addWidget(lbl_rem)
+
         txt = QPlainTextEdit()
         txt.setReadOnly(True)
         txt.setPlainText("\n".join(lines))
@@ -2824,7 +2873,210 @@ class InvoicesView(QWidget):
         btn_close = QPushButton(tr("combine.close"))
         btn_close.clicked.connect(dlg.reject)
         row_btns.addWidget(btn_copy)
+        if summary["n_credits"] > 0:
+            btn_link = QPushButton(tr("credit.link_from_combine"))
+
+            def _open_link() -> None:
+                dlg.accept()
+                self._show_link_credit_dialog(preselected_rows=rows)
+
+            btn_link.clicked.connect(_open_link)
+            row_btns.addWidget(btn_link)
         row_btns.addWidget(btn_export)
+        row_btns.addStretch(1)
+        row_btns.addWidget(btn_close)
+        lay.addLayout(row_btns)
+        dlg.exec()
+
+    def _show_link_credit_dialog(
+        self, _checked: bool = False, preselected_rows: list[dict] | None = None
+    ) -> None:
+        """Kopplar vald kreditfaktura till obetalda fakturor och behåller
+        kvarvarande kreditbelopp på krediten till nästa koppling."""
+        from PySide6.QtWidgets import QCheckBox, QScrollArea, QWidget as _QW
+
+        if preselected_rows is not None:
+            selected = list(preselected_rows)
+        else:
+            seen_ids: set[str] = set()
+            selected = []
+            for item in self._selected_invoices() + self._get_selected_exportable():
+                iid = str(item.get("id", "") or "")
+                if iid and iid in seen_ids:
+                    continue
+                if iid:
+                    seen_ids.add(iid)
+                selected.append(item)
+        sel_credits = [
+            r for r in selected
+            if _to_float(r.get("total_amount")) < 0
+            and str(r.get("status", "")) not in NON_UNPAID_STATUSES
+        ]
+        all_credits = [
+            r for r in self._all_data
+            if _to_float(r.get("total_amount")) < 0
+            and str(r.get("status", "")) not in NON_UNPAID_STATUSES
+        ]
+        credits = sel_credits or all_credits
+        if not credits:
+            QMessageBox.information(
+                self, tr("credit.link_title"), tr("credit.link_need_credit")
+            )
+            return
+
+        # Om ingen specifik kredit valdes och flera finns, låt första valda
+        # (eller samma leverantör som markerade fakturor) starta ikryssad,
+        # men användaren kan ha valt fler i förhand.
+        if not sel_credits and len(all_credits) > 1:
+            credits = [all_credits[0]]
+
+        unpaid_invoices = [
+            r for r in self._all_data
+            if _to_float(r.get("total_amount")) > 0
+            and str(r.get("status", "")) not in NON_UNPAID_STATUSES
+        ]
+        if not unpaid_invoices:
+            QMessageBox.information(
+                self, tr("credit.link_title"), tr("credit.no_unpaid_invoices")
+            )
+            return
+
+        credit_suppliers = {
+            str(c.get("supplier", "") or "").strip().lower() for c in credits
+        }
+        unpaid_invoices.sort(
+            key=lambda r: (
+                str(r.get("supplier", "") or "").strip().lower() not in credit_suppliers,
+                str(r.get("due_date", "") or "9999-99-99"),
+                str(r.get("invoice_number", "") or ""),
+            )
+        )
+        pre_pos_ids = {
+            str(r.get("id", "")) for r in selected
+            if _to_float(r.get("total_amount")) > 0 and r.get("id")
+        }
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr("credit.link_title"))
+        dlg.setMinimumWidth(640)
+        dlg.setMinimumHeight(460)
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(10)
+
+        cred_lines = [
+            f"{c.get('supplier', '')} · {c.get('invoice_number', '')} · "
+            f"{fmt_amount(_to_float(c.get('total_amount')))}"
+            for c in credits
+        ]
+        lbl_cred = QLabel("  |  ".join(cred_lines))
+        lbl_cred.setWordWrap(True)
+        lbl_cred.setFont(make_font(12, bold=True))
+        lbl_cred.setStyleSheet("color:#64b5f6;")
+        lay.addWidget(lbl_cred)
+
+        lay.addWidget(QLabel(tr("credit.pick_invoices_label")))
+
+        scroll = QScrollArea(dlg)
+        scroll.setWidgetResizable(True)
+        holder = _QW(scroll)
+        holder_lay = QVBoxLayout(holder)
+        holder_lay.setContentsMargins(6, 6, 6, 6)
+        holder_lay.setSpacing(4)
+        checks: list[tuple[QCheckBox, dict]] = []
+        for inv in unpaid_invoices:
+            inv_id = str(inv.get("id", "") or "")
+            due = str(inv.get("due_date", "") or "—")
+            cb = QCheckBox(
+                f"{due}   {inv.get('supplier', '')} · "
+                f"{inv.get('invoice_number', '')} · "
+                f"{fmt_amount(_to_float(inv.get('total_amount')))}"
+            )
+            cb.setChecked(inv_id in pre_pos_ids)
+            checks.append((cb, inv))
+            holder_lay.addWidget(cb)
+        holder_lay.addStretch(1)
+        scroll.setWidget(holder)
+        lay.addWidget(scroll, stretch=1)
+
+        lbl_summary = QLabel()
+        lbl_summary.setWordWrap(True)
+        lbl_summary.setFont(make_font(11, bold=True))
+        lay.addWidget(lbl_summary)
+
+        def _picked_invoices() -> list[dict]:
+            return [inv for cb, inv in checks if cb.isChecked()]
+
+        def _refresh_summary() -> None:
+            picked = _picked_invoices()
+            plan = plan_credit_settlement(credits + picked)
+            lbl_summary.setText(
+                tr(
+                    "credit.link_summary",
+                    credits=fmt_amount(plan["total_credits_original"]),
+                    n=len(picked),
+                    invoices=fmt_amount(plan["total_invoices"]),
+                    used=fmt_amount(plan["used_credits"]),
+                    remaining=fmt_amount(plan["remaining_credits"]),
+                    net=fmt_amount(plan["net_to_pay"]),
+                )
+            )
+
+        for cb, _inv in checks:
+            cb.toggled.connect(_refresh_summary)
+        _refresh_summary()
+
+        row_btns = QHBoxLayout()
+        btn_apply_paid = QPushButton(tr("credit.link_apply_paid"))
+        btn_apply_export = QPushButton(tr("credit.link_apply_export"))
+        btn_apply_export.setProperty("accent", True)
+        btn_close = QPushButton(tr("combine.close"))
+        btn_close.clicked.connect(dlg.reject)
+
+        def _apply_paid_only() -> None:
+            picked = _picked_invoices()
+            if not picked:
+                QMessageBox.information(
+                    dlg, tr("credit.link_title"), tr("credit.need_one_invoice")
+                )
+                return
+            combined = credits + picked
+            plan = plan_credit_settlement(combined)
+            self._record_undo([
+                str(r.get("id", "")) for r in combined if r.get("id")
+            ])
+            settled = self._safe_mark_paid(plan["fully_settled_ids"])
+            apply_credit_carryovers(self._app, plan["carryovers"])
+            dlg.accept()
+            self._do_refresh()
+            self._status(
+                tr(
+                    "credit.settled_status",
+                    n=settled,
+                    remaining=fmt_amount(plan["remaining_credits"]),
+                )
+            )
+
+        def _apply_and_export() -> None:
+            picked = _picked_invoices()
+            if not picked:
+                QMessageBox.information(
+                    dlg, tr("credit.link_title"), tr("credit.need_one_invoice")
+                )
+                return
+            combined = credits + picked
+            earliest = combine_invoices(combined)["earliest_due"]
+            dlg.accept()
+            self._export_invoices(
+                combined,
+                confirm_title=tr("credit.link_title"),
+                default_payment_date=earliest,
+                confirm=False,
+            )
+
+        btn_apply_paid.clicked.connect(_apply_paid_only)
+        btn_apply_export.clicked.connect(_apply_and_export)
+        row_btns.addWidget(btn_apply_paid)
+        row_btns.addWidget(btn_apply_export)
         row_btns.addStretch(1)
         row_btns.addWidget(btn_close)
         lay.addLayout(row_btns)
@@ -2834,6 +3086,38 @@ class InvoicesView(QWidget):
         ids = self._selected_ids()
         if not ids:
             return
+        selected = self._selected_invoices()
+        plan = plan_credit_settlement(selected)
+        if plan["has_partial_credit"] and plan["total_invoices"] > 0.004:
+            reply = QMessageBox.question(
+                self,
+                "Markera som betald",
+                tr(
+                    "credit.mark_paid_partial_confirm",
+                    n=len(plan["settled_invoice_ids"]),
+                    invoices=fmt_amount(plan["total_invoices"]),
+                    credits=fmt_amount(plan["total_credits_original"]),
+                    remaining=fmt_amount(plan["remaining_credits"]),
+                ),
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            self._record_undo(ids)
+            count = self._safe_mark_paid(plan["fully_settled_ids"])
+            apply_credit_carryovers(self._app, plan["carryovers"])
+            self._do_refresh()
+            self._status(
+                tr(
+                    "credit.settled_status",
+                    n=count,
+                    remaining=fmt_amount(plan["remaining_credits"]),
+                )
+            )
+            return
+
         reply = QMessageBox.question(
             self,
             "Markera som betald",
@@ -3869,39 +4153,55 @@ class InvoicesView(QWidget):
         )
 
     def _record_undo(self, ids: list[str]) -> None:
-        """Sparar nuvarande status/betalningsdatum före en ändring."""
+        """Sparar nuvarande status/betalningsdatum/belopp före en ändring."""
         by_id = {str(r.get("id")): r for r in self._all_data}
-        batch: list[tuple[str, str, str]] = []
+        batch: list[dict[str, Any]] = []
         for rid in ids:
             rec = by_id.get(str(rid))
             if rec is not None:
-                batch.append(
-                    (
-                        str(rid),
-                        str(rec.get("status", "")),
-                        str(rec.get("payment_date", "") or ""),
-                    )
-                )
+                snap: dict[str, Any] = {
+                    "id": str(rid),
+                    "status": str(rec.get("status", "")),
+                    "payment_date": str(rec.get("payment_date", "") or ""),
+                    "total_amount": _to_float(rec.get("total_amount")),
+                    "note": str(rec.get("note", "") or ""),
+                    "original_credit_amount": rec.get(
+                        "original_credit_amount"
+                    ),
+                }
+                batch.append(snap)
         if batch:
             self._undo_stack.append(batch)
             del self._undo_stack[:-20]  # max 20 ångringar bakåt
 
     def _undo_last_status(self) -> None:
-        """Ångrar senaste statusändringen (markera betald m.m.)."""
+        """Ångrar senaste statusändringen (markera betald / kreditkoppling)."""
         if not self._undo_stack:
             self._status(tr("invoices.undo_empty"))
             return
         batch = self._undo_stack.pop()
         count = 0
-        for rid, old_status, old_payment_date in batch:
+        for item in batch:
+            if isinstance(item, dict):
+                rid = str(item.get("id", "") or "")
+                patch: dict[str, Any] = {
+                    "status": str(item.get("status", "")),
+                    "payment_date": str(item.get("payment_date", "") or ""),
+                    "total_amount": item.get("total_amount", 0.0),
+                    "note": str(item.get("note", "") or ""),
+                }
+                if "original_credit_amount" in item:
+                    patch["original_credit_amount"] = item.get(
+                        "original_credit_amount"
+                    )
+            else:
+                rid, old_status, old_payment_date = item
+                patch = {
+                    "status": old_status,
+                    "payment_date": old_payment_date,
+                }
             try:
-                self._app.update_invoice(
-                    rid,
-                    {
-                        "status": old_status,
-                        "payment_date": old_payment_date,
-                    },
-                )
+                self._app.update_invoice(rid, patch)
                 count += 1
             except Exception as exc:
                 log.error("_undo_last_status %s: %s", rid, exc)
@@ -3956,16 +4256,16 @@ class InvoicesView(QWidget):
             )
             return
 
-        # ── Beräkna summor ─────────────────────────────────────────────
-        total_invoices = 0.0
-        total_credits = 0.0
-        for i in exportable:
-            val = _to_float(i.get("total_amount"))
-            if val > 0:
-                total_invoices += val
-            elif val < 0:
-                total_credits += val
-        att_betala = round(total_invoices + total_credits, 2)
+        # ── Beräkna summor (inkl. delavräknade kreditfakturor) ────────
+        settlement = plan_credit_settlement(exportable)
+        has_partial_credit = bool(settlement["has_partial_credit"])
+        total_invoices = settlement["total_invoices"]
+        total_credits = (
+            settlement["applied_credits"]
+            if settlement["settled_credit_rows"] and total_invoices > 0.004
+            else settlement["total_credits_original"]
+        )
+        att_betala = settlement["net_to_pay"]
 
         n_inv = sum(
             1 for i in exportable if _to_float(i.get("total_amount")) >= 0
@@ -3978,6 +4278,11 @@ class InvoicesView(QWidget):
                 if i.get("supplier")
             }
         )
+        remaining_credit_note = (
+            f"\n  {tr('credit.export_remaining_line', remaining=fmt_amount(settlement['remaining_credits']))}\n"
+            if has_partial_credit and total_invoices > 0.004
+            else ""
+        )
 
         # ── Bekräftelsedialog ──────────────────────────────────────────
         reply = (
@@ -3988,7 +4293,8 @@ class InvoicesView(QWidget):
             f"  Fakturor ({n_inv}):   {fmt_amount(total_invoices)}\n"
             f"  Krediter ({n_cre}):   {fmt_amount(total_credits)}\n"
             f"  {'─' * 38}\n"
-            f"  ATT BETALA:       {fmt_amount(att_betala)}\n\n"
+            f"  ATT BETALA:       {fmt_amount(att_betala)}\n"
+            f"{remaining_credit_note}\n"
             f"Leverantörer: {', '.join(suppliers)}\n\n"
             f"Du tillfrågas om betalningsdatum i nästa steg.\n"
             f"Fakturorna markeras som Betald efter export och "
@@ -4007,7 +4313,7 @@ class InvoicesView(QWidget):
         # Avbryt → export stoppas. Datumet nollställs automatiskt
         # efter exporten (finns bara i denna lokala variabel).
         payment_date, confirmed = self._ask_payment_date_for_export(
-            exportable=exportable,
+            exportable=settlement["export_rows"],
             total_invoices=total_invoices,
             total_credits=total_credits,
             att_betala=att_betala,
@@ -4046,12 +4352,19 @@ class InvoicesView(QWidget):
         # betalningsdatum gäller alla delfiler i exporten, och
         # historik + arkivering sker per fil. Misslyckas en delfil
         # stannar exporten där — resten förblir oexporterat.
-        # Exporten flyttar inte originalfiler igen: bevakade original
-        # ligger redan under sin fakturaårs-mapp efter lyckad import.
-        # Valet nedan styr bara om/sidor ur originalet kopieras in i PDF;
-        # exporten flyttar enbart registerposten till Betald/historik.
+        # Delavräknade kreditfakturor minskar med det avräknade beloppet
+        # och behåller sitt kvarvarande saldo som Obetald till nästa gång.
 
-        chunks = chunk_export_rows(exportable)
+        chunks = (
+            chunk_settlement_rows(settlement)
+            if settlement["settled_credit_rows"] and total_invoices > 0.004
+            else chunk_export_rows(exportable)
+        )
+        live_credits_by_id = {
+            str(r.get("id")): dict(r)
+            for r in exportable
+            if _to_float(r.get("total_amount")) < 0 and r.get("id")
+        }
         made_files: list[str] = []
         total_included_att = 0
         n_missing_att = 0
@@ -4110,6 +4423,10 @@ class InvoicesView(QWidget):
                 result.get("attachments_missing", 0) or 0
             )
 
+            settled_chunk_rows, chunk_carryovers = build_chunk_carryovers(
+                chunk, live_credits_by_id
+            )
+
             # Summor för just DENNA fil (historiken är per fil)
             c_inv = 0.0
             c_cred = 0.0
@@ -4127,11 +4444,17 @@ class InvoicesView(QWidget):
                 att_betala=round(c_inv + c_cred, 2),
                 suppliers=chunk_suppliers,
                 payment_date=export_pd,   # betalningsdatum sparas
+                credit_carryovers=chunk_carryovers,
             )
 
-            # Arkivera just den här filens fakturor → de flyttas
-            # till leverantörens fil i data/betalda/ (Historik)
-            archived += self._archive_exported(chunk, export_pd)
+            # Arkivera bara de poster som slutbetalats; delavräknad
+            # kreditfaktura ligger kvar som Obetald med kvarvarande saldo.
+            archived += self._archive_exported(settled_chunk_rows, export_pd)
+            if chunk_carryovers:
+                apply_credit_carryovers(self._app, chunk_carryovers)
+                for _co in chunk_carryovers:
+                    if _co.get("id"):
+                        self._marked_export_ids.discard(str(_co["id"]))
 
         if not made_files:
             if aborted:
@@ -4155,19 +4478,21 @@ class InvoicesView(QWidget):
             attach_note += (
                 "  " + tr("invoices.attachments_missing", n=n_missing_att)
             )
-        if n_missing_att:
-            attach_note += (
-                "  " + tr("invoices.attachments_missing", n=n_missing_att)
-            )
         files_note = (
             f" i {len(made_files)} filer (max 10/fil)"
             if len(made_files) > 1 else ""
+        )
+        rem_status = (
+            f" · {tr('credit.export_remaining_line', remaining=fmt_amount(settlement['remaining_credits']))}"
+            if has_partial_credit and total_invoices > 0.004
+            else ""
         )
         self._status(
             f"📄  {archived} poster exporterade och markerade "
             f"Betald{files_note}"
             f" → {fmt_amount(att_betala)}"
             + (f"  (betaldatum: {export_pd})" if export_pd else "")
+            + rem_status
             + attach_note
         )
 
@@ -4208,6 +4533,7 @@ class InvoicesView(QWidget):
             f"  Krediter  (−)    {fmt_amount(total_credits)}\n"
             f"  {'─' * 38}\n"
             f"  ATT BETALA       {fmt_amount(att_betala)}\n"
+            f"{remaining_credit_note}"
             f"{payment_line}\n"
             f"{files_line}"
             f"{missing_line}"
@@ -4255,6 +4581,9 @@ class InvoicesView(QWidget):
             theme=self._current_theme,
         )
         dlg.export_restored.connect(self._on_export_restored)
+        dlg.credit_carryovers_restored.connect(
+            self._on_credit_carryovers_restored
+        )
         dlg.exec()
 
     def _on_export_restored(self, invoice_ids: list[str]) -> None:
@@ -4263,15 +4592,85 @@ class InvoicesView(QWidget):
 
         Anropas via ExportHistoryDialog.export_restored-signalen.
         """
-        for iid in invoice_ids:
+        engine = getattr(self._app, "invoices", None)
+        if engine is not None and hasattr(engine, "mark_status"):
             try:
-                self._app.update_invoice(iid, {"status": "Obetald"})
+                engine.mark_status(list(invoice_ids), "Obetald")
             except Exception:
                 pass
+        else:
+            for iid in invoice_ids:
+                try:
+                    self._app.update_invoice(iid, {"status": "Obetald"})
+                except Exception:
+                    pass
         self._do_refresh()
         self._status(
             f"✅  {len(invoice_ids)} fakturor återställda från arkiv"
         )
+
+    def _on_credit_carryovers_restored(self, carryovers: list[dict]) -> None:
+        """Återställer delavräknat kreditbelopp när en export ångras."""
+        if not carryovers:
+            return
+        from ui.invoices_helpers import _merge_credit_note
+
+        engine = getattr(self._app, "invoices", None)
+        by_id = {str(r.get("id", "")): r for r in self._all_data}
+        for co in carryovers:
+            cid = str(co.get("id", "") or "")
+            used = abs(float(co.get("used_amount", 0.0) or 0.0))
+            if not cid or used <= 0.004:
+                continue
+            if engine is not None and hasattr(engine, "restore_from_archive"):
+                try:
+                    if hasattr(engine, "_archive") and engine._archive.get(cid) is not None:
+                        engine.restore_from_archive([cid])
+                except Exception:
+                    pass
+            cur = (
+                engine.get(cid) if engine is not None and hasattr(engine, "get")
+                else by_id.get(cid)
+            )
+            cur_amt = _to_float(
+                (cur or {}).get("total_amount"),
+                default=float(co.get("remaining_amount", 0.0) or 0.0),
+            )
+            restored_amt = round(cur_amt - used, 2)
+            orig = round(
+                _to_float(
+                    (cur or {}).get("original_credit_amount")
+                    or co.get("original_credit_amount")
+                    or restored_amt
+                ),
+                2,
+            )
+            patch: dict[str, Any] = {
+                "status": "Obetald",
+                "payment_date": "",
+                "total_amount": restored_amt,
+                "invoice_type": "Kreditfaktura",
+            }
+            if abs(restored_amt - orig) <= 0.004:
+                patch["note"] = str(co.get("before_note", "") or "")
+                patch["original_credit_amount"] = None
+            else:
+                cum_used = round(max(0.0, abs(orig) - abs(restored_amt)), 2)
+                rem_note = tr(
+                    "credit.remaining_note",
+                    remaining=fmt_amount(restored_amt),
+                    original=fmt_amount(orig),
+                    used=fmt_amount(cum_used),
+                )
+                patch["note"] = _merge_credit_note(
+                    str((cur or {}).get("note", "") or ""), rem_note
+                )
+                patch["original_credit_amount"] = orig
+            try:
+                self._app.update_invoice(cid, patch)
+            except Exception as exc:
+                log.warning("_on_credit_carryovers_restored %s: %s", cid, exc)
+        self._do_refresh()
 
     # ══════════════════════════════════════════════════════════════════
     #  HÖGERKLICK-MENY
@@ -4321,6 +4720,17 @@ class InvoicesView(QWidget):
         menu.addAction(
             tr("invoices.mark_paid"), self._mark_selected_paid
         )
+        if any(
+            _to_float(r.get("total_amount")) < 0
+            and str(r.get("status", "")) not in NON_UNPAID_STATUSES
+            for r in self._all_data
+        ) or any(
+            _to_float(r.get("total_amount")) < 0
+            for r in self._selected_invoices()
+        ):
+            menu.addAction(
+                tr("credit.link_action"), self._show_link_credit_dialog
+            )
         menu.addAction(
             tr("invoices.export_selected"),
             lambda checked=False, r=rid: self._export_with_row(r),

@@ -111,13 +111,19 @@ def _is_windows_runtime() -> bool:
     return os.name == "nt" or sys.platform == "win32"
 
 
-def _windows_no_console_kwargs(kwargs: dict[str, Any] | None = None) -> dict[str, Any]:
+def _windows_no_console_kwargs(
+    kwargs: dict[str, Any] | None = None,
+    *,
+    default_stdin_devnull: bool = False,
+) -> dict[str, Any]:
     """Suppress console windows when spawning tesseract.exe on Windows."""
     merged = dict(kwargs or {})
     if not _is_windows_runtime():
         return merged
-    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-    merged["creationflags"] = int(merged.get("creationflags", 0) or 0) | int(create_no_window)
+    create_no_window = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+    create_new_console = int(getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010))
+    flags = int(merged.get("creationflags", 0) or 0)
+    merged["creationflags"] = (flags & ~create_new_console) | create_no_window
     startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
     if startupinfo_cls is not None:
         info = merged.get("startupinfo")
@@ -126,6 +132,12 @@ def _windows_no_console_kwargs(kwargs: dict[str, Any] | None = None) -> dict[str
         info.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 1)
         info.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
         merged["startupinfo"] = info
+    if (
+        default_stdin_devnull
+        and "stdin" not in merged
+        and "input" not in merged
+    ):
+        merged["stdin"] = subprocess.DEVNULL
     return merged
 
 
@@ -143,35 +155,63 @@ class _NoConsoleSubprocessProxy:
         return self._target.Popen(*args, **_windows_no_console_kwargs(kwargs))
 
     def run(self, *args: Any, **kwargs: Any) -> Any:
-        return self._target.run(*args, **_windows_no_console_kwargs(kwargs))
+        return self._target.run(
+            *args,
+            **_windows_no_console_kwargs(kwargs, default_stdin_devnull=True),
+        )
 
     def check_output(self, *args: Any, **kwargs: Any) -> Any:
-        return self._target.check_output(*args, **_windows_no_console_kwargs(kwargs))
+        return self._target.check_output(
+            *args,
+            **_windows_no_console_kwargs(kwargs, default_stdin_devnull=True),
+        )
 
     def check_call(self, *args: Any, **kwargs: Any) -> Any:
-        return self._target.check_call(*args, **_windows_no_console_kwargs(kwargs))
+        return self._target.check_call(
+            *args,
+            **_windows_no_console_kwargs(kwargs, default_stdin_devnull=True),
+        )
 
     def call(self, *args: Any, **kwargs: Any) -> Any:
-        return self._target.call(*args, **_windows_no_console_kwargs(kwargs))
+        return self._target.call(
+            *args,
+            **_windows_no_console_kwargs(kwargs, default_stdin_devnull=True),
+        )
 
 
 def _install_pytesseract_no_console_hooks() -> None:
-    """Ensure get_tesseract_version() and image_to_string() hide Windows consoles."""
+    """Ensure get_tesseract_version(), get_languages(), and OCR hide Windows consoles."""
     if not HAS_TESS or not _is_windows_runtime():
         return
-    engine = getattr(pytesseract, "pytesseract", None)
-    if engine is None:
-        return
-    orig_sub = getattr(engine, "subprocess", None)
-    if orig_sub is not None and not getattr(orig_sub, "_fb_no_console_wrapped", False):
-        engine.subprocess = _NoConsoleSubprocessProxy(orig_sub)
-    orig_args = getattr(engine, "subprocess_args", None)
-    if callable(orig_args) and not getattr(orig_args, "_fb_no_console_wrapped", False):
-        def _wrapped_subprocess_args(include_stdout: bool = True, _orig=orig_args):
-            return _windows_no_console_kwargs(_orig(include_stdout=include_stdout))
+    engines: list[Any] = []
+    seen_ids: set[int] = set()
+    for candidate in (
+        getattr(pytesseract, "pytesseract", None),
+        sys.modules.get("pytesseract.pytesseract"),
+    ):
+        if candidate is not None and id(candidate) not in seen_ids:
+            seen_ids.add(id(candidate))
+            engines.append(candidate)
+    for engine in engines:
+        orig_sub = getattr(engine, "subprocess", None)
+        if orig_sub is not None and not getattr(orig_sub, "_fb_no_console_wrapped", False):
+            engine.subprocess = _NoConsoleSubprocessProxy(orig_sub)
+        orig_args = getattr(engine, "subprocess_args", None)
+        if callable(orig_args) and not getattr(orig_args, "_fb_no_console_wrapped", False):
+            def _wrapped_subprocess_args(include_stdout: bool = True, _orig=orig_args):
+                return _windows_no_console_kwargs(_orig(include_stdout=include_stdout))
 
-        _wrapped_subprocess_args._fb_no_console_wrapped = True  # type: ignore[attr-defined]
-        engine.subprocess_args = _wrapped_subprocess_args
+            _wrapped_subprocess_args._fb_no_console_wrapped = True  # type: ignore[attr-defined]
+            engine.subprocess_args = _wrapped_subprocess_args
+        for fn_name in ("run_tesseract", "get_tesseract_version", "get_languages"):
+            orig_fn = getattr(engine, fn_name, None)
+            if callable(orig_fn) and not getattr(orig_fn, "_fb_no_console_wrapped", False):
+                def _wrapped_engine_call(*args: Any, _orig=orig_fn, **kwargs: Any):
+                    _install_pytesseract_no_console_hooks()
+                    return _orig(*args, **kwargs)
+
+                _wrapped_engine_call._fb_no_console_wrapped = True  # type: ignore[attr-defined]
+                setattr(engine, fn_name, _wrapped_engine_call)
 
 
 _install_pytesseract_no_console_hooks()
@@ -313,6 +353,7 @@ def tesseract_available() -> bool:
     """True bara när både pytesseract och själva Tesseract-programmet finns."""
     if not _configure_tesseract_binary():
         return False
+    _install_pytesseract_no_console_hooks()
     try:
         return bool(pytesseract.get_tesseract_version())
     except Exception:
@@ -323,6 +364,7 @@ def _ocr_image_text(image, *, engine_checked: bool = False) -> tuple[str, str]:
     """OCR:a en bild; prova vanliga språkdata utan att tappa sidan."""
     if not HAS_TESS:
         return "", "ocr-saknas"
+    _install_pytesseract_no_console_hooks()
     if not engine_checked and not tesseract_available():
         return "", "ocr-saknas"
     last_exc: Exception | None = None
@@ -3449,6 +3491,8 @@ def _ocr_crop_text(path: Path, page_index: int, rect: tuple) -> str:
     """OCR av den utklippta rutan (bildfil eller skannad PDF)."""
     if not HAS_TESS:
         return ""
+    _configure_tesseract_binary()
+    _install_pytesseract_no_console_hooks()
     x0, y0, x1, y1 = rect
     try:
         import io
@@ -4807,18 +4851,21 @@ def store_supplier_template(
     *,
     max_templates: int = MAX_TEMPLATES_PER_SUPPLIER,
     replace_primary: bool = False,
+    replace_logos: bool = False,
 ) -> tuple[str, dict[str, Any], bool]:
     """Sparar eller uppdaterar en mallvariant för leverantören (max 15 st).
 
     Behåller befintliga logotypvarianter (också begränsade till max 15)
-    och slår aldrig ihop separata toppnycklar. När gränsen nås ersätts
-    den äldsta/minst använda mallen automatiskt så nya fakturor alltid
-    kan fortsätta sparas. Returnerar ``(nyckel, sparad_post, ny_variant)``.
+    när inte ``replace_logos`` anges, och slår aldrig ihop separata
+    toppnycklar. När gränsen nås ersätts den äldsta/minst använda mallen
+    automatiskt så nya fakturor alltid kan fortsätta sparas. Returnerar
+    ``(nyckel, sparad_post, ny_variant)``.
     """
     name = str(supplier or "").strip()
     if not name or not isinstance(candidate, dict):
         return "", {}, False
     limit = max(1, int(max_templates or MAX_TEMPLATES_PER_SUPPLIER))
+    replace_logos = bool(replace_logos or candidate.get("replace_logos"))
 
     key = name
     if key not in templates:
@@ -4835,47 +4882,71 @@ def store_supplier_template(
     added_new = False
     now_stamp = datetime.datetime.now().isoformat(timespec="seconds")
 
-    if isinstance(new_fields, dict) and new_fields:
-        new_variant: dict[str, Any] = {
-            "fields": {
-                str(f): dict(spec)
-                for f, spec in new_fields.items()
-                if isinstance(spec, dict)
-            },
-            "last_used": now_stamp,
-        }
-        new_sig = template_confirmation_signature(new_variant)
-        existing_sigs = [
-            template_confirmation_signature(v) for v in variants
-        ]
-        if replace_primary and variants:
+    if isinstance(new_fields, dict) and (new_fields or replace_primary):
+        if not new_fields and replace_primary:
+            # Användaren har rensat fältmarkeringar (t.ex. behållit bara logotyp
+            # eller andra varianter): ersätt den primära varianten i stället
+            # för att återställa gamla fält.
             primary_sig = template_confirmation_signature(
                 {"fields": old_dict.get("fields", {})}
             )
-            replace_idx = (
-                existing_sigs.index(primary_sig)
-                if primary_sig in existing_sigs
-                else len(variants) - 1
+            existing_sigs = [
+                template_confirmation_signature(v) for v in variants
+            ]
+            if variants:
+                replace_idx = (
+                    existing_sigs.index(primary_sig)
+                    if primary_sig in existing_sigs
+                    else len(variants) - 1
+                )
+                variants.pop(replace_idx)
+            merged["fields"] = (
+                dict(variants[-1]["fields"]) if variants else {}
             )
-            variants.pop(replace_idx)
-            existing_sigs.pop(replace_idx)
-            if new_sig in existing_sigs:
-                variants.pop(existing_sigs.index(new_sig))
-            variants.append(new_variant)
-            added_new = new_sig != primary_sig
-        elif new_sig and new_sig in existing_sigs:
-            idx = existing_sigs.index(new_sig)
-            variants.pop(idx)
-            variants.append(new_variant)
-            added_new = False
+            if len(variants) > 1:
+                merged["variants"] = [dict(v) for v in variants]
+            added_new = bool(old_dict.get("fields"))
         else:
-            variants.append(new_variant)
-            added_new = True
-        if len(variants) > limit:
-            variants = variants[-limit:]
-        merged["fields"] = dict(variants[-1]["fields"])
-        if len(variants) > 1:
-            merged["variants"] = [dict(v) for v in variants]
+            new_variant: dict[str, Any] = {
+                "fields": {
+                    str(f): dict(spec)
+                    for f, spec in new_fields.items()
+                    if isinstance(spec, dict)
+                },
+                "last_used": now_stamp,
+            }
+            new_sig = template_confirmation_signature(new_variant)
+            existing_sigs = [
+                template_confirmation_signature(v) for v in variants
+            ]
+            if replace_primary and variants:
+                primary_sig = template_confirmation_signature(
+                    {"fields": old_dict.get("fields", {})}
+                )
+                replace_idx = (
+                    existing_sigs.index(primary_sig)
+                    if primary_sig in existing_sigs
+                    else len(variants) - 1
+                )
+                variants.pop(replace_idx)
+                existing_sigs.pop(replace_idx)
+                if new_sig in existing_sigs:
+                    variants.pop(existing_sigs.index(new_sig))
+                variants.append(new_variant)
+                added_new = new_sig != primary_sig
+            elif new_sig and new_sig in existing_sigs:
+                idx = existing_sigs.index(new_sig)
+                variants.pop(idx)
+                variants.append(new_variant)
+                added_new = False
+            else:
+                variants.append(new_variant)
+                added_new = True
+            if len(variants) > limit:
+                variants = variants[-limit:]
+            merged["fields"] = dict(variants[-1]["fields"])
+            if len(variants) > 1:
+                merged["variants"] = [dict(v) for v in variants]
     else:
         existing_fields = old_dict.get("fields")
         merged["fields"] = (
@@ -4884,12 +4955,12 @@ def store_supplier_template(
         if len(variants) > 1:
             merged["variants"] = [dict(v) for v in variants]
 
-    merged_logos = supplier_logo_specs({
-        "supplier_logos": [
-            *supplier_logo_specs(old_dict),
-            *supplier_logo_specs(candidate),
-        ]
-    })
+    logo_pool = (
+        list(supplier_logo_specs(candidate))
+        if replace_logos
+        else [*supplier_logo_specs(old_dict), *supplier_logo_specs(candidate)]
+    )
+    merged_logos = supplier_logo_specs({"supplier_logos": logo_pool})
     if merged_logos:
         merged_logos = merged_logos[-limit:]
         merged["supplier_logos"] = [dict(spec) for spec in merged_logos]

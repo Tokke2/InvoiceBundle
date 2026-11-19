@@ -83,18 +83,41 @@ def plan_batches(
         ]
         earliest = min(dues) if dues else None
         if len(rows) >= count_threshold:
-            # Max `count_threshold` fakturor per exportfil — fler
-            # delas i delfiler (tidigaste förfall först) med eget
-            # betalningsdatum (tidigaste förfallet) per delfil.
-            ordered = sorted(
-                rows,
-                key=lambda r: (
-                    str(r.get("due_date", "") or "9999-99-99"),
-                    str(r.get("invoice_number", "") or ""),
-                ),
+            has_credits = any(
+                float(r.get("total_amount", 0) or 0) < 0 for r in rows
             )
-            for start in range(0, len(ordered), count_threshold):
-                part = ordered[start:start + count_threshold]
+            if has_credits:
+                from ui.invoices_helpers import (
+                    chunk_settlement_rows, plan_credit_settlement,
+                )
+
+                ordered_rows = sorted(
+                    rows,
+                    key=lambda r: (
+                        str(r.get("due_date", "") or "9999-99-99"),
+                        str(r.get("invoice_number", "") or ""),
+                    ),
+                )
+                plan = plan_credit_settlement(ordered_rows)
+                parts = chunk_settlement_rows(plan, size=count_threshold)
+                if not parts:
+                    parts = [ordered_rows]
+            else:
+                # Max `count_threshold` fakturor per exportfil — fler
+                # delas i delfiler (tidigaste förfall först) med eget
+                # betalningsdatum (tidigaste förfallet) per delfil.
+                ordered = sorted(
+                    rows,
+                    key=lambda r: (
+                        str(r.get("due_date", "") or "9999-99-99"),
+                        str(r.get("invoice_number", "") or ""),
+                    ),
+                )
+                parts = [
+                    ordered[start:start + count_threshold]
+                    for start in range(0, len(ordered), count_threshold)
+                ]
+            for part in parts:
                 pdues = [
                     d for d in (
                         _parse_day(r.get("due_date")) for r in part
@@ -164,7 +187,10 @@ def export_batches(
     Returnerar en lista med {batch, success, file_path, error}
     — en post per batch; file_path pekar på första delfilen.
     """
-    from ui.invoices_helpers import chunk_export_rows
+    from ui.invoices_helpers import (
+        build_chunk_carryovers, chunk_export_rows, chunk_settlement_rows,
+        plan_credit_settlement,
+    )
 
     results: list[dict] = []
     exporter = getattr(app, "pdf_exporter", None)
@@ -183,12 +209,44 @@ def export_batches(
         _setting(app, "export_original_first_page_only", False)
     )
 
+    live_credits_by_id: dict[str, dict] = {}
+    try:
+        for inv in list(getattr(app, "get_invoices", lambda: [])() or []):
+            if float(inv.get("total_amount", 0) or 0) < 0 and inv.get("id"):
+                live_credits_by_id[str(inv["id"])] = dict(inv)
+    except Exception:
+        pass
+
     for batch in batches:
         try:
-            chunks = chunk_export_rows(list(batch["invoices"]))
+            batch_rows = list(batch["invoices"])
+            already_sliced = any(
+                "_partial_credit_carryover" in r or "_credit_slice_amount" in r
+                for r in batch_rows
+            )
+            if already_sliced:
+                chunks = chunk_export_rows(batch_rows)
+            else:
+                plan = plan_credit_settlement(batch_rows)
+                chunks = (
+                    chunk_settlement_rows(plan)
+                    if plan["settled_credit_rows"] and plan["total_invoices"] > 0.004
+                    else chunk_export_rows(batch_rows)
+                )
+            for r in batch_rows:
+                rid = str(r.get("id", "") or "")
+                if (
+                    rid
+                    and rid not in live_credits_by_id
+                    and float(r.get("total_amount", 0) or 0) < 0
+                ):
+                    live_credits_by_id[rid] = dict(r)
             target_dir, filename = path_builder([batch["supplier"]])
             files: list[str] = []
             errors: list[str] = []
+            exported_rows: list[dict] = []
+            settled_ids: list[str] = []
+            batch_carryovers: list[dict] = []
             ok = True
             for idx, chunk in enumerate(chunks):
                 chunk_name = filename
@@ -228,6 +286,14 @@ def export_batches(
                         (result.get("errors") or ["okänt fel"])
                     )
                     break
+                exported_rows.extend(chunk)
+                c_settled, c_carry = build_chunk_carryovers(
+                    chunk, live_credits_by_id
+                )
+                settled_ids.extend(
+                    str(r.get("id")) for r in c_settled if r.get("id")
+                )
+                batch_carryovers.extend(c_carry)
             results.append({
                 "batch": batch,
                 "success": ok,
@@ -236,6 +302,9 @@ def export_batches(
                     else str(Path(target_dir) / filename)
                 ),
                 "error": "" if ok else "; ".join(errors),
+                "exported_rows": exported_rows if ok else [],
+                "settled_ids": settled_ids if ok else [],
+                "credit_carryovers": batch_carryovers if ok else [],
             })
             log.info(
                 "AUTOBATCH %s: %d fakturor i %d fil(er), %s "

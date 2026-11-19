@@ -49,6 +49,7 @@ import logging
 import math
 import os
 import platform
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -794,6 +795,426 @@ def chunk_export_rows(
     return [
         ordered[i:i + size] for i in range(0, len(ordered), size)
     ]
+
+
+_CREDIT_NOTE_TAG_RE = re.compile(
+    r"(?:\s*·\s*)?(?:"
+    r"Kredit kvar:.*|"
+    r"Credit remaining:.*|"
+    r"Kredit helt avräknad.*|"
+    r"Credit fully settled.*|"
+    r"Avräknat:.*|"
+    r"Applied:.*"
+    r")$",
+    flags=re.IGNORECASE,
+)
+
+
+def _strip_credit_note_tag(note: str) -> str:
+    """Tar bort tidigare kredit-saldonotering innan ny status skrivs."""
+    text = str(note or "").strip()
+    while text:
+        cleaned = _CREDIT_NOTE_TAG_RE.sub("", text).strip(" ·")
+        if cleaned == text:
+            break
+        text = cleaned
+    return text
+
+
+def _merge_credit_note(base_note: str, tag: str) -> str:
+    clean_base = _strip_credit_note_tag(base_note)
+    clean_tag = str(tag or "").strip()
+    if clean_base and clean_tag:
+        return f"{clean_base} · {clean_tag}"
+    return clean_tag or clean_base
+
+
+def plan_credit_settlement(rows: list[dict]) -> dict:
+    """Beräknar avräkning mellan positiva fakturor och kreditfakturor.
+
+    När summan av en kreditfaktura (t.ex. −132 000) överstiger de
+    valda positiva fakturorna (t.ex. 53 550) används bara 53 550 nu;
+    kvarvarande −78 450 stannar kvar som obetalt saldo på krediten
+    till nästa koppling.
+    """
+    def _pos_key(r: dict) -> tuple[str, str, str, str]:
+        return (
+            str(r.get("supplier", "") or "").strip().lower(),
+            str(r.get("due_date", "") or ""),
+            str(r.get("invoice_number", "") or ""),
+            str(r.get("id", "") or ""),
+        )
+
+    def _cred_key(r: dict) -> tuple[str, str, str, str]:
+        return (
+            str(r.get("due_date", "") or "9999-99-99"),
+            str(r.get("supplier", "") or "").strip().lower(),
+            str(r.get("invoice_number", "") or ""),
+            str(r.get("id", "") or ""),
+        )
+
+    all_rows = [dict(r) for r in (rows or [])]
+    positives = sorted(
+        [r for r in all_rows if _to_float(r.get("total_amount")) > 0],
+        key=_pos_key,
+    )
+    zero_rows = [
+        r for r in all_rows if abs(_to_float(r.get("total_amount"))) <= 0.004
+    ]
+    credits = sorted(
+        [r for r in all_rows if _to_float(r.get("total_amount")) < 0],
+        key=_cred_key,
+    )
+
+    total_invoices = round(
+        sum(_to_float(r.get("total_amount")) for r in positives), 2
+    )
+    total_credits_original = round(
+        sum(_to_float(r.get("total_amount")) for r in credits), 2
+    )
+
+    # Utan krediter eller utan positiva fakturor att kvitta mot behålls
+    # exakt befintligt beteende.
+    if not credits or total_invoices <= 0.004:
+        settled_ids = [str(r.get("id", "")) for r in all_rows if r.get("id")]
+        return {
+            "positive_rows": positives + zero_rows,
+            "settled_credit_rows": credits,
+            "export_rows": all_rows,
+            "carryovers": [],
+            "fully_settled_ids": settled_ids,
+            "settled_invoice_ids": [
+                str(r.get("id", ""))
+                for r in (positives + zero_rows) if r.get("id")
+            ],
+            "settled_credit_ids": [
+                str(r.get("id", "")) for r in credits if r.get("id")
+            ],
+            "total_invoices": total_invoices,
+            "total_credits_original": total_credits_original,
+            "used_credits": 0.0,
+            "applied_credits": total_credits_original,
+            "remaining_credits": 0.0,
+            "net_to_pay": round(total_invoices + total_credits_original, 2),
+            "has_partial_credit": False,
+        }
+
+    pool = total_invoices
+    settled_credit_rows: list[dict] = []
+    carryovers: list[dict] = []
+    settled_credit_ids: list[str] = []
+
+    for cred in credits:
+        cid = str(cred.get("id", "") or "")
+        before_amt = round(_to_float(cred.get("total_amount")), 2)
+        raw_orig = _to_float(cred.get("original_credit_amount"), default=0.0)
+        orig_base = round(-abs(raw_orig) if raw_orig else before_amt, 2)
+        avail = round(abs(before_amt), 2)
+        used = round(min(pool, avail), 2)
+        pool = round(pool - used, 2)
+        remaining = round(-(avail - used), 2)
+        before_note = str(cred.get("note", "") or "")
+
+        if used > 0.004 and abs(remaining) > 0.004:
+            cum_used = round(max(0.0, abs(orig_base) - abs(remaining)), 2)
+            rem_note = tr(
+                "credit.remaining_note",
+                remaining=fmt_amount(remaining),
+                original=fmt_amount(orig_base),
+                used=fmt_amount(cum_used),
+            )
+            pdf_note = tr(
+                "credit.pdf_used_note",
+                used=fmt_amount(-used),
+                remaining=fmt_amount(remaining),
+                original=fmt_amount(orig_base),
+            )
+            new_note = _merge_credit_note(before_note, rem_note)
+            exp_row = dict(cred)
+            exp_row["total_amount"] = round(-used, 2)
+            exp_row["_partial_credit_carryover"] = True
+            exp_row["_credit_original_amount"] = orig_base
+            exp_row["_credit_remaining_amount"] = remaining
+            exp_row["_credit_used_amount"] = used
+            exp_row["note"] = _merge_credit_note(before_note, pdf_note)
+            settled_credit_rows.append(exp_row)
+            carryovers.append({
+                "id": cid,
+                "supplier": str(cred.get("supplier", "") or ""),
+                "invoice_number": str(cred.get("invoice_number", "") or ""),
+                "before_amount": before_amt,
+                "original_credit_amount": orig_base,
+                "used_amount": used,
+                "remaining_amount": remaining,
+                "before_note": before_note,
+                "before_status": str(cred.get("status", "Obetald") or "Obetald"),
+                "before_payment_date": str(cred.get("payment_date", "") or ""),
+                "new_note": new_note,
+                "partial": True,
+            })
+        elif used > 0.004:
+            exp_row = dict(cred)
+            if abs(abs(orig_base) - avail) > 0.004:
+                exp_row["note"] = _merge_credit_note(
+                    before_note,
+                    tr(
+                        "credit.exhausted_note",
+                        original=fmt_amount(orig_base),
+                    ),
+                )
+            settled_credit_rows.append(exp_row)
+            if cid:
+                settled_credit_ids.append(cid)
+        else:
+            # Extrakredit som inte ens behövde röras ligger orörd kvar.
+            carryovers.append({
+                "id": cid,
+                "supplier": str(cred.get("supplier", "") or ""),
+                "invoice_number": str(cred.get("invoice_number", "") or ""),
+                "before_amount": before_amt,
+                "original_credit_amount": orig_base,
+                "used_amount": 0.0,
+                "remaining_amount": before_amt,
+                "before_note": before_note,
+                "before_status": str(cred.get("status", "Obetald") or "Obetald"),
+                "before_payment_date": str(cred.get("payment_date", "") or ""),
+                "new_note": before_note,
+                "partial": True,
+            })
+
+    settled_invoice_ids = [
+        str(r.get("id", "")) for r in (positives + zero_rows) if r.get("id")
+    ]
+    used_credits = round(
+        sum(abs(_to_float(r.get("total_amount"))) for r in settled_credit_rows),
+        2,
+    )
+    remaining_credits = round(
+        sum(float(co["remaining_amount"]) for co in carryovers), 2
+    )
+    export_rows = positives + zero_rows + settled_credit_rows
+    return {
+        "positive_rows": positives + zero_rows,
+        "settled_credit_rows": settled_credit_rows,
+        "export_rows": export_rows,
+        "carryovers": carryovers,
+        "fully_settled_ids": settled_invoice_ids + settled_credit_ids,
+        "settled_invoice_ids": settled_invoice_ids,
+        "settled_credit_ids": settled_credit_ids,
+        "total_invoices": total_invoices,
+        "total_credits_original": total_credits_original,
+        "used_credits": used_credits,
+        "applied_credits": round(-used_credits, 2),
+        "remaining_credits": remaining_credits,
+        "net_to_pay": round(max(0.0, total_invoices - used_credits), 2),
+        "has_partial_credit": bool(carryovers),
+    }
+
+
+def chunk_settlement_rows(
+    rows_or_plan: list[dict] | dict, size: int = MAX_PER_EXPORT_FILE
+) -> list[list[dict]]:
+    """Delar exportrader i filer om max `size` rader inkl. avräknade krediter.
+
+    För vanliga exporter utan delavräknade krediter eller med <= `size`
+    rader behålls enkel ordning. När > `size` rader och krediter finns
+    fördelas kreditbeloppet över delfilerna så varje PDF håller sig
+    inom `size` rader och ingen delfil blir skevt positiv/negativ.
+    """
+    plan = (
+        rows_or_plan
+        if isinstance(rows_or_plan, dict) and "export_rows" in rows_or_plan
+        else plan_credit_settlement(list(rows_or_plan or []))
+    )
+    if size < 1:
+        size = MAX_PER_EXPORT_FILE
+    export_rows = list(plan.get("export_rows") or [])
+    if not export_rows:
+        return []
+    settled_credits = list(plan.get("settled_credit_rows") or [])
+    if not settled_credits or plan.get("total_invoices", 0.0) <= 0.004:
+        return chunk_export_rows(export_rows, size=size)
+    if len(export_rows) <= size:
+        return [sorted(
+            export_rows,
+            key=lambda r: (
+                str(r.get("supplier", "") or "").strip().lower(),
+                str(r.get("due_date", "") or ""),
+                str(r.get("invoice_number", "") or ""),
+            ),
+        )]
+
+    size = max(2, int(size))
+    positives = list(plan.get("positive_rows") or [])
+    carryover_by_id = {
+        str(co.get("id", "")): co
+        for co in (plan.get("carryovers") or [])
+        if co.get("id")
+    }
+    credit_states: list[dict[str, Any]] = []
+    for cred in settled_credits:
+        cid = str(cred.get("id", "") or "")
+        credit_states.append({
+            "row": dict(cred),
+            "id": cid,
+            "rem": round(abs(_to_float(cred.get("total_amount"))), 2),
+            "has_final_carryover": bool(cid and cid in carryover_by_id),
+            "attachment_sent": False,
+        })
+
+    def _allocate_for_pos(
+        pos_batch: list[dict], dry_run: bool = False
+    ) -> list[dict]:
+        pos_sum = round(
+            sum(max(0.0, _to_float(p.get("total_amount"))) for p in pos_batch),
+            2,
+        )
+        need = pos_sum
+        slices: list[dict] = []
+        for state in credit_states:
+            if need <= 0.004:
+                break
+            if state["rem"] <= 0.004:
+                continue
+            take = round(min(need, state["rem"]), 2)
+            if take <= 0.004:
+                continue
+            need = round(need - take, 2)
+            if dry_run:
+                slices.append({"id": state["id"], "take": take})
+                continue
+            rem_after = round(state["rem"] - take, 2)
+            state["rem"] = rem_after
+            slice_row = dict(state["row"])
+            slice_row["total_amount"] = round(-take, 2)
+            slice_row["_credit_slice_amount"] = take
+            if state["attachment_sent"]:
+                slice_row["attachment"] = ""
+            else:
+                state["attachment_sent"] = True
+            # Sista delfilen för en helt förbrukad kredit får arkivera krediten;
+            # alla mellantappningar + delsaldokrediter håller kvar krediten.
+            is_partial = state["has_final_carryover"] or rem_after > 0.004
+            slice_row["_partial_credit_carryover"] = is_partial
+            slices.append(slice_row)
+        return slices
+
+    chunks: list[list[dict]] = []
+    pos_idx = 0
+    while pos_idx < len(positives):
+        take_n = min(size, len(positives) - pos_idx)
+        while take_n > 1:
+            trial_pos = positives[pos_idx:pos_idx + take_n]
+            trial_slices = _allocate_for_pos(trial_pos, dry_run=True)
+            if len(trial_pos) + len(trial_slices) <= size:
+                break
+            take_n = max(1, size - len(trial_slices))
+        batch_pos = positives[pos_idx:pos_idx + take_n]
+        pos_idx += take_n
+        slices = _allocate_for_pos(batch_pos, dry_run=False)
+        chunks.append(batch_pos + slices)
+    return chunks
+
+
+def apply_credit_carryovers(
+    app_core: Any,
+    carryovers: list[dict],
+) -> int:
+    """Uppdaterar delavräknade kreditfakturor så kvarvarande belopp behålls."""
+    if app_core is None or not carryovers:
+        return 0
+    updater = getattr(app_core, "update_invoice", None)
+    if not callable(updater):
+        return 0
+    updated = 0
+    for co in carryovers:
+        rid = str(co.get("id", "") or "")
+        used = float(co.get("used_amount", 0.0) or 0.0)
+        if not rid or used <= 0.004:
+            continue
+        remaining = round(float(co.get("remaining_amount", 0.0) or 0.0), 2)
+        orig = round(
+            float(co.get("original_credit_amount", remaining) or remaining), 2
+        )
+        patch = {
+            "total_amount": remaining,
+            "invoice_type": "Kreditfaktura",
+            "status": "Obetald",
+            "payment_date": "",
+            "original_credit_amount": orig,
+            "note": str(co.get("new_note", "") or ""),
+        }
+        try:
+            res = updater(rid, patch)
+            if res is not False:
+                updated += 1
+        except Exception as exc:
+            log.warning("apply_credit_carryovers %s: %s", rid, exc)
+    return updated
+
+
+def build_chunk_carryovers(
+    chunk: list[dict],
+    live_credits_by_id: dict[str, dict],
+) -> tuple[list[dict], list[dict]]:
+    """Beräknar vilka poster i en delfil som slutbetalas resp. lämnar delsaldo.
+
+    Returnerar ``(settled_rows_for_archive, chunk_carryovers)`` och
+    uppdaterar ``live_credits_by_id`` löpande mellan delfilerna.
+    """
+    settled: list[dict] = []
+    carryovers: list[dict] = []
+    for row in chunk or []:
+        rid = str(row.get("id", "") or "")
+        if not row.get("_partial_credit_carryover"):
+            settled.append(row)
+            continue
+        cur = live_credits_by_id.get(rid)
+        if cur is None:
+            cur = dict(row)
+            live_credits_by_id[rid] = cur
+        before_amt = round(_to_float(cur.get("total_amount")), 2)
+        raw_orig = _to_float(
+            cur.get("original_credit_amount")
+            or row.get("_credit_original_amount")
+            or before_amt,
+            default=before_amt,
+        )
+        orig_base = round(-abs(raw_orig) if raw_orig else before_amt, 2)
+        used = round(abs(_to_float(row.get("total_amount"))), 2)
+        remaining = round(before_amt + used, 2)
+        if abs(remaining) <= 0.004:
+            # Sista delfilen tömde krediten helt -> arkivera krediten
+            settled.append(row)
+            cur["total_amount"] = 0.0
+            continue
+        before_note = str(cur.get("note", "") or "")
+        cum_used = round(max(0.0, abs(orig_base) - abs(remaining)), 2)
+        rem_note = tr(
+            "credit.remaining_note",
+            remaining=fmt_amount(remaining),
+            original=fmt_amount(orig_base),
+            used=fmt_amount(cum_used),
+        )
+        new_note = _merge_credit_note(before_note, rem_note)
+        carryovers.append({
+            "id": rid,
+            "supplier": str(cur.get("supplier", "") or ""),
+            "invoice_number": str(cur.get("invoice_number", "") or ""),
+            "before_amount": before_amt,
+            "original_credit_amount": orig_base,
+            "used_amount": used,
+            "remaining_amount": remaining,
+            "before_note": before_note,
+            "before_status": str(cur.get("status", "Obetald") or "Obetald"),
+            "before_payment_date": str(cur.get("payment_date", "") or ""),
+            "new_note": new_note,
+            "partial": True,
+        })
+        cur["total_amount"] = remaining
+        cur["note"] = new_note
+        cur["original_credit_amount"] = orig_base
+    return settled, carryovers
 
 
 def read_watch_folders(config_file) -> list[dict]:
@@ -1615,6 +2036,7 @@ class ExportHistoryManager:
         att_betala: float,
         suppliers: list[str],
         payment_date: str = "",
+        credit_carryovers: list[dict] | None = None,
     ) -> dict:
         """
         Spara en ny export i historiken.
@@ -1643,6 +2065,9 @@ class ExportHistoryManager:
             "total_invoices": round(total_inv, 2),
             "total_credits": round(total_cred, 2),
             "att_betala": round(att_betala, 2),
+            "credit_carryovers": [
+                dict(co) for co in (credit_carryovers or [])
+            ],
             "invoices": [
                 {
                     "id":             i.get("id", ""),
@@ -1654,6 +2079,9 @@ class ExportHistoryManager:
                     "due_date":       i.get("due_date", ""),
                     "payment_date":   i.get("payment_date", ""),
                     "status":         i.get("status", ""),
+                    "partial_credit_carryover": bool(
+                        i.get("_partial_credit_carryover")
+                    ),
                 }
                 for i in invoices
             ],
@@ -1700,14 +2128,25 @@ class ExportHistoryManager:
         return None
 
     def get_invoice_ids(self, display_index: int) -> list[str]:
-        """Hämtar alla faktura-ID:n från en specifik export."""
+        """Hämtar faktura-ID:n från en export (utom delavräknade krediter)."""
         exp = self.get_export(display_index)
         if not exp:
             return []
         return [
             inv.get("id", "")
             for inv in exp.get("invoices", [])
-            if inv.get("id")
+            if inv.get("id") and not inv.get("partial_credit_carryover")
+        ]
+
+    def get_credit_carryovers(self, display_index: int) -> list[dict]:
+        """Hämtar delavräknade kreditposter från en export."""
+        exp = self.get_export(display_index)
+        if not exp:
+            return []
+        return [
+            dict(co)
+            for co in (exp.get("credit_carryovers") or [])
+            if isinstance(co, dict)
         ]
 
 
@@ -1729,6 +2168,7 @@ class ExportHistoryDialog(QDialog):
     """
 
     export_restored = Signal(list)  # list[str] = invoice-ID:n
+    credit_carryovers_restored = Signal(list)  # list[dict] = delavräknade krediter
 
     #: Tabellkolumner inkl Betaldatum.
     _HIST_COLS: list[tuple[str, int]] = [
@@ -2062,7 +2502,10 @@ class ExportHistoryDialog(QDialog):
             return
 
         invoice_ids = self._history.get_invoice_ids(row)
+        carryovers = self._history.get_credit_carryovers(row)
         self._history.remove_export(row)
+        if carryovers:
+            self.credit_carryovers_restored.emit(carryovers)
         if invoice_ids:
             self.export_restored.emit(invoice_ids)
 

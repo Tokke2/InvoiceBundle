@@ -848,11 +848,16 @@ def _spawn_with_python(
     if mark_current:
         attempts.add(_python_path_key(sys.executable))
     attempts.add(_python_path_key(executable))
+    launch_exe = executable
+    if CURRENT_PLATFORM == "windows" and not DEBUG_MODE and not SELFTEST:
+        pyw = _windowless_python(executable)
+        if pyw is not None:
+            launch_exe = str(pyw)
     env = _python_child_environment()
     env[_RUNTIME_ATTEMPTS] = json.dumps(sorted(attempts))
     try:
         subprocess.Popen(
-            [executable, str(script), *sys.argv[1:]],
+            [launch_exe, str(script), *sys.argv[1:]],
             cwd=str(BASE_DIR),
             env=env,
             stdin=subprocess.DEVNULL,

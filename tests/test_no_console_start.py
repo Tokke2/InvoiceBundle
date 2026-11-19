@@ -145,6 +145,11 @@ def test_scan_import_suppresses_console_in_pytesseract_checks_and_ocr(monkeypatc
             recorded.append(("Popen", args, kwargs))
             return types.SimpleNamespace(returncode=0)
 
+        @staticmethod
+        def run(*args, **kwargs):
+            recorded.append(("run", args, kwargs))
+            return types.SimpleNamespace(returncode=0, stdout=b"swe\neng\n")
+
     def _orig_subprocess_args(include_stdout=True):
         return {"stdin": -1, "stderr": -1, "include_stdout": include_stdout}
 
@@ -161,13 +166,95 @@ def test_scan_import_suppresses_console_in_pytesseract_checks_and_ocr(monkeypatc
     si._install_pytesseract_no_console_hooks()
     fake_engine.subprocess.check_output(["tesseract.exe", "--version"])
     fake_engine.subprocess.Popen(["tesseract.exe", "in.png", "out"])
+    fake_engine.subprocess.run(
+        ["tesseract.exe", "--list-langs"],
+        creationflags=0x00000010,  # CREATE_NEW_CONSOLE must be stripped
+    )
     args_dict = fake_engine.subprocess_args()
 
     assert recorded[0][0] == "check_output"
     assert recorded[0][2]["creationflags"] & 0x08000000
     assert recorded[1][0] == "Popen"
     assert recorded[1][2]["creationflags"] & 0x08000000
+    assert recorded[2][0] == "run"
+    assert recorded[2][2]["creationflags"] & 0x08000000
+    assert not (recorded[2][2]["creationflags"] & 0x00000010)
     assert args_dict["creationflags"] & 0x08000000
+
+
+def test_spawn_with_python_prefers_pythonw_on_windows(tmp_path, monkeypatch):
+    import main as m
+
+    bindir = tmp_path / "py"
+    bindir.mkdir()
+    py = bindir / "python.exe"
+    pyw = bindir / "pythonw.exe"
+    py.write_text("", encoding="utf-8")
+    pyw.write_text("", encoding="utf-8")
+    (tmp_path / "main.pyw").write_text("# app", encoding="utf-8")
+
+    monkeypatch.setattr(m, "CURRENT_PLATFORM", "windows")
+    monkeypatch.setattr(m, "DEBUG_MODE", False)
+    monkeypatch.setattr(m, "SELFTEST", False)
+    monkeypatch.setattr(m, "BASE_DIR", tmp_path)
+
+    calls = []
+
+    class _Popen:
+        def __init__(self, cmd, **kw):
+            calls.append((cmd, kw))
+
+    monkeypatch.setattr(m.subprocess, "Popen", _Popen)
+    assert m._spawn_with_python(str(py), reason="test", mark_current=False) is True
+    assert calls[0][0][0] == str(pyw)
+    assert calls[0][0][1] == str(tmp_path / "main.pyw")
+    assert calls[0][1]["creationflags"] & 0x08000000
+
+
+def test_ocr_crop_text_installs_no_console_hooks(tmp_path, monkeypatch):
+    import types
+    from PIL import Image
+    import plugins.scan_import as si
+
+    recorded = []
+
+    class _FakeSubprocess:
+        CREATE_NO_WINDOW = 0x08000000
+        STARTF_USESHOWWINDOW = 1
+        SW_HIDE = 0
+
+        @staticmethod
+        def Popen(*args, **kwargs):  # noqa: N802
+            recorded.append(kwargs)
+            return types.SimpleNamespace(returncode=0)
+
+    fake_engine = types.SimpleNamespace(
+        tesseract_cmd="tesseract.exe",
+        subprocess=_FakeSubprocess,
+        subprocess_args=lambda include_stdout=True: {"include_stdout": include_stdout},
+    )
+
+    def _fake_image_to_string(_img, **_kw):
+        fake_engine.subprocess.Popen(
+            ["tesseract.exe", "crop.png", "out"],
+            **fake_engine.subprocess_args(),
+        )
+        return "Faktura 123"
+
+    fake_pyt = types.SimpleNamespace(
+        pytesseract=fake_engine,
+        image_to_string=_fake_image_to_string,
+    )
+    img_path = tmp_path / "crop.png"
+    Image.new("RGB", (120, 80), color="white").save(img_path)
+
+    monkeypatch.setattr(si, "HAS_TESS", True)
+    monkeypatch.setattr(si, "pytesseract", fake_pyt, raising=False)
+    monkeypatch.setattr(si, "_configure_tesseract_binary", lambda: True)
+    monkeypatch.setattr(si.sys, "platform", "win32")
+
+    assert si._ocr_crop_text(img_path, 0, (0.1, 0.1, 0.9, 0.9)) == "Faktura 123"
+    assert recorded and (recorded[0]["creationflags"] & 0x08000000)
 
 
 def test_ensure_packages_and_scheduler_hide_windows_consoles(tmp_path, monkeypatch):

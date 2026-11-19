@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """Tester för:
 1. Alla matchade mallar (1–flersidiga, rutor + etiketter + hybrid + from_end + reader fallback)
-2. Skanningsbatcher: max 15 fakturor åt gången, sedan automatiskt 10 nya efter flytt till Fakturor
+2. Skanningsbatcher: max 10 fakturor åt gången, sedan automatiskt 10 nya efter matchning/flytt till Fakturor
 3. Kontinuerligt självlärande från både manuella matchningar och redigerade automatchningar
 4. Avancerad självlärandeloggning (JSONL/text + textbevis + LogView-export till chatten)
+5. Ta bort/rensa enskilda markeringar, sidor och logotyper i fakturamallar
 """
 from __future__ import annotations
 
@@ -183,12 +184,12 @@ def test_template_dialog_rules_saves_multipage_from_end(tmp_path):
         dlg.close()
 
 
-def test_scan_import_view_batches_15_then_refills_10(tmp_path, monkeypatch):
+def test_scan_import_view_batches_10_then_refills_10(tmp_path, monkeypatch):
     _qt_app()
     import fitz
     from ui.scan_import_view import ScanImportView, SCAN_INITIAL_BATCH_SIZE, SCAN_REFILL_BATCH_SIZE
 
-    assert SCAN_INITIAL_BATCH_SIZE == 15
+    assert SCAN_INITIAL_BATCH_SIZE == 10
     assert SCAN_REFILL_BATCH_SIZE == 10
 
     data_dir = tmp_path / "data"
@@ -242,16 +243,14 @@ def test_scan_import_view_batches_15_then_refills_10(tmp_path, monkeypatch):
         view._paths = list(paths)
         view._scan_files()
 
-        # Max 15 inlästa först, resterande 13 i kö
-        assert len(view._rows) == 15
-        assert len(view._pending_scan_queue) == 13
+        # Max 10 inlästa först, resterande 18 i kö
+        assert len(view._rows) == 10
+        assert len(view._pending_scan_queue) == 18
 
-        # Flytta dessa 15 till Fakturor -> laddar 10 nya automatiskt!
+        # Flytta dessa 10 till Fakturor -> laddar 10 nya automatiskt!
         view._tbl.selectAll()
-        # Mocka _run_scan_batch synkront vid refill-koll eller låt event-loopen köra QTimer
         view._create_invoices()
-        assert len(app._invoices) == 15
-        # Pumpa event-loopen kort så QTimer.singleShot(50, ...) laddar batch 2 (10 filer)
+        assert len(app._invoices) == 10
         for _ in range(10):
             QApplication.processEvents()
             if len(view._rows) == 10:
@@ -259,18 +258,19 @@ def test_scan_import_view_batches_15_then_refills_10(tmp_path, monkeypatch):
             import time
             time.sleep(0.02)
         assert len(view._rows) == 10
-        assert len(view._pending_scan_queue) == 3
+        assert len(view._pending_scan_queue) == 8
 
-        # Flytta de 10 -> resterande 3 laddas
+        # Flytta nästa 10 -> resterande 8 laddas
         view._tbl.selectAll()
         view._create_invoices()
+        assert len(app._invoices) == 20
         for _ in range(10):
             QApplication.processEvents()
-            if len(view._rows) == 3:
+            if len(view._rows) == 8:
                 break
             import time
             time.sleep(0.02)
-        assert len(view._rows) == 3
+        assert len(view._rows) == 8
         assert len(view._pending_scan_queue) == 0
     finally:
         if getattr(view, "_watch", None) is not None:
@@ -278,11 +278,11 @@ def test_scan_import_view_batches_15_then_refills_10(tmp_path, monkeypatch):
         view.close()
 
 
-def test_watch_manager_batches_15_then_10(tmp_path, monkeypatch):
+def test_watch_manager_batches_10_then_10(tmp_path, monkeypatch):
     _qt_app()
     from ui.watch_folders import WatchManager, WATCH_INITIAL_BATCH_SIZE, WATCH_REFILL_BATCH_SIZE
 
-    assert WATCH_INITIAL_BATCH_SIZE == 15
+    assert WATCH_INITIAL_BATCH_SIZE == 10
     assert WATCH_REFILL_BATCH_SIZE == 10
 
     wdir = tmp_path / "watched"
@@ -311,15 +311,32 @@ def test_watch_manager_batches_15_then_10(tmp_path, monkeypatch):
         time.sleep(0.01)
 
     assert done_stats
-    assert mgr.deferred_file_count == 7  # 22 total - 15 i batch 1 = 7 köade
-    assert len(mgr.parked) == 15
+    assert mgr.deferred_file_count == 12  # 22 total - 10 i batch 1 = 12 köade
+    assert len(mgr.parked) == 10
 
     # Bakgrundspoll får INTE fylla på fler medan batchen ligger kvar parkerad
     mgr._on_poll_scan()
     assert not mgr.is_scanning
 
-    # Flytta/registrera de 15 parkerade till Fakturor (markera bearbetade och töm parkeringen)
-    # -> nästa 10 (dvs resterande 7) läses in automatiskt!
+    # Matcha/flytta de 10 parkerade -> nästa 10 läses in automatiskt!
+    done_stats.clear()
+    for p_item in list(mgr.parked):
+        mgr._config.setdefault("processed", {})[p_item["hash"]] = {
+            "path": p_item["path"],
+            "file": p_item["file"],
+        }
+        mgr.remove_parked(p_item["hash"])
+    for _ in range(120):
+        QApplication.processEvents()
+        if done_stats:
+            break
+        import time
+        time.sleep(0.01)
+    assert done_stats
+    assert mgr.deferred_file_count == 2
+    assert len(mgr.parked) == 10
+
+    # Matcha nästa 10 -> sista 2 läses in!
     done_stats.clear()
     for p_item in list(mgr.parked):
         mgr._config.setdefault("processed", {})[p_item["hash"]] = {
@@ -335,7 +352,7 @@ def test_watch_manager_batches_15_then_10(tmp_path, monkeypatch):
         time.sleep(0.01)
     assert done_stats
     assert mgr.deferred_file_count == 0
-    assert len(mgr.parked) == 7
+    assert len(mgr.parked) == 2
 
 
 def test_continuous_learning_from_edited_auto_matches_in_import_and_invoices(tmp_path, monkeypatch):
@@ -1324,5 +1341,99 @@ def test_correction_resets_wrong_logo_and_ui_learns_logo_end_to_end(
     assert len(saved_mem["Rätt AB"].get("logos") or {}) == 1
     events = ll.read_recent_events()
     assert any(ev.get("logo_auto_saved") is True for ev in events)
+
+
+def test_template_dialog_and_store_can_remove_individual_and_all_marks(tmp_path):
+    _qt_app()
+    import fitz
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtCore import QEvent
+    from ui.scan_import_view import TemplateDialog
+
+    pdf = tmp_path / "marks.pdf"
+    doc = fitz.open()
+    for pg in range(1, 3):
+        page = doc.new_page()
+        page.insert_text((50, 80), f"Mark AB Sida {pg}\nFakturanr M-{pg}\nAtt betala 900,00")
+    doc.save(str(pdf))
+    doc.close()
+
+    logo_hash = "dhash128-v1:" + "a" * 32
+    existing_tpl = {
+        "fields": {
+            "invoice_number": {"region": [0.1, 0.1, 0.3, 0.2], "page": 0},
+            "date": {"region": [0.1, 0.2, 0.3, 0.3], "page": 0},
+            "total_amount": {"region": [0.5, 0.7, 0.9, 0.8], "page": 1},
+        },
+        "supplier_logo": {"region": [0.05, 0.05, 0.2, 0.12], "page": 0, "dhash": logo_hash},
+        "supplier_logos": [{"region": [0.05, 0.05, 0.2, 0.12], "page": 0, "dhash": logo_hash}],
+    }
+
+    dlg = TemplateDialog(
+        None,
+        "Mark AB Sida 1\nFakturanr M-1\nAtt betala 900,00",
+        supplier="Mark AB",
+        existing=existing_tpl,
+        path=str(pdf),
+    )
+    try:
+        # 1) Ta bort ett fält via ✖-hjälparen och ett annat med Delete-tangenten
+        assert "date" in dlg._regions
+        dlg._remove_field_mark("date")
+        assert "date" not in dlg._regions
+        assert dlg._fields_removed is True
+
+        dlg._set_active("total_amount")
+        ev = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Delete, Qt.KeyboardModifier.NoModifier)
+        dlg.keyPressEvent(ev)
+        assert "total_amount" not in dlg._regions
+
+        # 2) Ta bort logomarkering och spara -> store_supplier_template tar bort både fälten och logon!
+        dlg._clear_logo_marks()
+        assert dlg._logo_removed is True
+        assert dlg._logo_specs == []
+
+        dlg._save()
+        assert dlg.result_template is not None
+        assert dlg.result_template["replace_logos"] is True
+        assert list(dlg.result_template["fields"].keys()) == ["invoice_number"]
+
+        tpl_store = {"Mark AB": existing_tpl}
+        cand = {k: v for k, v in dlg.result_template.items() if k != "supplier"}
+        rep_logos = bool(cand.pop("replace_logos", False))
+        si.store_supplier_template(
+            tpl_store, "Mark AB", cand,
+            replace_primary=True, replace_logos=rep_logos,
+        )
+        saved = tpl_store["Mark AB"]
+        assert set(saved["fields"].keys()) == {"invoice_number"}
+        assert "supplier_logo" not in saved
+        assert "supplier_logos" not in saved
+    finally:
+        dlg.close()
+
+    # 3) Rensa enskild sida vs rensa alla markeringar
+    dlg2 = TemplateDialog(
+        None,
+        "Mark AB Sida 1\nFakturanr M-1\nAtt betala 900,00",
+        supplier="Mark AB",
+        existing=existing_tpl,
+        path=str(pdf),
+    )
+    try:
+        dlg2._page_idx = 0
+        dlg2._clear_page_marks()
+        assert "invoice_number" not in dlg2._regions
+        assert "date" not in dlg2._regions
+        assert "total_amount" in dlg2._regions  # låg på sida 1, orörd!
+        assert dlg2._logo_specs == []
+
+        dlg2._clear_marks()
+        assert dlg2._regions == {}
+        assert dlg2._existing_fields == {}
+        assert dlg2._logo_specs == []
+    finally:
+        dlg2.close()
+
 
 

@@ -78,7 +78,7 @@ PARKED_INSERT_CHUNK = 40
 #: Hur många nya fakturor som skannas/läses in åt gången innan appen
 #: väntar på att de matchas och flyttas till Fakturor — sedan läses
 #: 10 nya in automatiskt så datorn aldrig låser sig på stora lass.
-SCAN_INITIAL_BATCH_SIZE = 15
+SCAN_INITIAL_BATCH_SIZE = 10
 SCAN_REFILL_BATCH_SIZE = 10
 
 #: Hur många osäkra rader som frågas om direkt när ett stort lass
@@ -268,6 +268,8 @@ class _RegionImageView(QWidget):
     """
 
     region_drawn = Signal(str, int, tuple)
+    region_remove_requested = Signal(str)
+    page_clear_requested = Signal()
     zoom_changed = Signal(float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -287,12 +289,16 @@ class _RegionImageView(QWidget):
         self._zoom = 1.0
         self._focus: tuple[float, float] = (0.5, 0.5)
         self._pan_last = None
+        self._pan_start = None
+        self._pan_moved = False
 
     def set_page(self, pixmap: QPixmap | None, page: int) -> None:
         self._pixmap = pixmap
         self._page = page
         self._drag_a = self._drag_b = None
         self._pan_last = None
+        self._pan_start = None
+        self._pan_moved = False
         self._zoom = 1.0
         self._focus = (0.5, 0.5)
         self.zoom_changed.emit(self._zoom)
@@ -442,10 +448,27 @@ class _RegionImageView(QWidget):
             painter.setPen(QPen(color, 2, Qt.PenStyle.DashLine))
             painter.drawRect(rubrik)
 
+    def _hit_region_field(self, pos) -> str:
+        """Returnerar fältet vars ruta på aktuell sida innehåller ``pos``."""
+        if self._img_rect() is None:
+            return ""
+        for field, (page, frac) in reversed(list(self._regions.items())):
+            if page != self._page:
+                continue
+            try:
+                rect = self._rect_px(frac)
+            except Exception:
+                continue
+            if rect.contains(pos):
+                return field
+        return ""
+
     # ── Mus ───────────────────────────────────────────────────
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.RightButton:
             self._pan_last = event.position()
+            self._pan_start = event.position()
+            self._pan_moved = False
             self.setCursor(Qt.CursorShape.SizeAllCursor)
             return
         if not self._active:
@@ -460,6 +483,11 @@ class _RegionImageView(QWidget):
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._pan_last is not None:
             pos = event.position()
+            if (
+                self._pan_start is not None
+                and (pos - self._pan_start).manhattanLength() > 4.0
+            ):
+                self._pan_moved = True
             rect = self._img_rect()
             if rect is not None:
                 dx = (pos.x() - self._pan_last.x()) / max(
@@ -485,8 +513,42 @@ class _RegionImageView(QWidget):
             event.button() == Qt.MouseButton.RightButton
             and self._pan_last is not None
         ):
+            was_moved = bool(self._pan_moved)
             self._pan_last = None
+            self._pan_start = None
+            self._pan_moved = False
             self.unsetCursor()
+            if not was_moved:
+                page_fields = [
+                    f for f, (pg, _r) in self._regions.items()
+                    if pg == self._page
+                ]
+                hit = self._hit_region_field(event.position())
+                if hit or page_fields:
+                    menu = QMenu(self)
+                    act_hit = None
+                    if hit:
+                        act_hit = menu.addAction(
+                            tr(
+                                "tmpl.canvas_remove_mark",
+                                field=tr(f"tmpl.field_{hit}"),
+                            )
+                        )
+                    act_clear = None
+                    if page_fields:
+                        if act_hit is not None:
+                            menu.addSeparator()
+                        act_clear = menu.addAction(
+                            tr("tmpl.canvas_clear_page_marks")
+                        )
+                    chosen = menu.exec(
+                        self.mapToGlobal(event.position().toPoint())
+                    )
+                    if chosen is not None:
+                        if chosen is act_hit and hit:
+                            self.region_remove_requested.emit(hit)
+                        elif chosen is act_clear:
+                            self.page_clear_requested.emit()
             return
         if self._drag_a is None or self._drag_b is None:
             return
@@ -595,6 +657,9 @@ class TemplateDialog(QDialog):
         self._pending_logo_candidate: dict | None = None
         self._logo_region: tuple[int, tuple] | None = None
         self._logo_hash = ""
+        self._fields_removed = False
+        self._logo_removed = False
+        self._had_existing_logos = bool(self._logo_specs)
         for logo_spec in self._logo_specs:
             logo_region = logo_spec.get("region")
             if not isinstance(logo_region, (list, tuple)) \
@@ -703,6 +768,8 @@ class TemplateDialog(QDialog):
         left.addLayout(nav)
         self._view = _RegionImageView()
         self._view.region_drawn.connect(self._on_region_drawn)
+        self._view.region_remove_requested.connect(self._remove_mark)
+        self._view.page_clear_requested.connect(self._clear_page_marks)
         self._btn_zoom_out.clicked.connect(self._view.zoom_out)
         self._btn_zoom_in.clicked.connect(self._view.zoom_in)
         self._btn_zoom_fit.clicked.connect(self._view.zoom_fit)
@@ -717,6 +784,7 @@ class TemplateDialog(QDialog):
         right.addWidget(QLabel(tr("tmpl.fields_header")))
         self._previews: dict[str, QLabel] = {}
         self._mark_buttons: dict[str, QPushButton] = {}
+        self._remove_buttons: dict[str, QPushButton] = {}
         for field in _TEMPLATE_FIELDS:
             row = QHBoxLayout()
             chip = QLabel("■")
@@ -742,9 +810,19 @@ class TemplateDialog(QDialog):
                 lambda _c=False, f=field: self._set_active(f)
             )
             row.addWidget(btn)
+            btn_rem = QPushButton(tr("tmpl.remove_mark"))
+            btn_rem.setMaximumWidth(34)
+            btn_rem.setToolTip(tr(
+                "tmpl.remove_field_tip", field=tr(f"tmpl.field_{field}")
+            ))
+            btn_rem.clicked.connect(
+                lambda _c=False, f=field: self._remove_field_mark(f)
+            )
+            row.addWidget(btn_rem)
             right.addLayout(row)
             self._previews[field] = prev
             self._mark_buttons[field] = btn
+            self._remove_buttons[field] = btn_rem
 
         logo_row = QHBoxLayout()
         logo_chip = QLabel("■")
@@ -779,6 +857,13 @@ class TemplateDialog(QDialog):
             lambda _c=False: self._set_active("supplier_logo")
         )
         logo_row.addWidget(self._btn_mark_logo)
+        self._btn_remove_logo = QPushButton(tr("tmpl.remove_mark"))
+        self._btn_remove_logo.setMaximumWidth(34)
+        self._btn_remove_logo.setToolTip(tr("tmpl.remove_logo_tip"))
+        self._btn_remove_logo.clicked.connect(
+            lambda _c=False: self._clear_logo_marks()
+        )
+        logo_row.addWidget(self._btn_remove_logo)
         right.addLayout(logo_row)
         self._lbl_hint = QLabel()
         self._lbl_hint.setWordWrap(True)
@@ -828,6 +913,9 @@ class TemplateDialog(QDialog):
         if self._logo_only:
             for mark_button in self._mark_buttons.values():
                 mark_button.setEnabled(False)
+            for rem_button in self._remove_buttons.values():
+                rem_button.setEnabled(False)
+                rem_button.hide()
             btn_clear.hide()
             btn_test.hide()
             btn_suggest.hide()
@@ -1049,6 +1137,7 @@ class TemplateDialog(QDialog):
         self._set_active("supplier_logo")
         self._view.set_regions(self._all_regions())
         self._set_logo_preview()
+        self._update_mark_buttons()
         return bool(self._logo_hash)
 
     def _match_supplier_by_identifiers(self) -> None:
@@ -1200,17 +1289,36 @@ class TemplateDialog(QDialog):
             distance=picked["distance"],
         ))
 
-    def _set_active(self, field: str) -> None:
-        self._active = field
-        self._view.set_active(field)
+    def _has_field_mark(self, field: str) -> bool:
+        if field in self._regions:
+            return True
+        spec = self._existing_fields.get(field)
+        return bool(
+            isinstance(spec, dict)
+            and (str(spec.get("label", "")).strip() or spec.get("region"))
+        )
+
+    def _has_logo_mark(self) -> bool:
+        return bool(
+            self._logo_specs
+            or self._logo_new_specs
+            or self._logo_region is not None
+            or self._pending_logo_candidate
+        )
+
+    def _update_mark_buttons(self) -> None:
+        field = getattr(self, "_active", "")
         for f, btn in self._mark_buttons.items():
             btn.setText(
-                tr("tmpl.marked") if f in self._regions
+                tr("tmpl.marked") if self._has_field_mark(f)
                 else tr("tmpl.mark")
             )
             btn.setStyleSheet(
                 "font-weight:bold;" if f == field else ""
             )
+            rem = self._remove_buttons.get(f)
+            if rem is not None and not self._logo_only:
+                rem.setEnabled(self._has_field_mark(f))
         self._btn_mark_logo.setText(
             tr("tmpl.add_logo_variant")
             if self._logo_specs else tr("tmpl.mark")
@@ -1218,6 +1326,116 @@ class TemplateDialog(QDialog):
         self._btn_mark_logo.setStyleSheet(
             "font-weight:bold;" if field == "supplier_logo" else ""
         )
+        if hasattr(self, "_btn_remove_logo"):
+            self._btn_remove_logo.setEnabled(self._has_logo_mark())
+
+    def _set_active(self, field: str) -> None:
+        self._active = field
+        self._view.set_active(field)
+        self._update_mark_buttons()
+
+    def _remove_mark(self, field: str) -> None:
+        if field == "supplier_logo":
+            self._clear_logo_marks()
+        elif field in _TEMPLATE_FIELDS:
+            self._remove_field_mark(field)
+
+    def _remove_field_mark(self, field: str) -> None:
+        if self._logo_only or field not in _TEMPLATE_FIELDS:
+            return
+        had = self._has_field_mark(field)
+        self._regions.pop(field, None)
+        self._existing_fields.pop(field, None)
+        if had:
+            self._fields_removed = True
+        self._view.set_regions(self._all_regions())
+        self._preview_field(field)
+        self._set_active(field)
+        if had:
+            self._lbl_hint.setText(tr(
+                "tmpl.mark_removed", field=tr(f"tmpl.field_{field}")
+            ))
+
+    def _clear_logo_marks(self) -> None:
+        had = self._has_logo_mark()
+        self._logo_specs = []
+        self._logo_new_specs = []
+        self._pending_logo_candidate = None
+        self._logo_region = None
+        self._logo_hash = ""
+        if had or getattr(self, "_had_existing_logos", False):
+            self._logo_removed = True
+        self._view.set_regions(self._all_regions())
+        self._set_logo_preview()
+        self._update_mark_buttons()
+        if had:
+            self._lbl_hint.setText(tr(
+                "tmpl.mark_removed", field=tr("tmpl.field_supplier_logo")
+            ))
+
+    def _clear_page_marks(self) -> None:
+        page = int(getattr(self, "_page", 0) or 0)
+        removed_any = False
+        if not self._logo_only:
+            for field in list(self._regions):
+                pg, _rect = self._regions[field]
+                if pg == page:
+                    self._regions.pop(field, None)
+                    self._existing_fields.pop(field, None)
+                    self._fields_removed = True
+                    removed_any = True
+        if self._logo_region is not None and self._logo_region[0] == page:
+            self._logo_specs = [
+                spec for spec in self._logo_specs
+                if int(spec.get("page", 0) or 0) != page
+            ]
+            self._logo_new_specs = [
+                spec for spec in self._logo_new_specs
+                if int(spec.get("page", 0) or 0) != page
+            ]
+            if (
+                self._pending_logo_candidate is not None
+                and int(self._pending_logo_candidate.get("page", 0) or 0) == page
+            ):
+                self._pending_logo_candidate = None
+            self._logo_region = None
+            self._logo_hash = ""
+            for spec in self._logo_specs:
+                region = spec.get("region")
+                if isinstance(region, (list, tuple)) and len(region) == 4:
+                    self._logo_region = (
+                        max(0, int(spec.get("page", 0) or 0)),
+                        tuple(float(v) for v in region),
+                    )
+                    self._logo_hash = str(spec.get("dhash", ""))
+                    break
+            self._logo_removed = True
+            removed_any = True
+        if removed_any:
+            self._view.set_regions(self._all_regions())
+            self._set_logo_preview()
+            self._test_all()
+            self._update_mark_buttons()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() in (
+            Qt.Key.Key_Delete, Qt.Key.Key_Backspace
+        ):
+            focus_w = QApplication.focusWidget()
+            combo_edit = self._supplier_edit.lineEdit()
+            if focus_w is not self._supplier_edit and (
+                combo_edit is None or focus_w is not combo_edit
+            ):
+                active = getattr(self, "_active", "")
+                if active == "supplier_logo" and self._has_logo_mark():
+                    self._clear_logo_marks()
+                    event.accept()
+                    return
+                if active in _TEMPLATE_FIELDS and self._has_field_mark(active):
+                    self._remove_field_mark(active)
+                    event.accept()
+                    return
+        super().keyPressEvent(event)
 
     def _on_region_drawn(
         self, field: str, page: int, rect: tuple
@@ -1288,7 +1506,12 @@ class TemplateDialog(QDialog):
         self._set_active(nxt)
 
     def _clear_marks(self) -> None:
+        if self._regions or self._existing_fields:
+            self._fields_removed = True
+        if self._has_logo_mark() or getattr(self, "_had_existing_logos", False):
+            self._logo_removed = True
         self._regions = {}
+        self._existing_fields = {}
         self._logo_specs = []
         self._logo_new_specs = []
         self._pending_logo_candidate = None
@@ -1300,6 +1523,7 @@ class TemplateDialog(QDialog):
             "supplier_logo" if self._logo_only else _TEMPLATE_FIELDS[0]
         )
         self._test_all()
+        self._update_mark_buttons()
 
     # ── Förhandsvisning / spara ───────────────────────────────
     def _rules(self) -> dict:
@@ -1452,6 +1676,7 @@ class TemplateDialog(QDialog):
             self._lbl_hint.setText(tr("tmpl.suggest_fields_none"))
             return
         self._test_all()
+        self._update_mark_buttons()
         self._lbl_hint.setText(tr(
             "tmpl.suggest_fields_applied",
             fields="; ".join(summary),
@@ -1525,6 +1750,10 @@ class TemplateDialog(QDialog):
         self.result_template = {
             "supplier": supplier, "fields": rules
         }
+        if getattr(self, "_logo_removed", False) or (
+            getattr(self, "_had_existing_logos", False) and not logo_specs
+        ):
+            self.result_template["replace_logos"] = True
         if logo_specs:
             normalized_specs = [dict(spec) for spec in logo_specs]
             self.result_template["supplier_logos"] = normalized_specs
@@ -3760,7 +3989,10 @@ class ScanImportView(QWidget):
             wrong = si.match_correction_needed(row, chosen)
             if wrong:
                 si.record_match_correction(
-                    self._get_match_learning(), wrong, text=text
+                    self._get_match_learning(), wrong, text=text,
+                    path=str(row.get("_path", "") or ""),
+                    templates=self._get_templates(),
+                    suppliers=self._suppliers(),
                 )
                 self._save_match_learning()
                 correction_note = tr(
@@ -4373,6 +4605,13 @@ class ScanImportView(QWidget):
                     log.debug("reprocess parked fallback: %s", exc)
             except Exception as exc:
                 log.warning("reprocess parked: %s", exc)
+
+        if (
+            not self._rows
+            and self._pending_scan_queue
+            and not getattr(self, "_in_create_invoices", False)
+        ):
+            self._maybe_load_next_scan_batch()
 
         if not (reread_count or parked_added):
             return ""
@@ -5962,17 +6201,25 @@ class ScanImportView(QWidget):
             key: value for key, value in dlg.result_template.items()
             if key != "supplier"
         }
+        replace_logos = bool(
+            candidate.pop("replace_logos", False)
+            or getattr(dlg, "_logo_removed", False)
+        )
         if existing_name and existing_name != supplier:
             templates.pop(existing_name, None)
         replace_primary = bool(
             existing is not None
             and (not existing_name or existing_name == supplier)
-            and not si._template_has_core_fields(existing)
+            and (
+                not si._template_has_core_fields(existing)
+                or getattr(dlg, "_fields_removed", False)
+            )
         )
         supplier, _, _ = si.store_supplier_template(
             templates, supplier, candidate,
             max_templates=si.MAX_TEMPLATES_PER_SUPPLIER,
             replace_primary=replace_primary,
+            replace_logos=replace_logos,
         )
         if not self._save_templates_file():
             self._lbl_status.setText(
@@ -6035,12 +6282,17 @@ class ScanImportView(QWidget):
             key: value for key, value in dlg.result_template.items()
             if key != "supplier"
         }
+        replace_logos = bool(
+            candidate.pop("replace_logos", False)
+            or getattr(dlg, "_logo_removed", False)
+        )
         if supplier != name:
             templates.pop(name, None)
         si.store_supplier_template(
             templates, supplier, candidate,
             max_templates=si.MAX_TEMPLATES_PER_SUPPLIER,
             replace_primary=True,
+            replace_logos=replace_logos,
         )
         if not self._save_templates_file():
             self._lbl_status.setText(
@@ -6282,7 +6534,7 @@ class ScanImportView(QWidget):
             self._btn_cancel_scan.setEnabled(False)
 
     def _scan_files(self) -> None:
-        """Startar inläsning i batchar (max 15 först, sedan 10 efter flytt)."""
+        """Startar tyst inläsning i batchar (max 10 först, sedan 10 efter matchning)."""
         if getattr(self, "_scanning_files", False):
             return
 
@@ -7551,6 +7803,14 @@ class ScanImportView(QWidget):
         if not idxs:
             QMessageBox.information(self, "Import", "Markera rader först.")
             return
+        prev_in_create = bool(getattr(self, "_in_create_invoices", False))
+        self._in_create_invoices = True
+        try:
+            self._create_invoices_inner(idxs)
+        finally:
+            self._in_create_invoices = prev_in_create
+
+    def _create_invoices_inner(self, idxs: list[int]) -> None:
 
         error_rows = {
             i for i in idxs if self._rows[i].get("_scan_error")

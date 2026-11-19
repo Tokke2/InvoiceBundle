@@ -747,6 +747,10 @@ class InvoiceNumberGuard:
         already: list[dict] = []
         count = 0
         for inv in invoices:
+            if inv.get("_partial_credit_carryover"):
+                # Delavräknad kreditfaktura behåller kvarvarande kredit
+                # för nästa koppling och låses först när hela krediten förbrukats.
+                continue
             nr = str(inv.get("invoice_number", "")).strip()
             sup = str(inv.get("supplier", "")).strip()
             if self.is_already_exported(nr, sup):

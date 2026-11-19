@@ -74,10 +74,10 @@ import time
 FILE_STABILITY_SECONDS = 2.0
 FILE_STABILITY_RECHECK_MS = 1500
 
-#: Batchstorlek för bevakning och inläsning: högst 15 nya fakturor i
+#: Batchstorlek för bevakning och inläsning: högst 10 nya fakturor i
 #: första omgången så att appen aldrig fryser, sedan 10 nya automatiskt
 #: så snart föregående omgång flyttats till Fakturor.
-WATCH_INITIAL_BATCH_SIZE = 15
+WATCH_INITIAL_BATCH_SIZE = 10
 WATCH_REFILL_BATCH_SIZE = 10
 
 #: Filtyper som bevakningen tar (PDF/bilder — .txt räknas inte,
@@ -1591,7 +1591,7 @@ class WatchManager(QObject):
 
     @property
     def deferred_file_count(self) -> int:
-        """Antal nya filer som köats till nästa batch (efter max 15/10)."""
+        """Antal nya filer som köats till nästa batch (efter max 10 åt gången)."""
         if self._scan_running:
             return int(self._last_deferred_files or self._scan_deferred_files or 0)
         return int(self._scan_deferred_files or self._last_deferred_files or 0)
@@ -1645,9 +1645,9 @@ class WatchManager(QObject):
     ) -> None:
         """Startar en skanning som inte låser appen.
 
-        Läser högst ``max_new_files`` nya filer åt gången (standard 15
-        vid inläsning, 10 vid påfyllning efter flytt till Fakturor) så att
-        appen aldrig fryser på stora fakturahögar.
+        Läser högst ``max_new_files`` nya filer åt gången (standard 10
+        vid inläsning, 10 vid påfyllning efter matchning/flytt till Fakturor)
+        så att appen aldrig fryser på stora fakturahögar.
         """
         if self._scan_running:
             self._scan_again = True
