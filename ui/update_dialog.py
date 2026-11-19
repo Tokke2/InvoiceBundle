@@ -17,9 +17,10 @@ import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QThread, QTimer, Signal
+from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QVBoxLayout,
+    QApplication, QDialog, QHBoxLayout, QLabel, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins"))
@@ -29,6 +30,22 @@ try:
     import updater  # plugins/updater.py
 except Exception:  # pragma: no cover
     updater = None  # type: ignore
+
+try:
+    from ui.design import (
+        ICON_HEADER_PX, app_icon_pixmap, fit_dialog_to_screen, header_font,
+    )
+except Exception:  # pragma: no cover
+    ICON_HEADER_PX = 28  # type: ignore[no-redef]
+    fit_dialog_to_screen = None  # type: ignore[assignment]
+    header_font = None  # type: ignore[assignment]
+    app_icon_pixmap = None  # type: ignore[assignment]
+
+try:
+    from ui.icons import bind_icon
+except Exception:  # pragma: no cover
+    def bind_icon(target, *_a, **_kw):  # type: ignore[no-redef]
+        return target
 
 from ui.i18n import tr
 
@@ -152,23 +169,55 @@ class UpdateDialog(QDialog):
         self.restart_requested = False
 
         self.setWindowTitle(tr("update.title"))
-        self.setMinimumWidth(540)
+        self.setSizeGripEnabled(True)
         root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(16, 14, 16, 14)
         root_layout.setSpacing(10)
+
+        dark = False
+        try:
+            inst = QApplication.instance()
+            if inst is not None:
+                dark = inst.palette().color(
+                    QPalette.ColorRole.Window
+                ).lightness() < 128
+        except Exception:
+            pass
+        muted_css = (
+            f"color:{'#9cb0c4' if dark else '#4b5563'};"
+            "background:transparent;"
+        )
+        active_theme = {"text_strong": "#e2eaf4" if dark else "#0d1218"}
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        if callable(app_icon_pixmap):
+            _pix = app_icon_pixmap(ICON_HEADER_PX)
+            if not _pix.isNull():
+                _mark = QLabel()
+                _mark.setPixmap(_pix)
+                _mark.setStyleSheet("background:transparent;")
+                head.addWidget(_mark)
+        lbl_hdr = QLabel(tr("update.title"))
+        if callable(header_font):
+            lbl_hdr.setFont(header_font())
+        head.addWidget(lbl_hdr)
+        head.addStretch(1)
+        root_layout.addLayout(head)
 
         self._lbl_status = QLabel(tr("update.checking"))
         self._lbl_status.setWordWrap(True)
         root_layout.addWidget(self._lbl_status)
 
         self._lbl_build = QLabel()
-        self._lbl_build.setStyleSheet("color:#5a6b80;")
+        self._lbl_build.setStyleSheet(muted_css)
         self._lbl_build.setWordWrap(True)
         root_layout.addWidget(self._lbl_build)
         self._show_local_build()
 
         lbl_safe = QLabel(tr("update.safe_note"))
         lbl_safe.setWordWrap(True)
-        lbl_safe.setStyleSheet("color:#5a6b80;")
+        lbl_safe.setStyleSheet(muted_css)
         root_layout.addWidget(lbl_safe)
 
         self._lbl_notes = QLabel(tr("update.notes"))
@@ -185,17 +234,22 @@ class UpdateDialog(QDialog):
         root_layout.addWidget(self._progress)
 
         row = QHBoxLayout()
+        row.setSpacing(8)
         self._btn_install = QPushButton(tr("update.install"))
         self._btn_install.setProperty("accent", True)
+        bind_icon(self._btn_install, "update", size=14, role="on_accent", theme=active_theme)
         self._btn_install.clicked.connect(self._install)
         self._btn_install.hide()
         self._btn_restart = QPushButton(tr("update.restart"))
         self._btn_restart.setProperty("accent", True)
+        bind_icon(self._btn_restart, "refresh", size=14, role="on_accent", theme=active_theme)
         self._btn_restart.clicked.connect(self._restart)
         self._btn_restart.hide()
         self._btn_close = QPushButton(tr("update.close"))
+        bind_icon(self._btn_close, "clear", size=14, theme=active_theme)
         self._btn_close.clicked.connect(self.reject)
         self._btn_restore = QPushButton(tr("update.restore"))
+        bind_icon(self._btn_restore, "undo", size=14, theme=active_theme)
         self._btn_restore.clicked.connect(self._restore)
         if updater is None or not updater.find_backups(self._root):
             self._btn_restore.hide()
@@ -205,6 +259,13 @@ class UpdateDialog(QDialog):
         row.addStretch(1)
         row.addWidget(self._btn_close)
         root_layout.addLayout(row)
+
+        if callable(fit_dialog_to_screen):
+            fit_dialog_to_screen(
+                self, 560, 400, minimum_width=400, minimum_height=280,
+            )
+        else:
+            self.setMinimumWidth(460)
 
         if self._initial_result is not None:
             self._on_check(self._initial_result)

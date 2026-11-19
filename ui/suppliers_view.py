@@ -103,24 +103,43 @@ except Exception:  # pragma: no cover - fristående körning
             from PySide6.QtGui import QPixmap as _QP
             return _QP()
 
+try:
+    from ui.icons import attach_search_icon, bind_icon, refresh_bound_icons
+except Exception:  # pragma: no cover - fristående körning
+    try:
+        from icons import (  # type: ignore[no-redef]
+            attach_search_icon,
+            bind_icon,
+            refresh_bound_icons,
+        )
+    except Exception:
+        def bind_icon(target: Any, *_a: Any, **_kw: Any) -> Any:  # type: ignore[no-redef]
+            return target
+
+        def attach_search_icon(target: Any, *_a: Any, **_kw: Any) -> Any:  # type: ignore[no-redef]
+            return target
+
+        def refresh_bound_icons(*_a: Any, **_kw: Any) -> None:  # type: ignore[no-redef]
+            pass
+
 log = logging.getLogger("SuppliersView")
 
 #: (etikett, datanyckel, min-bredd, justering)
 COLUMNS: list[tuple[str, str, int, Qt.AlignmentFlag]] = [
-    ("Namn",     "name",           140, Qt.AlignmentFlag.AlignLeft),
-    ("Org.nr",   "org_number",      90, Qt.AlignmentFlag.AlignLeft),
-    ("Bankgiro", "bg",              80, Qt.AlignmentFlag.AlignLeft),
-    ("Plusgiro", "pg",              70, Qt.AlignmentFlag.AlignLeft),
-    ("IBAN",     "iban",           120, Qt.AlignmentFlag.AlignLeft),
-    ("BIC",      "bic",             60, Qt.AlignmentFlag.AlignLeft),
-    ("Villkor",  "payment_terms",   58, Qt.AlignmentFlag.AlignCenter),
-    ("OCR",      "ocr_same_as_invoice_number", 64,
+    ("Namn",     "name",           185, Qt.AlignmentFlag.AlignLeft),
+    ("Org.nr",   "org_number",     154, Qt.AlignmentFlag.AlignLeft),
+    ("Bankgiro", "bg",             114, Qt.AlignmentFlag.AlignLeft),
+    ("Plusgiro", "pg",             114, Qt.AlignmentFlag.AlignLeft),
+    ("IBAN",     "iban",           190, Qt.AlignmentFlag.AlignLeft),
+    ("BIC",      "bic",            108, Qt.AlignmentFlag.AlignLeft),
+    ("Villkor",  "payment_terms",   82, Qt.AlignmentFlag.AlignCenter),
+    ("OCR",      "ocr_same_as_invoice_number", 138,
      Qt.AlignmentFlag.AlignCenter),
-    ("Kontakt",  "contact_person",  90, Qt.AlignmentFlag.AlignLeft),
-    ("E-post",   "email",          110, Qt.AlignmentFlag.AlignLeft),
-    ("Telefon",  "phone",           80, Qt.AlignmentFlag.AlignLeft),
-    ("Adress",   "address",         90, Qt.AlignmentFlag.AlignLeft),
-    ("Notering", "note",            70, Qt.AlignmentFlag.AlignLeft),
+    ("Kontakt",  "contact_person", 130, Qt.AlignmentFlag.AlignLeft),
+    ("E-post",   "email",          180, Qt.AlignmentFlag.AlignLeft),
+    ("Telefon",  "phone",          124, Qt.AlignmentFlag.AlignLeft),
+    ("Adress",   "address",        130, Qt.AlignmentFlag.AlignLeft),
+    ("Notering", "note",           120, Qt.AlignmentFlag.AlignLeft),
 ]
 
 COL_LABELS: list[str] = [c[0] for c in COLUMNS]
@@ -589,28 +608,34 @@ class SuppliersView(QWidget):
         self._search = QLineEdit()
         self._search.setPlaceholderText(tr("suppliers.search_ph"))
         self._search.setMinimumHeight(36)
+        self._search.setMinimumWidth(160)
         self._search.setFont(_font(11))
         self._search.setClearButtonEnabled(True)
+        attach_search_icon(self._search, size=14)
         self._search.textChanged.connect(self._on_search_changed)
 
         self._btn_add = _make_btn(
             tr("suppliers.new"), tr("suppliers.new"), accent=True
         )
+        bind_icon(self._btn_add, "add", size=14, role="on_accent")
         self._btn_add.clicked.connect(self._add_supplier)
 
         self._btn_edit = _make_btn(tr("suppliers.edit"), tr("suppliers.edit"))
+        bind_icon(self._btn_edit, "edit", size=14)
         self._btn_edit.clicked.connect(self._edit_supplier)
         self._btn_edit.setEnabled(False)
 
         self._btn_duplicate = _make_btn(
             tr("suppliers.duplicate"), tr("suppliers.duplicate")
         )
+        bind_icon(self._btn_duplicate, "duplicate", size=14)
         self._btn_duplicate.clicked.connect(self._duplicate_supplier)
         self._btn_duplicate.setEnabled(False)
 
         self._btn_delete = _make_btn(
             tr("suppliers.delete"), tr("suppliers.delete"), danger=True
         )
+        bind_icon(self._btn_delete, "delete", size=14, role="on_accent")
         self._btn_delete.clicked.connect(self._delete_supplier)
         self._btn_delete.setEnabled(False)
 
@@ -619,11 +644,13 @@ class SuppliersView(QWidget):
             "Exportera leverantörslista till CSV / JSON",
             info=True,
         )
+        bind_icon(self._btn_export, "export", size=14, role="on_accent")
         self._btn_export.clicked.connect(self._export_suppliers)
 
         self._btn_refresh = _make_btn(
-            "🔄", "Uppdatera listan", width=46
+            "🔄", "Uppdatera listan", width=42
         )
+        bind_icon(self._btn_refresh, "refresh", size=15)
         self._btn_refresh.clicked.connect(self._reload_from_disk)
 
         row1.addWidget(self._search, stretch=1)
@@ -658,7 +685,7 @@ class SuppliersView(QWidget):
         self._table.setTextElideMode(Qt.TextElideMode.ElideRight)
         self._table.setMinimumWidth(0)
         self._table.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
         self._table.setShowGrid(False)
         self._row_delegate = attach_visible_rows(self._table)
@@ -714,10 +741,24 @@ class SuppliersView(QWidget):
         footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         footer.setFont(_font(9))
         footer.setStyleSheet("background:transparent; color:#718096;")
+        self._footer = footer
         root.addWidget(footer)
 
     def _fit_columns(self) -> None:
-        fit_table_columns(self._table, COL_WIDTHS)
+        from PySide6.QtGui import QFontMetrics
+
+        header = self._table.horizontalHeader()
+        hf = QFont(header.font())
+        hf.setBold(True)
+        if hf.pointSize() > 0:
+            hf.setPointSize(max(12, hf.pointSize()))
+        hm = QFontMetrics(hf)
+        mins = []
+        for idx, (default_lbl, _key, width, _align) in enumerate(COLUMNS):
+            item = self._table.horizontalHeaderItem(idx)
+            lbl = item.text() if item is not None else default_lbl
+            mins.append(max(width, hm.horizontalAdvance(lbl) + 28))
+        fit_table_columns(self._table, COL_WIDTHS, mins)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -1179,6 +1220,10 @@ class SuppliersView(QWidget):
         """Uppdaterar alla texter efter språkbyte (utan omstart)."""
         self._hdr_label.setText(tr("suppliers.title"))
         self._search.setPlaceholderText(tr("suppliers.search_ph"))
+        attach_search_icon(
+            self._search, size=14,
+            theme=getattr(self, "_current_theme", None) or None,
+        )
         self._btn_add.setText(tr("suppliers.new"))
         self._btn_edit.setText(tr("suppliers.edit"))
         self._btn_duplicate.setText(tr("suppliers.duplicate"))
@@ -1201,17 +1246,21 @@ class SuppliersView(QWidget):
         dark = self._is_dark()
 
         text_strong = t.get("text_strong", "#f0f6fc" if dark else "#1c2128")
+        muted       = t.get("muted",       "#a0aec0" if dark else "#4b5563")
         accent      = t.get("accent",      "#58a6ff" if dark else "#0969da")
         accent_hov  = t.get("accent_hover", "#388bfd" if dark else "#0550ae")
         header_bg   = t.get("header_bg",   "#161b22" if dark else "#0969da")
         row_normal  = t.get("row_normal",  "#0d1117" if dark else "#ffffff")
         row_alt     = t.get("row_alt",     "#161b22" if dark else "#f6f8fa")
         border      = t.get("border",      "#30363d" if dark else "#d0d7de")
+        grid_c      = t.get("table_grid",  "#1f2e40" if dark else "#e5dfd5")
         input_bg    = t.get("input_bg",    "#0d1117" if dark else "#ffffff")
         input_bdr   = t.get("input_border", "#30363d" if dark else "#d0d7de")
-        button_bg   = t.get("button_bg",   "#21262d" if dark else "#6e7781")
-        button_text = t.get("button_text", "#f0f6fc" if dark else "#ffffff")
-        button_hov  = t.get("button_hover", "#30363d" if dark else "#57606a")
+        button_bg   = t.get("button_bg",   "#21262d" if dark else "#f4f1ea")
+        button_text = t.get("button_text", "#f0f6fc" if dark else "#0d1218")
+        button_hov  = t.get("button_hover", "#30363d" if dark else "#eae5dc")
+        disabled_bg = t.get("bg_tertiary", border)
+        disabled_tx = t.get("text_disabled", "#9aa4b2" if dark else "#57606a")
         error       = t.get("error",       "#f85149" if dark else "#cf222e")
         info        = t.get("info",        "#58a6ff" if dark else "#0969da")
 
@@ -1220,14 +1269,14 @@ class SuppliersView(QWidget):
             QTableWidget {{
                 background-color           : {row_normal};
                 color                      : {text_strong};
-                font-weight                : 700;
-                font-size                  : 12px;
-                gridline-color             : {"#8ea4ba" if dark else "#8a7d6c"};
+                font-weight                : 600;
+                font-size                  : 13px;
+                gridline-color             : {grid_c};
                 alternate-background-color : {row_alt};
                 selection-background-color : {accent};
                 selection-color            : #ffffff;
                 border                     : 1px solid {border};
-                border-radius              : 6px;
+                border-radius              : 8px;
                 outline                    : none;
             }}
             QHeaderView::section {{
@@ -1235,16 +1284,13 @@ class SuppliersView(QWidget):
                 color            : #ffffff;
                 font-weight      : 700;
                 font-size        : 12px;
-                padding          : 6px 8px;
+                padding          : 7px 8px;
                 border           : none;
-                border-right     : 1px solid {border};
+                border-right     : 1px solid {grid_c};
                 border-bottom    : 1px solid {border};
             }}
-            QHeaderView::section:first {{
-                border-radius : 6px 0 0 0;
-            }}
             QTableWidget::item {{
-                padding : 8px 8px;
+                padding : 7px 8px;
                 color   : {text_strong};
             }}
             QTableWidget::item:selected {{
@@ -1257,10 +1303,11 @@ class SuppliersView(QWidget):
                 border-radius : 5px;
             }}
             QScrollBar::handle:vertical {{
-                background    : {accent};
+                background    : {t.get("scrollbar_handle", accent)};
                 border-radius : 5px;
                 min-height    : 20px;
             }}
+            QScrollBar::handle:vertical:hover {{ background: {accent}; }}
         """)
 
         # ── Knappar ────────────────────────────────────────────────────
@@ -1268,7 +1315,7 @@ class SuppliersView(QWidget):
             (self._btn_add,       accent,    accent_hov, "#ffffff"),
             (self._btn_edit,      button_bg, button_hov, button_text),
             (self._btn_duplicate, button_bg, button_hov, button_text),
-            (self._btn_delete,    error,     "#da3633",  "#ffffff"),
+            (self._btn_delete,    error,     "#c92a2a",  "#ffffff"),
             (self._btn_export,    info,      accent_hov, "#ffffff"),
             (self._btn_refresh,   button_bg, button_hov, button_text),
         ]
@@ -1279,17 +1326,23 @@ class SuppliersView(QWidget):
                     color            : {fg};
                     font-weight      : 700;
                     font-size        : 12px;
-                    border-radius    : 7px;
-                    border           : none;
-                    padding          : 6px 14px;
+                    border-radius    : 8px;
+                    border           : 1px solid {border};
+                    padding          : 6px 12px;
                     min-height       : 36px;
                 }}
-                QPushButton:hover   {{ background-color : {hov}; }}
-                QPushButton:pressed {{ background-color : {accent};
-                                       color : #ffffff; }}
+                QPushButton:hover {{
+                    background-color : {hov};
+                    border-color     : {accent};
+                }}
+                QPushButton:pressed {{
+                    background-color : {accent};
+                    color            : #ffffff;
+                }}
                 QPushButton:disabled {{
-                    background-color : {border};
-                    color            : #666666;
+                    background-color : {disabled_bg};
+                    color            : {disabled_tx};
+                    border-color     : {border};
                 }}
             """)
 
@@ -1299,9 +1352,9 @@ class SuppliersView(QWidget):
                 background-color : {input_bg};
                 color            : {text_strong};
                 border           : 1.5px solid {input_bdr};
-                border-radius    : 7px;
+                border-radius    : 8px;
                 padding          : 4px 10px;
-                font-size        : 12px;
+                font-size        : 13px;
                 font-weight      : 600;
             }}
             QLineEdit:focus {{
@@ -1315,6 +1368,15 @@ class SuppliersView(QWidget):
             f"background:{t.get('tab_selected', accent)}; "
             f"border-radius:11px; padding:3px 12px;"
         )
+        if hasattr(self, "_footer"):
+            self._footer.setStyleSheet(
+                f"background:transparent; color:{muted};"
+            )
+        if hasattr(self, "_empty_label"):
+            self._empty_label.setStyleSheet(
+                f"background:transparent; color:{muted}; padding:24px;"
+            )
+        refresh_bound_icons(t)
 
         self._do_refresh()
 

@@ -1292,20 +1292,20 @@ STATUS_COLORS: dict[str, tuple[str, str]] = {
 
 #: (etikett, datanyckel, min-bredd, justering)
 COLUMNS: list[tuple[str, str, int, Qt.AlignmentFlag]] = [
-    ("Typ",        "invoice_type",    64, Qt.AlignmentFlag.AlignCenter),
-    ("Leverantör", "supplier",       150, Qt.AlignmentFlag.AlignLeft),
-    ("Fakturanr",  "invoice_number", 110, Qt.AlignmentFlag.AlignLeft),
-    ("OCR",        "ocr",             90, Qt.AlignmentFlag.AlignLeft),
-    ("Datum",      "date",            88, Qt.AlignmentFlag.AlignCenter),
-    ("Förfaller",  "due_date",        88, Qt.AlignmentFlag.AlignCenter),
-    ("Betaldatum", "payment_date",    88, Qt.AlignmentFlag.AlignCenter),
-    ("Belopp",     "total_amount",   100, Qt.AlignmentFlag.AlignRight),
-    ("Valuta",     "currency",        52, Qt.AlignmentFlag.AlignCenter),
-    ("Status",     "status",          88, Qt.AlignmentFlag.AlignCenter),
-    ("Kategori",   "category",        72, Qt.AlignmentFlag.AlignLeft),
-    ("Referens",   "reference",       72, Qt.AlignmentFlag.AlignLeft),
-    ("Notering",   "note",            80, Qt.AlignmentFlag.AlignLeft),
-    ("Sidor",      "pages",           54, Qt.AlignmentFlag.AlignCenter),
+    ("Typ",        "invoice_type",   108, Qt.AlignmentFlag.AlignCenter),
+    ("Leverantör", "supplier",       185, Qt.AlignmentFlag.AlignLeft),
+    ("Fakturanr",  "invoice_number", 124, Qt.AlignmentFlag.AlignLeft),
+    ("OCR",        "ocr",            114, Qt.AlignmentFlag.AlignLeft),
+    ("Datum",      "date",           108, Qt.AlignmentFlag.AlignCenter),
+    ("Förfaller",  "due_date",       108, Qt.AlignmentFlag.AlignCenter),
+    ("Betaldatum", "payment_date",   108, Qt.AlignmentFlag.AlignCenter),
+    ("Belopp",     "total_amount",   148, Qt.AlignmentFlag.AlignRight),
+    ("Valuta",     "currency",        68, Qt.AlignmentFlag.AlignCenter),
+    ("Status",     "status",          92, Qt.AlignmentFlag.AlignCenter),
+    ("Kategori",   "category",        86, Qt.AlignmentFlag.AlignLeft),
+    ("Referens",   "reference",       90, Qt.AlignmentFlag.AlignLeft),
+    ("Notering",   "note",            92, Qt.AlignmentFlag.AlignLeft),
+    ("Sidor",      "pages",           64, Qt.AlignmentFlag.AlignCenter),
 ]
 
 COL_LABELS: list[str] = [c[0] for c in COLUMNS]
@@ -1471,7 +1471,7 @@ DATE_COLUMN_KEYS: frozenset[str] = frozenset(
 )
 
 
-def date_column_width(padding: int = 16) -> int:
+def date_column_width(padding: int = 28) -> int:
     """Bredd som rymmer ett fullt ISO-datum i tabellens fetstilta font.
 
     Utan det här krymptes datumkolumnerna till något som bara visade
@@ -1483,10 +1483,10 @@ def date_column_width(padding: int = 16) -> int:
         from PySide6.QtGui import QFontMetrics
 
         font = make_tabular_font(scaled_point_size(12), bold=True)
-        return max(84, QFontMetrics(font).horizontalAdvance("2026-11-11")
+        return max(108, QFontMetrics(font).horizontalAdvance("2026-11-11")
                    + padding)
     except Exception:
-        return 104
+        return 116
 
 
 def fit_table_columns(
@@ -1724,6 +1724,7 @@ def make_btn(
     btn = QPushButton(label)
     btn.setToolTip(tooltip)
     btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+    btn.setMinimumWidth(0)
     btn.setMinimumHeight(32)
     btn.setFont(make_font(12, bold=True))
     btn.setSizePolicy(

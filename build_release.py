@@ -72,6 +72,7 @@ RELEASE_FILES: tuple[str, ...] = (
     "ui/donate.py",
     "ui/history_view.py",
     "ui/i18n.py",
+    "ui/icons.py",
     "ui/invoice_table_model.py",
     "ui/invoices_helpers.py",
     "ui/invoices_view.py",

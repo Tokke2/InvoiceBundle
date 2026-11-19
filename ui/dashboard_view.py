@@ -54,6 +54,15 @@ except Exception:  # pragma: no cover
         return font
 
 try:
+    from ui.icons import bind_icon
+except Exception:  # pragma: no cover
+    try:
+        from icons import bind_icon  # type: ignore[no-redef]
+    except Exception:
+        def bind_icon(target: Any, *_a: Any, **_kw: Any) -> Any:  # type: ignore[no-redef]
+            return target
+
+try:
     from ui.invoices_helpers import fmt_amount
     from ui.typography import make_tabular_font, set_item_font
 except Exception:  # pragma: no cover
@@ -161,12 +170,17 @@ class _StatCard(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._accent = accent
         self._light_value = light_value
+        self.setMinimumWidth(0)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 10, 14, 10)
-        lay.setSpacing(2)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(3)
         self._title = QLabel()
+        self._title.setWordWrap(True)
         self._value = QLabel("–")
+        if callable(make_tabular_font):
+            self._value.setFont(make_tabular_font(20, bold=True))
         self._sub = QLabel()
+        self._sub.setWordWrap(True)
         lay.addWidget(self._title)
         lay.addWidget(self._value)
         lay.addWidget(self._sub)
@@ -176,38 +190,39 @@ class _StatCard(QWidget):
         if light:
             self.setStyleSheet(
                 f"QWidget#StatCard {{ background:#ffffff;"
-                f" border:2px solid {NAVY};"
-                f" border-top:6px solid {self._accent};"
-                " border-radius:10px; }"
+                f" border:1px solid #d6cec0;"
+                f" border-top:5px solid {self._accent};"
+                " border-radius:12px; }"
             )
             self._title.setStyleSheet(
                 f"color:{NAVY}; background:transparent;"
-                " font-size:13px; font-weight:800;"
+                " font-size:12px; font-weight:700; letter-spacing:0.4px;"
             )
             self._value.setStyleSheet(
                 f"color:{self._light_value}; background:transparent;"
                 " font-size:26px; font-weight:800;"
             )
             self._sub.setStyleSheet(
-                "color:#334155; background:transparent;"
+                "color:#4f5b69; background:transparent;"
                 " font-size:12px; font-weight:600;"
             )
         else:
             self.setStyleSheet(
                 f"QWidget#StatCard {{ background:{NAVY};"
-                f" border:1px solid {self._accent};"
-                " border-radius:10px; }"
+                f" border:1px solid #264266;"
+                f" border-top:4px solid {self._accent};"
+                " border-radius:12px; }"
             )
             self._title.setStyleSheet(
-                "color:#e8eff9; background:transparent;"
-                " font-size:13px; font-weight:800;"
+                "color:#dbe7f6; background:transparent;"
+                " font-size:12px; font-weight:700; letter-spacing:0.4px;"
             )
             self._value.setStyleSheet(
                 f"color:{GOLD}; background:transparent;"
                 " font-size:26px; font-weight:800;"
             )
             self._sub.setStyleSheet(
-                "color:#c9d9ee; background:transparent;"
+                "color:#b9cde6; background:transparent;"
                 " font-size:12px; font-weight:600;"
             )
 
@@ -245,12 +260,14 @@ class DashboardView(QWidget):
         head.addWidget(self._lbl_title)
         head.addStretch()
         self._btn_open_invoices = QPushButton()
+        self._btn_open_invoices.setProperty("accent", True)
+        bind_icon(self._btn_open_invoices, "arrow_right", role="on_accent", size=15)
         self._btn_open_invoices.clicked.connect(self._goto_invoices)
         head.addWidget(self._btn_open_invoices)
         root.addLayout(head)
 
         cards = QHBoxLayout()
-        cards.setSpacing(10)
+        cards.setSpacing(12)
         self._card_pay = _StatCard(GOLD, "#0f2140")
         self._card_overdue = _StatCard("#e5534b", "#b3261e")
         self._card_week = _StatCard("#58a6ff", "#0b5cab")
@@ -270,6 +287,10 @@ class DashboardView(QWidget):
         root.addWidget(self._lbl_upcoming)
 
         self._table = QTableWidget(0, 4)
+        self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(38)
+        self._table.setAlternatingRowColors(True)
+        self._table.setShowGrid(False)
         self._table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers
         )
@@ -278,8 +299,8 @@ class DashboardView(QWidget):
         )
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.setColumnWidth(0, 128)
-        self._table.setColumnWidth(1, 190)
-        self._table.setColumnWidth(2, 120)
+        self._table.setColumnWidth(1, 210)
+        self._table.setColumnWidth(2, 130)
         self._table.setColumnWidth(3, 150)
         self._table.doubleClicked.connect(
             lambda _i: self._goto_invoices()

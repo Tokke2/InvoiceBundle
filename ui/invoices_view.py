@@ -171,7 +171,7 @@ except ImportError:
 
 try:
     from ui.design import (
-        CONTROL_RADIUS_PX, FOCUS_RING_PX, ICON_HEADER_PX,
+        CONTROL_RADIUS_PX, FOCUS_RING_PX, FlowLayout, ICON_HEADER_PX,
         PANEL_RADIUS_PX, TABLE_CELL_PADDING_COMPACT_PX,
         TABLE_CELL_PADDING_COMFORTABLE_PX, TABLE_ROW_HEIGHT_COMPACT,
         TABLE_ROW_HEIGHT_COMFORTABLE, app_icon_pixmap,
@@ -179,13 +179,14 @@ try:
 except Exception:  # pragma: no cover - fristående körning
     try:
         from design import (  # type: ignore[no-redef]
-            CONTROL_RADIUS_PX, FOCUS_RING_PX, ICON_HEADER_PX,
+            CONTROL_RADIUS_PX, FOCUS_RING_PX, FlowLayout, ICON_HEADER_PX,
             PANEL_RADIUS_PX, TABLE_CELL_PADDING_COMPACT_PX,
             TABLE_CELL_PADDING_COMFORTABLE_PX, TABLE_ROW_HEIGHT_COMPACT,
             TABLE_ROW_HEIGHT_COMFORTABLE, app_icon_pixmap,
         )
     except Exception:
         ICON_HEADER_PX = 28  # type: ignore[no-redef]
+        FlowLayout = QHBoxLayout  # type: ignore[misc, assignment]
         CONTROL_RADIUS_PX = 7  # type: ignore[no-redef]
         PANEL_RADIUS_PX = 10  # type: ignore[no-redef]
         FOCUS_RING_PX = 2  # type: ignore[no-redef]
@@ -206,9 +207,43 @@ except ImportError:  # pragma: no cover - standalone import
     )
 
 try:
-    from ui.typography import set_table_default_row_height
+    from ui.icons import (
+        attach_search_icon,
+        bind_icon,
+        qss_indicator_urls,
+        refresh_bound_icons,
+    )
+except Exception:  # pragma: no cover - fristående körning
+    try:
+        from icons import (  # type: ignore[no-redef]
+            attach_search_icon,
+            bind_icon,
+            qss_indicator_urls,
+            refresh_bound_icons,
+        )
+    except Exception:
+        def bind_icon(target: Any, *_a: Any, **_kw: Any) -> Any:  # type: ignore[no-redef]
+            return target
+
+        def attach_search_icon(target: Any, *_a: Any, **_kw: Any) -> Any:  # type: ignore[no-redef]
+            return target
+
+        def refresh_bound_icons(*_a: Any, **_kw: Any) -> None:  # type: ignore[no-redef]
+            pass
+
+        def qss_indicator_urls(*_a: Any, **_kw: Any) -> dict[str, str]:  # type: ignore[no-redef]
+            return {}
+
+try:
+    from ui.typography import make_tabular_font, set_table_default_row_height
 except ImportError:  # pragma: no cover - standalone import
-    from typography import set_table_default_row_height  # type: ignore[no-redef]
+    try:
+        from typography import (  # type: ignore[no-redef]
+            make_tabular_font, set_table_default_row_height,
+        )
+    except Exception:
+        make_tabular_font = make_font  # type: ignore[assignment]
+        from typography import set_table_default_row_height  # type: ignore[no-redef]
 
 log = logging.getLogger("InvoicesView")
 
@@ -487,7 +522,6 @@ class InvoicesView(QWidget):
         supplier_layout.addWidget(lbl_sup)
         supplier_layout.addWidget(self._sup_selector, stretch=1)
         supplier_layout.addWidget(self._lbl_supplier_info)
-        supplier_layout.addStretch()
         root.addWidget(supplier_frame)
 
         # ── Huvudindelning: knappar/kontroller till VÄNSTER och
@@ -504,8 +538,8 @@ class InvoicesView(QWidget):
         # Innehållet i rullområdet måste hålla sig inom spaltens
         # bredd — annars växer panelerna förbi spalten och knappar
         # hamnar under tabellen.
-        side_wrap.setMinimumWidth(276)
-        side_wrap.setMaximumWidth(364)
+        side_wrap.setMinimumWidth(244)
+        side_wrap.setMaximumWidth(296)
         side = QVBoxLayout(side_wrap)
         side.setContentsMargins(0, 0, 0, 0)
         side.setSpacing(6)
@@ -513,8 +547,8 @@ class InvoicesView(QWidget):
         side_scroll.setObjectName("SideScroll")
         side_scroll.setWidgetResizable(True)
         side_scroll.setWidget(side_wrap)
-        side_scroll.setMinimumWidth(284)
-        side_scroll.setMaximumWidth(372)
+        side_scroll.setMinimumWidth(252)
+        side_scroll.setMaximumWidth(304)
         side_scroll.setFrameShape(QFrame.Shape.NoFrame)
         side_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
@@ -547,6 +581,7 @@ class InvoicesView(QWidget):
         self._search.setMinimumHeight(38)
         self._search.setFont(make_font(12))
         self._search.setClearButtonEnabled(True)
+        attach_search_icon(self._search, size=14)
         self._search.textChanged.connect(
             lambda *_: self._search_timer.start()
         )
@@ -593,19 +628,19 @@ class InvoicesView(QWidget):
         row_chips = QVBoxLayout()
         row_chips.setSpacing(6)
         self._chip_btns: dict[str, Any] = {}
-        for mode, key in (
-            ("overdue", "invoices.chip_overdue"),
-            ("today", "invoices.chip_today"),
-            ("week", "invoices.chip_week"),
+        for mode, key, icon_name in (
+            ("overdue", "invoices.chip_overdue", "alert"),
+            ("today", "invoices.chip_today", "clock"),
+            ("week", "invoices.chip_week", "calendar"),
         ):
             chip = make_btn(tr(key), tr(key))
             chip.setCheckable(True)
+            bind_icon(chip, icon_name, size=14)
             chip.clicked.connect(
                 lambda _checked=False, m=mode: self._on_chip(m)
             )
             self._chip_btns[mode] = chip
             row_chips.addWidget(chip)
-        row_chips.addStretch()
         filter_layout.addLayout(row_chips)
         side.addWidget(filter_frame)
 
@@ -615,7 +650,7 @@ class InvoicesView(QWidget):
         # Knapprutnät 2 × N i sidokolumnen: varje knapp får plats
         # i full bredd i stället för att klämmas på en lång rad.
         row_actions = QGridLayout(actions_frame)
-        row_actions.setContentsMargins(10, 6, 10, 6)
+        row_actions.setContentsMargins(10, 8, 10, 8)
         row_actions.setSpacing(6)
         row_actions.setColumnStretch(0, 1)
         row_actions.setColumnStretch(1, 1)
@@ -625,17 +660,20 @@ class InvoicesView(QWidget):
             "Registrera faktura för vald leverantör",
             accent=True,
         )
+        bind_icon(self._btn_add, "add", size=14, role="on_accent")
         self._btn_add.clicked.connect(self._add_invoice)
 
         self._btn_edit = make_btn(
             tr("invoices.edit"), "Redigera markerad faktura"
         )
+        bind_icon(self._btn_edit, "edit", size=14)
         self._btn_edit.clicked.connect(self._edit_invoice)
         self._btn_edit.setEnabled(False)
 
         self._btn_delete = make_btn(
             tr("invoices.delete"), tr("invoices.delete_tip"), danger=True
         )
+        bind_icon(self._btn_delete, "delete", size=14, role="on_accent")
         self._btn_delete.clicked.connect(self._delete_invoice)
         self._btn_delete.setEnabled(False)
 
@@ -644,12 +682,14 @@ class InvoicesView(QWidget):
             tr("invoices.delete_all_tip"),
             danger=True,
         )
+        bind_icon(self._btn_delete_all, "delete", size=14, role="on_accent")
         self._btn_delete_all.clicked.connect(self._delete_all_invoices)
         self._btn_delete_all.setEnabled(False)
 
         self._btn_duplicate = make_btn(
             tr("invoices.duplicate"), "Duplicera markerad faktura"
         )
+        bind_icon(self._btn_duplicate, "duplicate", size=14)
         self._btn_duplicate.clicked.connect(self._duplicate_invoice)
         self._btn_duplicate.setEnabled(False)
 
@@ -658,6 +698,7 @@ class InvoicesView(QWidget):
             "Markera markerade fakturor som betalda",
             success=True,
         )
+        bind_icon(self._btn_mark_paid, "check", size=14, role="on_accent")
         self._btn_mark_paid.clicked.connect(self._mark_selected_paid)
         self._btn_mark_paid.setEnabled(False)
 
@@ -666,6 +707,7 @@ class InvoicesView(QWidget):
             tr("combine.tip"),
             info=True,
         )
+        bind_icon(self._btn_combine, "combine", size=14, role="on_accent")
         self._btn_combine.clicked.connect(self._show_combine_dialog)
         self._btn_combine.setEnabled(False)
 
@@ -681,6 +723,7 @@ class InvoicesView(QWidget):
             tr("invoices.pay_today_tip"),
             success=True,
         )
+        bind_icon(self._btn_pay_today, "zap", size=14, role="on_accent")
         self._btn_pay_today.clicked.connect(self._pay_today)
         row_actions.addWidget(self._btn_pay_today, 3, 0, 1, 2)
 
@@ -689,17 +732,18 @@ class InvoicesView(QWidget):
             tr("credit.link_tip"),
             info=True,
         )
+        bind_icon(self._btn_link_credit, "link", size=14, role="on_accent")
         self._btn_link_credit.clicked.connect(self._show_link_credit_dialog)
         self._btn_link_credit.setEnabled(False)
         row_actions.addWidget(self._btn_link_credit, 4, 0, 1, 2)
 
-        self._btn_refresh = make_btn("🔄", "Uppdatera vyn", width=50)
+        self._btn_refresh = make_btn("🔄", "Uppdatera vyn")
+        bind_icon(self._btn_refresh, "refresh", size=15)
         self._btn_refresh.clicked.connect(self._do_refresh)
         row_actions.addWidget(self._btn_refresh, 5, 0)
 
-        self._btn_undo = make_btn(
-            "↩", tr("invoices.undo_tip"), width=50
-        )
+        self._btn_undo = make_btn("↩", tr("invoices.undo_tip"))
+        bind_icon(self._btn_undo, "undo", size=15)
         self._btn_undo.clicked.connect(self._undo_last_status)
         row_actions.addWidget(self._btn_undo, 5, 1)
         row_actions.addWidget(self._btn_delete_all, 6, 0, 1, 2)
@@ -709,13 +753,14 @@ class InvoicesView(QWidget):
         export_frame = QFrame()
         export_frame.setObjectName("ExportBar")
         export_layout = QVBoxLayout(export_frame)
-        export_layout.setContentsMargins(10, 6, 10, 6)
+        export_layout.setContentsMargins(10, 8, 10, 8)
         export_layout.setSpacing(6)
-        row_original_options = QHBoxLayout()
-        row_original_options.setSpacing(6)
+        row_original_options = QVBoxLayout()
+        row_original_options.setSpacing(4)
         self._lbl_original_export = QLabel(
             tr("invoices.export_originals_mode")
         )
+        self._lbl_original_export.setWordWrap(True)
         self._combo_original_export = QComboBox()
         for mode, key in (
             ("all_pages", "invoices.export_originals_all_pages"),
@@ -738,9 +783,7 @@ class InvoicesView(QWidget):
             self._on_export_original_mode_changed
         )
         row_original_options.addWidget(self._lbl_original_export)
-        row_original_options.addWidget(
-            self._combo_original_export, stretch=1
-        )
+        row_original_options.addWidget(self._combo_original_export)
         export_layout.addLayout(row_original_options)
         row_export = QVBoxLayout()
         row_export.setSpacing(6)
@@ -750,6 +793,7 @@ class InvoicesView(QWidget):
             tr("invoices.export_selected_tip"),
             success=True,
         )
+        bind_icon(self._btn_export_selected, "export", size=14, role="on_accent")
         self._btn_export_selected.clicked.connect(
             self._export_selected_pdf
         )
@@ -761,18 +805,21 @@ class InvoicesView(QWidget):
             "Du tillfrågas om betalningsdatum innan export.",
             info=True,
         )
+        bind_icon(self._btn_export_all, "export", size=14, role="on_accent")
         self._btn_export_all.clicked.connect(self._export_all_pdf)
 
         self._btn_history = make_btn(
             tr("invoices.history"),
             "Visa tidigare exporter och återställ vid behov",
         )
+        bind_icon(self._btn_history, "history", size=14)
         self._btn_history.clicked.connect(self._show_history)
 
         self._btn_open_export = make_btn(
             tr("invoices.open_export_folder"),
             "Öppna exports/-mappen i filhanteraren",
         )
+        bind_icon(self._btn_open_export, "folder", size=14)
         self._btn_open_export.clicked.connect(
             lambda: open_folder(get_export_base())
         )
@@ -788,7 +835,6 @@ class InvoicesView(QWidget):
         row_export.addWidget(self._btn_history)
         row_export.addWidget(self._btn_open_export)
         row_export.addWidget(self._lbl_history_count)
-        row_export.addStretch()
         export_layout.addLayout(row_export)
 
         # Markerbar: radmarkeringen ÄR exportvalet. Markeringen
@@ -799,7 +845,8 @@ class InvoicesView(QWidget):
         self._lbl_export_selection = QLabel(
             tr("invoices.export_sel_none")
         )
-        self._lbl_export_selection.setFont(make_font(11, True))
+        self._lbl_export_selection.setFont(make_tabular_font(11, True))
+        self._lbl_export_selection.setWordWrap(True)
         self._lbl_export_selection.setStyleSheet(
             "background:transparent;"
         )
@@ -807,17 +854,18 @@ class InvoicesView(QWidget):
             tr("invoices.mark_shown"),
             "Markera alla rader som visas just nu för export",
         )
+        bind_icon(self._btn_mark_shown, "check", size=14)
         self._btn_mark_shown.clicked.connect(self._mark_all_shown)
         self._btn_clear_marked = make_btn(
             tr("invoices.clear_marked"),
             "Rensa exportmarkeringen helt",
         )
+        bind_icon(self._btn_clear_marked, "clear", size=14)
         self._btn_clear_marked.clicked.connect(
             self._clear_export_selection
         )
         self._btn_clear_marked.setEnabled(False)
         row_select.addWidget(self._lbl_export_selection)
-        row_select.addStretch()
         row_select.addWidget(self._btn_mark_shown)
         row_select.addWidget(self._btn_clear_marked)
         export_layout.addLayout(row_select)
@@ -837,13 +885,12 @@ class InvoicesView(QWidget):
             self._lbl_marked_cred,
             self._lbl_marked_net,
         ):
-            _lbl.setFont(make_font(11, True))
+            _lbl.setFont(make_tabular_font(11, True))
             _lbl.setStyleSheet("background:transparent;")
         row_marked.addWidget(self._lbl_marked_cap)
         row_marked.addWidget(self._lbl_marked_inv)
         row_marked.addWidget(self._lbl_marked_cred)
         row_marked.addWidget(self._lbl_marked_net)
-        row_marked.addStretch()
         export_layout.addLayout(row_marked)
         side.addWidget(export_frame)
         side.addStretch()
@@ -863,12 +910,12 @@ class InvoicesView(QWidget):
             card.setObjectName(name)
             lay = QVBoxLayout(card)
             lay.setContentsMargins(14, 8, 14, 8)
-            lay.setSpacing(0)
+            lay.setSpacing(2)
             cap = QLabel(caption)
             cap.setObjectName("MoneyCaption")
             self._money_caps[name] = cap
             cap.setFont(make_font(11, True))
-            value.setFont(make_font(16, True))
+            value.setFont(make_tabular_font(17, True))
             value.setObjectName("MoneyValue")
             lay.addWidget(cap)
             lay.addWidget(value)
@@ -892,15 +939,16 @@ class InvoicesView(QWidget):
         self._cap_total = self._money_caps.get("MoneyCardTotal")
 
         meta = QHBoxLayout()
-        meta.setSpacing(14)
+        meta.setSpacing(10)
+        meta_stats = FlowLayout(spacing=12)
         self._lbl_count = QLabel("Poster: 0")
         self._lbl_unpaid = QLabel("Obetalt: 0,00 SEK")
         self._lbl_overdue = QLabel("Förfallet: 0,00 SEK")
         for lbl in (self._lbl_count, self._lbl_unpaid, self._lbl_overdue):
-            lbl.setFont(make_font(11, True))
+            lbl.setFont(make_tabular_font(11, True))
             lbl.setStyleSheet("background:transparent;")
-            meta.addWidget(lbl)
-        meta.addStretch()
+            meta_stats.addWidget(lbl)
+        meta.addLayout(meta_stats, stretch=1)
         self._density_label = QLabel(tr("invoices.table_density"))
         self._density_label.setObjectName("invoiceDensityLabel")
         self._density_selector = QComboBox()
@@ -924,8 +972,11 @@ class InvoicesView(QWidget):
         self._density_selector.currentIndexChanged.connect(
             self._on_row_density_changed
         )
-        meta.addWidget(self._density_label)
-        meta.addWidget(self._density_selector)
+        density_box = QHBoxLayout()
+        density_box.setSpacing(6)
+        density_box.addWidget(self._density_label)
+        density_box.addWidget(self._density_selector)
+        meta.addLayout(density_box)
         summary_layout.addLayout(meta)
         self._right_layout.addWidget(summary_frame)
 
@@ -933,7 +984,7 @@ class InvoicesView(QWidget):
         # Ersätter den kortlivade statusradstexten så summan av det
         # man markerat alltid syns medan man arbetar.
         self._lbl_selection = QLabel("")
-        self._lbl_selection.setFont(make_font(12, True))
+        self._lbl_selection.setFont(make_tabular_font(12, True))
         self._lbl_selection.setStyleSheet("background:transparent;")
         self._right_layout.addWidget(self._lbl_selection)
 
@@ -1016,7 +1067,8 @@ class InvoicesView(QWidget):
         self._lbl_sticky_selection = QLabel(
             tr("invoices.export_sel_none")
         )
-        self._lbl_sticky_selection.setFont(make_font(12, True))
+        self._lbl_sticky_selection.setFont(make_tabular_font(12, True))
+        self._lbl_sticky_selection.setWordWrap(True)
         self._lbl_sticky_selection.setStyleSheet(
             "background:transparent;"
         )
@@ -1026,12 +1078,15 @@ class InvoicesView(QWidget):
             "samma knapp som i exportpanelen ovan.",
             success=True,
         )
+        self._btn_export_selected_sticky.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        bind_icon(self._btn_export_selected_sticky, "export", size=14, role="on_accent")
         self._btn_export_selected_sticky.clicked.connect(
             self._export_selected_pdf
         )
         self._btn_export_selected_sticky.setEnabled(False)
-        sticky_layout.addWidget(self._lbl_sticky_selection)
-        sticky_layout.addStretch()
+        sticky_layout.addWidget(self._lbl_sticky_selection, stretch=1)
         sticky_layout.addWidget(self._btn_export_selected_sticky)
         root.addWidget(sticky_frame)
 
@@ -1973,6 +2028,10 @@ class InvoicesView(QWidget):
         self._sup_selector.setPlaceholderText(tr("invoices.choose_ph"))
         self._sup_selector.setToolTip(tr("invoices.supplier_selector_tip"))
         self._search.setPlaceholderText(tr("invoices.search_ph"))
+        attach_search_icon(
+            self._search, size=14,
+            theme=getattr(self, "_current_theme", None) or None,
+        )
         self._search.setToolTip(tr("invoices.search_shortcut_tip"))
         self._table.setToolTip(tr("invoices.table_keyboard_tip"))
         self._btn_add.setText(tr("invoices.add"))
@@ -4849,6 +4908,13 @@ class InvoicesView(QWidget):
         input_border = t.get(
             "input_border", "#30363d" if dark else "#d0d7de"
         )
+        qss_urls = qss_indicator_urls(text_color)
+        down_path = qss_urls.get("chevron_down", "")
+        down_css = f"image: url({down_path});" if down_path else ""
+        combo_arrow_qss = (
+            f"QComboBox::drop-down{{border:none;width:24px;background:transparent;}}"
+            f"QComboBox::down-arrow{{{down_css}width:12px;height:12px;}}"
+        )
         input_style = (
             f"background-color:{input_bg};"
             f"color:{text_color};"
@@ -4859,8 +4925,9 @@ class InvoicesView(QWidget):
         focus_border = f"border:{FOCUS_RING_PX}px solid {accent};"
 
         self._sup_selector.setStyleSheet(
-            f"QComboBox{{{input_style}min-height:38px;font-size:14px;}}"
+            f"QComboBox{{{input_style}min-height:38px;font-size:14px;padding-right:28px;}}"
             f"QComboBox:focus{{{focus_border}}}"
+            f"{combo_arrow_qss}"
         )
         self._search.setStyleSheet(
             f"QLineEdit{{{input_style}}}"
@@ -4873,12 +4940,14 @@ class InvoicesView(QWidget):
             f"color:{muted_color};background:transparent;font-weight:700;"
         )
         self._density_selector.setStyleSheet(
-            f"QComboBox{{{input_style}min-height:32px;}}"
+            f"QComboBox{{{input_style}min-height:32px;padding-right:28px;}}"
             f"QComboBox:focus{{{focus_border}}}"
+            f"{combo_arrow_qss}"
         )
         self._combo_original_export.setStyleSheet(
-            f"QComboBox{{{input_style}min-height:32px;}}"
+            f"QComboBox{{{input_style}min-height:32px;padding-right:28px;}}"
             f"QComboBox:focus{{{focus_border}}}"
+            f"{combo_arrow_qss}"
         )
         for combo in (
             self._filter_type,
@@ -4886,14 +4955,16 @@ class InvoicesView(QWidget):
             self._filter_supplier,
         ):
             combo.setStyleSheet(
-                f"QComboBox{{{input_style}min-height:36px;}}"
+                f"QComboBox{{{input_style}min-height:36px;padding-right:28px;}}"
                 f"QComboBox:focus{{{focus_border}}}"
+                f"{combo_arrow_qss}"
             )
 
         # ── Tabell ─────────────────────────────────────────────────────
         header_bg = t.get("header_bg", "#1f6feb" if dark else "#0969da")
         row_normal = t.get("row_normal", bg_color)
         row_alt = t.get("row_alt", "#161b22" if dark else "#f6f8fa")
+        grid_c = t.get("table_grid", "#1f2e40" if dark else "#e5dfd5")
         scroll_bg = t.get(
             "scrollbar_bg", "#161b22" if dark else "#f6f8fa"
         )
@@ -4910,9 +4981,9 @@ class InvoicesView(QWidget):
             QTableView {{
                 background-color           : {row_normal};
                 color                      : {text_color};
-                font-weight                : 700;
+                font-weight                : 600;
                 font-size                  : 13px;
-                gridline-color             : {border_c};
+                gridline-color             : {grid_c};
                 alternate-background-color : {row_alt};
                 selection-background-color : {accent};
                 selection-color            : #ffffff;
@@ -4928,11 +4999,11 @@ class InvoicesView(QWidget):
             QHeaderView::section {{
                 background-color : {header_bg};
                 color            : #ffffff;
-                font-weight      : 800;
+                font-weight      : 700;
                 font-size        : 12px;
                 padding          : 7px 10px;
                 border           : none;
-                border-right     : 1px solid {border_c};
+                border-right     : 1px solid {grid_c};
                 border-bottom    : 1px solid {border_c};
             }}
             QTableView::item {{
@@ -4966,23 +5037,34 @@ class InvoicesView(QWidget):
             btn_bg = t.get("button_bg", "#21262d")
             btn_hover = t.get("button_hover", "#30363d")
             btn_text = t.get("button_text", "#f0f6fc")
+            disabled_bg = t.get("bg_tertiary", "#1e2a38")
             disabled_text = t.get("text_disabled", "#9aa4b2")
         else:
-            btn_bg = t.get("button_bg", "#6e7781")
-            btn_hover = t.get("button_hover", "#57606a")
-            btn_text = t.get("button_text", "#ffffff")
+            btn_bg = t.get("button_bg", "#f4f1ea")
+            btn_hover = t.get("button_hover", "#eae5dc")
+            btn_text = t.get("button_text", "#0d1218")
+            disabled_bg = t.get("bg_tertiary", "#f0ebe2")
             disabled_text = t.get("text_disabled", "#57606a")
 
         btn_configs = [
-            (self._btn_add,         accent,    accent_hover, "#ffffff"),
-            (self._btn_edit,        btn_bg,    btn_hover,    btn_text),
-            (self._btn_delete,      error_c,   "#da3633",    "#ffffff"),
-            (self._btn_duplicate,   btn_bg,    btn_hover,    btn_text),
-            (self._btn_mark_paid,   success_c, "#2ea043",    "#ffffff"),
-            (self._btn_export_all,  info_c,    accent_hover, "#ffffff"),
-            (self._btn_history,     btn_bg,    btn_hover,    btn_text),
-            (self._btn_open_export, btn_bg,    btn_hover,    btn_text),
-            (self._btn_refresh,     btn_bg,    btn_hover,    btn_text),
+            (self._btn_add,                    accent,    accent_hover, "#ffffff"),
+            (self._btn_edit,                   btn_bg,    btn_hover,    btn_text),
+            (self._btn_delete,                 error_c,   "#c92a2a",    "#ffffff"),
+            (self._btn_delete_all,             error_c,   "#c92a2a",    "#ffffff"),
+            (self._btn_duplicate,              btn_bg,    btn_hover,    btn_text),
+            (self._btn_mark_paid,              success_c, "#1e874b",    "#ffffff"),
+            (self._btn_combine,                info_c,    accent_hover, "#ffffff"),
+            (self._btn_pay_today,              success_c, "#1e874b",    "#ffffff"),
+            (self._btn_link_credit,            info_c,    accent_hover, "#ffffff"),
+            (self._btn_refresh,                btn_bg,    btn_hover,    btn_text),
+            (self._btn_undo,                   btn_bg,    btn_hover,    btn_text),
+            (self._btn_export_selected,        success_c, "#1e874b",    "#ffffff"),
+            (self._btn_export_all,             info_c,    accent_hover, "#ffffff"),
+            (self._btn_history,                btn_bg,    btn_hover,    btn_text),
+            (self._btn_open_export,            btn_bg,    btn_hover,    btn_text),
+            (self._btn_mark_shown,             btn_bg,    btn_hover,    btn_text),
+            (self._btn_clear_marked,           btn_bg,    btn_hover,    btn_text),
+            (self._btn_export_selected_sticky, success_c, "#1e874b",    "#ffffff"),
         ]
         for btn, bg, hover, fg in btn_configs:
             btn.setStyleSheet(f"""
@@ -4993,8 +5075,8 @@ class InvoicesView(QWidget):
                     font-size        : 12px;
                     border-radius    : {CONTROL_RADIUS_PX}px;
                     border           : 1px solid {border_c};
-                    padding          : 7px 16px;
-                    min-height       : 36px;
+                    padding          : 6px 10px;
+                    min-height       : 34px;
                 }}
                 QPushButton:hover {{
                     background-color : {hover};
@@ -5008,9 +5090,33 @@ class InvoicesView(QWidget):
                     color            : #ffffff;
                 }}
                 QPushButton:disabled {{
-                    background-color : {border_c};
+                    background-color : {disabled_bg};
                     color            : {disabled_text};
                     border-color     : {border_c};
+                }}
+            """)
+
+        for chip in getattr(self, "_chip_btns", {}).values():
+            chip.setStyleSheet(f"""
+                QPushButton {{
+                    background-color : {btn_bg};
+                    color            : {btn_text};
+                    font-weight      : 700;
+                    font-size        : 12px;
+                    border-radius    : {CONTROL_RADIUS_PX}px;
+                    border           : 1px solid {border_c};
+                    padding          : 6px 10px;
+                    min-height       : 32px;
+                    text-align       : left;
+                }}
+                QPushButton:hover {{
+                    background-color : {btn_hover};
+                    border-color     : {accent};
+                }}
+                QPushButton:checked {{
+                    background-color : {accent};
+                    color            : #ffffff;
+                    border-color     : {accent};
                 }}
             """)
 
@@ -5020,22 +5126,16 @@ class InvoicesView(QWidget):
         )
         for lbl in (
             self._lbl_count,
-            self._lbl_invoices,
-            self._lbl_credits,
             self._lbl_unpaid,
             self._lbl_overdue,
         ):
             lbl.setStyleSheet(label_style)
 
-        self._lbl_att_betala.setStyleSheet(
-            f"color:{success_c};font-weight:800;font-size:14px;"
-            f"background:transparent;"
-        )
-
         muted_style = f"color:{muted_color};background:transparent;"
         self._lbl_supplier_info.setStyleSheet(muted_style)
         self._footer.setStyleSheet(muted_style)
         self._lbl_history_count.setStyleSheet(muted_style)
+        refresh_bound_icons(t)
 
         if self._initialised:
             filtered = self._apply_filters()

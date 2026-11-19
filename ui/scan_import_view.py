@@ -57,16 +57,36 @@ except Exception:  # pragma: no cover - skrivarstöd saknas
     QPrintDialog = QPrinter = None  # type: ignore[assignment]
 
 try:
-    from ui.design import ICON_HEADER_PX, app_icon_pixmap
+    from ui.design import (
+        FlowLayout, ICON_HEADER_PX, app_icon_pixmap, header_font,
+    )
 except Exception:  # pragma: no cover - fristående körning
     try:
-        from design import ICON_HEADER_PX, app_icon_pixmap  # type: ignore[no-redef]
+        from design import (  # type: ignore[no-redef]
+            FlowLayout, ICON_HEADER_PX, app_icon_pixmap, header_font,
+        )
     except Exception:
         ICON_HEADER_PX = 28  # type: ignore[no-redef]
+        FlowLayout = QHBoxLayout  # type: ignore[misc, assignment]
 
         def app_icon_pixmap(size: int = 28):  # type: ignore[no-redef]
             from PySide6.QtGui import QPixmap as _QP
             return _QP()
+
+        def header_font():  # type: ignore[no-redef]
+            return QFont("Segoe UI", 17, QFont.Weight.Bold)
+
+try:
+    from ui.icons import bind_icon, refresh_bound_icons
+except Exception:  # pragma: no cover
+    try:
+        from icons import bind_icon, refresh_bound_icons  # type: ignore[no-redef]
+    except Exception:
+        def bind_icon(target: Any, *_a: Any, **_kw: Any) -> Any:  # type: ignore[no-redef]
+            return target
+
+        def refresh_bound_icons(*_a: Any, **_kw: Any) -> None:  # type: ignore[no-redef]
+            pass
 
 log = logging.getLogger("ScanImportView")
 
@@ -1886,6 +1906,7 @@ class ScanImportView(QWidget):
         self._rows: list[dict] = []       # tolkade rader
         self._paths: list[Path] = []      # valda filer
         self._dark = True
+        self._current_theme: dict = {}
         self._templates_path = (
             Path(templates_path) if templates_path else None
         )
@@ -1913,7 +1934,7 @@ class ScanImportView(QWidget):
 
         hdr = QLabel(tr("scan.title"))
         self._hdr_label = hdr
-        hdr.setFont(QFont("Segoe UI", 17, QFont.Weight.Bold))
+        hdr.setFont(header_font())
         head = QHBoxLayout()
         head.setSpacing(8)
         _pix = app_icon_pixmap(ICON_HEADER_PX)
@@ -1943,9 +1964,11 @@ class ScanImportView(QWidget):
         row1.setSpacing(8)
         btn_pick = QPushButton(tr("scan.pick"))
         self._btn_pick = btn_pick
+        bind_icon(btn_pick, "folder", size=14)
         btn_pick.clicked.connect(self._pick_files)
         btn_clear = QPushButton(tr("scan.clear"))
         self._btn_clear = btn_clear
+        bind_icon(btn_clear, "clear", size=14)
         btn_clear.clicked.connect(self._clear_paths)
         self._lbl_files = QLabel(tr("scan.no_files"))
         self._lbl_files.setStyleSheet("color:#8b949e;background:transparent;")
@@ -1969,24 +1992,28 @@ class ScanImportView(QWidget):
         self._btn_scan = btn_scan
         btn_scan.setProperty("accent", True)
         btn_scan.setMinimumHeight(42)
+        bind_icon(btn_scan, "import", size=15, role="on_accent")
         btn_scan.clicked.connect(self._scan_files)
         # ── Bevakade mappar: auto-import från leverantörsmappar ──
         box_watch = QGroupBox(tr("watch.title"))
         self._box_watch = box_watch
         bw = QVBoxLayout()
         bw.setContentsMargins(10, 8, 10, 8)
+        bw.setSpacing(6)
         lbl_winfo = QLabel(tr("watch.info"))
         self._lbl_watch_info = lbl_winfo
         lbl_winfo.setWordWrap(True)
-        lbl_winfo.setStyleSheet("color:#5a6b80;")
+        lbl_winfo.setStyleSheet("color:#8b949e;background:transparent;")
         bw.addWidget(lbl_winfo)
         self._lst_watch = QListWidget()
         self._lst_watch.setMaximumHeight(96)
         bw.addWidget(self._lst_watch)
-        wr = QHBoxLayout()
+        wr = FlowLayout(spacing=6)
         self._btn_add_folder = QPushButton(tr("watch.add_folder"))
+        bind_icon(self._btn_add_folder, "add", size=14)
         self._btn_add_folder.clicked.connect(self._add_watch_folder)
         self._btn_remove_folder = QPushButton(tr("watch.remove_folder"))
+        bind_icon(self._btn_remove_folder, "delete", size=14)
         self._btn_remove_folder.clicked.connect(self._remove_watch_folder)
         self._chk_auto_watch = QCheckBox(tr("watch.auto_create"))
         self._chk_auto_watch.setChecked(True)
@@ -1994,26 +2021,28 @@ class ScanImportView(QWidget):
         wr.addWidget(self._btn_add_folder)
         wr.addWidget(self._btn_remove_folder)
         wr.addWidget(self._chk_auto_watch)
-        wr.addStretch(1)
         bw.addLayout(wr)
-        wr2 = QHBoxLayout()
+        wr2 = FlowLayout(spacing=6)
         self._lbl_watch_parked = QLabel()
         self._btn_review_parked = QPushButton(tr("watch.review"))
+        bind_icon(self._btn_review_parked, "eye", size=14)
         self._btn_review_parked.clicked.connect(self._review_parked)
         wr2.addWidget(self._lbl_watch_parked)
         wr2.addWidget(self._btn_review_parked)
         self._btn_teach_folder = QPushButton(tr("watch.learn"))
+        bind_icon(self._btn_teach_folder, "learn", size=14)
         self._btn_teach_folder.clicked.connect(
             self._teach_from_folder_clicked
         )
         wr2.addWidget(self._btn_teach_folder)
         self._btn_scan_watch = QPushButton(tr("watch.scan_now"))
+        bind_icon(self._btn_scan_watch, "search", size=14)
         self._btn_scan_watch.clicked.connect(self._scan_watch_now)
         wr2.addWidget(self._btn_scan_watch)
         self._btn_control_scan = QPushButton(tr("watch.control_scan"))
+        bind_icon(self._btn_control_scan, "check", size=14)
         self._btn_control_scan.clicked.connect(self._control_scan_now)
         wr2.addWidget(self._btn_control_scan)
-        wr2.addStretch(1)
         bw.addLayout(wr2)
         self._watch_progress = QProgressBar()
         self._watch_progress.setTextVisible(True)
@@ -2026,6 +2055,7 @@ class ScanImportView(QWidget):
         self._lbl_status.setStyleSheet("color:#8b949e;background:transparent;")
         row2.addWidget(btn_scan)
         self._btn_cancel_scan = QPushButton(tr("scan.cancel"))
+        bind_icon(self._btn_cancel_scan, "clear", size=14)
         self._btn_cancel_scan.setVisible(False)
         self._btn_cancel_scan.clicked.connect(self._cancel_scan_files)
         row2.addWidget(self._btn_cancel_scan)
@@ -2056,6 +2086,7 @@ class ScanImportView(QWidget):
         rowt.setSpacing(8)
         btn_parse = QPushButton(tr("scan.parse"))
         self._btn_parse = btn_parse
+        bind_icon(btn_parse, "list", size=14)
         btn_parse.clicked.connect(self._scan_pasted)
         self._chk_auto = QCheckBox(tr("scan.auto_open"))
         self._chk_auto.setChecked(False)
@@ -2079,7 +2110,12 @@ class ScanImportView(QWidget):
             else [c[0] for c in COLUMNS]
         )
         self._tbl.verticalHeader().setVisible(False)
+        self._tbl.verticalHeader().setDefaultSectionSize(36)
         self._tbl.setAlternatingRowColors(True)
+        self._tbl.setShowGrid(False)
+        self._tbl.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
         self._tbl.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
         )
@@ -2118,33 +2154,40 @@ class ScanImportView(QWidget):
         self._tbl.setMinimumHeight(220)
         br.addWidget(self._tbl, stretch=1)
 
-        row3 = QHBoxLayout()
-        row3.setSpacing(8)
+        self._lbl_sum = QLabel()
+        self._lbl_sum.setFont(make_tabular_font(12, bold=True))
+        self._lbl_sum.setStyleSheet("background:transparent;")
+        br.addWidget(self._lbl_sum)
+
+        row3 = FlowLayout(spacing=6)
         btn_create = QPushButton(tr("scan.create"))
         self._btn_create = btn_create
         btn_create.setProperty("success", True)
-        btn_create.setMinimumHeight(42)
+        btn_create.setMinimumHeight(40)
+        bind_icon(btn_create, "check", size=14, role="on_accent")
         btn_create.clicked.connect(self._create_invoices)
         btn_open_dlg = QPushButton(tr("scan.open_dialog"))
         self._btn_open_dlg = btn_open_dlg
+        bind_icon(btn_open_dlg, "edit", size=14)
         btn_open_dlg.clicked.connect(self._open_row_dialog)
         btn_print = QPushButton(tr("scan.print"))
         self._btn_print = btn_print
+        bind_icon(btn_print, "invoices", size=14)
         btn_print.clicked.connect(self._print_row)
         btn_open_orig = QPushButton(tr("scan.open_original"))
         self._btn_open_orig = btn_open_orig
+        bind_icon(btn_open_orig, "folder", size=14)
         btn_open_orig.clicked.connect(self._open_original_row)
         btn_del = QPushButton(tr("scan.remove_row"))
         self._btn_del = btn_del
+        bind_icon(btn_del, "delete", size=14)
         btn_del.clicked.connect(self._remove_row)
         self._btn_template = QPushButton(tr("scan.template_btn"))
+        bind_icon(self._btn_template, "mark", size=14)
         self._btn_template.clicked.connect(self._open_template_dialog)
         self._btn_templates = QPushButton()
+        bind_icon(self._btn_templates, "settings", size=14)
         self._btn_templates.clicked.connect(self._open_templates_manager)
-        self._lbl_sum = QLabel()
-        self._lbl_sum.setStyleSheet(
-            "background:transparent;font-weight:700;"
-        )
         row3.addWidget(btn_create)
         row3.addWidget(btn_open_dlg)
         row3.addWidget(btn_print)
@@ -2152,7 +2195,6 @@ class ScanImportView(QWidget):
         row3.addWidget(btn_del)
         row3.addWidget(self._btn_template)
         row3.addWidget(self._btn_templates)
-        row3.addWidget(self._lbl_sum, stretch=1)
         self._refresh_templates_btn()
         br.addLayout(row3)
         root.addWidget(box_res, stretch=1)
@@ -2171,6 +2213,7 @@ class ScanImportView(QWidget):
         )
         footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         footer.setStyleSheet("color:#8b949e;background:transparent;")
+        self._footer = footer
         root.addWidget(footer)
 
     def retranslate(self) -> None:
@@ -7425,21 +7468,199 @@ class ScanImportView(QWidget):
         return [i for i in idxs if 0 <= i < len(self._rows)]
 
     def _table_context_menu(self, pos) -> None:
-        """Högerklick i granskningstabellen: öppna originalet m.m."""
+        """Högerklick i granskningstabellen: markera klar/flytta eller hantera raden."""
         item = self._tbl.itemAt(pos)
+        clicked_row: int | None = None
         if item is not None and item.row() >= 0:
-            self._tbl.selectRow(item.row())
+            clicked_row = item.row()
+            self._tbl.selectRow(clicked_row)
+        has_sel = clicked_row is not None or bool(self._selected_rows())
         menu = QMenu(self)
-        menu.addAction(tr("scan.open_original"), self._open_original_row)
-        menu.addAction(tr("scan.print"), self._print_row)
-        menu.addAction(tr("scan.manual_match"), self._manual_match_row)
-        menu.addAction(tr("scan.template_btn"), self._open_template_dialog)
-        menu.addAction(
+        act_move = menu.addAction(
+            tr("scan.mark_ready_move"),
+            lambda _checked=False, r=clicked_row:
+                self._mark_ready_and_move_selected(row_index=r),
+        )
+        bind_icon(act_move, "check", size=14)
+        if act_move is not None:
+            act_move.setEnabled(has_sel and bool(self._rows))
+        act_dlg = menu.addAction(
+            tr("scan.open_dialog"), self._open_row_dialog
+        )
+        bind_icon(act_dlg, "edit", size=14)
+        if act_dlg is not None:
+            act_dlg.setEnabled(has_sel and bool(self._rows))
+        menu.addSeparator()
+        act_orig = menu.addAction(
+            tr("scan.open_original"), self._open_original_row
+        )
+        bind_icon(act_orig, "folder", size=14)
+        act_print = menu.addAction(tr("scan.print"), self._print_row)
+        bind_icon(act_print, "invoices", size=14)
+        act_match = menu.addAction(
+            tr("scan.manual_match"), self._manual_match_row
+        )
+        bind_icon(act_match, "puzzle", size=14)
+        act_tmpl = menu.addAction(
+            tr("scan.template_btn"), self._open_template_dialog
+        )
+        bind_icon(act_tmpl, "mark", size=14)
+        act_rescan = menu.addAction(
             tr("scan.rescan_all_action"), self._rescan_all_now
         )
+        bind_icon(act_rescan, "refresh", size=14)
         menu.addSeparator()
-        menu.addAction(tr("scan.remove_row"), self._remove_row)
+        act_del = menu.addAction(tr("scan.remove_row"), self._remove_row)
+        bind_icon(act_del, "delete", size=14)
         menu.exec(self._tbl.viewport().mapToGlobal(pos))
+
+    def _refresh_invoices_view_only(self) -> None:
+        """Uppdaterar Fakturor-vyn och statusraden utan att byta flik."""
+        host = self.window()
+        if host is self:
+            return
+        try:
+            invoices_view = getattr(host, "_invoices_view", None)
+            refresh = getattr(invoices_view, "refresh", None)
+            if callable(refresh):
+                refresh()
+            update_bar = getattr(host, "_update_att_betala_bar", None)
+            if callable(update_bar):
+                update_bar()
+        except Exception as exc:
+            log.debug("refresh invoices after single move: %s", exc)
+
+    def _mark_ready_and_move_selected(
+        self, *_args: Any, row_index: int | None = None
+    ) -> bool:
+        """Markerar ENDAST den valda fakturaraden som klar och flyttar den
+        till Fakturor-fliken (utan att röra andra rader i tabellen)."""
+        if row_index is not None and 0 <= int(row_index) < len(self._rows):
+            idx = int(row_index)
+        else:
+            idxs = self._selected_rows()
+            if not idxs:
+                self._lbl_status.setText(tr("scan.mark_ready_select_one"))
+                return False
+            cur = self._tbl.currentRow()
+            idx = cur if cur in idxs else idxs[0]
+
+        if not (0 <= idx < len(self._rows)):
+            self._lbl_status.setText(tr("scan.mark_ready_select_one"))
+            return False
+
+        row = self._rows[idx]
+        if row.get("_scan_error"):
+            QMessageBox.warning(
+                self,
+                tr("scan.file_read_error_title"),
+                tr(
+                    "scan.error_rows_unreadable",
+                    files=f"• {row.get('file', '')}",
+                ),
+            )
+            return False
+
+        if row.get("match_uncertain"):
+            if not self._ask_user_for_match(row):
+                self._refresh_table()
+                return False
+
+        self._recalc_missing(row)
+        if row.get("missing") or not self._supplier_exists(
+            row.get("supplier", "")
+        ):
+            self._tbl.selectRow(idx)
+            self._open_row_dialog()
+            return False
+
+        if row.get("ocr_warning"):
+            answer = QMessageBox.question(
+                self,
+                tr("scan.ocr_review_title"),
+                tr(
+                    "scan.ocr_review_body",
+                    files=f"• {row.get('file', '')}",
+                ),
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+
+        self._refresh_payment_details(
+            row, text=str(row.get("_text", "") or ""), source=row
+        )
+        if (
+            row.get("payment_details_warning")
+            and row.get("_payment_warning_confirmed")
+            != self._payment_warning_key(row)
+        ):
+            if not self._confirm_payment_warnings([row]):
+                return False
+
+        dup_hits = self._possible_duplicates_for_rows([idx])
+        if dup_hits:
+            comparison = self._possible_duplicate_comparison(dup_hits)
+            answer = QMessageBox.question(
+                self,
+                tr("scan.possible_dup_title"),
+                tr("scan.possible_dup_body", lines=comparison),
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self._lbl_status.setText(
+                    tr("scan.possible_dup_skipped", n=1)
+                )
+                return False
+
+        prev_in_create = bool(getattr(self, "_in_create_invoices", False))
+        self._in_create_invoices = True
+        try:
+            row["match_uncertain"] = False
+            row["status"] = "redo"
+            data = self._invoice_data_from_row(row)
+            if not self._save_invoice(data, source=row.get("file", "")):
+                return False
+
+            learned_note = ""
+            if not getattr(self, "_automatic_registering", False):
+                learned_note = self._record_confirmed_template_row(row)
+
+            self._unpark_row(row)
+            file_name = str(row.get("file", "") or "")
+            supplier_name = str(row.get("supplier", "") or "")
+            self._rows.pop(idx)
+            self._refresh_table()
+
+            reread_note = ""
+            if learned_note:
+                reread_note = self._rescan_everything_after_learning()
+
+            msg = tr(
+                "scan.mark_ready_moved",
+                file=file_name,
+                supplier=supplier_name,
+            )
+            notes = [n for n in (learned_note, reread_note) if n]
+            if notes:
+                msg += "  ·  " + "  ·  ".join(notes)
+            self._lbl_status.setText(msg)
+
+            host = self.window()
+            if host is not self and hasattr(host, "set_status"):
+                try:
+                    host.set_status(msg, 6000)
+                except Exception:
+                    pass
+            self._refresh_invoices_view_only()
+            self._maybe_load_next_scan_batch()
+            return True
+        finally:
+            self._in_create_invoices = prev_in_create
 
     def _open_original_row(self) -> None:
         """Öppnar markerad rads originalfaktura i systemets visare.
@@ -8212,21 +8433,31 @@ class ScanImportView(QWidget):
     # ══════════════════════════════════════════════════════════════════
 
     def apply_theme(self, theme: dict) -> None:
-        """Anpassar små detaljer efter aktivt tema."""
+        """Anpassar detaljer, muted-etiketter och ikoner efter aktivt tema."""
+        t = dict(theme or {})
+        self._current_theme = t
         try:
-            # Samma temadetektering som övriga vyer: temats namn
-            # ("dark"/"light") i första hand, bakgrundens luminans
-            # som reserv. (En hårdkodad lista över ljusa bakgrunder
-            # kände förr inte igen det ljusa temat #f4f1ea — då
-            # målades mörka radbakgrunder med mörk text i ljust läge
-            # och raderna gick inte att läsa omarkerade.)
             try:
                 from ui.invoices_helpers import is_dark_theme
             except ImportError:
                 from invoices_helpers import is_dark_theme  # type: ignore
-            self._dark = is_dark_theme(theme)
+            self._dark = is_dark_theme(t)
         except Exception:
             pass
+        muted = t.get("muted", "#8b949e" if self._dark else "#4b5563")
+        muted_css = f"color:{muted};background:transparent;"
+        for lbl_name in (
+            "_info_label", "_lbl_watch_info", "_lbl_files",
+            "_lbl_status", "_footer",
+        ):
+            lbl = getattr(self, lbl_name, None)
+            if lbl is not None:
+                lbl.setStyleSheet(muted_css)
+        if hasattr(self, "_lbl_log"):
+            self._lbl_log.setStyleSheet(
+                f"color:{muted};background:transparent;font-size:11px;"
+            )
+        refresh_bound_icons(t)
         # Radfärgerna (röd osäker / grön säker) följer temat —
         # rita om tabellen så färgerna byter mörkt/ljust direkt.
         try:

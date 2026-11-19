@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
     QApplication, QToolBar, QStatusBar,
     QMessageBox, QScrollArea, QFrame, QPushButton, QDialog, QTextEdit, QGroupBox,
     QTableWidget, QTableWidgetItem, QKeySequenceEdit, QComboBox,
-    QHeaderView, QAbstractItemView,
+    QHeaderView, QAbstractItemView, QSizePolicy,
 )
 from PySide6.QtGui import (
     QActionGroup,
@@ -52,7 +52,7 @@ from PySide6.QtGui import (
     QKeySequence, QShortcut,
 )
 from PySide6.QtCore import (
-    Qt, QEvent, QTimer, QPoint, Signal, QUrl, QFileSystemWatcher,
+    Qt, QEvent, QTimer, QPoint, QSize, Signal, QUrl, QFileSystemWatcher,
 )
 
 # ═════════════════════════════════════════════════════════════════════
@@ -79,20 +79,55 @@ def _ui_font_family() -> str:
         return "Segoe UI"
 
 
+def _ui_font_css_stack() -> str:
+    """Full plattformstypsnittskedja för global QSS (se ui/design.py)."""
+    try:
+        try:
+            from ui.design import ui_font_css_stack
+        except ImportError:
+            from design import ui_font_css_stack  # type: ignore[no-redef]
+        return ui_font_css_stack()
+    except Exception:
+        return '"Segoe UI","SF Pro Display","Helvetica Neue",Arial,sans-serif'
+
+
 FONT_FAMILY: str = _ui_font_family()
 
 log = logging.getLogger("MainWindow")
 
 try:
+    from ui.icons import (
+        bind_icon,
+        icon_pixmap,
+        install_clean_style,
+        qss_indicator_urls,
+        refresh_bound_icons,
+        strip_visual_prefix,
+        vector_icon,
+    )
+except ImportError:
+    from icons import (  # type: ignore[no-redef]
+        bind_icon,
+        icon_pixmap,
+        install_clean_style,
+        qss_indicator_urls,
+        refresh_bound_icons,
+        strip_visual_prefix,
+        vector_icon,
+    )
+
+try:
     from ui.typography import (
         FONT_SIZE_CHOICES,
         apply_font_size,
+        make_tabular_font,
         normalize_font_size,
     )
 except ImportError:
     from typography import (  # type: ignore[no-redef]
         FONT_SIZE_CHOICES,
         apply_font_size,
+        make_tabular_font,
         normalize_font_size,
     )
 
@@ -171,52 +206,54 @@ _ensure_paths()
 THEMES: dict[str, dict] = {
     "dark": {
         "name": "dark", "label": "🌙  Mörkt",
-        "bg": "#0c1218", "bg_secondary": "#141c26",
-        "bg_tertiary": "#1c2836",
-        "text": "#e8eef7", "text_strong": "#ffffff",
-        "accent": "#3d8bfd", "accent_hover": "#6aa6ff",
-        "button_bg": "#1c2836", "button_text": "#f4f7fb",
-        "button_hover": "#283648",
-        "tab_bg": "#141c26", "tab_selected": "#1f4f8a",
-        "tab_text": "#d9e4f0", "tab_text_selected": "#ffffff",
-        "border": "#2a3848", "header_bg": "#17304c",
-        "row_alt": "#1c3044", "row_normal": "#0c1218",
-        "card_bg": "#141c26", "status_bar": "#0c1218",
+        "bg": "#0c1218", "bg_secondary": "#131c27",
+        "bg_tertiary": "#1a2634",
+        "text": "#e2eaf4", "text_strong": "#ffffff",
+        "text_muted": "#9eb2c9", "text_disabled": "#96a8bd",
+        "accent": "#3d8bfd", "accent_hover": "#5ea0ff",
+        "button_bg": "#1a2634", "button_text": "#f4f7fb",
+        "button_hover": "#253447",
+        "tab_bg": "#131c27", "tab_selected": "#1f5aa6",
+        "tab_text": "#c9d8e8", "tab_text_selected": "#ffffff",
+        "border": "#263649", "header_bg": "#162d49",
+        "row_alt": "#162231", "row_normal": "#0f1720",
+        "card_bg": "#131c27", "status_bar": "#0f1720",
         "status_text": "#d5deea",
-        "input_bg": "#0c1218", "input_border": "#2a3848",
-        "scrollbar_bg": "#0c1218", "scrollbar_handle": "#3a4a5c",
-        "menu_bg": "#141c26", "menu_text": "#d5deea",
-        "menu_hover": "#1f4f8a",
+        "input_bg": "#0f1720", "input_border": "#304358",
+        "scrollbar_bg": "#0c1218", "scrollbar_handle": "#34465a",
+        "menu_bg": "#131c27", "menu_text": "#e2eaf4",
+        "menu_hover": "#1f5aa6",
         "tooltip_bg": "#1c2836", "tooltip_text": "#f4f7fb",
         "success": "#3ecf8e", "warning": "#e3b341",
         "error": "#f07178", "info": "#3d8bfd",
-        "gold": "#e8b030", "gold_bg": "#2a2416",
-        "toolbar_bg": "#101820", "toolbar_border": "#c9a227",
+        "gold": "#e8b030", "gold_bg": "#282214",
+        "toolbar_bg": "#101822", "toolbar_border": "#c9a227",
         "tray_icon_color": "#e8b030",
     },
     "light": {
         "name": "light", "label": "☀️  Ljust",
-        "bg": "#f4f1ea", "bg_secondary": "#fffcf7",
-        "bg_tertiary": "#e8e2d6",
+        "bg": "#f4f1ea", "bg_secondary": "#ffffff",
+        "bg_tertiary": "#ebe4d8",
         "text": "#252d38", "text_strong": "#0d1218",
+        "text_muted": "#4f5b69", "text_disabled": "#66707d",
         "accent": "#0b5cab", "accent_hover": "#084a8a",
-        "button_bg": "#fffcf7", "button_text": "#1c2128",
-        "button_hover": "#efe8dc",
+        "button_bg": "#ffffff", "button_text": "#1c2128",
+        "button_hover": "#eef3f9",
         "tab_bg": "#e8e2d6", "tab_selected": "#0b5cab",
-        "tab_text": "#39424e", "tab_text_selected": "#ffffff",
-        "border": "#ddd4c6", "header_bg": "#1c3f6e",
-        "row_alt": "#d5e4f5", "row_normal": "#fffcf7",
-        "card_bg": "#fffcf7", "status_bar": "#fffcf7",
+        "tab_text": "#35404d", "tab_text_selected": "#ffffff",
+        "border": "#d6cec0", "header_bg": "#16335b",
+        "row_alt": "#eef4fb", "row_normal": "#ffffff",
+        "card_bg": "#ffffff", "status_bar": "#ffffff",
         "status_text": "#1c2128",
-        "input_bg": "#fffcf7", "input_border": "#ddd4c6",
-        "scrollbar_bg": "#f4f1ea", "scrollbar_handle": "#cfc6b6",
-        "menu_bg": "#fffcf7", "menu_text": "#1c2128",
+        "input_bg": "#ffffff", "input_border": "#c9c0b0",
+        "scrollbar_bg": "#f4f1ea", "scrollbar_handle": "#c7beae",
+        "menu_bg": "#ffffff", "menu_text": "#1c2128",
         "menu_hover": "#0b5cab",
         "tooltip_bg": "#1c2128", "tooltip_text": "#ffffff",
         "success": "#1a7f37", "warning": "#9a6700",
         "error": "#cf222e", "info": "#0b5cab",
-        "gold": "#8a5a12", "gold_bg": "#f8efd4",
-        "toolbar_bg": "#fffcf7", "toolbar_border": "#c4a15a",
+        "gold": "#9a6310", "gold_bg": "#fdf6e4",
+        "toolbar_bg": "#ffffff", "toolbar_border": "#c4a15a",
         "tray_icon_color": "#0b5cab",
     },
 }
@@ -322,15 +359,30 @@ def build_stylesheet(t: dict) -> str:
         return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
     is_dark = _lum(t.get("bg", "#0c1218")) < 0.5
-    grid = "#8ea4ba" if is_dark else "#8a7d6c"
+    grid = "#243447" if is_dark else "#e2dbd0"
+    font_css = _ui_font_css_stack()
+    urls = qss_indicator_urls(t.get("text_strong", "#1c2128"), "#ffffff")
+    down_arrow_css = (
+        f'image: url("{urls["chevron_down"]}"); width: 12px; height: 12px;'
+        if urls.get("chevron_down")
+        else f"width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 6px solid {t['text_strong']};"
+    )
+    right_arrow_css = (
+        f'QMenu::right-arrow {{ image: url("{urls["chevron_right"]}"); width: 10px; height: 10px; margin-right: 6px; }}'
+        if urls.get("chevron_right") else ""
+    )
+    check_img_css = (
+        f'image: url("{urls["check"]}");'
+        if urls.get("check") else ""
+    )
+    muted_fg = t.get("text_muted", t["text"])
 
     return f"""
 /* Fakturabunten – Global QSS
    © {COPYRIGHT_YEAR} Rickard Längkvist */
 
 * {{
-    font-family : "Segoe UI","SF Pro Display","Helvetica Neue",
-                  Arial,sans-serif;
+    font-family : {font_css};
     font-size   : 14px;
     outline     : none;
 }}
@@ -348,21 +400,26 @@ QWidget {{
 QLabel {{
     color       : {t["text_strong"]};
     font-weight : 600;
+    background  : transparent;
+}}
+QLabel[muted="true"] {{
+    color       : {muted_fg};
+    font-weight : 500;
 }}
 
 /* ── Scrollbars ─────────────────────────────────────────────── */
 
 QScrollBar:vertical {{
     background    : {t["scrollbar_bg"]};
-    width         : 12px;
-    border-radius : 6px;
+    width         : 10px;
+    border-radius : 5px;
     margin        : 0;
     border        : none;
 }}
 QScrollBar::handle:vertical {{
     background    : {t["scrollbar_handle"]};
     min-height    : 30px;
-    border-radius : 6px;
+    border-radius : 5px;
 }}
 QScrollBar::handle:vertical:hover {{ background: {t["accent"]}; }}
 QScrollBar::add-line:vertical,
@@ -372,15 +429,15 @@ QScrollBar::sub-page:vertical {{ background: none; }}
 
 QScrollBar:horizontal {{
     background    : {t["scrollbar_bg"]};
-    height        : 12px;
-    border-radius : 6px;
+    height        : 10px;
+    border-radius : 5px;
     margin        : 0;
     border        : none;
 }}
 QScrollBar::handle:horizontal {{
     background    : {t["scrollbar_handle"]};
     min-width     : 30px;
-    border-radius : 6px;
+    border-radius : 5px;
 }}
 QScrollBar::handle:horizontal:hover {{ background: {t["accent"]}; }}
 QScrollBar::add-line:horizontal,
@@ -388,22 +445,14 @@ QScrollBar::sub-line:horizontal {{ width: 0; background: none; }}
 QScrollBar::add-page:horizontal,
 QScrollBar::sub-page:horizontal {{ background: none; }}
 
-/* ── Labels ─────────────────────────────────────────────────── */
-
-QLabel {{
-    color       : {t["text_strong"]};
-    font-weight : 700;
-    background  : transparent;
-}}
-
 /* ── Buttons ────────────────────────────────────────────────── */
 
 QPushButton {{
     background-color : {t["button_bg"]};
     color            : {t["button_text"]};
-    font-weight      : 700;
-    font-size        : 14px;
-    padding          : 9px 18px;
+    font-weight      : 600;
+    font-size        : 13px;
+    padding          : 7px 14px;
     border-radius    : 8px;
     border           : 1px solid {t["border"]};
     min-height       : 34px;
@@ -418,40 +467,47 @@ QPushButton:pressed {{
     color            : #ffffff;
 }}
 QPushButton:disabled {{
-    background-color : {t["border"]};
-    color            : #666666;
+    background-color : {t["bg_tertiary"]};
+    color            : {t.get("text_disabled", muted_fg)};
     border-color     : {t["border"]};
 }}
 QPushButton[accent="true"] {{
     background-color : {t["accent"]};
     color            : #ffffff;
     border-color     : {t["accent"]};
+    font-weight      : 700;
 }}
 QPushButton[accent="true"]:hover {{
     background-color : {t["accent_hover"]};
 }}
-QPushButton#DonateButton {{
+QPushButton#DonateButton,
+QToolButton#DonateButton {{
     background-color : {t.get("gold", "#e8b030")};
-    color            : #231a00;
+    color            : {"#1c1400" if is_dark else "#ffffff"};
     border-color     : {t.get("gold", "#e8b030")};
-    font-weight      : 800;
+    font-weight      : 700;
+    border-radius    : 6px;
+    padding          : 4px 8px;
+    min-height       : 28px;
 }}
-QPushButton#DonateButton:hover {{
+QPushButton#DonateButton:hover,
+QToolButton#DonateButton:hover {{
     background-color : {t.get("gold_bg", "#f5d67a")};
+    color            : {t["text_strong"]};
     border-color     : {t.get("gold", "#e8b030")};
 }}
 QPushButton#DonateButtonAlt {{
     background-color : {t.get("gold_bg", "#2a2416")};
     color            : {t.get("gold", "#e8b030")};
     border-color     : {t.get("gold", "#e8b030")};
-    font-weight      : 800;
+    font-weight      : 700;
 }}
 QLabel#CountChip {{
     background-color : {t["tab_selected"]};
     color            : #ffffff;
     border-radius    : 11px;
     padding          : 3px 12px;
-    font-weight      : 800;
+    font-weight      : 700;
 }}
 QFrame#DonateCard {{
     background-color : {t.get("gold_bg", t["card_bg"])};
@@ -468,16 +524,27 @@ QPushButton[danger="true"] {{
     background-color : {t["error"]};
     color            : #ffffff;
     border-color     : {t["error"]};
+    font-weight      : 700;
 }}
 QPushButton[success="true"] {{
     background-color : {t["success"]};
     color            : #ffffff;
     border-color     : {t["success"]};
+    font-weight      : 700;
 }}
 QPushButton[info="true"] {{
     background-color : {t["info"]};
     color            : #ffffff;
     border-color     : {t["info"]};
+    font-weight      : 700;
+}}
+QPushButton[accent="true"]:disabled,
+QPushButton[success="true"]:disabled,
+QPushButton[danger="true"]:disabled,
+QPushButton[info="true"]:disabled {{
+    background-color : {t["bg_tertiary"]};
+    color            : {t.get("text_disabled", muted_fg)};
+    border-color     : {t["border"]};
 }}
 
 /* ── Tabs ───────────────────────────────────────────────────── */
@@ -485,18 +552,18 @@ QPushButton[info="true"] {{
 QTabWidget::pane {{
     border        : 1px solid {t["border"]};
     background    : {t["bg_secondary"]};
-    border-radius : 0 8px 8px 8px;
+    border-radius : 0 10px 10px 10px;
     top           : -1px;
 }}
 QTabBar {{ background: transparent; border: none; }}
 QTabBar::tab {{
     background    : {t["tab_bg"]};
     color         : {t["tab_text"]};
-    font-weight   : 800;
+    font-weight   : 600;
     font-size     : 15px;
-    padding       : 12px 22px;
-    margin-right  : 3px;
-    border-radius : 10px 10px 0 0;
+    padding       : 8px 6px;
+    margin-right  : 2px;
+    border-radius : 9px 9px 0 0;
     border        : 1px solid {t["border"]};
     border-bottom : none;
     min-width     : 0px;
@@ -505,25 +572,25 @@ QTabBar::tab:selected {{
     background   : {t["tab_selected"]};
     color        : {t["tab_text_selected"]};
     border-color : {t["tab_selected"]};
-    font-weight  : 800;
+    font-weight  : 700;
 }}
 QTabBar::tab:hover:!selected {{
     background   : {t["button_hover"]};
     color        : {t["text_strong"]};
     border-color : {t["accent"]};
 }}
-QTabBar::scroller {{ width: 28px; }}
+QTabBar::scroller {{ width: 26px; }}
 
 /* ── Tables ─────────────────────────────────────────────────── */
 
 QTableWidget, QTableView, QTreeView, QListView {{
     background-color           : {t["row_normal"]};
     color                      : {t["text_strong"]};
-    font-weight                : 700;
-    font-size                  : 14px;
+    font-weight                : 500;
+    font-size                  : 13px;
     gridline-color             : {grid};
     border                     : 1px solid {t["border"]};
-    border-radius              : 6px;
+    border-radius              : 8px;
     selection-background-color : {t["accent"]};
     selection-color            : #ffffff;
     alternate-background-color : {t["row_alt"]};
@@ -532,15 +599,15 @@ QTableWidget, QTableView, QTreeView, QListView {{
 QHeaderView::section {{
     background-color : {t["header_bg"]};
     color            : #ffffff;
-    font-weight      : 800;
-    font-size        : 13px;
-    padding          : 10px 10px;
+    font-weight      : 700;
+    font-size        : 12px;
+    padding          : 8px 10px;
     border           : none;
     border-right     : 1px solid {t["border"]};
     border-bottom    : 1px solid {t["border"]};
 }}
 QTableWidget::item, QTableView::item {{
-    padding : 8px 8px;
+    padding : 7px 8px;
     color   : {t["text_strong"]};
 }}
 QTableWidget::item:selected, QTableView::item:selected {{
@@ -554,11 +621,11 @@ QLineEdit, QTextEdit, QPlainTextEdit,
 QSpinBox, QDoubleSpinBox, QDateEdit {{
     background-color : {t["input_bg"]};
     color            : {t["text_strong"]};
-    font-weight      : 600;
+    font-weight      : 500;
     font-size        : 13px;
     border           : 1.5px solid {t["input_border"]};
-    border-radius    : 6px;
-    padding          : 6px 10px;
+    border-radius    : 7px;
+    padding          : 5px 10px;
     min-height       : 32px;
 }}
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus,
@@ -570,12 +637,12 @@ QDateEdit:focus {{ border-color: {t["accent"]}; }}
 QComboBox {{
     background-color : {t["input_bg"]};
     color            : {t["text_strong"]};
-    font-weight      : 700;
+    font-weight      : 600;
     font-size        : 13px;
-    border           : 1px solid {t["input_border"]};
-    border-radius    : 6px;
+    border           : 1.5px solid {t["input_border"]};
+    border-radius    : 7px;
     padding          : 4px 28px 4px 10px;
-    min-height       : 30px;
+    min-height       : 32px;
 }}
 QComboBox:focus, QComboBox:on {{
     border-color : {t["accent"]};
@@ -589,17 +656,13 @@ QComboBox::drop-down {{
     background          : transparent;
 }}
 QComboBox::down-arrow {{
-    width         : 0;
-    height        : 0;
-    border-left   : 5px solid transparent;
-    border-right  : 5px solid transparent;
-    border-top    : 6px solid {t["text_strong"]};
+    {down_arrow_css}
     margin-right  : 8px;
 }}
 QComboBox QAbstractItemView {{
     background-color           : {t["menu_bg"]};
     color                      : {t["text_strong"]};
-    font-weight                : 700;
+    font-weight                : 600;
     font-size                  : 13px;
     selection-background-color : {t["accent"]};
     selection-color            : #ffffff;
@@ -623,31 +686,31 @@ QComboBox QAbstractItemView::item:selected {{
 QMenuBar {{
     background-color : {t["bg_secondary"]};
     color            : {t["text_strong"]};
-    font-weight      : 700;
-    padding          : 2px 4px;
+    font-weight      : 600;
+    padding          : 2px 6px;
     border-bottom    : 1px solid {t["border"]};
 }}
 QMenuBar::item {{
     background    : transparent;
-    padding       : 6px 14px;
-    border-radius : 4px;
+    padding       : 6px 12px;
+    border-radius : 5px;
     color         : {t["text_strong"]};
-    font-weight   : 700;
+    font-weight   : 600;
 }}
 QMenuBar::item:selected {{ background: {t["accent"]}; color: #ffffff; }}
 
 QMenu {{
     background-color : {t["menu_bg"]};
     color            : {t["menu_text"]};
-    font-weight      : 600;
-    font-size        : 14px;
+    font-weight      : 500;
+    font-size        : 13px;
     border           : 1px solid {t["border"]};
     border-radius    : 8px;
     padding          : 4px;
 }}
 QMenu::item {{
-    padding       : 6px 22px 6px 12px;
-    border-radius : 4px;
+    padding       : 6px 24px 6px 12px;
+    border-radius : 5px;
     margin        : 1px 2px;
     color         : {t["menu_text"]};
 }}
@@ -655,20 +718,23 @@ QMenu::item:selected {{
     background-color : {t["menu_hover"]};
     color            : #ffffff;
 }}
+{right_arrow_css}
 QMenu::separator {{
     height     : 1px;
     background : {t["border"]};
     margin     : 4px 8px;
 }}
-QMenu::indicator {{ width: 16px; height: 16px; }}
+QMenu::indicator {{ width: 16px; height: 16px; margin-left: 6px; }}
 QMenu::indicator:checked {{
     background    : {t["accent"]};
-    border-radius : 3px;
+    border        : 1px solid {t["accent"]};
+    border-radius : 4px;
+    {check_img_css}
 }}
 QMenu::indicator:unchecked {{
     background    : {t["input_bg"]};
-    border        : 2px solid {t["border"]};
-    border-radius : 3px;
+    border        : 1.5px solid {t["border"]};
+    border-radius : 4px;
 }}
 
 /* ── Toolbar ────────────────────────────────────────────────── */
@@ -676,18 +742,30 @@ QMenu::indicator:unchecked {{
 QToolBar {{
     background-color : {t["toolbar_bg"]};
     border-bottom    : 1px solid {t["border"]};
-    spacing          : 4px;
-    padding          : 4px 8px;
+    spacing          : 1px;
+    padding          : 3px 4px;
 }}
 QToolBar QToolButton {{
     background-color : transparent;
     color            : {t["button_text"]};
-    font-weight      : 700;
+    font-weight      : 600;
     font-size        : 12px;
     border-radius    : 6px;
-    padding          : 4px 10px;
+    padding          : 4px 5px;
     border           : 1px solid transparent;
     min-height       : 28px;
+}}
+QToolBar QToolButton#DonateButton {{
+    background-color : {t.get("gold", "#e8b030")};
+    color            : {"#1c1400" if is_dark else "#ffffff"};
+    border-color     : {t.get("gold", "#e8b030")};
+    font-weight      : 700;
+    padding          : 4px 8px;
+}}
+QToolBar QToolButton#DonateButton:hover {{
+    background-color : {t.get("gold_bg", "#f5d67a")};
+    color            : {t["text_strong"]};
+    border-color     : {t.get("gold", "#e8b030")};
 }}
 QToolBar QToolButton:hover {{
     background-color : {t["button_hover"]};
@@ -701,7 +779,7 @@ QToolBar QToolButton:pressed {{
 QToolBar::separator {{
     background : {t["border"]};
     width      : 1px;
-    margin     : 4px 8px;
+    margin     : 4px 1px;
 }}
 
 /* ── Status bar ─────────────────────────────────────────────── */
@@ -709,9 +787,10 @@ QToolBar::separator {{
 QStatusBar {{
     background-color : {t["status_bar"]};
     color            : {t.get("status_text", t["text_strong"])};
-    font-weight      : 700;
-    font-size        : 13px;
+    font-weight      : 600;
+    font-size        : 12px;
     border-top       : 1px solid {t["border"]};
+    padding          : 2px 6px;
 }}
 QStatusBar::item {{ border: none; }}
 
@@ -719,11 +798,11 @@ QStatusBar::item {{ border: none; }}
 
 QGroupBox {{
     border        : 1px solid {t["border"]};
-    border-radius : 8px;
+    border-radius : 10px;
     margin-top    : 14px;
     font-weight   : 700;
     color         : {t["text_strong"]};
-    padding       : 8px 8px 6px 8px;
+    padding       : 12px 10px 8px 10px;
     background    : {t["bg_secondary"]};
 }}
 QGroupBox::title {{
@@ -746,13 +825,14 @@ QCheckBox, QRadioButton {{
 QCheckBox::indicator, QRadioButton::indicator {{
     width         : 18px;
     height        : 18px;
-    border        : 2px solid {t["border"]};
-    border-radius : 4px;
+    border        : 1.5px solid {t["input_border"]};
+    border-radius : 5px;
     background    : {t["input_bg"]};
 }}
 QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
     background   : {t["accent"]};
     border-color : {t["accent"]};
+    {check_img_css}
 }}
 QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
     border-color : {t["accent"]};
@@ -1047,28 +1127,43 @@ def _wrap_scroll(widget: QWidget) -> QScrollArea:
     return sa
 
 
-def _placeholder(icon: str, title: str, subtitle: str = "") -> QWidget:
+def _placeholder(
+    icon: str, title: str, subtitle: str = "", icon_name: str = ""
+) -> QWidget:
     """Placeholder-innehåll för flikar som inte byggts ännu."""
     w = QWidget()
     v = QVBoxLayout(w)
     v.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    v.setSpacing(16)
+    v.setSpacing(14)
     v.addStretch()
-    for text, size, bold, color in [
-        (icon,     54, False, ""),
-        (title,    22, True,  ""),
-        (subtitle, 12, False, "#888888"),
-    ]:
-        if not text:
-            continue
-        lbl = QLabel(text)
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl.setFont(_font(size, bold=bold))
-        ss = "background:transparent;"
-        if color:
-            ss += f" color:{color};"
-        lbl.setStyleSheet(ss)
-        v.addWidget(lbl)
+
+    ico_lbl = QLabel()
+    ico_lbl.setObjectName("PlaceholderIcon")
+    ico_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    ico_lbl.setStyleSheet("background:transparent;")
+    if icon_name:
+        ico_lbl._icon_name = icon_name  # type: ignore[attr-defined]
+        ico_lbl.setPixmap(icon_pixmap(icon_name, "#3d8bfd", 64))
+    else:
+        ico_lbl.setText(icon)
+        ico_lbl.setFont(_font(54))
+    v.addWidget(ico_lbl)
+
+    if title:
+        lbl_title = QLabel(title)
+        lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_title.setFont(_font(22, bold=True))
+        lbl_title.setStyleSheet("background:transparent;")
+        v.addWidget(lbl_title)
+
+    if subtitle:
+        lbl_sub = QLabel(subtitle)
+        lbl_sub.setProperty("muted", True)
+        lbl_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_sub.setFont(_font(12, bold=False))
+        lbl_sub.setStyleSheet("background:transparent;")
+        v.addWidget(lbl_sub)
+
     v.addStretch()
     return w
 
@@ -1314,6 +1409,18 @@ class MainWindow(QMainWindow):
          "⚙️", "Program- och företagsinställningar"),
     ]
 
+    _TAB_ICON_NAMES: dict[str, str] = {
+        "dashboard":    "dashboard",
+        "invoices":     "invoices",
+        "history":      "history",
+        "suppliers":    "suppliers",
+        "payments":     "payments",
+        "import_tab":   "import",
+        "reports":      "reports",
+        "log_tab":      "log",
+        "settings_tab": "settings",
+    }
+
     def __init__(self, app: Any) -> None:
         super().__init__()
         self._app = app
@@ -1339,6 +1446,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        app_qt = QApplication.instance()
+        if app_qt is not None:
+            install_clean_style(app_qt)
+
         self.setWindowTitle(APP_NAME)
         try:
             available = QApplication.primaryScreen().availableGeometry()
@@ -1353,7 +1464,6 @@ class MainWindow(QMainWindow):
         self._custom_icon = _load_app_icon()
         if self._custom_icon is not None:
             self.setWindowIcon(self._custom_icon)
-            app_qt = QApplication.instance()
             if app_qt is not None:
                 app_qt.setWindowIcon(self._custom_icon)
 
@@ -1373,14 +1483,12 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.setMovable(True)
         self.tabs.setUsesScrollButtons(True)
+        self.tabs.setIconSize(QSize(16, 16))
         tab_bar = self.tabs.tabBar()
         tab_bar.setUsesScrollButtons(True)
         tab_bar.setExpanding(False)
-        tab_bar.setElideMode(Qt.TextElideMode.ElideRight)
-        tab_bar.setStyleSheet(
-            "QTabBar::tab { padding: 8px 12px; font-size: 13px; }"
-            "QTabBar::scroller { width: 22px; }"
-        )
+        tab_bar.setElideMode(Qt.TextElideMode.ElideNone)
+        self.tabs.currentChanged.connect(self._on_current_tab_changed)
         self.tabs.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu
         )
@@ -1742,11 +1850,13 @@ class MainWindow(QMainWindow):
         a_sup = QAction(tr("menu.new_supplier"), self)
         a_sup.setShortcut(self._shortcut_seq("ny_leverantor", "Ctrl+L"))
         a_sup.triggered.connect(self._quick_new_supplier)
+        bind_icon(a_sup, "add", size=15)
         m_file.addAction(a_sup)
 
         a_inv = QAction(tr("menu.new_invoice"), self)
         a_inv.setShortcut(self._shortcut_seq("ny_faktura", "Ctrl+N"))
         a_inv.triggered.connect(self._quick_new_invoice)
+        bind_icon(a_inv, "invoices", size=15)
         m_file.addAction(a_inv)
 
         m_file.addSeparator()
@@ -1754,25 +1864,30 @@ class MainWindow(QMainWindow):
         a_backup = QAction(tr("menu.backup_now"), self)
         a_backup.setShortcut(self._shortcut_seq("skapa_backup", "Ctrl+B"))
         a_backup.triggered.connect(self._manual_backup)
+        bind_icon(a_backup, "backup", size=15)
         m_file.addAction(a_backup)
 
         a_exports = QAction(tr("menu.open_exports"), self)
         a_exports.triggered.connect(self._open_export_folder)
+        bind_icon(a_exports, "folder", size=15)
         m_file.addAction(a_exports)
 
         a_log = QAction(tr("menu.open_log"), self)
         a_log.triggered.connect(self._open_log_file)
+        bind_icon(a_log, "log", size=15)
         m_file.addAction(a_log)
 
         m_file.addSeparator()
 
         a_hide = QAction(tr("menu.minimize_tray"), self)
         a_hide.triggered.connect(self.hide)
+        bind_icon(a_hide, "minimize", size=15)
         m_file.addAction(a_hide)
 
         a_quit = QAction(tr("menu.quit"), self)
         a_quit.setShortcut(self._shortcut_seq("avsluta", "Ctrl+Q"))
         a_quit.triggered.connect(self._force_exit)
+        bind_icon(a_quit, "quit", size=15)
         m_file.addAction(a_quit)
 
         # ── Visa ──────────────────────────────────────────────────────
@@ -1788,6 +1903,7 @@ class MainWindow(QMainWindow):
             ("system", "menu.theme_system"),
         ]:
             act = QAction(tr(label_key), self)
+            bind_icon(act, key, size=15)
             act.triggered.connect(
                 lambda checked=False, k=key: self._apply_theme(k)
             )
@@ -1920,6 +2036,7 @@ class MainWindow(QMainWindow):
             "1 dygn. Färska filer från idag rörs aldrig. Samma\n"
             "rensning körs dessutom automatiskt 1 gång per dygn."
         )
+        bind_icon(self._act_clean_cache_old, "clean", size=15)
         self._act_clean_cache_old.triggered.connect(
             lambda: self._clean_cache_now("old")
         )
@@ -1932,6 +2049,7 @@ class MainWindow(QMainWindow):
             "Rensar ALL cache nu (__pycache__, *.pyc, *.tmp).\n"
             "Data, inställningar, loggar och backuper röras aldrig."
         )
+        bind_icon(self._act_clean_cache_all, "clean", size=15)
         self._act_clean_cache_all.triggered.connect(
             lambda: self._clean_cache_now("all")
         )
@@ -1942,21 +2060,18 @@ class MainWindow(QMainWindow):
         self._help_menu = m_help
         self._donate_menu = None
         a_about = QAction(tr("menu.about"), self)
-        if self._custom_icon is not None:
-            a_about.setIcon(self._custom_icon)
+        bind_icon(a_about, "info", size=15)
         a_about.triggered.connect(self._show_about)
         m_help.addAction(a_about)
 
         a_update = QAction(tr("menu.update"), self)
-        if self._custom_icon is not None:
-            a_update.setIcon(self._custom_icon)
+        bind_icon(a_update, "update", size=15)
         a_update.triggered.connect(self._check_updates)
         m_help.addAction(a_update)
 
         a_donate = QAction(tr("menu.donate"), self)
         a_donate.setToolTip(tr("toolbar.donate_tip"))
-        if self._custom_icon is not None:
-            a_donate.setIcon(self._custom_icon)
+        bind_icon(a_donate, "donate", role="gold", size=15)
         a_donate.triggered.connect(lambda: open_donate_dialog(self))
         m_help.addAction(a_donate)
         self._help_donate_action = a_donate
@@ -1967,6 +2082,7 @@ class MainWindow(QMainWindow):
             "inställningar och senaste loggraderna till urklipp.\n"
             "Klistra in texten i en felrapport eller AI-chatt."
         )
+        bind_icon(a_diag, "diagnostics", size=15)
         a_diag.triggered.connect(self._copy_diagnostics)
         m_help.addAction(a_diag)
 
@@ -1986,6 +2102,7 @@ class MainWindow(QMainWindow):
 
         self._view_menu.addSeparator()
         a_all = QAction(tr("menu.show_all_tabs"), self)
+        bind_icon(a_all, "eye", size=15)
         a_all.triggered.connect(self._show_all_tabs)
         self._view_menu.addAction(a_all)
 
@@ -1998,56 +2115,74 @@ class MainWindow(QMainWindow):
         self._toolbar = tb
         tb.setObjectName("main_toolbar")
         tb.setMovable(False)
+        tb.setIconSize(QSize(15, 15))
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.addToolBar(tb)
 
         if self._custom_icon is not None:
             logo = QLabel()
-            logo.setPixmap(self._custom_icon.pixmap(28, 28))
-            logo.setStyleSheet("background:transparent; padding:0 4px 0 8px;")
+            logo.setPixmap(self._custom_icon.pixmap(22, 22))
+            logo.setStyleSheet("background:transparent; padding:0 3px 0 4px;")
             logo.setToolTip(APP_NAME)
             tb.addWidget(logo)
             brand = QLabel(APP_NAME)
             brand.setStyleSheet(
-                "background:transparent; font-weight:800; padding-right:10px;"
+                "background:transparent; font-weight:800; padding-right:4px;"
             )
             tb.addWidget(brand)
             tb.addSeparator()
 
-        def _add(label: str, tip: str, slot) -> None:
-            act = QAction(label, self)
+        def _add(label: str, tip: str, slot, icon_name: str = "") -> None:
+            act = QAction(strip_visual_prefix(label), self)
             act.setToolTip(tip)
             act.triggered.connect(slot)
+            if icon_name:
+                bind_icon(act, icon_name, size=15)
             tb.addAction(act)
 
         _add(tr("toolbar.new_supplier"),
              "Registrera ny leverantör (Ctrl+L)",
-             self._quick_new_supplier)
+             self._quick_new_supplier, "suppliers")
         _add(tr("toolbar.new_invoice"),
              "Registrera ny faktura (Ctrl+N)",
-             self._quick_new_invoice)
+             self._quick_new_invoice, "invoices")
         tb.addSeparator()
-        _add(tr("toolbar.refresh"), "Uppdatera alla vyer", self._refresh_all)
+        _add(tr("toolbar.refresh"), "Uppdatera alla vyer",
+             self._refresh_all, "refresh")
         tb.addSeparator()
-        _add(tr("toolbar.backup"), "Skapa backup (Ctrl+B)", self._manual_backup)
+        _add(tr("toolbar.backup"), "Skapa backup (Ctrl+B)",
+             self._manual_backup, "backup")
         _add(tr("toolbar.exports"), "Öppna exportmappen",
-             self._open_export_folder)
+             self._open_export_folder, "folder")
         tb.addSeparator()
         _add(tr("toolbar.dark"), "Aktivera mörkt tema",
-             lambda: self._apply_theme("dark"))
+             lambda: self._apply_theme("dark"), "dark")
         _add(tr("toolbar.light"), "Aktivera ljust tema",
-             lambda: self._apply_theme("light"))
+             lambda: self._apply_theme("light"), "light")
         tb.addSeparator()
         # 💖 Donation — alltid synlig guldknapp (frivillig, tyst).
-        btn_donate = QPushButton(tr("menu.donate").replace("…", "").strip(), tb)
-        btn_donate.setObjectName("DonateButton")
-        btn_donate.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn_donate.setToolTip(tr("toolbar.donate_tip"))
-        btn_donate.clicked.connect(lambda: open_donate_dialog(self))
-        tb.addWidget(btn_donate)
+        # Använder QAction + widgetForAction() så QToolBarLayout flyttar den
+        # rent till »-menyn i smala fönster i stället för att kapa texten.
+        donate_lbl = strip_visual_prefix(
+            tr("menu.donate").replace("…", "").strip()
+        )
+        act_donate = QAction(donate_lbl, self)
+        act_donate.setToolTip(tr("toolbar.donate_tip"))
+        bind_icon(act_donate, "donate", role="on_gold", size=14)
+        act_donate.triggered.connect(lambda: open_donate_dialog(self))
+        tb.addAction(act_donate)
+        btn_donate = tb.widgetForAction(act_donate)
+        if btn_donate is not None:
+            btn_donate.setObjectName("DonateButton")
+            btn_donate.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn_donate.setToolButtonStyle(
+                Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+            )
         tb.addSeparator()
-        _add(tr("toolbar.minimize"), "Minimera till systemfältet", self.hide)
-        _add(tr("toolbar.quit"), "Avsluta helt (Ctrl+Q)", self._force_exit)
+        _add(tr("toolbar.minimize"), "Minimera till systemfältet",
+             self.hide, "minimize")
+        _add(tr("toolbar.quit"), "Avsluta helt (Ctrl+Q)",
+             self._force_exit, "quit")
 
     # ══════════════════════════════════════════════════════════════════
     #  STATUSFÄLT
@@ -2056,18 +2191,28 @@ class MainWindow(QMainWindow):
     def _build_status_bar(self) -> None:
         sb = QStatusBar(self)
         self.setStatusBar(sb)
+        info_wrap = QWidget(sb)
+        info_wrap.setStyleSheet("background:transparent;")
+        info_lay = QHBoxLayout(info_wrap)
+        info_lay.setContentsMargins(6, 0, 6, 0)
+        info_lay.setSpacing(6)
         if self._custom_icon is not None:
-            mark = QLabel()
-            mark.setPixmap(self._custom_icon.pixmap(16, 16))
-            mark.setStyleSheet("background:transparent; padding-left:6px;")
-            sb.addWidget(mark)
+            mark = QLabel(info_wrap)
+            mark.setPixmap(self._custom_icon.pixmap(15, 15))
+            mark.setStyleSheet("background:transparent;")
+            info_lay.addWidget(mark)
         lbl = QLabel(
-            f"  {APP_NAME}  v{APP_VERSION}  ·  "
-            f"© {COPYRIGHT_YEAR} Rickard Längkvist  ·  "
-            f"{CURRENT_PLATFORM}  "
+            f"{APP_NAME} v{APP_VERSION} · "
+            f"© {COPYRIGHT_YEAR} Rickard Längkvist · "
+            f"{CURRENT_PLATFORM}",
+            info_wrap,
         )
-        lbl.setFont(_font(10, bold=True))
-        sb.addPermanentWidget(lbl)
+        lbl.setFont(_font(10, bold=False))
+        lbl.setProperty("muted", True)
+        lbl.setStyleSheet("background:transparent;")
+        info_lay.addWidget(lbl)
+        sb.addPermanentWidget(info_wrap)
+
         self._btn_status_donate = QPushButton(tr("status.donate"), sb)
         self._btn_status_donate.setObjectName("DonateButton")
         self._btn_status_donate.setCursor(
@@ -2075,6 +2220,7 @@ class MainWindow(QMainWindow):
         )
         self._btn_status_donate.setToolTip(tr("toolbar.donate_tip"))
         self._btn_status_donate.setMinimumHeight(24)
+        bind_icon(self._btn_status_donate, "donate", role="on_gold", size=13)
         self._btn_status_donate.clicked.connect(
             lambda: open_donate_dialog(self)
         )
@@ -2085,13 +2231,13 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════════════
 
     def _tab_title(self, key: str) -> str:
-        """Fliktitel på aktuellt språk (med _TAB_DEFS som fallback)."""
+        """Fliktitel på aktuellt språk (utan emoji-prefix; ikonen sköter grafiken)."""
         text = tr(f"tab.{key}")
         if text != f"tab.{key}":
-            return text
+            return strip_visual_prefix(text)
         for k, _plain, title, _icon, _sub in self._TAB_DEFS:
             if k == key:
-                return title
+                return strip_visual_prefix(title)
         return key
 
     def _tab_subtitle(self, key: str) -> str:
@@ -2107,8 +2253,34 @@ class MainWindow(QMainWindow):
         icon = next(
             (d[3] for d in self._TAB_DEFS if d[0] == key), "📄"
         )
-        return _placeholder(icon, self._tab_title(key).strip(),
-                            self._tab_subtitle(key))
+        icon_name = self._TAB_ICON_NAMES.get(key, "")
+        return _placeholder(
+            icon, self._tab_title(key).strip(),
+            self._tab_subtitle(key), icon_name=icon_name,
+        )
+
+    def _tab_key_at(self, index: int) -> str:
+        w = self.tabs.widget(index)
+        for key, (scroll, _inner) in self._tab_map.items():
+            if scroll is w:
+                return key
+        return ""
+
+    def _refresh_tab_icons(self, theme: dict | None = None) -> None:
+        t = theme or self.current_theme_dict()
+        sel_col = str(t.get("tab_text_selected", "#ffffff"))
+        unsel_col = str(t.get("tab_text", t.get("text", "#c9d8e8")))
+        cur = self.tabs.currentIndex()
+        for idx in range(self.tabs.count()):
+            key = self._tab_key_at(idx)
+            icon_name = self._TAB_ICON_NAMES.get(key)
+            if not icon_name:
+                continue
+            col = sel_col if idx == cur else unsel_col
+            self.tabs.setTabIcon(idx, vector_icon(icon_name, color=col, size=15))
+
+    def _on_current_tab_changed(self, _index: int) -> None:
+        self._refresh_tab_icons()
 
     def _build_tabs(self) -> None:
         """Skapar alla flikar med placeholders (vyer monteras senare)."""
@@ -2124,6 +2296,7 @@ class MainWindow(QMainWindow):
                 title = self._tab_title(key)
                 index = self.tabs.addTab(scroll, title)
                 self.tabs.setTabToolTip(index, title)
+        self._refresh_tab_icons()
 
     def _tab_index(self, key: str) -> int:
         """Aktuell tab-index för en fliknyckel (-1 om dold/saknas)."""
@@ -2161,6 +2334,7 @@ class MainWindow(QMainWindow):
 
         self._settings.set("hidden_tabs", list(self._hidden.keys()))
         self._rebuild_view_menu()
+        self._refresh_tab_icons()
 
     def _show_all_tabs(self) -> None:
         for key, _plain, _title, _icon, _sub in self._TAB_DEFS:
@@ -2237,14 +2411,18 @@ class MainWindow(QMainWindow):
         if key:
             self._tab_map[key] = (scroll, widget)
         self.tabs.addTab(scroll, title)
+        self._refresh_tab_icons()
 
     def current_theme_dict(self) -> dict:
-        """Aktuellt tema som dict (löser auto/system)."""
+        """Aktuellt tema som dict (löser auto/system och beaktar förhandsvisning)."""
+        active = getattr(self, "_active_theme", None)
+        if isinstance(active, dict) and active:
+            return dict(active)
         return resolve_theme(self._settings.get("theme", "dark"))
 
     def set_status(self, msg: str, timeout: int = 4000) -> None:
-        """Visar ett meddelande i statusfältet."""
-        self.statusBar().showMessage(msg, timeout)
+        """Visar ett meddelande i statusfältet (utan dekorativ emoji-ruta)."""
+        self.statusBar().showMessage(strip_visual_prefix(msg), timeout)
 
     def _update_att_betala_bar(self) -> None:
         """
@@ -2278,8 +2456,9 @@ class MainWindow(QMainWindow):
             lbl = getattr(self, "_lbl_att_betala_bar", None)
             if lbl is None:
                 lbl = QLabel()
-                lbl.setFont(_font(11, True))
-                self.statusBar().addPermanentWidget(lbl)
+                lbl.setFont(make_tabular_font(11, bold=True))
+                lbl.setStyleSheet("padding:0 10px; background:transparent;")
+                self.statusBar().insertPermanentWidget(0, lbl)
                 self._lbl_att_betala_bar = lbl
             lbl.setText(
                 tr(
@@ -2940,6 +3119,9 @@ class MainWindow(QMainWindow):
         # Tray-menyn på nya språket
         if hasattr(self, "tray"):
             self.tray.setContextMenu(self._build_tray_menu())
+        cur_theme = self.current_theme_dict()
+        self._refresh_tab_icons(cur_theme)
+        refresh_bound_icons(cur_theme)
         app_qt = QApplication.instance()
         if app_qt is not None:
             apply_font_size(
@@ -2958,6 +3140,7 @@ class MainWindow(QMainWindow):
             self._settings.set("theme", name)
 
         theme = resolve_theme(name)
+        self._active_theme = dict(theme)
         # Kom ihåg vilket KONKRET tema (dark/light) som nu applicerats —
         # så att 60-sekundersrefreshen kan hoppa över ommålning när
         # upplöst tema är oförändrat (annars målas hela fönstret om
@@ -2965,6 +3148,7 @@ class MainWindow(QMainWindow):
         self._last_resolved_theme = theme.get("name", name)
         inst = QApplication.instance()
         if inst is not None:
+            install_clean_style(inst)
             apply_app_palette(theme)
             inst.setStyleSheet(build_stylesheet(theme))
 
@@ -2979,12 +3163,28 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 log.debug("tray icon on theme change: %s", exc)
 
+        self._refresh_tab_icons(theme)
+        refresh_bound_icons(theme)
+        self._refresh_placeholder_icons(theme)
         self.theme_changed.emit(theme)
         if inst is not None:
             apply_font_size(
                 inst, self._settings.get("font_size", 13)
             )
         log.info("Tema → %s", name)
+
+    def _refresh_placeholder_icons(self, theme: dict) -> None:
+        col = str(theme.get("accent", "#3d8bfd"))
+        for key in list(getattr(self, "_placeholder_keys", set())):
+            entry = self._tab_map.get(key)
+            if not entry:
+                continue
+            _scroll, inner = entry
+            lbl = inner.findChild(QLabel, "PlaceholderIcon")
+            if lbl is not None:
+                icon_name = getattr(lbl, "_icon_name", "")
+                if icon_name:
+                    lbl.setPixmap(icon_pixmap(icon_name, col, 64))
 
     def _refresh_auto_theme(self) -> None:
         """
@@ -3601,6 +3801,7 @@ class MainWindow(QMainWindow):
         skrivas över — loggvyn blir då en separat flik i stället.
         """
         self._settings_tab_custom = True
+        cur_theme = self.current_theme_dict()
         panel = QWidget()
         root = QVBoxLayout(panel)
         root.setContentsMargins(16, 14, 16, 14)
@@ -3625,10 +3826,11 @@ class MainWindow(QMainWindow):
             )
         )
         lbl_lang_hint = QLabel(tr("settings.language_hint"))
-        lbl_lang_hint.setStyleSheet("color:#8b949e; background:transparent;")
+        lbl_lang_hint.setProperty("muted", True)
+        lbl_lang_hint.setWordWrap(True)
+        lbl_lang_hint.setStyleSheet("background:transparent;")
         v_lang.addWidget(self._lang_combo)
-        v_lang.addWidget(lbl_lang_hint)
-        v_lang.addStretch(1)
+        v_lang.addWidget(lbl_lang_hint, stretch=1)
         root.addWidget(box_lang)
 
         # ── Textstorlek ───────────────────────────────────────────────
@@ -3654,7 +3856,8 @@ class MainWindow(QMainWindow):
         v_text.addWidget(self._font_size_combo)
         lbl_text_hint = QLabel(tr("settings.text_size_hint"))
         lbl_text_hint.setWordWrap(True)
-        lbl_text_hint.setStyleSheet("color:#8b949e; background:transparent;")
+        lbl_text_hint.setProperty("muted", True)
+        lbl_text_hint.setStyleSheet("background:transparent;")
         v_text.addWidget(lbl_text_hint, stretch=1)
         root.addWidget(box_text)
 
@@ -3666,15 +3869,22 @@ class MainWindow(QMainWindow):
         lbl_donate.setWordWrap(True)
         lbl_donate.setStyleSheet("background:transparent;")
         v_donate.addWidget(lbl_donate)
+        donate_btn_row = QHBoxLayout()
         btn_donate_settings = QPushButton(tr("settings.donate_open"))
         btn_donate_settings.setObjectName("DonateButton")
         btn_donate_settings.setCursor(
             QCursor(Qt.CursorShape.PointingHandCursor)
         )
+        bind_icon(
+            btn_donate_settings, "donate", role="on_gold",
+            size=15, theme=cur_theme,
+        )
         btn_donate_settings.clicked.connect(
             lambda: open_donate_dialog(self)
         )
-        v_donate.addWidget(btn_donate_settings)
+        donate_btn_row.addWidget(btn_donate_settings)
+        donate_btn_row.addStretch(1)
+        v_donate.addLayout(donate_btn_row)
         root.addWidget(box_donate)
 
         # ── Kortkommandon ─────────────────────────────────────────────
@@ -3686,7 +3896,13 @@ class MainWindow(QMainWindow):
 
         tbl = QTableWidget(0, 2)
         tbl.setColumnCount(2)
+        tbl.setHorizontalHeaderLabels(
+            ["Action", "Shortcut"]
+            if _i18n_language() == "en"
+            else ["Åtgärd", "Kortkommando"]
+        )
         tbl.verticalHeader().setVisible(False)
+        tbl.verticalHeader().setDefaultSectionSize(46)
         tbl.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers
         )
@@ -3732,6 +3948,8 @@ class MainWindow(QMainWindow):
             tbl.setItem(r, 0, cell)
             editor = QKeySequenceEdit(QKeySequence(seq or ""))
             editor.setClearButtonEnabled(True)
+            editor.setFixedHeight(32)
+            editor.setStyleSheet("padding: 2px 8px; min-height: 26px;")
             tbl.setCellWidget(r, 1, editor)
             self._shortcut_editors.append((action, editor))
 
@@ -3739,17 +3957,22 @@ class MainWindow(QMainWindow):
         tbl.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
         )
-        tbl.setMinimumHeight(min(60 + 38 * len(rows), 460))
+        tbl.setColumnWidth(1, max(195, tbl.columnWidth(1)))
+        tbl.setMinimumHeight(min(60 + 46 * len(rows), 480))
         v_keys.addWidget(tbl)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
         btn_save = QPushButton(tr("settings.save_shortcuts"))
+        btn_save.setProperty("accent", True)
+        bind_icon(btn_save, "check", role="on_accent", size=15, theme=cur_theme)
         btn_save.clicked.connect(self._save_shortcuts_panel)
         btn_reset = QPushButton(tr("settings.reset_shortcuts"))
+        bind_icon(btn_reset, "undo", size=15, theme=cur_theme)
         btn_reset.clicked.connect(self._reset_shortcuts_panel)
         hint = QLabel(tr("settings.shortcuts_hint"))
-        hint.setStyleSheet("color:#8b949e; background:transparent;")
+        hint.setProperty("muted", True)
+        hint.setStyleSheet("background:transparent;")
         hint.setFont(_font(10))
         btn_row.addWidget(btn_save)
         btn_row.addWidget(btn_reset)
@@ -3761,7 +3984,7 @@ class MainWindow(QMainWindow):
         # ── Plugins ───────────────────────────────────────────────────
         box_plug = QGroupBox(tr("settings.plugins"))
         v_plug = QVBoxLayout(box_plug)
-        v_plug.setSpacing(6)
+        v_plug.setSpacing(8)
 
         self._plugin_status_label = QLabel()
         self._plugin_status_label.setFont(_font(11))
@@ -3769,17 +3992,23 @@ class MainWindow(QMainWindow):
         self._refresh_plugin_status_label()
         v_plug.addWidget(self._plugin_status_label)
 
+        plug_btn_row = QHBoxLayout()
         btn_reenable = QPushButton(tr("settings.reenable_plugins"))
         btn_reenable.setToolTip(
             "Nollställer kraschräknarna och lyfter bort 3-strikes-"
             "spärren.\nPlugins försöks laddas igen vid nästa programstart."
         )
+        bind_icon(btn_reenable, "puzzle", size=15, theme=cur_theme)
         btn_reenable.clicked.connect(self._reenable_plugins)
-        v_plug.addWidget(btn_reenable)
+        plug_btn_row.addWidget(btn_reenable)
+        plug_btn_row.addStretch(1)
+        v_plug.addLayout(plug_btn_row)
         root.addWidget(box_plug)
 
         note = QLabel(tr("settings.note"))
-        note.setStyleSheet("color:#8b949e; background:transparent;")
+        note.setProperty("muted", True)
+        note.setWordWrap(True)
+        note.setStyleSheet("background:transparent;")
         note.setFont(_font(10))
         root.addWidget(note)
         root.addStretch(1)

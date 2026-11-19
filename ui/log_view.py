@@ -46,15 +46,39 @@ from PySide6.QtWidgets import (
 )
 
 try:
-    from ui.design import ICON_HEADER_PX, app_icon_pixmap, header_font
+    from ui.design import (
+        FlowLayout, ICON_HEADER_PX, app_icon_pixmap, header_font,
+    )
 except Exception:  # pragma: no cover
     ICON_HEADER_PX = 28  # type: ignore[no-redef]
+    FlowLayout = QHBoxLayout  # type: ignore[misc, assignment]
 
     def app_icon_pixmap(size: int = 28):  # type: ignore[no-redef]
         return QPixmap()
 
     def header_font():  # type: ignore[no-redef]
         return QFont("Segoe UI", 17, QFont.Weight.Bold)
+
+try:
+    from ui.typography import make_mono_font
+except Exception:  # pragma: no cover
+    def make_mono_font(size: int = 10, bold: bool = False) -> QFont:  # type: ignore[no-redef]
+        f = QFont("Consolas", size)
+        if bold:
+            f.setBold(True)
+        return f
+
+try:
+    from ui.icons import attach_search_icon, bind_icon, refresh_bound_icons
+except Exception:  # pragma: no cover
+    def bind_icon(target: Any, *_a: Any, **_kw: Any) -> Any:  # type: ignore[no-redef]
+        return target
+
+    def attach_search_icon(target: Any, *_a: Any, **_kw: Any) -> Any:  # type: ignore[no-redef]
+        return target
+
+    def refresh_bound_icons(*_a: Any, **_kw: Any) -> None:  # type: ignore[no-redef]
+        pass
 
 try:
     from ui.i18n import tr
@@ -81,6 +105,19 @@ LEVEL_BG: dict[str, str] = {
     "WARNING": "#6b5410", "WARN": "#6b5410",
     "INFO": "#1d4e2e", "AUDIT": "#274b63", "DEBUG": "#3a3f44",
     "TRACE": "#3a3f44", "PERF": "#4a2d5e",
+}
+
+LEVEL_BADGE_LIGHT: dict[str, tuple[str, str]] = {
+    "ERROR": ("#fde8ea", "#9f1239"),
+    "CRITICAL": ("#fde8ea", "#9f1239"),
+    "FATAL": ("#fde8ea", "#9f1239"),
+    "WARNING": ("#fef3c7", "#92400e"),
+    "WARN": ("#fef3c7", "#92400e"),
+    "INFO": ("#dcfce7", "#166534"),
+    "AUDIT": ("#e0f2fe", "#075985"),
+    "DEBUG": ("#f1f5f9", "#334155"),
+    "TRACE": ("#f1f5f9", "#334155"),
+    "PERF": ("#f3e8ff", "#6b21a8"),
 }
 
 DEFAULT_LOG_FILE = (
@@ -350,6 +387,7 @@ class LogView(QWidget):
         self._marker_ts: str = ""
         self._paused = False
         self._dark = True
+        self._current_theme: dict = {}
         self._last_size = -1
         self._last_mtime = 0.0
 
@@ -384,13 +422,17 @@ class LogView(QWidget):
 
         # Felbanner (dold när inga fel finns)
         banner_row = QHBoxLayout()
+        banner_row.setContentsMargins(0, 0, 0, 0)
+        banner_row.setSpacing(8)
         self._lbl_banner = QLabel()
         self._lbl_banner.setWordWrap(True)
         self._lbl_banner.setStyleSheet(
-            "background:#5a1d1d; color:#ffd7d7; border:1px solid #a33;"
-            " border-radius:6px; padding:6px 10px;"
+            "background:#4c161b; color:#ffd7d7; border:1px solid #f87171;"
+            " border-radius:8px; padding:7px 12px; font-weight:600;"
         )
         self._btn_goto_error = QPushButton()
+        self._btn_goto_error.setProperty("danger", "true")
+        bind_icon(self._btn_goto_error, "alert", size=14, role="on_accent")
         self._btn_goto_error.clicked.connect(self._goto_last_error)
         banner_row.addWidget(self._lbl_banner, stretch=1)
         banner_row.addWidget(self._btn_goto_error)
@@ -401,6 +443,7 @@ class LogView(QWidget):
 
         # Filterrad
         row1 = QHBoxLayout()
+        row1.setSpacing(8)
         self._lbl_level = QLabel()
         row1.addWidget(self._lbl_level)
         self._cmb_level = QComboBox()
@@ -411,7 +454,9 @@ class LogView(QWidget):
         self._cmb_level.currentIndexChanged.connect(self._refresh_table)
         row1.addWidget(self._cmb_level)
         self._search = QLineEdit()
+        self._search.setMinimumWidth(180)
         self._search.setClearButtonEnabled(True)
+        attach_search_icon(self._search, size=14)
         self._search.textChanged.connect(self._refresh_table)
         row1.addWidget(self._search, stretch=1)
         self._chk_errors = QCheckBox()
@@ -422,29 +467,40 @@ class LogView(QWidget):
         row1.addWidget(self._chk_session)
         root.addLayout(row1)
 
-        # Knapprad
-        row2 = QHBoxLayout()
+        # Knapprad (FlowLayout så alla knappar bryter snyggt på smal skärm)
+        row2 = FlowLayout(spacing=6)
         self._btn_refresh = QPushButton()
+        bind_icon(self._btn_refresh, "refresh", size=14)
         self._btn_refresh.clicked.connect(
             lambda: self._reload_from_file(scroll_bottom=True)
         )
         self._btn_pause = QPushButton()
+        bind_icon(self._btn_pause, "pause", size=14)
         self._btn_pause.clicked.connect(self._toggle_pause)
         self._btn_mark = QPushButton()
+        bind_icon(self._btn_mark, "mark", size=14)
         self._btn_mark.clicked.connect(self._set_marker)
         self._btn_copy_marked = QPushButton()
+        bind_icon(self._btn_copy_marked, "duplicate", size=14)
         self._btn_copy_marked.clicked.connect(self._copy_after_marker)
         self._btn_copy_diag = QPushButton()
+        self._btn_copy_diag.setProperty("accent", "true")
+        bind_icon(self._btn_copy_diag, "diagnostics", size=14, role="on_accent")
         self._btn_copy_diag.clicked.connect(self._copy_diagnostics)
         self._btn_copy_learning = QPushButton()
+        bind_icon(self._btn_copy_learning, "learn", size=14)
         self._btn_copy_learning.clicked.connect(self._copy_learning_log)
         self._btn_open_dir = QPushButton()
+        bind_icon(self._btn_open_dir, "folder", size=14)
         self._btn_open_dir.clicked.connect(self._open_log_dir)
         self._btn_errors = QPushButton()
+        bind_icon(self._btn_errors, "alert", size=14)
         self._btn_errors.clicked.connect(self._collect_all_errors)
         self._btn_export = QPushButton()
+        bind_icon(self._btn_export, "export", size=14)
         self._btn_export.clicked.connect(self._export_shown)
         self._btn_reset = QPushButton()
+        bind_icon(self._btn_reset, "clean", size=14)
         self._btn_reset.clicked.connect(self._reset_filters)
         for b in (self._btn_refresh, self._btn_pause, self._btn_mark,
                   self._btn_copy_marked, self._btn_copy_diag,
@@ -452,11 +508,8 @@ class LogView(QWidget):
                   self._btn_open_dir, self._btn_errors,
                   self._btn_export, self._btn_reset):
             b.setMinimumHeight(34)
+            b.setMinimumWidth(0)
             row2.addWidget(b)
-        row2.addStretch()
-        self._chk_scroll = QCheckBox()
-        self._chk_scroll.setChecked(True)
-        row2.addWidget(self._chk_scroll)
         root.addLayout(row2)
 
         # Tabell
@@ -467,9 +520,18 @@ class LogView(QWidget):
         self._table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers
         )
+        self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(34)
+        self._table.setAlternatingRowColors(True)
+        self._table.setShowGrid(False)
+        self._table.setWordWrap(False)
+        self._table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self._table.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
         hdr = self._table.horizontalHeader()
         hdr.setStretchLastSection(True)
-        self._table.setColumnWidth(0, 150)
+        self._table.setColumnWidth(0, 145)
         self._table.setColumnWidth(1, 86)
         self._table.setColumnWidth(2, 140)
         self._table.setColumnWidth(3, 130)
@@ -483,13 +545,18 @@ class LogView(QWidget):
         self._detail = QPlainTextEdit()
         self._detail.setReadOnly(True)
         self._detail.setMaximumHeight(130)
-        self._detail.setFont(QFont("Consolas", 9))
+        self._detail.setFont(make_mono_font(10))
         root.addWidget(self._detail)
 
         row3 = QHBoxLayout()
+        row3.setSpacing(10)
         self._btn_copy_row = QPushButton()
+        bind_icon(self._btn_copy_row, "duplicate", size=14)
         self._btn_copy_row.clicked.connect(self._copy_selected)
         row3.addWidget(self._btn_copy_row)
+        self._chk_scroll = QCheckBox()
+        self._chk_scroll.setChecked(True)
+        row3.addWidget(self._chk_scroll)
         row3.addStretch()
         self._lbl_info = QLabel()
         row3.addWidget(self._lbl_info)
@@ -561,10 +628,16 @@ class LogView(QWidget):
             for c, val in enumerate(values):
                 item = QTableWidgetItem(val)
                 if c == 1:
-                    bg = LEVEL_BG.get(lvl.upper())
-                    if bg:
-                        item.setBackground(QColor(bg))
-                        item.setForeground(QColor("#ffffff"))
+                    if self._dark:
+                        bg = LEVEL_BG.get(lvl.upper())
+                        if bg:
+                            item.setBackground(QColor(bg))
+                            item.setForeground(QColor("#ffffff"))
+                    else:
+                        badge = LEVEL_BADGE_LIGHT.get(lvl.upper())
+                        if badge:
+                            item.setBackground(QColor(badge[0]))
+                            item.setForeground(QColor(badge[1]))
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if c == 4 and e.get("exc"):
                     item.setToolTip(str(e["exc"])[:800])
@@ -622,6 +695,12 @@ class LogView(QWidget):
         self._paused = not self._paused
         self._btn_pause.setText(
             tr("log.resume") if self._paused else tr("log.pause")
+        )
+        bind_icon(
+            self._btn_pause,
+            "play" if self._paused else "pause",
+            size=14,
+            theme=self._current_theme or None,
         )
 
     def _reset_filters(self) -> None:
@@ -893,8 +972,25 @@ class LogView(QWidget):
     # ── Tema / språk ──────────────────────────────────────────────────
 
     def apply_theme(self, theme: dict | None = None) -> None:
-        name = str((theme or {}).get("name", "")).lower()
+        t = dict(theme or {})
+        self._current_theme = t
+        name = str(t.get("name", "")).lower()
         self._dark = name != "light"
+        muted = t.get("muted", "#9cb0c4" if self._dark else "#4b5563")
+        if self._dark:
+            self._lbl_banner.setStyleSheet(
+                "background:#4c161b; color:#ffd7d7; border:1px solid #f87171;"
+                " border-radius:8px; padding:7px 12px; font-weight:600;"
+            )
+        else:
+            self._lbl_banner.setStyleSheet(
+                "background:#fde8ea; color:#9f1239; border:1px solid #e11d48;"
+                " border-radius:8px; padding:7px 12px; font-weight:600;"
+            )
+        self._lbl_info.setStyleSheet(
+            f"color:{muted}; background:transparent; font-weight:600;"
+        )
+        refresh_bound_icons(t)
         self._refresh_table()
 
     def retranslate(self) -> None:
@@ -906,6 +1002,10 @@ class LogView(QWidget):
         ])
         self._lbl_level.setText(tr("log.level"))
         self._search.setPlaceholderText(tr("log.search_ph"))
+        attach_search_icon(
+            self._search, size=14,
+            theme=getattr(self, "_current_theme", None) or None,
+        )
         self._chk_errors.setText(tr("log.only_errors"))
         self._chk_session.setText(tr("log.only_session"))
         self._chk_scroll.setText(tr("log.auto_scroll"))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import weakref
 from typing import Any
 
 FONT_SIZE_CHOICES: tuple[int, ...] = (11, 13, 15, 17)
@@ -12,24 +13,28 @@ _MAX_FONT_SIZE: int = FONT_SIZE_CHOICES[-1]
 _current_font_size: int = DEFAULT_FONT_SIZE
 _font_scale_filters: dict[int, Any] = {}
 
-# En egen item-data-roll. Post-ID lagras i UserRole; hjälparnas radroller
-# ligger på +11…+14.
-_ITEM_BASE_FONT_ROLE = 0x0100 + 15  # Qt.UserRole + 15
-_FONT_BASE_PROPERTY = "_invoicebundle_base_font"
-_FONT_APPLIED_PROPERTY = "_invoicebundle_applied_font"
-_STYLE_BASE_PROPERTY = "_invoicebundle_base_stylesheet"
-_STYLE_APPLIED_PROPERTY = "_invoicebundle_applied_stylesheet"
-_GEOMETRY_BASE_PROPERTY = "_invoicebundle_base_height_limits"
-_GEOMETRY_APPLIED_PROPERTY = "_invoicebundle_applied_height_limits"
-_TABLE_SCALE_PROPERTY = "_invoicebundle_applied_table_scale"
-_TABLE_BASE_ROW_HEIGHT_PROPERTY = "_invoicebundle_base_row_height"
-_APP_BASE_FONT_PROPERTY = "_invoicebundle_base_application_font"
+# Metadata sparas i rena Python-strukturer (aldrig via QTableWidgetItem.data
+# med oanvänd roll eller QObject.setProperty(..., QFont), vilket kan orsaka
+# refcount-krascher i Shiboken/PySide6 6.12).
+_WIDGET_META: weakref.WeakKeyDictionary[Any, dict[str, Any]] = (
+    weakref.WeakKeyDictionary()
+)
+_ITEM_BASE_ATTR = "_invoicebundle_base_font"
+_ITEM_BASE_FONT_ROLE = 0x0100 + 15  # behållen konstant för ev. referenser
 
 _FONT_SIZE_RE = re.compile(
     r"(?P<prefix>\b(?:font-size|min-height|max-height)\s*:\s*)"
     r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>px|pt)\b",
     re.IGNORECASE,
 )
+
+
+def _meta(obj: Any) -> dict[str, Any]:
+    bucket = _WIDGET_META.get(obj)
+    if bucket is None:
+        bucket = {}
+        _WIDGET_META[obj] = bucket
+    return bucket
 
 
 def normalize_font_size(value: Any) -> int:
@@ -92,6 +97,8 @@ def _scaled_qfont(font: Any, preference: Any = None) -> Any:
 
     result = QFont(font)
     scale = font_scale(preference)
+    if abs(scale - 1.0) < 0.001:
+        return result
     point_size = result.pointSizeF()
     if point_size > 0:
         result.setPointSizeF(max(6.0, point_size * scale))
@@ -103,10 +110,49 @@ def _scaled_qfont(font: Any, preference: Any = None) -> Any:
 
 
 def make_tabular_font(size: int = 12, bold: bool = False) -> Any:
-    """Monospace-siffror för belopp, fakturanummer och betalnings-ID:n."""
+    """UI-typsnitt med raka tabellsiffror för belopp, datum och fakturanummer."""
     from PySide6.QtGui import QFont
 
-    font = QFont("monospace", max(6, int(size)))
+    try:
+        from ui.design import ui_font_family
+    except ImportError:
+        try:
+            from design import ui_font_family  # type: ignore[no-redef]
+        except ImportError:
+            def ui_font_family() -> str:  # type: ignore[no-redef]
+                return "Segoe UI"
+
+    font = QFont(ui_font_family(), max(6, int(size)))
+    font.setWeight(
+        QFont.Weight.Bold if bold else QFont.Weight.Medium
+    )
+    tag_cls = getattr(QFont, "Tag", None)
+    if tag_cls is not None and hasattr(font, "setFeature"):
+        try:
+            tag = tag_cls.fromString("tnum")
+            if isinstance(tag, tuple):
+                tag = tag[0]
+            if tag is not None:
+                font.setFeature(tag, 1)
+        except Exception:
+            pass
+    return font
+
+
+def make_mono_font(size: int = 10, bold: bool = False) -> Any:
+    """Monospaced typsnitt för loggdetaljer och felsökningskod."""
+    from PySide6.QtGui import QFont
+
+    try:
+        from ui.design import mono_font_family
+        family = mono_font_family()
+    except ImportError:
+        try:
+            from design import mono_font_family  # type: ignore[no-redef]
+            family = mono_font_family()
+        except ImportError:
+            family = "Consolas"
+    font = QFont(family, max(6, int(size)))
     font.setStyleHint(QFont.StyleHint.Monospace)
     font.setBold(bool(bold))
     return font
@@ -117,7 +163,10 @@ def set_item_font(item: Any, base_font: Any) -> None:
     from PySide6.QtGui import QFont
 
     base = QFont(base_font)
-    item.setData(_ITEM_BASE_FONT_ROLE, base)
+    try:
+        setattr(item, _ITEM_BASE_ATTR, base)
+    except Exception:
+        pass
     item.setFont(_scaled_qfont(base))
 
 
@@ -132,9 +181,10 @@ def _set_scaled_font(obj: Any, preference: int, *, force: bool = False) -> None:
     from PySide6.QtGui import QFont
 
     try:
+        meta = _meta(obj)
         current = obj.font()
-        base = obj.property(_FONT_BASE_PROPERTY)
-        applied = obj.property(_FONT_APPLIED_PROPERTY)
+        base = meta.get("base_font")
+        applied = meta.get("applied_font")
         if not isinstance(base, QFont) or (
             applied is not None
             and _font_signature(current) != _font_signature(applied)
@@ -143,25 +193,25 @@ def _set_scaled_font(obj: Any, preference: int, *, force: bool = False) -> None:
         scaled = _scaled_qfont(base, preference)
         if force or _font_signature(current) != _font_signature(scaled):
             obj.setFont(scaled)
-        obj.setProperty(_FONT_BASE_PROPERTY, QFont(base))
-        obj.setProperty(_FONT_APPLIED_PROPERTY, QFont(scaled))
+        meta["base_font"] = QFont(base)
+        meta["applied_font"] = QFont(scaled)
     except Exception:
         return
 
 
 def _set_scaled_stylesheet(obj: Any, preference: int) -> None:
     try:
+        meta = _meta(obj)
         current = str(obj.styleSheet() or "")
-        base = obj.property(_STYLE_BASE_PROPERTY)
-        applied = obj.property(_STYLE_APPLIED_PROPERTY)
+        base = meta.get("base_stylesheet")
+        applied = meta.get("applied_stylesheet")
         if not isinstance(base, str) or current != applied:
-            # A theme/view just supplied a fresh, unscaled stylesheet.
             base = current
         scaled = scale_stylesheet(base, preference)
         if current != scaled:
             obj.setStyleSheet(scaled)
-        obj.setProperty(_STYLE_BASE_PROPERTY, base)
-        obj.setProperty(_STYLE_APPLIED_PROPERTY, scaled)
+        meta["base_stylesheet"] = base
+        meta["applied_stylesheet"] = scaled
     except Exception:
         return
 
@@ -169,37 +219,29 @@ def _set_scaled_stylesheet(obj: Any, preference: int) -> None:
 def _scale_widget_height_limits(widget: Any, preference: int) -> None:
     """Skalar kontrollernas min-/maxhöjd med typsnittet."""
     try:
+        meta = _meta(widget)
         current = (int(widget.minimumHeight()), int(widget.maximumHeight()))
-        current_key = f"{current[0]},{current[1]}"
-        base_raw = widget.property(_GEOMETRY_BASE_PROPERTY)
-        applied = widget.property(_GEOMETRY_APPLIED_PROPERTY)
-        if not isinstance(base_raw, str) or current_key != applied:
+        base = meta.get("base_height_limits")
+        applied = meta.get("applied_height_limits")
+        if not isinstance(base, tuple) or current != applied:
             base = current
-        else:
-            base = tuple(int(part) for part in base_raw.split(",", 1))
         scale = font_scale(preference)
         base_min, base_max = int(base[0]), int(base[1])
         min_h = max(0, int(round(base_min * scale))) if base_min else 0
-        # Qt's large sentinel means "unlimited"; leave it untouched.
         if base_max >= 16_000_000:
             max_h = base_max
         else:
             max_h = max(min_h, int(round(base_max * scale)))
         if widget.isWindow():
-            # Keep saved window/dialog geometry independent of text scale;
-            # child controls and layouts still grow to fit the larger text.
             min_h, max_h = base_min, base_max
-        try:
-            widget.setMaximumHeight(max_h)
-            widget.setMinimumHeight(min_h)
-        except Exception:
-            pass
-        widget.setProperty(
-            _GEOMETRY_BASE_PROPERTY, f"{int(base[0])},{int(base[1])}"
-        )
-        widget.setProperty(
-            _GEOMETRY_APPLIED_PROPERTY, f"{min_h},{max_h}"
-        )
+        if (min_h, max_h) != current:
+            try:
+                widget.setMaximumHeight(max_h)
+                widget.setMinimumHeight(min_h)
+            except Exception:
+                pass
+        meta["base_height_limits"] = base
+        meta["applied_height_limits"] = (min_h, max_h)
     except Exception:
         return
 
@@ -209,14 +251,16 @@ def _scale_table(table: Any, preference: int) -> None:
     from PySide6.QtWidgets import QTableView, QTableWidget
 
     try:
+        meta = _meta(table)
         if isinstance(table, QTableWidget):
             count = int(table.rowCount())
+            cols = int(table.columnCount())
             for row in range(count):
-                for col in range(int(table.columnCount())):
+                for col in range(cols):
                     item = table.item(row, col)
                     if item is None:
                         continue
-                    base = item.data(_ITEM_BASE_FONT_ROLE)
+                    base = getattr(item, _ITEM_BASE_ATTR, None)
                     if isinstance(base, QFont):
                         item.setFont(_scaled_qfont(base, preference))
         elif isinstance(table, QTableView):
@@ -226,17 +270,16 @@ def _scale_table(table: Any, preference: int) -> None:
             count = int(table.rowCount())
 
         new_scale = font_scale(preference)
-        base_height = table.property(_TABLE_BASE_ROW_HEIGHT_PROPERTY)
+        base_height = meta.get("table_base_row_height")
         if isinstance(table, QTableView) and base_height is not None:
             height = max(16, int(round(float(base_height) * new_scale)))
             table.verticalHeader().setDefaultSectionSize(height)
             for row in range(count):
                 table.setRowHeight(row, height)
-            table.setProperty(_TABLE_SCALE_PROPERTY, new_scale)
+            meta["table_scale"] = new_scale
             return
 
-        old_scale = table.property(_TABLE_SCALE_PROPERTY)
-        old_scale = float(old_scale) if old_scale else 1.0
+        old_scale = float(meta.get("table_scale") or 1.0)
         ratio = new_scale / old_scale if old_scale else 1.0
         if abs(ratio - 1.0) > 0.001:
             header = table.verticalHeader()
@@ -251,7 +294,7 @@ def _scale_table(table: Any, preference: int) -> None:
                     table.setRowHeight(
                         row, max(16, int(round(height * ratio)))
                     )
-        table.setProperty(_TABLE_SCALE_PROPERTY, new_scale)
+        meta["table_scale"] = new_scale
     except Exception:
         return
 
@@ -259,16 +302,17 @@ def _scale_table(table: Any, preference: int) -> None:
 def set_table_default_row_height(table: Any, height: int) -> None:
     """Sets a density baseline that continues to follow the text-size choice."""
     try:
+        meta = _meta(table)
         base_height = max(16, int(height))
         scale = font_scale()
         scaled_height = max(16, int(round(base_height * scale)))
-        table.setProperty(_TABLE_BASE_ROW_HEIGHT_PROPERTY, base_height)
+        meta["table_base_row_height"] = base_height
         table.verticalHeader().setDefaultSectionSize(scaled_height)
         model = table.model()
         count = int(model.rowCount()) if model is not None else 0
         for row in range(count):
             table.setRowHeight(row, scaled_height)
-        table.setProperty(_TABLE_SCALE_PROPERTY, scale)
+        meta["table_scale"] = scale
     except Exception:
         return
 
@@ -309,12 +353,22 @@ class _FontScaleEventFilter:
                         event.type() == QEvent.Type.Show
                         and isinstance(watched, QWidget)
                     ):
-                        target = watched
                         preference = current_font_size()
+                        meta = _meta(watched)
+                        if (
+                            preference == DEFAULT_FONT_SIZE
+                            and meta.get("scaled_pref", DEFAULT_FONT_SIZE)
+                            == DEFAULT_FONT_SIZE
+                        ):
+                            return False
+                        meta["scaled_pref"] = preference
+                        ref = weakref.ref(watched)
                         QTimer.singleShot(
                             0,
-                            lambda w=target, s=preference:
-                                _scale_widget_tree(w, s),
+                            lambda r=ref, s=preference: (
+                                _scale_widget_tree(r(), s)
+                                if r() is not None else None
+                            ),
                         )
                 except Exception:
                     pass
@@ -329,13 +383,12 @@ def apply_font_size(app: Any, size: Any) -> int:
     from PySide6.QtGui import QFont
     from PySide6.QtWidgets import QTableView, QWidget
 
-    old_size = _current_font_size
     preference = set_current_font_size(size)
 
-    # Qt:s standardfont täcker kontroller som inte har en egen font.
     try:
-        base = app.property(_APP_BASE_FONT_PROPERTY)
-        applied = app.property(_FONT_APPLIED_PROPERTY)
+        meta = _meta(app)
+        base = meta.get("app_base_font")
+        applied = meta.get("applied_font")
         current = app.font()
         if not isinstance(base, QFont) or (
             applied is not None
@@ -343,18 +396,19 @@ def apply_font_size(app: Any, size: Any) -> int:
         ):
             base = QFont(current)
         scaled = _scaled_qfont(base, preference)
-        app.setFont(scaled)
-        app.setProperty(_APP_BASE_FONT_PROPERTY, QFont(base))
-        app.setProperty(_FONT_APPLIED_PROPERTY, QFont(scaled))
+        if _font_signature(current) != _font_signature(scaled):
+            app.setFont(scaled)
+        meta["app_base_font"] = QFont(base)
+        meta["applied_font"] = QFont(scaled)
     except Exception:
         pass
 
-    # Skala programmets globala QSS samt lokala stilark i alla öppna fönster.
     _set_scaled_stylesheet(app, preference)
     try:
         for widget in list(app.allWidgets()):
             if not isinstance(widget, QWidget):
                 continue
+            _meta(widget)["scaled_pref"] = preference
             if widget.testAttribute(Qt.WidgetAttribute.WA_SetFont):
                 _set_scaled_font(widget, preference)
             _set_scaled_stylesheet(widget, preference)
@@ -364,8 +418,6 @@ def apply_font_size(app: Any, size: Any) -> int:
     except Exception:
         pass
 
-    # Eventfiltern håller framtida dialoger och dynamiskt skapade kontroller
-    # i samma skala. En Python-referens behålls så wrappern inte samlas in.
     try:
         key = id(app)
         event_filter = _font_scale_filters.get(key)

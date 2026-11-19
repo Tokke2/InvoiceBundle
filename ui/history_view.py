@@ -35,15 +35,56 @@ from PySide6.QtWidgets import (
 )
 
 try:
-    from ui.i18n import tr
+    from ui.i18n import tr, tr_list
 except ImportError:  # fristående körning av filen
-    from i18n import tr  # type: ignore[no-redef]
+    from i18n import tr, tr_list  # type: ignore[no-redef]
 
 try:
-    from ui.invoices_helpers import COLUMNS, fmt_amount, make_font
+    from ui.design import ICON_HEADER_PX, app_icon_pixmap, header_font
+except Exception:  # pragma: no cover
+    try:
+        from design import (  # type: ignore[no-redef]
+            ICON_HEADER_PX, app_icon_pixmap, header_font,
+        )
+    except Exception:
+        ICON_HEADER_PX = 28  # type: ignore[no-redef]
+
+        def app_icon_pixmap(size: int = 28):  # type: ignore[no-redef]
+            from PySide6.QtGui import QPixmap
+            return QPixmap()
+
+        def header_font():  # type: ignore[no-redef]
+            from PySide6.QtGui import QFont
+            return QFont("Segoe UI", 17, QFont.Weight.Bold)
+
+try:
+    from ui.icons import attach_search_icon, bind_icon, refresh_bound_icons
+except Exception:  # pragma: no cover
+    try:
+        from icons import (  # type: ignore[no-redef]
+            attach_search_icon, bind_icon, refresh_bound_icons,
+        )
+    except Exception:
+        def bind_icon(target: Any, *_a: Any, **_kw: Any) -> Any:  # type: ignore[no-redef]
+            return target
+
+        def attach_search_icon(target: Any, *_a: Any, **_kw: Any) -> Any:  # type: ignore[no-redef]
+            return target
+
+        def refresh_bound_icons(*_a: Any, **_kw: Any) -> None:  # type: ignore[no-redef]
+            pass
+
+try:
+    from ui.invoices_helpers import (
+        COLUMNS, DATE_COLUMN_KEYS, date_column_width,
+        fmt_amount, is_dark_theme, make_font,
+    )
     from ui.typography import make_tabular_font, set_item_font
 except ImportError:  # pragma: no cover
-    from invoices_helpers import COLUMNS, fmt_amount, make_font  # type: ignore[no-redef]
+    from invoices_helpers import (  # type: ignore[no-redef]
+        COLUMNS, DATE_COLUMN_KEYS, date_column_width,
+        fmt_amount, is_dark_theme, make_font,
+    )
     from typography import (  # type: ignore[no-redef]
         make_tabular_font, set_item_font,
     )
@@ -92,24 +133,43 @@ class HistoryView(QWidget):
         super().__init__(parent)
         self._app = app
         self._records: list[dict] = []
+        self._current_theme: dict = {}
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 10, 12, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(16, 14, 16, 12)
+        root.setSpacing(10)
 
-        lbl_title = QLabel(tr("history.title"))
-        lbl_title.setFont(make_font(15, bold=True))
-        root.addWidget(lbl_title)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        pix = app_icon_pixmap(ICON_HEADER_PX)
+        if not pix.isNull():
+            mark = QLabel()
+            mark.setPixmap(pix)
+            mark.setStyleSheet("background:transparent;")
+            head.addWidget(mark)
+        self._lbl_title = QLabel(tr("history.title"))
+        self._lbl_title.setFont(header_font())
+        head.addWidget(self._lbl_title)
+        head.addStretch(1)
+        self._lbl_count = QLabel("")
+        self._lbl_count.setObjectName("CountChip")
+        self._lbl_count.setFont(make_tabular_font(11, bold=True))
+        head.addWidget(self._lbl_count)
+        root.addLayout(head)
 
         row = QHBoxLayout()
+        row.setSpacing(8)
         self._search = QLineEdit()
         self._search.setPlaceholderText(tr("history.search"))
         self._search.setMinimumHeight(36)
+        self._search.setClearButtonEnabled(True)
+        attach_search_icon(self._search, size=14)
         self._search.textChanged.connect(lambda _t: self.refresh())
         row.addWidget(self._search, stretch=1)
 
         self._supplier_filter = QComboBox()
         self._supplier_filter.setMinimumHeight(36)
+        self._supplier_filter.setMinimumWidth(180)
         self._supplier_filter.addItem(tr("history.all_suppliers"), "")
         self._supplier_filter.currentIndexChanged.connect(
             lambda _i: self.refresh()
@@ -118,34 +178,37 @@ class HistoryView(QWidget):
 
         self._btn_folder = QPushButton(tr("history.open_folder"))
         self._btn_folder.setMinimumHeight(36)
+        bind_icon(self._btn_folder, "folder", size=15)
         self._btn_folder.clicked.connect(self._open_archive_folder)
         row.addWidget(self._btn_folder)
         root.addLayout(row)
 
-        self._lbl_count = QLabel("")
-        root.addWidget(self._lbl_count)
-
         self._table = QTableWidget(0, len(COLUMNS))
+        headers = tr_list("invoices.columns")
         self._table.setHorizontalHeaderLabels(
-            [c[0] for c in COLUMNS]
+            headers if len(headers) == len(COLUMNS) else [c[0] for c in COLUMNS]
         )
         self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(38)
+        self._table.setAlternatingRowColors(True)
+        self._table.setShowGrid(False)
         self._table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers
         )
         self._table.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows
         )
-        header = self._table.horizontalHeader()
-        for idx, (_label, _key, width, _align) in enumerate(COLUMNS):
-            header.resizeSection(idx, width)
-        header.setSectionResizeMode(
-            len(COLUMNS) - 1, QHeaderView.ResizeMode.Stretch
+        self._table.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
+        self._apply_column_widths()
         root.addWidget(self._table, stretch=1)
 
         self._lbl_empty = QLabel(tr("history.empty"))
+        self._lbl_empty.setProperty("muted", True)
+        self._lbl_empty.setWordWrap(True)
         self._lbl_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_empty.setStyleSheet("padding:20px; background:transparent;")
         root.addWidget(self._lbl_empty)
 
         self.refresh()
@@ -217,7 +280,7 @@ class HistoryView(QWidget):
                 else:
                     text = str(value or "")
                 item = QTableWidgetItem(text)
-                item.setTextAlignment(align)
+                item.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
                 if key in {
                     "invoice_number", "ocr", "date", "due_date",
                     "payment_date", "total_amount",
@@ -227,6 +290,67 @@ class HistoryView(QWidget):
                         make_tabular_font(11, bold=(key == "total_amount")),
                     )
                 self._table.setItem(row_idx, col_idx, item)
+
+    # ── Tema / språk ───────────────────────────────────────────────
+
+    def apply_theme(self, theme: dict | None = None) -> None:
+        """Anpassar Historik-vyn till aktuellt tema."""
+        self._current_theme = dict(theme or {})
+        t = self._current_theme
+        dark = is_dark_theme(t)
+        muted = t.get("text_muted", "#9eb2c9" if dark else "#4f5b69")
+        accent = t.get("tab_selected", t.get("accent", "#1f5aa6"))
+        self._lbl_count.setStyleSheet(
+            f"background-color:{accent}; color:#ffffff;"
+            " border-radius:11px; padding:4px 12px; font-weight:700;"
+        )
+        self._lbl_empty.setStyleSheet(
+            f"color:{muted}; padding:20px; background:transparent;"
+        )
+        self._table.viewport().update()
+
+    def _apply_column_widths(self) -> None:
+        from PySide6.QtGui import QFont, QFontMetrics
+
+        header = self._table.horizontalHeader()
+        hf = QFont(header.font())
+        hf.setBold(True)
+        if hf.pointSize() > 0:
+            hf.setPointSize(max(12, hf.pointSize()))
+        hm = QFontMetrics(hf)
+        dw = date_column_width()
+        for idx, (default_lbl, key, width, _align) in enumerate(COLUMNS):
+            item = self._table.horizontalHeaderItem(idx)
+            lbl = item.text() if item is not None else default_lbl
+            w = max(width, hm.horizontalAdvance(lbl) + 28)
+            if key in DATE_COLUMN_KEYS:
+                w = max(w, dw)
+            header.resizeSection(idx, w)
+        header.setSectionResizeMode(
+            len(COLUMNS) - 1, QHeaderView.ResizeMode.Stretch
+        )
+
+    def apply_theme(self, theme: dict) -> None:
+        """Uppdaterar ikonfärger efter aktivt tema."""
+        self._current_theme = theme
+        refresh_bound_icons(theme)
+
+    def retranslate(self) -> None:
+        """Uppdaterar texter efter språkbyte."""
+        self._lbl_title.setText(tr("history.title"))
+        self._search.setPlaceholderText(tr("history.search"))
+        attach_search_icon(
+            self._search, size=14,
+            theme=getattr(self, "_current_theme", None) or None,
+        )
+        self._btn_folder.setText(tr("history.open_folder"))
+        self._lbl_empty.setText(tr("history.empty"))
+        headers = tr_list("invoices.columns")
+        self._table.setHorizontalHeaderLabels(
+            headers if len(headers) == len(COLUMNS) else [c[0] for c in COLUMNS]
+        )
+        self._apply_column_widths()
+        self.refresh()
 
     # ── Arkivmapp ──────────────────────────────────────────────────
 

@@ -10,10 +10,11 @@ kopiera sökvägar och storlekar — då ser allt likadant ut överallt.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtGui import QFont, QIcon, QPixmap
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLayout, QLayoutItem, QWidget
 
 #: Appmappen (ui/ → projektroten).
 PROJECT_DIR: Path = Path(__file__).resolve().parent.parent
@@ -36,6 +37,89 @@ TABLE_ROW_HEIGHT_COMPACT: int = 32
 TABLE_ROW_HEIGHT_COMFORTABLE: int = 42
 TABLE_CELL_PADDING_COMPACT_PX: int = 4
 TABLE_CELL_PADDING_COMFORTABLE_PX: int = 7
+
+
+class FlowLayout(QLayout):
+    """Responsiv radbrytande layout så knappar och filter aldrig klipps."""
+
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        spacing: int = 6,
+        margins: tuple[int, int, int, int] = (0, 0, 0, 0),
+    ) -> None:
+        super().__init__(parent)
+        self._items: list[QLayoutItem] = []
+        self.setSpacing(spacing)
+        self.setContentsMargins(*margins)
+
+    def __del__(self) -> None:
+        while self.count():
+            self.takeAt(0)
+
+    def addItem(self, item: QLayoutItem) -> None:
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int) -> Optional[QLayoutItem]:
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int) -> Optional[QLayoutItem]:
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self) -> Qt.Orientation:
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._do_layout(QRect(0, 0, max(1, width), 0), test_only=True)
+
+    def setGeometry(self, rect: QRect) -> None:
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def _do_layout(self, rect: QRect, *, test_only: bool) -> int:
+        m = self.contentsMargins()
+        effective = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x = effective.x()
+        y = effective.y()
+        line_height = 0
+        spacing = max(0, self.spacing())
+
+        for item in self._items:
+            widget = item.widget()
+            if widget is not None and widget.isHidden():
+                continue
+            sz = item.sizeHint()
+            next_x = x + sz.width() + spacing
+            if next_x - spacing > effective.right() and line_height > 0:
+                x = effective.x()
+                y += line_height + spacing
+                next_x = x + sz.width() + spacing
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), sz))
+            x = next_x
+            line_height = max(line_height, sz.height())
+
+        return y + line_height - rect.y() + m.bottom()
 
 
 def fit_dialog_to_screen(
@@ -85,6 +169,10 @@ FONT_STACKS: dict[str, tuple[str, ...]] = {
 #: container eller server utan skrivbordstypsnitt).
 FONT_FALLBACKS: tuple[str, ...] = (
     "Noto Sans", "DejaVu Sans", "Liberation Sans", "Arial", "sans-serif",
+)
+MONO_FONT_STACK: tuple[str, ...] = (
+    "JetBrains Mono", "Cascadia Mono", "Consolas", "SF Mono",
+    "DejaVu Sans Mono", "Liberation Mono", "monospace",
 )
 
 _FONT_CACHE: dict[str, str] = {}
@@ -141,6 +229,31 @@ def ui_font_family(platform: str = "") -> str:
     )
     _FONT_CACHE[key] = chosen
     return chosen
+
+
+def ui_font_css_stack(platform: str = "") -> str:
+    """CSS-typsnittskedja med vald plattformsfamilj först."""
+    primary = ui_font_family(platform)
+    stack = [primary]
+    for fam in FONT_STACKS.get(platform or current_platform(), ()) + FONT_FALLBACKS:
+        if fam not in stack:
+            stack.append(fam)
+    quoted = [
+        f'"{fam}"' if (" " in fam or fam.startswith(".")) else fam
+        for fam in stack
+    ]
+    return ",".join(quoted)
+
+
+def mono_font_family() -> str:
+    """Bästa tillgängliga monospaced-familj för loggar/tracebacks."""
+    available = installed_font_families()
+    if not available:
+        return MONO_FONT_STACK[0]
+    return next(
+        (fam for fam in MONO_FONT_STACK if fam in available),
+        MONO_FONT_STACK[-1],
+    )
 
 
 def ui_font(size: int = 11, weight: QFont.Weight | None = None) -> QFont:

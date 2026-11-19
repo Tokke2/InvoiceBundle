@@ -6858,5 +6858,7 @@ def register_ui(main_window: Any) -> None:
             main_window.add_plugin_tab(view, "📥  Import", "import_tab")
         if hasattr(main_window, "theme_changed"):
             main_window.theme_changed.connect(view.apply_theme)
+        if hasattr(main_window, "current_theme_dict"):
+            view.apply_theme(main_window.current_theme_dict())
     except Exception as exc:
         log.error("scan_import register_ui: %s", exc, exc_info=True)
