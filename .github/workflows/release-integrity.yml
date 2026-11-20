@@ -149,6 +149,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      asset_sha256: ${{ steps.package_meta.outputs.sha256 }}
+      asset_size: ${{ steps.package_meta.outputs.size }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -193,6 +196,26 @@ jobs:
               sys.exit(1)
           PY
 
+      - name: Verify built package & record checksum
+        id: package_meta
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_PATH="${RUNNER_TEMP}/InvoiceBundle-v${VERSION}.zip"
+          python build_release.py \
+            --verify "$PACKAGE_PATH" \
+            --version "$VERSION" \
+            --sha "$(git rev-parse HEAD)"
+          python - "$PACKAGE_PATH" "$GITHUB_OUTPUT" <<'PY'
+          import pathlib, sys
+          from build_release import sha256_file
+
+          pkg = pathlib.Path(sys.argv[1])
+          out_file = pathlib.Path(sys.argv[2])
+          with out_file.open("a", encoding="utf-8") as fh:
+              fh.write(f"sha256={sha256_file(pkg)}\n")
+              fh.write(f"size={pkg.stat().st_size}\n")
+          PY
+
       - name: Attach package to the existing GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -201,3 +224,223 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" \
             "${RUNNER_TEMP}/InvoiceBundle-v${VERSION}.zip" \
             --clobber
+
+  verify-live-release:
+    name: Verify live release package
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-release-package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Verify release job, tag commit & live downloaded asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA256: ${{ needs.build-release-package.outputs.asset_sha256 }}
+          EXPECTED_SIZE: ${{ needs.build-release-package.outputs.asset_size }}
+          BUILD_JOB_RESULT: ${{ needs.build-release-package.result }}
+        run: |
+          set -euo pipefail
+          if [ "$BUILD_JOB_RESULT" != "success" ]; then
+            echo "::error::build-release-package did not succeed ($BUILD_JOB_RESULT)"
+            exit 1
+          fi
+
+          VERSION="${GITHUB_REF_NAME#v}"
+          ASSET_NAME="InvoiceBundle-v${VERSION}.zip"
+          LIVE_ZIP="${RUNNER_TEMP}/live-${ASSET_NAME}"
+
+          # 1. Verify all preceding jobs in this workflow run succeeded
+          JOBS_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=50")
+          python - "$JOBS_JSON" <<'PY'
+          import json, sys
+
+          jobs = json.loads(sys.argv[1]).get("jobs", [])
+          failed = [
+              f"{j['name']} ({j['status']}/{j['conclusion']})"
+              for j in jobs
+              if j["name"] != "Verify live release package"
+              and (j["status"] != "completed" or j["conclusion"] != "success")
+          ]
+          print("Preceding workflow jobs checked:", len(jobs) - 1)
+          if failed:
+              print("::error::Release workflow had failed/incomplete jobs: " + ", ".join(failed))
+              sys.exit(1)
+          PY
+
+          # 2. Verify live tag ref points to this exact commit SHA
+          TAG_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}")
+          python - "$TAG_JSON" "$GITHUB_SHA" "$GITHUB_REPOSITORY" <<'PY'
+          import json, subprocess, sys
+
+          obj = json.loads(sys.argv[1])["object"]
+          expected_sha = sys.argv[2]
+          repo = sys.argv[3]
+          resolved = obj["sha"]
+          if obj.get("type") == "tag":
+              out = subprocess.check_output(
+                  ["gh", "api", f"repos/{repo}/git/tags/{resolved}"],
+                  text=True,
+              )
+              resolved = json.loads(out)["object"]["sha"]
+          print(f"Live tag commit SHA: {resolved} (expected: {expected_sha})")
+          if resolved != expected_sha:
+              print(f"::error::Tag commit mismatch: {resolved} != {expected_sha}")
+              sys.exit(1)
+          PY
+
+          # 3. Verify live GitHub Release exists, is published, and has the asset
+          REL_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}")
+          python - "$REL_JSON" "$ASSET_NAME" "$EXPECTED_SIZE" <<'PY'
+          import json, sys
+
+          rel = json.loads(sys.argv[1])
+          asset_name = sys.argv[2]
+          expected_size = int(sys.argv[3])
+          if rel.get("draft"):
+              print("::error::Release is still marked as draft")
+              sys.exit(1)
+          matches = [a for a in rel.get("assets", []) if a["name"] == asset_name]
+          if not matches:
+              print(f"::error::Asset {asset_name} missing from live release")
+              sys.exit(1)
+          asset = matches[0]
+          print(f"Live asset: {asset['name']} ({asset['size']} bytes, updated {asset['updated_at']})")
+          if int(asset["size"]) != expected_size:
+              print(f"::error::Live asset size mismatch: {asset['size']} != {expected_size}")
+              sys.exit(1)
+          PY
+
+          # 4. Download the actual live release asset and verify CRC, SHA-256, build_info.json & files
+          for attempt in 1 2 3; do
+            if gh release download "$GITHUB_REF_NAME" -p "$ASSET_NAME" -O "$LIVE_ZIP" --clobber; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Failed to download live release asset $ASSET_NAME"
+              exit 1
+            fi
+            sleep 3
+          done
+
+          python build_release.py \
+            --verify "$LIVE_ZIP" \
+            --version "$VERSION" \
+            --sha "$GITHUB_SHA" \
+            --expected-sha256 "$EXPECTED_SHA256" \
+            --expected-size "$EXPECTED_SIZE"
+
+          {
+            echo "### Live Release Verification Passed"
+            echo "- Tag: \`${GITHUB_REF_NAME}\` -> \`${GITHUB_SHA}\`"
+            echo "- Asset: \`${ASSET_NAME}\` (${EXPECTED_SIZE} bytes)"
+            echo "- SHA-256: \`${EXPECTED_SHA256}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  verify-release-build:
+    name: Verify release build & live release status
+    if: "!startsWith(github.ref, 'refs/tags/v')"
+    needs: [updater-guard, windows-autostart, autostart-ui, unix-startup]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build and verify dry-run release package
+        run: |
+          DRYRUN_ZIP="${RUNNER_TEMP}/InvoiceBundle-dryrun.zip"
+          python build_release.py \
+            --root . \
+            --out "$DRYRUN_ZIP" \
+            --version "1.0.0" \
+            --sha "$GITHUB_SHA"
+          python build_release.py \
+            --verify "$DRYRUN_ZIP" \
+            --version "1.0.0" \
+            --sha "$GITHUB_SHA"
+      - name: Verify live release & latest completed tag release run
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess, sys
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+
+          def gh_json(endpoint: str):
+              res = subprocess.run(
+                  ["gh", "api", endpoint],
+                  capture_output=True, text=True, timeout=30,
+              )
+              if res.returncode != 0:
+                  return None, (res.stderr or res.stdout or "").strip()
+              return json.loads(res.stdout), ""
+
+          runs_data, err = gh_json(
+              f"repos/{repo}/actions/workflows/release-integrity.yml/runs?event=push&per_page=30"
+          )
+          if runs_data is None:
+              print(f"Skipping remote run check (API unavailable): {err}")
+              sys.exit(0)
+
+          completed_tag_runs = [
+              r for r in runs_data.get("workflow_runs", [])
+              if str(r.get("head_branch", "")).startswith("v")
+              and r.get("status") == "completed"
+          ]
+          if not completed_tag_runs:
+              print("No completed tag release runs yet on this repository.")
+              sys.exit(0)
+
+          latest = completed_tag_runs[0]
+          print(
+              f"Latest completed tag release run: #{latest['id']} "
+              f"({latest['head_branch']} @ {latest['head_sha'][:8]}) -> {latest['conclusion']}"
+          )
+          if latest.get("conclusion") != "success":
+              print(
+                  f"::error::Latest completed release workflow {latest['id']} "
+                  f"({latest['head_branch']}) ended with conclusion={latest.get('conclusion')!r} "
+                  f"({latest.get('html_url')})"
+              )
+              sys.exit(1)
+
+          jobs_data, err = gh_json(f"repos/{repo}/actions/runs/{latest['id']}/jobs?per_page=50")
+          if jobs_data is None:
+              print(f"::error::Could not inspect jobs of release run {latest['id']}: {err}")
+              sys.exit(1)
+          pkg_jobs = [
+              j for j in jobs_data.get("jobs", [])
+              if j.get("name") in ("build-release-package", "Verify live release package")
+          ]
+          if not pkg_jobs:
+              print(f"::error::Release run {latest['id']} did not execute build-release-package")
+              sys.exit(1)
+          for j in pkg_jobs:
+              print(f"  {j['name']}: {j['conclusion']}")
+              if j.get("conclusion") != "success":
+                  print(f"::error::Release job {j['name']} failed in run {latest['id']}")
+                  sys.exit(1)
+
+          releases_data, err = gh_json(f"repos/{repo}/releases?per_page=10")
+          if releases_data:
+              published = [r for r in releases_data if not r.get("draft")]
+              for rel in published[:3]:
+                  tag = rel["tag_name"]
+                  expected_asset = f"InvoiceBundle-{tag}.zip"
+                  assets = [a for a in rel.get("assets", []) if a["name"] == expected_asset]
+                  if not assets or int(assets[0].get("size", 0)) <= 0:
+                      print(f"::error::Live release {tag} is missing non-empty {expected_asset}")
+                      sys.exit(1)
+                  print(f"Live release {tag}: {expected_asset} ({assets[0]['size']} bytes)")
+          PY

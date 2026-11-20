@@ -607,3 +607,79 @@ def test_donate_menu_and_locked_values_in_main_window():
     assert "https://www.paypal.com/donate" not in main_window
     assert "LockedDonationConfig" in donate_src
     assert "frozen=True" in donate_src
+
+
+def test_verify_release_zip_validates_checksum_manifest_and_cli(tmp_path):
+    pkg = br.build_release_zip(
+        PROJECT_DIR, tmp_path / "InvoiceBundle-v1.0.0.zip",
+        version="1.0.0", sha="abc123",
+    )
+    digest = br.sha256_file(pkg)
+    size = pkg.stat().st_size
+    report = br.verify_release_zip(
+        pkg,
+        expected_version="1.0.0",
+        expected_sha="abc123",
+        expected_size=size,
+        expected_sha256=digest,
+    )
+    assert report["version"] == "1.0.0"
+    assert report["sha"] == "abc123"
+    assert report["size"] == size
+    assert report["sha256"] == digest
+    assert report["file_count"] == len(br.RELEASE_FILES)
+
+    # CLI --verify succeeds on matching metadata and fails on mismatch
+    assert br.main([
+        "--verify", str(pkg),
+        "--version", "1.0.0",
+        "--sha", "abc123",
+        "--expected-sha256", digest,
+        "--expected-size", str(size),
+    ]) == 0
+    assert br.main([
+        "--verify", str(pkg),
+        "--version", "1.0.0",
+        "--sha", "wrongsha",
+    ]) == 1
+
+    # Missing file from RELEASE_FILES must fail verification
+    broken_missing = tmp_path / "missing.zip"
+    with zipfile.ZipFile(pkg, "r") as src, zipfile.ZipFile(
+        broken_missing, "w", zipfile.ZIP_DEFLATED
+    ) as dst:
+        for item in src.infolist():
+            if item.filename != "plugins/updater.py":
+                dst.writestr(item, src.read(item.filename))
+    with pytest.raises(ValueError, match="saknas"):
+        br.verify_release_zip(broken_missing)
+
+    # Leaked private/user data inside the zip must fail verification
+    broken_user_data = tmp_path / "userdata.zip"
+    with zipfile.ZipFile(pkg, "r") as src, zipfile.ZipFile(
+        broken_user_data, "w", zipfile.ZIP_DEFLATED
+    ) as dst:
+        for item in src.infolist():
+            dst.writestr(item, src.read(item.filename))
+        dst.writestr("data/invoices.json", "[]")
+    with pytest.raises(ValueError, match="privata"):
+        br.verify_release_zip(broken_user_data)
+
+
+def test_release_workflow_verifies_release_job_on_every_push():
+    workflow = (
+        PROJECT_DIR / ".github" / "workflows" / "release-integrity.yml"
+    ).read_text(encoding="utf-8")
+    # Tag pushes verify all workflow jobs, tag SHA, live asset download & checksum
+    assert "verify-live-release:" in workflow
+    assert "needs: [build-release-package]" in workflow
+    assert "actions: read" in workflow
+    assert "gh release download" in workflow
+    assert "--expected-sha256" in workflow
+    assert "--expected-size" in workflow
+    assert "actions/runs/${GITHUB_RUN_ID}/jobs" in workflow
+
+    # Non-tag pushes run dry-run build verification & check live release job status
+    assert "verify-release-build:" in workflow
+    assert "actions/workflows/release-integrity.yml/runs" in workflow
+    assert "python build_release.py \\\n            --verify" in workflow or "--verify" in workflow
