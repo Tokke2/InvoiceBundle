@@ -261,15 +261,38 @@ jobs:
           import json, sys
 
           jobs = json.loads(sys.argv[1]).get("jobs", [])
+          by_name = {j["name"]: j for j in jobs}
+          required = {
+              "updater-guard",
+              "Windows autostart (Python 3.11)",
+              "Windows autostart (Python 3.15)",
+              "Autostart and tray UI",
+              "Start files (ubuntu-latest)",
+              "Start files (macos-latest)",
+              "build-release-package",
+          }
+          missing_jobs = sorted(required - set(by_name))
           failed = [
+              f"{name} ({by_name[name]['status']}/{by_name[name]['conclusion']})"
+              for name in sorted(required & set(by_name))
+              if by_name[name]["status"] != "completed"
+              or by_name[name]["conclusion"] != "success"
+          ]
+          other_bad = [
               f"{j['name']} ({j['status']}/{j['conclusion']})"
               for j in jobs
-              if j["name"] != "Verify live release package"
-              and (j["status"] != "completed" or j["conclusion"] != "success")
+              if j.get("conclusion") in ("failure", "cancelled", "timed_out")
           ]
-          print("Preceding workflow jobs checked:", len(jobs) - 1)
-          if failed:
-              print("::error::Release workflow had failed/incomplete jobs: " + ", ".join(failed))
+          print("Preceding required jobs checked:", len(required))
+          if missing_jobs or failed or other_bad:
+              details = []
+              if missing_jobs:
+                  details.append("missing=" + ", ".join(missing_jobs))
+              if failed:
+                  details.append("not-success=" + ", ".join(failed))
+              if other_bad:
+                  details.append("bad=" + ", ".join(other_bad))
+              print("::error::Release workflow check failed: " + "; ".join(details))
               sys.exit(1)
           PY
 
@@ -367,15 +390,16 @@ jobs:
             --verify "$DRYRUN_ZIP" \
             --version "1.0.0" \
             --sha "$GITHUB_SHA"
-      - name: Verify live release & latest completed tag release run
+      - name: Verify live release & tag release workflow status
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python - <<'PY'
-          import json, os, subprocess, sys
+          import json, os, subprocess, sys, time
 
           repo = os.environ["GITHUB_REPOSITORY"]
+          head_sha = os.environ["GITHUB_SHA"]
 
           def gh_json(endpoint: str):
               res = subprocess.run(
@@ -386,51 +410,92 @@ jobs:
                   return None, (res.stderr or res.stdout or "").strip()
               return json.loads(res.stdout), ""
 
-          runs_data, err = gh_json(
-              f"repos/{repo}/actions/workflows/release-integrity.yml/runs?event=push&per_page=30"
-          )
-          if runs_data is None:
+          def get_tag_runs():
+              data, err = gh_json(
+                  f"repos/{repo}/actions/workflows/release-integrity.yml/runs?event=push&per_page=30"
+              )
+              if data is None:
+                  return None, err
+              return [
+                  r for r in data.get("workflow_runs", [])
+                  if str(r.get("head_branch", "")).startswith("v")
+              ], ""
+
+          tag_runs, err = get_tag_runs()
+          if tag_runs is None:
               print(f"Skipping remote run check (API unavailable): {err}")
               sys.exit(0)
 
-          completed_tag_runs = [
-              r for r in runs_data.get("workflow_runs", [])
-              if str(r.get("head_branch", "")).startswith("v")
-              and r.get("status") == "completed"
-          ]
-          if not completed_tag_runs:
-              print("No completed tag release runs yet on this repository.")
-              sys.exit(0)
+          # If a tag release run exists for THIS commit SHA, wait for it to finish
+          matching = [r for r in tag_runs if r.get("head_sha") == head_sha]
+          target_run = None
+          if matching:
+              target_run = matching[0]
+              deadline = time.monotonic() + 180
+              while (
+                  target_run.get("status") != "completed"
+                  and time.monotonic() < deadline
+              ):
+                  print(
+                      f"Waiting for tag release run #{target_run['id']} "
+                      f"({target_run['head_branch']} @ {head_sha[:8]}) -> "
+                      f"{target_run.get('status')}..."
+                  )
+                  time.sleep(10)
+                  refreshed, _ = get_tag_runs()
+                  if refreshed:
+                      m = [r for r in refreshed if r.get("id") == target_run["id"]]
+                      if m:
+                          target_run = m[0]
+          else:
+              completed = [r for r in tag_runs if r.get("status") == "completed"]
+              if not completed:
+                  print("No completed tag release runs yet on this repository.")
+                  sys.exit(0)
+              target_run = completed[0]
 
-          latest = completed_tag_runs[0]
           print(
-              f"Latest completed tag release run: #{latest['id']} "
-              f"({latest['head_branch']} @ {latest['head_sha'][:8]}) -> {latest['conclusion']}"
+              f"Checking tag release run #{target_run['id']} "
+              f"({target_run['head_branch']} @ {target_run['head_sha'][:8]}): "
+              f"status={target_run.get('status')}, conclusion={target_run.get('conclusion')}"
           )
-          if latest.get("conclusion") != "success":
-              print(
-                  f"::error::Latest completed release workflow {latest['id']} "
-                  f"({latest['head_branch']}) ended with conclusion={latest.get('conclusion')!r} "
-                  f"({latest.get('html_url')})"
-              )
+          jobs_data, err = gh_json(
+              f"repos/{repo}/actions/runs/{target_run['id']}/jobs?per_page=50"
+          )
+          if jobs_data is None:
+              print(f"::error::Could not inspect jobs of release run {target_run['id']}: {err}")
               sys.exit(1)
 
-          jobs_data, err = gh_json(f"repos/{repo}/actions/runs/{latest['id']}/jobs?per_page=50")
-          if jobs_data is None:
-              print(f"::error::Could not inspect jobs of release run {latest['id']}: {err}")
-              sys.exit(1)
-          pkg_jobs = [
-              j for j in jobs_data.get("jobs", [])
-              if j.get("name") in ("build-release-package", "Verify live release package")
-          ]
-          if not pkg_jobs:
-              print(f"::error::Release run {latest['id']} did not execute build-release-package")
-              sys.exit(1)
-          for j in pkg_jobs:
-              print(f"  {j['name']}: {j['conclusion']}")
-              if j.get("conclusion") != "success":
-                  print(f"::error::Release job {j['name']} failed in run {latest['id']}")
+          if target_run.get("status") == "completed":
+              if target_run.get("conclusion") != "success":
+                  print(
+                      f"::error::Release workflow {target_run['id']} "
+                      f"({target_run['head_branch']}) ended with conclusion="
+                      f"{target_run.get('conclusion')!r} ({target_run.get('html_url')})"
+                  )
                   sys.exit(1)
+              pkg_jobs = [
+                  j for j in jobs_data.get("jobs", [])
+                  if j.get("name") in ("build-release-package", "Verify live release package")
+              ]
+              if not pkg_jobs:
+                  print(f"::error::Release run {target_run['id']} did not execute release jobs")
+                  sys.exit(1)
+              for j in pkg_jobs:
+                  print(f"  {j['name']}: {j['conclusion']}")
+                  if j.get("conclusion") != "success":
+                      print(f"::error::Release job {j['name']} failed in run {target_run['id']}")
+                      sys.exit(1)
+          else:
+              bad = [
+                  f"{j['name']} ({j.get('conclusion')})"
+                  for j in jobs_data.get("jobs", [])
+                  if j.get("conclusion") in ("failure", "cancelled", "timed_out")
+              ]
+              if bad:
+                  print(f"::error::Active release run {target_run['id']} already has failed jobs: " + ", ".join(bad))
+                  sys.exit(1)
+              print(f"Active tag release run #{target_run['id']} is still healthy ({target_run.get('status')}).")
 
           releases_data, err = gh_json(f"repos/{repo}/releases?per_page=10")
           if releases_data:
