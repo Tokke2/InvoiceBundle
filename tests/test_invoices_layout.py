@@ -235,3 +235,146 @@ def test_table_gets_remaining_width(tmp_path):
         assert view._table.width() > 900
     finally:
         view.close()
+
+
+def test_compact_sidebar_fits_at_1280x800_without_vertical_clipping(tmp_path):
+    """Vänsterspalten ryms vid 1280x800/820 och flyttade kontroller når menyer."""
+    from PySide6.QtWidgets import QFrame, QMenu
+
+    from ui.main_window import MainWindow
+
+    class _FakeSettings(dict):
+        def set(self, key, value):
+            self[key] = value
+
+    class _WindowApp:
+        def __init__(self):
+            self.settings = _FakeSettings({
+                "theme": "dark",
+                "language": "sv",
+                "db_path": str(tmp_path),
+            })
+            self.invoices_store = _Store()
+            self.suppliers_store = _Store()
+            self.session_due_date = None
+            self.session_due_date_str = ""
+
+        def get_setting(self, key, default=None):
+            return self.settings.get(key, default)
+
+        def set_setting(self, key, value):
+            self.settings[key] = value
+
+        def get_invoices(self):
+            return [_row(1), _row(2), _row(3)]
+
+        def get_suppliers(self):
+            return [{"id": "s1", "name": "Pilkington", "favorite": True}]
+
+        def get_invoices_summary(self):
+            return {"count": 3, "total": 300.0, "unpaid": 300.0, "overdue": 0.0}
+
+        def get_export_history(self):
+            return []
+
+        def get_watch_folders(self):
+            return []
+
+        def get_watch_folder_status(self):
+            return {}
+
+        def get_recent_learning_events(self, limit=50):
+            return []
+
+        def subscribe(self, *_a, **_kw):
+            pass
+
+    app = _qapp()
+    set_language("sv")
+    win = MainWindow(_WindowApp())
+    try:
+        for width, height in ((1280, 800), (1280, 820)):
+            win.resize(width, height)
+            win.show()
+            win._goto_tab("invoices", "Fakturor")
+            app.processEvents()
+            view = win.get_invoices_view()
+            scroll = view.findChild(QScrollArea, "SideScroll")
+            assert scroll is not None
+            assert scroll.verticalScrollBar().maximum() == 0
+
+            for frame_name in ("FilterBar", "ActionsBar", "ExportBar"):
+                frame = view.findChild(QFrame, frame_name)
+                assert frame is not None and frame.isVisible()
+
+            quick_bar = view.findChild(QFrame, "QuickFilterBar")
+            assert quick_bar is not None and quick_bar.isVisible()
+            _, qb_br = _rect_in(quick_bar, view)
+            tbl_tl, _ = _rect_in(view._table, view)
+            assert qb_br.y() <= tbl_tl.y()
+
+            assert isinstance(view._btn_more_actions.menu(), QMenu)
+            more_actions = set(view._more_actions_menu.actions())
+            for act in (
+                view._btn_combine,
+                view._btn_duplicate,
+                view._btn_link_credit,
+                view._btn_refresh,
+                view._btn_undo,
+                view._btn_delete_all,
+            ):
+                assert act in more_actions
+
+            assert isinstance(view._btn_export_menu.menu(), QMenu)
+            export_actions = set(view._export_tools_menu.actions())
+            assert view._btn_history in export_actions
+            assert view._btn_open_export in export_actions
+
+            assert not view._marked_summary_wrap.isVisible()
+            assert not view._lbl_export_selection.isVisible()
+            view._marked_export_ids.add("1")
+            view._update_export_buttons()
+            app.processEvents()
+            assert view._marked_summary_wrap.isVisible()
+            assert view._lbl_export_selection.isVisible()
+            view._marked_export_ids.clear()
+            view._update_export_buttons()
+            app.processEvents()
+    finally:
+        win.close()
+        win.deleteLater()
+        app.processEvents()
+
+
+def test_quick_filter_chips_preserve_theme_and_retranslate(tmp_path):
+    """Chip-klick behåller QSS-tema och nya menyer översätts till engelska."""
+    from ui.main_window import THEMES
+
+    app = _qapp()
+    view = _make_view(tmp_path)
+    try:
+        view.apply_theme(THEMES["dark"])
+        chip = view._chip_btns["overdue"]
+        assert "background-color" in chip.styleSheet()
+
+        view._on_chip("overdue")
+        assert chip.isChecked()
+        assert "background-color" in chip.styleSheet()
+
+        view._on_chip("overdue")
+        assert not chip.isChecked()
+        assert "background-color" in chip.styleSheet()
+
+        set_language("en")
+        view.retranslate()
+        assert view._btn_more_actions.text() == "More actions"
+        assert view._btn_export_menu.text() == "Tools"
+        assert view._lbl_export_heading.text() == "Export"
+        assert view._lbl_quick_filter.text() == "Quick filter:"
+        assert "Refresh" in view._btn_refresh.text()
+        assert "Undo" in view._btn_undo.text()
+    finally:
+        set_language("sv")
+        view.close()
+        view.deleteLater()
+        app.processEvents()

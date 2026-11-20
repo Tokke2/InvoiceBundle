@@ -139,6 +139,11 @@ PDF_LABELS: dict[str, dict[str, str]] = {
         "terms": "Betalvillkor", "contact": "Kontaktperson",
         "email": "E-post", "phone": "Telefon", "address": "Adress",
         "days": "dagar", "rows": "Rader", "suppliers": "Leverantorer",
+        "outline_overview": "Översikt",
+        "outline_suppliers": "Leverantörsuppgifter",
+        "outline_invoices": "Fakturor",
+        "outline_originals": "Bifogade original",
+        "jump_to_invoices": "-> Fakturor",
     },
     "en": {
         "col_invoice_number": "Invoice no.", "col_type": "Type",
@@ -155,6 +160,11 @@ PDF_LABELS: dict[str, dict[str, str]] = {
         "terms": "Payment terms", "contact": "Contact person",
         "email": "E-mail", "phone": "Phone", "address": "Address",
         "days": "days", "rows": "Rows", "suppliers": "Suppliers",
+        "outline_overview": "Overview",
+        "outline_suppliers": "Supplier details",
+        "outline_invoices": "Invoices",
+        "outline_originals": "Attached originals",
+        "jump_to_invoices": "-> Invoices",
     },
 }
 
@@ -806,12 +816,46 @@ class InvoiceNumberGuard:
 # ═════════════════════════════════════════════════════════════════════
 
 
+_ATTACH_SUFFIXES: frozenset[str] = frozenset({
+    ".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp",
+})
+
+
+def _clean_outline_title(text: str, fallback: str = "") -> str:
+    """Rensar radbrytningar och tomrum för PDF-bokmärken."""
+    cleaned = " ".join(str(text or "").split())
+    return cleaned or fallback
+
+
+def _is_readable_attachment(path: Path) -> bool:
+    """True om bilagan finns och kan bäddas in av merge_originals."""
+    try:
+        if not path.is_file() or path.stat().st_size <= 0:
+            return False
+        suffix = path.suffix.lower()
+        if suffix not in _ATTACH_SUFFIXES:
+            return False
+        from pypdf import PdfReader
+
+        if suffix == ".pdf":
+            return len(PdfReader(str(path)).pages) > 0
+        from PIL import Image  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 def merge_originals(
     base_pdf: Path,
     attachments: list,
     divider_label: str | None = None,
     *,
     first_page_only: bool = False,
+    originals_outline_title: str = "Bifogade original",
+    row_link_targets: list[
+        tuple[int, tuple[float, float, float, float], int]
+    ] | None = None,
+    stats_out: dict[str, int] | None = None,
 ) -> dict:
     """
     Lägger originalfakturorna EFTER huvud-PDF:en i samma fil —
@@ -821,13 +865,20 @@ def merge_originals(
     bilder som helsidor). *divider_label* accepteras fortfarande
     för bakåtkompatibilitet men används inte längre.
     Om first_page_only=True bifogas bara sida 1 av varje PDF-original.
+    Skapar hierarkiska bokmärken under *originals_outline_title* samt
+    klickbara sidlänkar från fakturarader via *row_link_targets*.
     Returnerar {"included": n, "missing": m, "pages_added": p}.
     """
     result = {"included": 0, "missing": 0, "pages_added": 0}
+    if stats_out is not None:
+        stats_out["bookmarks_added"] = 0
+        stats_out["links_added"] = 0
     if not attachments:
         return result
     try:
         from pypdf import PdfReader, PdfWriter
+        from pypdf.annotations import Link
+        from pypdf.generic import Fit
     except Exception as exc:
         log.warning("merge_originals: pypdf saknas: %s", exc)
         return result
@@ -841,7 +892,13 @@ def merge_originals(
 
     import io
 
-    for _label, raw_path in attachments:
+    att_start_pages: dict[int, int] = {}
+    parent_outline: Any = None
+    parent_title = _clean_outline_title(originals_outline_title)
+    bookmarks_added = 0
+    links_added = 0
+
+    for att_idx, (_label, raw_path) in enumerate(attachments):
         path = Path(str(raw_path))
         if not str(raw_path).strip() or not path.is_file():
             result["missing"] += 1
@@ -854,9 +911,11 @@ def merge_originals(
                     reader = PdfReader(str(path))
                     if not reader.pages:
                         raise ValueError("PDF-originalet saknar sidor")
-                    writer.append(reader, pages=(0, 1))
+                    writer.append(
+                        reader, pages=(0, 1), import_outline=False
+                    )
                 else:
-                    writer.append(str(path))
+                    writer.append(str(path), import_outline=False)
             elif suffix in (".png", ".jpg", ".jpeg", ".tif", ".tiff",
                             ".bmp"):
                 from PIL import Image
@@ -865,15 +924,57 @@ def merge_originals(
                 buf = io.BytesIO()
                 img.save(buf, format="PDF")
                 buf.seek(0)
-                writer.append(buf)
+                writer.append(buf, import_outline=False)
             else:
                 result["missing"] += 1
                 continue
+            added_now = len(writer.pages) - pages_before
+            if added_now <= 0:
+                result["missing"] += 1
+                continue
+            att_start_pages[att_idx] = pages_before
             result["included"] += 1
-            result["pages_added"] += len(writer.pages) - pages_before
+            result["pages_added"] += added_now
+
+            if parent_title:
+                if parent_outline is None:
+                    parent_outline = writer.add_outline_item(
+                        title=parent_title, page_number=pages_before
+                    )
+                    bookmarks_added += 1
+                item_title = _clean_outline_title(
+                    _label, fallback=path.name
+                )
+                writer.add_outline_item(
+                    title=item_title,
+                    page_number=pages_before,
+                    parent=parent_outline,
+                )
+                bookmarks_added += 1
         except Exception as exc:
             log.warning("merge_originals %s: %s", path, exc)
             result["missing"] += 1
+
+    if result["included"] and row_link_targets:
+        total_pages = len(writer.pages)
+        for src_page, rect, att_idx in row_link_targets:
+            target_page = att_start_pages.get(att_idx)
+            if (target_page is not None
+                    and 0 <= src_page < total_pages
+                    and 0 <= target_page < total_pages):
+                try:
+                    writer.add_annotation(
+                        page_number=src_page,
+                        annotation=Link(
+                            rect=rect,
+                            target_page_index=target_page,
+                            fit=Fit.fit(),
+                            border=[0, 0, 0],
+                        ),
+                    )
+                    links_added += 1
+                except Exception as exc:
+                    log.debug("merge_originals link: %s", exc)
 
     if result["included"]:
         tmp = base_pdf.with_suffix(".merged.pdf")
@@ -881,6 +982,9 @@ def merge_originals(
             with open(tmp, "wb") as fh:
                 writer.write(fh)
             tmp.replace(base_pdf)
+            if stats_out is not None:
+                stats_out["bookmarks_added"] = bookmarks_added
+                stats_out["links_added"] = links_added
         except Exception as exc:
             log.warning("merge_originals skriv: %s", exc)
             result["included"] = 0
@@ -1158,6 +1262,8 @@ class PDFExporter:
             "errors":             [],
             "originals_requested": include_originals,
             "original_first_page_only": original_first_page_only,
+            "bookmarks_count":    0,
+            "links_count":        0,
         }
 
         if not invoices:
@@ -1253,6 +1359,39 @@ class PDFExporter:
         sup_map = self._get_supplier_map(invoices, suppliers_list)
         sup_list = self._unique_suppliers(ordered, sup_map)
 
+        # Förbered bilagekarta i tabellens sorteringsordning så att
+        # original-sidor, bokmärken och klickbara fakturarader stämmer 1:1.
+        attachments: list[tuple[str, Path]] = []
+        missing_labels: list[str] = []
+        attach_indices: dict[int, int] = {}
+        if include_originals:
+            for row_idx, inv in enumerate(ordered):
+                raw = str(inv.get("attachment", "") or "").strip()
+                who = " · ".join(x for x in (
+                    str(inv.get("supplier", "")),
+                    str(inv.get("invoice_number", "")),
+                ) if x)
+                if not raw:
+                    if who:
+                        missing_labels.append(who)
+                    continue
+                candidate = Path(raw)
+                if not candidate.is_absolute():
+                    candidate = APP_ROOT / candidate
+                label = " · ".join(
+                    x for x in (who, candidate.name) if x
+                )
+                att_idx = len(attachments)
+                attachments.append((label, candidate))
+                if _is_readable_attachment(candidate):
+                    attach_indices[row_idx] = att_idx
+
+        rl_meta: dict[str, Any] = {
+            "bookmarks_count": 0,
+            "links_count": 0,
+            "row_link_targets": [],
+        }
+
         # ── Bygg PDF ────────────────────────────────────────────────────
         try:
             if self._has_rl:
@@ -1260,6 +1399,8 @@ class PDFExporter:
                     file_path, ordered, regular, credits,
                     title, sum_inv, sum_crd, net, net_display,
                     sup_list, effective_payment_date,
+                    attach_indices=attach_indices,
+                    meta_out=rl_meta,
                 )
             else:
                 self._build_text(
@@ -1285,30 +1426,18 @@ class PDFExporter:
         # ── Valfria originalbilagor ────────────────────────────────────
         result["attachments_included"] = 0
         result["attachments_missing"] = 0
+        merge_stats: dict[str, int] = {
+            "bookmarks_added": 0,
+            "links_added": 0,
+        }
         if include_originals:
-            attachments = []
-            missing_labels: list[str] = []
-            for inv in invoices:
-                raw = str(inv.get("attachment", "") or "").strip()
-                who = " · ".join(x for x in (
-                    str(inv.get("supplier", "")),
-                    str(inv.get("invoice_number", "")),
-                ) if x)
-                if not raw:
-                    if who:
-                        missing_labels.append(who)
-                    continue
-                candidate = Path(raw)
-                if not candidate.is_absolute():
-                    candidate = APP_ROOT / candidate
-                label = " · ".join(
-                    x for x in (who, candidate.name) if x
-                )
-                attachments.append((label, candidate))
             merged = merge_originals(
                 file_path,
                 attachments,
                 first_page_only=original_first_page_only,
+                originals_outline_title=self._t("outline_originals"),
+                row_link_targets=rl_meta.get("row_link_targets"),
+                stats_out=merge_stats,
             )
             result["attachments_included"] = merged["included"]
             result["attachments_missing"] = (
@@ -1339,6 +1468,14 @@ class PDFExporter:
             "total_credits":     sum_crd,
             "net_total":         net,
             "net_total_display": net_display,
+            "bookmarks_count": (
+                int(rl_meta.get("bookmarks_count", 0))
+                + int(merge_stats.get("bookmarks_added", 0))
+            ),
+            "links_count": (
+                int(rl_meta.get("links_count", 0))
+                + int(merge_stats.get("links_added", 0))
+            ),
         })
 
         log.info(
@@ -1371,13 +1508,16 @@ class PDFExporter:
         net_display: float,
         sup_list: list[dict],
         payment_date: str = "",
+        *,
+        attach_indices: dict[int, int] | None = None,
+        meta_out: dict[str, Any] | None = None,
     ) -> None:
         """
         Genererar fakturalistan som PDF med reportlab.
 
         Två pass: pass 1 renderar till minne för att räkna sidor så att
         sidfoten kan visa "Sida X av Y"; pass 2 skriver den riktiga
-        filen med korrekt sidantal.
+        filen med korrekt sidantal, bokmärken och klickbara länkar.
         """
         import io
 
@@ -1390,22 +1530,24 @@ class PDFExporter:
         # utskriften mörk, bläcktörstig och svårläst.
         col = self._colours(dark=False)
 
-        def render(c, total_pages):
+        def render(c, total_pages, collect_meta):
             self._draw_report(
                 c, page_w, page_h, col,
                 invoices, regular, credits, title,
                 sum_inv, sum_crd, net, net_display,
                 sup_list, payment_date, total_pages,
+                attach_indices=attach_indices,
+                meta_out=collect_meta,
             )
 
         buf = io.BytesIO()
         probe = rl_canvas.Canvas(buf, pagesize=A4)
-        render(probe, None)
+        render(probe, None, None)
         total = probe.getPageNumber()
         probe.save()
 
         c = rl_canvas.Canvas(str(file_path), pagesize=A4)
-        render(c, total)
+        render(c, total, meta_out)
         c.save()
         log.debug("PDF klar: %s (%d sidor)", file_path, total)
 
@@ -1429,13 +1571,44 @@ class PDFExporter:
         invoices, regular, credits, title,
         sum_inv, sum_crd, net, net_display,
         sup_list, payment_date, total_pages,
+        *,
+        attach_indices: dict[int, int] | None = None,
+        meta_out: dict[str, Any] | None = None,
     ) -> None:
-        """Ritar hela rapporten på canvas c (proffsig layout)."""
+        """Ritar hela rapporten på canvas c (proffsig layout + bokmärken)."""
         from reportlab.lib import colors as rl_colors
 
         hc = rl_colors.HexColor
         content_w = page_w - PDF_MARGIN_LEFT - PDF_MARGIN_RIGHT
         page_num = [1]
+        emit_meta = total_pages is not None
+
+        def add_bookmark(
+            bm_title: str, dest_key: str, level: int, top_y: float
+        ) -> None:
+            if not emit_meta:
+                return
+            clean = _clean_outline_title(bm_title, fallback=dest_key)
+            c.bookmarkPage(
+                dest_key,
+                fit="XYZ",
+                left=0,
+                top=max(0.0, min(float(page_h), float(top_y))),
+                zoom=0,
+            )
+            c.addOutlineEntry(clean, dest_key, level=level)
+            if meta_out is not None:
+                meta_out["bookmarks_count"] = (
+                    int(meta_out.get("bookmarks_count", 0)) + 1
+                )
+
+        # Förbered tabell-destinationer per leverantör så att
+        # leverantörskorten högre upp kan länka framåt till tabellen.
+        sup_table_dest: dict[str, str] = {}
+        for _inv in invoices:
+            _sk = str(_inv.get("supplier", "")).strip().lower()
+            if _sk and _sk not in sup_table_dest:
+                sup_table_dest[_sk] = f"sup_table_{len(sup_table_dest)}"
 
         def footer() -> None:
             c.setStrokeColor(hc(col["divider"]))
@@ -1530,6 +1703,7 @@ class PDFExporter:
         # ── Sida 1: sidyta + toppband + rubrik + företagsinfo ─────────
         paint_bg()
         top_band()
+        add_bookmark(self._t("outline_overview"), "sec_overview", 0, page_h)
         y = page_h - PDF_MARGIN_TOP
 
         c.setFont("Helvetica-Bold", 20)
@@ -1643,6 +1817,9 @@ class PDFExporter:
         # ── Leverantörsuppgifter ──────────────────────────────────────
         if sup_list:
             y = check(y, 40)
+            add_bookmark(
+                self._t("outline_suppliers"), "sec_suppliers", 0, y + 18
+            )
             c.setFont("Helvetica-Bold", 10)
             c.setFillColor(hc(col["accent"]))
             c.drawString(
@@ -1653,20 +1830,46 @@ class PDFExporter:
             _line(y, 0.5)
             y -= 12
 
-            for sup in sup_list:
+            email_label = self._t("email")
+            jump_txt = to_ascii(self._t("jump_to_invoices"))
+
+            for sup_idx, sup in enumerate(sup_list):
                 name = str(sup.get("name", "-")).strip()
                 details = supplier_detail_lines(sup, self._lang)
                 block_h = 16 + len(details) * 12 + 6
                 y = check(y, block_h)
 
+                add_bookmark(
+                    name or "-", f"sup_card_{sup_idx}", 1, y + 10
+                )
                 box(y + 2, block_h, col["supplier_bg"], 3)
                 stripe(y + 2, block_h, col["accent"])
 
                 c.setFont("Helvetica-Bold", 10.5)
                 c.setFillColor(hc(col["accent"]))
                 c.drawString(
-                    PDF_MARGIN_LEFT + 8, y - 2, to_ascii(name),
+                    PDF_MARGIN_LEFT + 8, y - 2,
+                    truncate(to_ascii(name), 55),
                 )
+                sup_key = name.lower()
+                if sup_key in sup_table_dest:
+                    x_right = page_w - PDF_MARGIN_RIGHT - 8
+                    c.setFont("Helvetica-Bold", 8)
+                    c.setFillColor(hc(col["accent"]))
+                    c.drawRightString(x_right, y - 2, jump_txt)
+                    if emit_meta:
+                        jw = c.stringWidth(jump_txt, "Helvetica-Bold", 8)
+                        c.linkRect(
+                            "",
+                            sup_table_dest[sup_key],
+                            (x_right - jw - 4, y - 6, x_right + 2, y + 8),
+                            relative=0,
+                            Border="[0 0 0]",
+                        )
+                        if meta_out is not None:
+                            meta_out["links_count"] = (
+                                int(meta_out.get("links_count", 0)) + 1
+                            )
                 y -= 15
 
                 for label, value in details:
@@ -1675,17 +1878,48 @@ class PDFExporter:
                     c.drawString(
                         PDF_MARGIN_LEFT + 12, y, to_ascii(f"{label}:"),
                     )
+                    ascii_val = to_ascii(value)
                     c.setFont("Helvetica-Bold", 8.5)
-                    c.setFillColor(hc(col["text"]))
-                    c.drawString(
-                        PDF_MARGIN_LEFT + 92, y, to_ascii(value),
-                    )
+                    if label == email_label and "@" in value:
+                        c.setFillColor(hc(col["accent"]))
+                        c.drawString(PDF_MARGIN_LEFT + 92, y, ascii_val)
+                        vw = c.stringWidth(ascii_val, "Helvetica-Bold", 8.5)
+                        c.setStrokeColor(hc(col["accent"]))
+                        c.setLineWidth(0.4)
+                        c.line(
+                            PDF_MARGIN_LEFT + 92,
+                            y - 1.5,
+                            PDF_MARGIN_LEFT + 92 + vw,
+                            y - 1.5,
+                        )
+                        if emit_meta:
+                            c.linkURL(
+                                f"mailto:{value.strip()}",
+                                (
+                                    PDF_MARGIN_LEFT + 90,
+                                    y - 3,
+                                    PDF_MARGIN_LEFT + 94 + vw,
+                                    y + 9,
+                                ),
+                                relative=0,
+                                Border="[0 0 0]",
+                            )
+                            if meta_out is not None:
+                                meta_out["links_count"] = (
+                                    int(meta_out.get("links_count", 0)) + 1
+                                )
+                    else:
+                        c.setFillColor(hc(col["text"]))
+                        c.drawString(
+                            PDF_MARGIN_LEFT + 92, y, ascii_val,
+                        )
                     y -= 12
                 y -= 4
             y -= 6
 
         # ── Tabell ────────────────────────────────────────────────────
         y = check(y, 40)
+        add_bookmark(self._t("outline_invoices"), "sec_invoices", 0, y + 18)
         c.setFont("Helvetica-Bold", 10)
         c.setFillColor(hc(col["accent"]))
         c.drawString(PDF_MARGIN_LEFT, y, self._t("invoices"))
@@ -1733,6 +1967,7 @@ class PDFExporter:
 
         row_idx = 0
         current_sup: str | None = None
+        seen_sup_tables: set[str] = set()
         for inv in invoices:
             if y < PDF_MARGIN_BOTTOM + 30:
                 y = new_page()
@@ -1746,6 +1981,24 @@ class PDFExporter:
                     y = table_header(y)
                 subtotal_line(current_sup)
             current_sup = sup_key
+
+            if emit_meta and sup_key in sup_table_dest and sup_key not in seen_sup_tables:
+                c.bookmarkPage(
+                    sup_table_dest[sup_key],
+                    fit="XYZ",
+                    left=0,
+                    top=max(0.0, min(float(page_h), float(y + 16))),
+                    zoom=0,
+                )
+                seen_sup_tables.add(sup_key)
+
+            inv_bm_label = " - ".join(
+                p for p in (
+                    str(inv.get("supplier", "") or "").strip(),
+                    str(inv.get("invoice_number", "") or "").strip(),
+                ) if p
+            ) or f"Row {row_idx + 1}"
+            add_bookmark(inv_bm_label, f"inv_row_{row_idx}", 1, y + 14)
 
             itype = str(inv.get("invoice_type", "Faktura")).strip()
             total = _to_float(inv.get("total_amount"))
@@ -1795,6 +2048,42 @@ class PDFExporter:
                     c.setFillColor(hc(text_col))
                     c.drawString(
                         x + 4, y, to_ascii(truncate(ocr, 20)) or "-")
+                elif key == "invoice_number":
+                    cell = truncate(
+                        to_ascii(str(inv.get(key) or "")), 30)
+                    has_att_link = (
+                        attach_indices is not None
+                        and row_idx in attach_indices
+                    )
+                    shown_nr = cell or ("-" if has_att_link else "")
+                    c.setFont(
+                        "Helvetica-Bold" if has_att_link else "Helvetica", 9
+                    )
+                    c.setFillColor(
+                        hc(col["accent"] if has_att_link else text_col)
+                    )
+                    c.drawString(x + 4, y, shown_nr)
+                    if has_att_link:
+                        cw = c.stringWidth(
+                            shown_nr or "0", "Helvetica-Bold", 9
+                        )
+                        c.setStrokeColor(hc(col["accent"]))
+                        c.setLineWidth(0.45)
+                        c.line(
+                            x + 4, y - 1.5,
+                            x + 4 + min(width - 8, cw), y - 1.5,
+                        )
+                        if emit_meta and meta_out is not None:
+                            meta_out["row_link_targets"].append((
+                                page_num[0] - 1,
+                                (
+                                    x + 2,
+                                    y - 3,
+                                    x + min(width - 2, max(cw + 10, 24)),
+                                    y + 10,
+                                ),
+                                attach_indices[row_idx],
+                            ))
                 else:
                     c.setFont("Helvetica", 9)
                     c.setFillColor(hc(text_col))

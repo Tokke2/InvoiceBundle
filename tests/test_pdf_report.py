@@ -173,3 +173,230 @@ def test_export_preserves_input_order_outside_pdf(tmp_path):
     )
     assert r["success"], r
     assert [i["invoice_number"] for i in invs] == before
+
+
+def _cleanup_exported_file(path_str: str) -> None:
+    p = Path(path_str)
+    if p.is_file():
+        p.unlink()
+    try:
+        if p.parent.is_dir() and not any(p.parent.iterdir()):
+            p.parent.rmdir()
+    except OSError:
+        pass
+
+
+def test_pdf_has_hierarchical_bookmarks_and_clickable_links(tmp_path):
+    """Exporterad PDF får bokmärken (outline), internlänkar och mailto-länkar."""
+    from PIL import Image
+    from pypdf import PdfReader
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas as rl_canvas
+
+    pymupdf = pytest.importorskip("pymupdf")
+    ex = _exporter(tmp_path, theme="dark", language="sv")
+    _require_reportlab(ex)
+
+    orig_pdf = tmp_path / "direktglas_orig.pdf"
+    c = rl_canvas.Canvas(str(orig_pdf), pagesize=A4)
+    c.drawString(72, 740, "Direktglas Original Sida 1")
+    c.addOutlineEntry("External Junk Outline", "junk_p1", level=0)
+    c.bookmarkPage("junk_p1")
+    c.showPage()
+    c.drawString(72, 740, "Direktglas Original Sida 2")
+    c.showPage()
+    c.save()
+
+    orig_png = tmp_path / "akeri_orig.png"
+    Image.new("RGB", (320, 200), (220, 230, 255)).save(orig_png)
+
+    suppliers = [
+        {
+            "name": "Direktglas AB",
+            "org_number": "556123-4567",
+            "bg": "555-1234",
+            "email": "ekonomi@direktglas.se",
+        },
+        {
+            "name": "Åkeri & Co",
+            "org_number": "556999-8888",
+            "pg": "12 34 56-7",
+            "email": "faktura@akeri.se",
+        },
+    ]
+    # Osorterad inmatning — PDF och bilagor följer _display_order
+    invoices = [
+        {
+            "supplier": "Åkeri & Co",
+            "invoice_number": "AK-202",
+            "ocr": "20200",
+            "due_date": "2026-10-15",
+            "total_amount": 4500.0,
+            "attachment": str(orig_png),
+        },
+        {
+            "supplier": "Direktglas AB",
+            "invoice_number": "DG-101",
+            "ocr": "10100",
+            "due_date": "2026-10-10",
+            "total_amount": 3200.0,
+            "attachment": str(orig_pdf),
+        },
+        {
+            "supplier": "Direktglas AB",
+            "invoice_number": "DG-102",
+            "invoice_type": "Kreditfaktura",
+            "ocr": "",
+            "due_date": "2026-10-20",
+            "total_amount": -500.0,
+            "attachment": "",
+        },
+    ]
+
+    r = ex.export_invoice_list(
+        invoices,
+        filename=str(tmp_path / "bunt_bokmarken.pdf"),
+        title="Betalunderlag Bokmärken",
+        suppliers_list=suppliers,
+        payment_date="2026-10-14",
+        ask_payment_date=False,
+        check_duplicates=False,
+        mark_exported=False,
+    )
+    try:
+        assert r["success"], r
+        assert r["attachments_included"] == 2
+        assert r["attachments_missing"] == 1
+        assert r["bookmarks_count"] >= 9
+        assert r["links_count"] >= 6
+
+        reader = PdfReader(r["file_path"])
+        assert len(reader.outline) >= 4
+
+        doc = pymupdf.open(r["file_path"])
+        try:
+            assert len(doc) == 4
+            toc = doc.get_toc()
+            titles = [title for _lvl, title, _page in toc]
+            assert "Översikt" in titles
+            assert "Leverantörsuppgifter" in titles
+            assert "Fakturor" in titles
+            assert "Bifogade original" in titles
+            assert "External Junk Outline" not in titles
+
+            by_title = {title: page for _lvl, title, page in toc}
+            assert any(
+                "Direktglas AB" in t and "DG-101" in t and p == 2
+                for _lvl, t, p in toc
+            )
+            assert any(
+                "Åkeri & Co" in t and "AK-202" in t and p == 4
+                for _lvl, t, p in toc
+            )
+            assert by_title["Bifogade original"] == 2
+
+            links = doc[0].get_links()
+            target_pages = {lnk["page"] for lnk in links if lnk.get("kind") == 1}
+            uris = {lnk.get("uri", "") for lnk in links if lnk.get("kind") == 2}
+            assert {0, 1, 3}.issubset(target_pages)
+            assert "mailto:ekonomi@direktglas.se" in uris
+            assert "mailto:faktura@akeri.se" in uris
+        finally:
+            doc.close()
+    finally:
+        _cleanup_exported_file(r["file_path"])
+
+
+def test_pdf_bookmarks_and_links_english_without_originals(tmp_path):
+    """Engelsk export utan original skapar engelska bokmärken och länkar."""
+    pymupdf = pytest.importorskip("pymupdf")
+    ex = _exporter(tmp_path, theme="light", language="en", include_originals=False)
+    _require_reportlab(ex)
+
+    r = ex.export_invoice_list(
+        [
+            {
+                "supplier": "Nordic Supply",
+                "invoice_number": "NS-1",
+                "ocr": "9988",
+                "due_date": "2026-10-20",
+                "total_amount": 1500.0,
+            },
+        ],
+        filename=str(tmp_path / "en_outline.pdf"),
+        title="Payment Batch",
+        suppliers_list=[
+            {"name": "Nordic Supply", "email": "ap@nordicsupply.example"},
+        ],
+        payment_date="2026-10-15",
+        ask_payment_date=False,
+        check_duplicates=False,
+        mark_exported=False,
+    )
+    try:
+        assert r["success"], r
+        assert r["bookmarks_count"] >= 5
+        assert r["links_count"] >= 2
+
+        doc = pymupdf.open(r["file_path"])
+        try:
+            titles = [title for _lvl, title, _page in doc.get_toc()]
+            assert "Overview" in titles
+            assert "Supplier details" in titles
+            assert "Invoices" in titles
+            assert "Attached originals" not in titles
+            uris = {lnk.get("uri", "") for lnk in doc[0].get_links()}
+            assert "mailto:ap@nordicsupply.example" in uris
+        finally:
+            doc.close()
+    finally:
+        _cleanup_exported_file(r["file_path"])
+
+
+def test_pdf_missing_and_corrupt_attachments_have_no_broken_links(tmp_path):
+    """Saknade eller trasiga bilagor skapar inga trasiga sidlänkar."""
+    pymupdf = pytest.importorskip("pymupdf")
+    ex = _exporter(tmp_path, theme="light", language="sv")
+    _require_reportlab(ex)
+
+    corrupt = tmp_path / "trasig.pdf"
+    corrupt.write_bytes(b"not a real pdf file")
+
+    r = ex.export_invoice_list(
+        [
+            {
+                "supplier": "Test AB",
+                "invoice_number": "T-1",
+                "due_date": "2026-10-20",
+                "total_amount": 100.0,
+                "attachment": str(tmp_path / "finns_inte.pdf"),
+            },
+            {
+                "supplier": "Test AB",
+                "invoice_number": "T-2",
+                "due_date": "2026-10-21",
+                "total_amount": 200.0,
+                "attachment": str(corrupt),
+            },
+        ],
+        filename=str(tmp_path / "broken_att.pdf"),
+        payment_date="2026-10-15",
+        ask_payment_date=False,
+        check_duplicates=False,
+        mark_exported=False,
+    )
+    try:
+        assert r["success"], r
+        assert r["attachments_included"] == 0
+        assert r["attachments_missing"] == 2
+        doc = pymupdf.open(r["file_path"])
+        try:
+            titles = [title for _lvl, title, _page in doc.get_toc()]
+            assert "Bifogade original" not in titles
+            for lnk in doc[0].get_links():
+                if lnk.get("kind") == 1:
+                    assert 0 <= lnk["page"] < len(doc)
+        finally:
+            doc.close()
+    finally:
+        _cleanup_exported_file(r["file_path"])
