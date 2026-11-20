@@ -667,9 +667,12 @@ class LogView(QWidget):
             self._banner_widget.setVisible(False)
             return
         last = errors[-1]
+        raw_msg = str(last.get("msg", "") or "").splitlines()[0].strip()
+        if len(raw_msg) > 130:
+            raw_msg = raw_msg[:127] + "…"
         self._lbl_banner.setText(tr(
             "log.banner_errors", n=len(errors),
-            last=f"{str(last.get('ts', ''))[5:19]} {last.get('msg', '')}",
+            last=f"{str(last.get('ts', ''))[5:19]} {raw_msg}",
         ))
         self._banner_widget.setVisible(True)
 
@@ -976,20 +979,78 @@ class LogView(QWidget):
         self._current_theme = t
         name = str(t.get("name", "")).lower()
         self._dark = name != "light"
-        muted = t.get("muted", "#9cb0c4" if self._dark else "#4b5563")
+        muted = t.get(
+            "text_muted",
+            t.get("muted", "#9eb2c9" if self._dark else "#4f5b69"),
+        )
+        text_strong = t.get(
+            "text_strong", "#f4f7fb" if self._dark else "#0d1218"
+        )
+        accent = t.get("accent", "#3d8bfd" if self._dark else "#0b5cab")
+        header_bg = t.get(
+            "header_bg", "#162d49" if self._dark else "#16335b"
+        )
+        row_normal = t.get(
+            "row_normal", "#0f1720" if self._dark else "#ffffff"
+        )
+        row_alt = t.get("row_alt", "#162231" if self._dark else "#eef4fb")
+        border = t.get("border", "#263649" if self._dark else "#d6cec0")
+        input_bg = t.get("input_bg", "#0f1720" if self._dark else "#ffffff")
+        grid_c = "#243447" if self._dark else "#e2dbd0"
+
         if self._dark:
             self._lbl_banner.setStyleSheet(
                 "background:#4c161b; color:#ffd7d7; border:1px solid #f87171;"
-                " border-radius:8px; padding:7px 12px; font-weight:600;"
+                " border-radius:8px; padding:8px 14px; font-weight:600;"
             )
         else:
             self._lbl_banner.setStyleSheet(
                 "background:#fde8ea; color:#9f1239; border:1px solid #e11d48;"
-                " border-radius:8px; padding:7px 12px; font-weight:600;"
+                " border-radius:8px; padding:8px 14px; font-weight:600;"
             )
+        self._table.setStyleSheet(f"""
+            QTableWidget {{
+                background-color           : {row_normal};
+                color                      : {text_strong};
+                font-weight                : 500;
+                font-size                  : 13px;
+                gridline-color             : {grid_c};
+                alternate-background-color : {row_alt};
+                selection-background-color : {accent};
+                selection-color            : #ffffff;
+                border                     : 1px solid {border};
+                border-radius              : 8px;
+                outline                    : none;
+            }}
+            QTableWidget:focus {{ border: 2px solid {accent}; }}
+            QHeaderView::section {{
+                background-color : {header_bg};
+                color            : #ffffff;
+                font-weight      : 700;
+                font-size        : 12px;
+                padding          : 8px 10px;
+                border           : none;
+                border-right     : 1px solid rgba(255, 255, 255, 0.18);
+                border-bottom    : 1px solid {border};
+            }}
+            QTableWidget::item {{
+                padding : 6px 8px;
+                color   : {text_strong};
+            }}
+            QTableWidget::item:selected {{
+                background-color : {accent};
+                color            : #ffffff;
+            }}
+        """)
+        self._detail.setStyleSheet(
+            f"QPlainTextEdit {{ background-color:{input_bg}; color:{text_strong};"
+            f" border:1px solid {border}; border-radius:8px; padding:8px; }}"
+            f"QPlainTextEdit:focus {{ border:2px solid {accent}; }}"
+        )
         self._lbl_info.setStyleSheet(
             f"color:{muted}; background:transparent; font-weight:600;"
         )
+        attach_search_icon(self._search, size=14, theme=t)
         refresh_bound_icons(t)
         self._refresh_table()
 

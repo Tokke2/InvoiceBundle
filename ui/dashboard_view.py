@@ -19,6 +19,7 @@ from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QPushButton,
     QTableWidget,
@@ -297,11 +298,15 @@ class DashboardView(QWidget):
         self._table.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows
         )
-        self._table.horizontalHeader().setStretchLastSection(True)
+        hh = self._table.horizontalHeader()
+        hh.setStretchLastSection(False)
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         self._table.setColumnWidth(0, 128)
-        self._table.setColumnWidth(1, 210)
-        self._table.setColumnWidth(2, 130)
-        self._table.setColumnWidth(3, 150)
+        self._table.setColumnWidth(2, 145)
+        self._table.setColumnWidth(3, 165)
         self._table.doubleClicked.connect(
             lambda _i: self._goto_invoices()
         )
@@ -410,15 +415,67 @@ class DashboardView(QWidget):
     # ── Tema / språk ──────────────────────────────────────────────────
 
     def apply_theme(self, theme: dict | None = None) -> None:
-        """Anpassar kort + hjälptext till ljust/mörkt tema."""
-        light = str((theme or {}).get("name", "")).lower() == "light"
+        """Anpassar kort, tabell och hjälptext till ljust/mörkt tema."""
+        t = dict(theme or {})
+        light = str(t.get("name", "")).lower() == "light"
         for card in (self._card_pay, self._card_overdue,
                      self._card_week, self._card_suppliers):
             card.apply_variant(light)
-        self._lbl_credit_warn.setStyleSheet(
-            f"color:{'#b45309' if light else '#f0b35c'};"
-            " background:transparent; font-weight:700; font-size:13px;"
-        )
+        text_strong = t.get("text_strong", "#0d1218" if light else "#f4f7fb")
+        row_normal = t.get("row_normal", "#ffffff" if light else "#0f1720")
+        row_alt = t.get("row_alt", "#eef4fb" if light else "#162231")
+        header_bg = t.get("header_bg", "#16335b" if light else "#162d49")
+        border = t.get("border", "#d6cec0" if light else "#263649")
+        accent = t.get("accent", "#0b5cab" if light else "#3d8bfd")
+        grid_c = "#e2dbd0" if light else "#243447"
+        self._table.setStyleSheet(f"""
+            QTableWidget {{
+                background-color           : {row_normal};
+                color                      : {text_strong};
+                font-weight                : 600;
+                font-size                  : 13px;
+                gridline-color             : {grid_c};
+                alternate-background-color : {row_alt};
+                selection-background-color : {accent};
+                selection-color            : #ffffff;
+                border                     : 1px solid {border};
+                border-radius              : 8px;
+                outline                    : none;
+            }}
+            QTableWidget:focus {{
+                border : 2px solid {accent};
+            }}
+            QHeaderView::section {{
+                background-color : {header_bg};
+                color            : #ffffff;
+                font-weight      : 700;
+                font-size        : 12px;
+                padding          : 8px 10px;
+                border           : none;
+                border-right     : 1px solid rgba(255, 255, 255, 0.18);
+                border-bottom    : 1px solid {border};
+            }}
+            QTableWidget::item {{
+                padding : 7px 8px;
+                color   : {text_strong};
+            }}
+            QTableWidget::item:selected {{
+                background-color : {accent};
+                color            : #ffffff;
+            }}
+        """)
+        if light:
+            self._lbl_credit_warn.setStyleSheet(
+                "color:#92400e; background:#fef3c7;"
+                " border:1px solid #f59e0b; border-radius:8px;"
+                " padding:8px 12px; font-weight:700; font-size:13px;"
+            )
+        else:
+            self._lbl_credit_warn.setStyleSheet(
+                "color:#fcd34d; background:#2b2110;"
+                " border:1px solid #d97706; border-radius:8px;"
+                " padding:8px 12px; font-weight:700; font-size:13px;"
+            )
         self._lbl_hint.setStyleSheet(
             f"color:{'#334155' if light else '#c9d9ee'};"
             " background:transparent; font-weight:600; font-size:13px;"

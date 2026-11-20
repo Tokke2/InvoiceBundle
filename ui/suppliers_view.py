@@ -126,7 +126,7 @@ log = logging.getLogger("SuppliersView")
 
 #: (etikett, datanyckel, min-bredd, justering)
 COLUMNS: list[tuple[str, str, int, Qt.AlignmentFlag]] = [
-    ("Namn",     "name",           185, Qt.AlignmentFlag.AlignLeft),
+    ("Namn",     "name",           225, Qt.AlignmentFlag.AlignLeft),
     ("Org.nr",   "org_number",     154, Qt.AlignmentFlag.AlignLeft),
     ("Bankgiro", "bg",             114, Qt.AlignmentFlag.AlignLeft),
     ("Plusgiro", "pg",             114, Qt.AlignmentFlag.AlignLeft),
@@ -1406,7 +1406,7 @@ class SuppliersView(QWidget):
         dark = self._is_dark()
 
         text_strong = t.get("text_strong", "#f0f6fc" if dark else "#1c2128")
-        muted       = t.get("muted",       "#a0aec0" if dark else "#4b5563")
+        muted       = t.get("text_muted",  t.get("muted", "#9eb2c9" if dark else "#4f5b69"))
         accent      = t.get("accent",      "#58a6ff" if dark else "#0969da")
         accent_hov  = t.get("accent_hover", "#388bfd" if dark else "#0550ae")
         header_bg   = t.get("header_bg",   "#161b22" if dark else "#0969da")
@@ -1444,9 +1444,9 @@ class SuppliersView(QWidget):
                 color            : #ffffff;
                 font-weight      : 700;
                 font-size        : 12px;
-                padding          : 7px 8px;
+                padding          : 8px 10px;
                 border           : none;
-                border-right     : 1px solid {grid_c};
+                border-right     : 1px solid rgba(255, 255, 255, 0.18);
                 border-bottom    : 1px solid {border};
             }}
             QTableWidget::item {{
@@ -1519,9 +1519,10 @@ class SuppliersView(QWidget):
                 font-weight      : 600;
             }}
             QLineEdit:focus {{
-                border-color : {accent};
+                border : 2px solid {accent};
             }}
         """)
+        attach_search_icon(self._search, size=14, theme=t)
 
         # ── Labels ─────────────────────────────────────────────────────
         self._lbl_count.setStyleSheet(

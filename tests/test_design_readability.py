@@ -106,3 +106,77 @@ def test_font_choice_before_qapplication_does_not_abort():
     )
     assert proc.returncode == 0, proc.stderr[-2000:]
     assert "ok" in proc.stdout
+
+
+def test_history_view_has_single_apply_theme_and_updates_styles():
+    """#13: HistoryView.apply_theme ska inte vara dubblerad/skuggad och ska
+    styla räknarchip, tomläge, sökfält, filter och tabell i båda temana."""
+    import ast
+    from ui.history_view import HistoryView
+    from ui.main_window import THEMES
+
+    tree = ast.parse((PROJECT_DIR / "ui" / "history_view.py").read_text("utf-8"))
+    hv_cls = next(
+        n for n in tree.body
+        if isinstance(n, ast.ClassDef) and n.name == "HistoryView"
+    )
+    apply_defs = [
+        n for n in hv_cls.body
+        if isinstance(n, ast.FunctionDef) and n.name == "apply_theme"
+    ]
+    assert len(apply_defs) == 1, f"Förväntade 1 apply_theme, hittade {len(apply_defs)}"
+
+    app = _qapp()
+
+    class _HistApp:
+        def get_archived_invoices(self):
+            return []
+
+    hv = HistoryView(_HistApp())
+    try:
+        hv.apply_theme(THEMES["light"])
+        assert THEMES["light"]["tab_selected"] in hv._lbl_count.styleSheet()
+        assert THEMES["light"]["text_muted"] in hv._lbl_empty.styleSheet()
+        assert "rgba(255, 255, 255, 0.18)" in hv._table.styleSheet()
+
+        hv.apply_theme(THEMES["dark"])
+        assert THEMES["dark"]["tab_selected"] in hv._lbl_count.styleSheet()
+        assert THEMES["dark"]["text_muted"] in hv._lbl_empty.styleSheet()
+        assert THEMES["dark"]["header_bg"] in hv._table.styleSheet()
+    finally:
+        hv.close()
+        hv.deleteLater()
+        app.processEvents()
+
+
+def test_sharper_design_stylesheet_and_no_hardcoded_muted_grey():
+    """GroupBox-titlar smälter in i bg_secondary, tabellrubriker har diskreta
+    avgränsare och ScanImportView/InvoiceDialog saknar hårdkodad #8b949e."""
+    from ui.main_window import THEMES, build_stylesheet
+
+    for mode in ("dark", "light"):
+        t = THEMES[mode]
+        css = build_stylesheet(t)
+        assert f"background          : {t['bg_secondary']};" in css
+        assert "border-right     : 1px solid rgba(255, 255, 255, 0.18);" in css
+        assert "QPushButton:focus" in css
+        assert "QTableWidget:focus, QTableView:focus" in css
+
+    scan_src = (PROJECT_DIR / "ui" / "scan_import_view.py").read_text("utf-8")
+    assert "color:#8b949e" not in scan_src
+    helpers_src = (PROJECT_DIR / "ui" / "invoices_helpers.py").read_text("utf-8")
+    assert "color:#8b949e" not in helpers_src
+
+    app = _qapp()
+    from PySide6.QtWidgets import QHeaderView
+    from ui.dashboard_view import DashboardView
+
+    dash = DashboardView(_FakeApp())
+    try:
+        hh = dash._table.horizontalHeader()
+        assert hh.sectionResizeMode(1) == QHeaderView.ResizeMode.Stretch
+        assert not hh.stretchLastSection()
+    finally:
+        dash.close()
+        dash.deleteLater()
+        app.processEvents()

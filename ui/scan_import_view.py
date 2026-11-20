@@ -2006,7 +2006,8 @@ class ScanImportView(QWidget):
         info = QLabel(tr("scan.info"))
         self._info_label = info
         info.setWordWrap(True)
-        info.setStyleSheet("color:#8b949e;background:transparent;")
+        info.setProperty("muted", True)
+        info.setStyleSheet("background:transparent;")
         root.addWidget(info)
         root.addWidget(self._hline())
 
@@ -2027,7 +2028,8 @@ class ScanImportView(QWidget):
         bind_icon(btn_clear, "clear", size=14)
         btn_clear.clicked.connect(self._clear_paths)
         self._lbl_files = QLabel(tr("scan.no_files"))
-        self._lbl_files.setStyleSheet("color:#8b949e;background:transparent;")
+        self._lbl_files.setProperty("muted", True)
+        self._lbl_files.setStyleSheet("background:transparent;")
         row1.addWidget(btn_pick)
         row1.addWidget(btn_clear)
         row1.addWidget(self._lbl_files, stretch=1)
@@ -2056,7 +2058,8 @@ class ScanImportView(QWidget):
         lbl_winfo = QLabel(tr("watch.info"))
         self._lbl_watch_info = lbl_winfo
         lbl_winfo.setWordWrap(True)
-        lbl_winfo.setStyleSheet("color:#8b949e;background:transparent;")
+        lbl_winfo.setProperty("muted", True)
+        lbl_winfo.setStyleSheet("background:transparent;")
         bw.addWidget(lbl_winfo)
         self._lst_watch = QListWidget()
         self._lst_watch.setMaximumHeight(96)
@@ -2105,7 +2108,8 @@ class ScanImportView(QWidget):
         root.addWidget(box_watch)
 
         self._lbl_status = QLabel(tr("scan.ready"))
-        self._lbl_status.setStyleSheet("color:#8b949e;background:transparent;")
+        self._lbl_status.setProperty("muted", True)
+        self._lbl_status.setStyleSheet("background:transparent;")
         row2.addWidget(btn_scan)
         self._btn_cancel_scan = QPushButton(tr("scan.cancel"))
         bind_icon(self._btn_cancel_scan, "clear", size=14)
@@ -2230,9 +2234,8 @@ class ScanImportView(QWidget):
         self._lbl_preview_title = QLabel(tr("scan.preview_title"))
         self._lbl_preview_title.setFont(make_tabular_font(12, bold=True))
         self._lbl_preview_file = QLabel("")
-        self._lbl_preview_file.setStyleSheet(
-            "color:#8b949e;background:transparent;"
-        )
+        self._lbl_preview_file.setProperty("muted", True)
+        self._lbl_preview_file.setStyleSheet("background:transparent;")
         self._lbl_preview_file.setWordWrap(False)
         self._btn_preview_open = QPushButton(tr("scan.open_original"))
         self._btn_preview_open.setToolTip(tr("scan.preview_open_tip"))
@@ -2252,9 +2255,8 @@ class ScanImportView(QWidget):
         self._btn_prev_page.clicked.connect(self._preview_prev_page)
         self._lbl_preview_page = QLabel("")
         self._lbl_preview_page.setFont(make_tabular_font(11))
-        self._lbl_preview_page.setStyleSheet(
-            "color:#8b949e;background:transparent;"
-        )
+        self._lbl_preview_page.setProperty("muted", True)
+        self._lbl_preview_page.setStyleSheet("background:transparent;")
         self._btn_next_page = QPushButton("▶")
         self._btn_next_page.setFixedWidth(30)
         self._btn_next_page.setToolTip(tr("scan.preview_next_tip"))
@@ -2265,9 +2267,8 @@ class ScanImportView(QWidget):
         self._btn_zoom_out.setToolTip(tr("scan.preview_zoom_out_tip"))
         self._lbl_zoom_pct = QLabel("100%")
         self._lbl_zoom_pct.setFont(make_tabular_font(11))
-        self._lbl_zoom_pct.setStyleSheet(
-            "color:#8b949e;background:transparent;"
-        )
+        self._lbl_zoom_pct.setProperty("muted", True)
+        self._lbl_zoom_pct.setStyleSheet("background:transparent;")
         self._btn_zoom_in = QPushButton("+")
         self._btn_zoom_in.setFixedWidth(30)
         self._btn_zoom_in.setToolTip(tr("scan.preview_zoom_in_tip"))
@@ -2287,9 +2288,8 @@ class ScanImportView(QWidget):
         self._preview_empty = QLabel(tr("scan.preview_empty"))
         self._preview_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preview_empty.setWordWrap(True)
-        self._preview_empty.setStyleSheet(
-            "color:#8b949e;background:transparent;padding:16px;"
-        )
+        self._preview_empty.setProperty("muted", True)
+        self._preview_empty.setStyleSheet("background:transparent;padding:16px;")
         self._preview_image = _RegionImageView(read_only=True)
         self._preview_image.setMinimumSize(220, 220)
         self._preview_image.zoom_changed.connect(
@@ -2374,9 +2374,8 @@ class ScanImportView(QWidget):
 
         # ── Logg-utdrag ───────────────────────────────────────────────
         self._lbl_log = QLabel()
-        self._lbl_log.setStyleSheet(
-            "color:#8b949e;background:transparent;font-size:11px;"
-        )
+        self._lbl_log.setProperty("muted", True)
+        self._lbl_log.setStyleSheet("background:transparent;font-size:11px;")
         self._lbl_log.setWordWrap(True)
         root.addWidget(self._lbl_log)
 
@@ -2384,7 +2383,8 @@ class ScanImportView(QWidget):
             tr("common.footer_local", year=COPYRIGHT_YEAR)
         )
         footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer.setStyleSheet("color:#8b949e;background:transparent;")
+        footer.setProperty("muted", True)
+        footer.setStyleSheet("background:transparent;")
         self._footer = footer
         root.addWidget(footer)
         self._update_preview_panel()
@@ -2677,7 +2677,6 @@ class ScanImportView(QWidget):
     def _hline() -> QFrame:
         f = QFrame()
         f.setFrameShape(QFrame.Shape.HLine)
-        f.setStyleSheet("color:#30363d;")
         return f
 
     # ══════════════════════════════════════════════════════════════════
@@ -8877,8 +8876,11 @@ class ScanImportView(QWidget):
             self._dark = is_dark_theme(t)
         except Exception:
             pass
-        muted = t.get("muted", "#8b949e" if self._dark else "#4b5563")
-        muted_css = f"color:{muted};background:transparent;"
+        muted = t.get(
+            "text_muted",
+            t.get("muted", "#9eb2c9" if self._dark else "#4f5b69"),
+        )
+        muted_css = f"color:{muted};background:transparent;font-weight:500;"
         for lbl_name in (
             "_info_label", "_lbl_watch_info", "_lbl_files",
             "_lbl_status", "_footer", "_lbl_preview_file",
@@ -8893,18 +8895,18 @@ class ScanImportView(QWidget):
             )
         if hasattr(self, "_preview_panel"):
             panel_bg = t.get(
-                "card_bg", "#161b22" if self._dark else "#f8fafc"
+                "card_bg", "#131c27" if self._dark else "#ffffff"
             )
             border_c = t.get(
-                "border", "#30363d" if self._dark else "#d0d7de"
+                "border", "#263649" if self._dark else "#d6cec0"
             )
             self._preview_panel.setStyleSheet(
                 f"QFrame#ScanPreviewPanel{{background-color:{panel_bg};"
-                f"border:1px solid {border_c};border-radius:8px;}}"
+                f"border:1px solid {border_c};border-radius:10px;}}"
             )
         if hasattr(self, "_preview_image"):
             canvas_bg = t.get(
-                "bg_tertiary", "#11161d" if self._dark else "#dde2e8"
+                "bg_tertiary", "#11161d" if self._dark else "#e7e1d6"
             )
             self._preview_image.set_theme_colors(canvas_bg, muted)
         if hasattr(self, "_lbl_log"):

@@ -2368,7 +2368,7 @@ class ExportHistoryDialog(QDialog):
                 font-size        : 12px;
                 padding          : 7px 8px;
                 border           : none;
-                border-right     : 1px solid {border};
+                border-right     : 1px solid rgba(255, 255, 255, 0.18);
                 border-bottom    : 1px solid {border};
             }}
             QTableWidget::item {{ padding: 5px 8px; }}
@@ -2879,9 +2879,8 @@ class InvoiceDialog(QDialog):
         # SMART IFYLLNING: org.nr / bankgiro / betalvillkor under namnet
         self._lbl_sup_info = QLabel()
         self._lbl_sup_info.setFont(make_font(9))
-        self._lbl_sup_info.setStyleSheet(
-            "color:#8b949e;background:transparent;"
-        )
+        self._lbl_sup_info.setProperty("muted", True)
+        self._lbl_sup_info.setStyleSheet("background:transparent;")
         self._lbl_sup_info.setWordWrap(True)
         self._lbl_sup_info.setVisible(False)
         sup_outer.addWidget(self._lbl_sup_info)

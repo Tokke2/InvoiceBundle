@@ -334,6 +334,7 @@ def icon_pixmap(name: str, color: str = "#1c2128", size: int = 16) -> QPixmap:
     if renderer.isValid():
         painter = QPainter(pix)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         renderer.render(painter)
         painter.end()
     _PIXMAP_CACHE[key] = pix
@@ -346,20 +347,27 @@ def vector_icon(
     size: int = 16,
     disabled_color: str | None = None,
 ) -> QIcon:
-    """Returnerar en QIcon med 1x och 2x vektorupplösning (+ Disabled-läge)."""
+    """Returnerar en QIcon med krisp 1x och HiDPI 2x vektorupplösning (+ Disabled-läge)."""
     dis = (disabled_color or "").lower()
     key = (name, color.lower(), dis, int(size))
     cached = _ICON_CACHE.get(key)
     if cached is not None:
         return cached
     ic = QIcon()
-    for px in (int(size), int(size) * 2):
+    for scale in (1, 2):
+        px = int(size) * scale
         pm = icon_pixmap(name, color=color, size=px)
         if not pm.isNull():
+            if scale > 1:
+                pm = QPixmap(pm)
+                pm.setDevicePixelRatio(float(scale))
             ic.addPixmap(pm, QIcon.Mode.Normal)
         if dis:
             pm_dis = icon_pixmap(name, color=disabled_color or dis, size=px)
             if not pm_dis.isNull():
+                if scale > 1:
+                    pm_dis = QPixmap(pm_dis)
+                    pm_dis.setDevicePixelRatio(float(scale))
                 ic.addPixmap(pm_dis, QIcon.Mode.Disabled)
     _ICON_CACHE[key] = ic
     return ic

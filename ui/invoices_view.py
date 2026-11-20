@@ -5130,7 +5130,7 @@ class InvoicesView(QWidget):
             self._filter_supplier,
         ):
             combo.setStyleSheet(
-                f"QComboBox{{{input_style}min-height:36px;padding-right:28px;}}"
+                f"QComboBox{{{input_style}min-height:33px;padding-right:28px;}}"
                 f"QComboBox:focus{{{focus_border}}}"
                 f"{combo_arrow_qss}"
             )
@@ -5176,9 +5176,9 @@ class InvoicesView(QWidget):
                 color            : #ffffff;
                 font-weight      : 700;
                 font-size        : 12px;
-                padding          : 7px 10px;
+                padding          : 8px 10px;
                 border           : none;
-                border-right     : 1px solid {grid_c};
+                border-right     : 1px solid rgba(255, 255, 255, 0.18);
                 border-bottom    : 1px solid {border_c};
             }}
             QTableView::item {{

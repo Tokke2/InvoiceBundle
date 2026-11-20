@@ -464,6 +464,9 @@ QPushButton:hover {{
     background-color : {t["button_hover"]};
     border-color     : {t["accent"]};
 }}
+QPushButton:focus {{
+    border           : 2px solid {t["accent"]};
+}}
 QPushButton:pressed {{
     background-color : {t["accent"]};
     color            : #ffffff;
@@ -481,6 +484,9 @@ QPushButton[accent="true"] {{
 }}
 QPushButton[accent="true"]:hover {{
     background-color : {t["accent_hover"]};
+}}
+QPushButton[accent="true"]:focus {{
+    border           : 2px solid {t["text_strong"]};
 }}
 QPushButton#DonateButton,
 QToolButton#DonateButton {{
@@ -553,6 +559,7 @@ QPushButton[info="true"]:disabled {{
 
 QTabWidget::pane {{
     border        : 1px solid {t["border"]};
+    border-top    : 2px solid {t["tab_selected"]};
     background    : {t["bg_secondary"]};
     border-radius : 0 10px 10px 10px;
     top           : -1px;
@@ -563,8 +570,8 @@ QTabBar::tab {{
     color         : {t["tab_text"]};
     font-weight   : 600;
     font-size     : 15px;
-    padding       : 8px 6px;
-    margin-right  : 2px;
+    padding       : 8px 10px;
+    margin-right  : 3px;
     border-radius : 9px 9px 0 0;
     border        : 1px solid {t["border"]};
     border-bottom : none;
@@ -585,7 +592,7 @@ QTabBar::scroller {{ width: 26px; }}
 
 /* ── Tables ─────────────────────────────────────────────────── */
 
-QTableWidget, QTableView, QTreeView, QListView {{
+QTableWidget, QTableView, QTreeView, QListView, QListWidget {{
     background-color           : {t["row_normal"]};
     color                      : {t["text_strong"]};
     font-weight                : 500;
@@ -598,6 +605,9 @@ QTableWidget, QTableView, QTreeView, QListView {{
     alternate-background-color : {t["row_alt"]};
     outline                    : none;
 }}
+QTableWidget:focus, QTableView:focus, QListWidget:focus {{
+    border : 2px solid {t["accent"]};
+}}
 QHeaderView::section {{
     background-color : {t["header_bg"]};
     color            : #ffffff;
@@ -605,7 +615,7 @@ QHeaderView::section {{
     font-size        : 12px;
     padding          : 8px 10px;
     border           : none;
-    border-right     : 1px solid {t["border"]};
+    border-right     : 1px solid rgba(255, 255, 255, 0.18);
     border-bottom    : 1px solid {t["border"]};
 }}
 QTableWidget::item, QTableView::item {{
@@ -632,7 +642,7 @@ QSpinBox, QDoubleSpinBox, QDateEdit {{
 }}
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus,
 QSpinBox:focus, QDoubleSpinBox:focus,
-QDateEdit:focus {{ border-color: {t["accent"]}; }}
+QDateEdit:focus {{ border: 2px solid {t["accent"]}; }}
 
 /* ── COMBOBOX ────────────────────────────────────────────────── */
 
@@ -647,7 +657,7 @@ QComboBox {{
     min-height       : 32px;
 }}
 QComboBox:focus, QComboBox:on {{
-    border-color : {t["accent"]};
+    border : 2px solid {t["accent"]};
 }}
 QComboBox:hover {{ border-color: {t["accent"]}; }}
 QComboBox::drop-down {{
@@ -792,7 +802,8 @@ QStatusBar {{
     font-weight      : 600;
     font-size        : 12px;
     border-top       : 1px solid {t["border"]};
-    padding          : 2px 6px;
+    padding          : 3px 10px;
+    min-height       : 28px;
 }}
 QStatusBar::item {{ border: none; }}
 
@@ -804,16 +815,17 @@ QGroupBox {{
     margin-top    : 14px;
     font-weight   : 700;
     color         : {t["text_strong"]};
-    padding       : 12px 10px 8px 10px;
+    padding       : 14px 12px 10px 12px;
     background    : {t["bg_secondary"]};
 }}
 QGroupBox::title {{
     subcontrol-origin   : margin;
     subcontrol-position : top left;
-    padding             : 0 8px;
+    padding             : 1px 8px;
     left                : 12px;
     color               : {t["accent"]};
-    background          : {t["bg"]};
+    background          : {t["bg_secondary"]};
+    border-radius       : 4px;
 }}
 
 /* ── Checkboxes / Radio ─────────────────────────────────────── */
@@ -838,6 +850,9 @@ QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
 }}
 QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
     border-color : {t["accent"]};
+}}
+QCheckBox::indicator:focus, QRadioButton::indicator:focus {{
+    border : 2px solid {t["accent"]};
 }}
 
 /* ── Tooltips ───────────────────────────────────────────────── */
@@ -3815,9 +3830,36 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(16, 14, 16, 14)
         root.setSpacing(14)
 
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        _hdr_font = _font(17, bold=True)
+        try:
+            try:
+                from ui.design import (
+                    ICON_HEADER_PX as _HDR_PX,
+                    app_icon_pixmap as _app_pix,
+                    header_font as _hdr_fn,
+                )
+            except ImportError:
+                from design import (  # type: ignore[no-redef]
+                    ICON_HEADER_PX as _HDR_PX,
+                    app_icon_pixmap as _app_pix,
+                    header_font as _hdr_fn,
+                )
+            _pix = _app_pix(_HDR_PX)
+            _hdr_font = _hdr_fn()
+            if not _pix.isNull():
+                _mark = QLabel()
+                _mark.setPixmap(_pix)
+                _mark.setStyleSheet("background:transparent;")
+                head.addWidget(_mark)
+        except Exception:
+            pass
         hdr = QLabel(tr("settings.title"))
-        hdr.setFont(_font(16, bold=True))
-        root.addWidget(hdr)
+        hdr.setFont(_hdr_font)
+        head.addWidget(hdr)
+        head.addStretch(1)
+        root.addLayout(head)
 
         # ── Språk ─────────────────────────────────────────────────────
         box_lang = QGroupBox(tr("settings.language"))
