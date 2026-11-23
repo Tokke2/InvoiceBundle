@@ -6,6 +6,22 @@ import re
 import weakref
 from typing import Any
 
+try:
+    import shiboken6 as _shiboken6
+except Exception:  # pragma: no cover
+    _shiboken6 = None  # type: ignore[assignment]
+
+
+def _qt_valid(obj: Any) -> bool:
+    if obj is None:
+        return False
+    if _shiboken6 is not None:
+        try:
+            return bool(_shiboken6.isValid(obj))
+        except Exception:
+            return False
+    return True
+
 FONT_SIZE_CHOICES: tuple[int, ...] = (11, 13, 15, 17)
 DEFAULT_FONT_SIZE: int = 13
 _MIN_FONT_SIZE: int = FONT_SIZE_CHOICES[0]
@@ -126,6 +142,8 @@ def make_tabular_font(size: int = 12, bold: bool = False) -> Any:
     font.setWeight(
         QFont.Weight.Bold if bold else QFont.Weight.Medium
     )
+    font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
     tag_cls = getattr(QFont, "Tag", None)
     if tag_cls is not None and hasattr(font, "setFeature"):
         try:
@@ -321,14 +339,17 @@ def _scale_widget_tree(root: Any, preference: int) -> None:
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QTableView, QWidget
 
-    if not isinstance(root, QWidget):
+    if not _qt_valid(root) or not isinstance(root, QWidget):
         return
     try:
         widgets = [root, *root.findChildren(QWidget)]
     except Exception:
         return
     for widget in widgets:
+        if not _qt_valid(widget):
+            continue
         try:
+            _meta(widget)["scaled_pref"] = preference
             if widget.testAttribute(Qt.WidgetAttribute.WA_SetFont):
                 _set_scaled_font(widget, preference)
             _set_scaled_stylesheet(widget, preference)
@@ -350,7 +371,8 @@ class _FontScaleEventFilter:
             def eventFilter(self, watched: Any, event: Any) -> bool:  # noqa: N802
                 try:
                     if (
-                        event.type() == QEvent.Type.Show
+                        _qt_valid(watched)
+                        and event.type() == QEvent.Type.Show
                         and isinstance(watched, QWidget)
                     ):
                         preference = current_font_size()
@@ -367,7 +389,7 @@ class _FontScaleEventFilter:
                             0,
                             lambda r=ref, s=preference: (
                                 _scale_widget_tree(r(), s)
-                                if r() is not None else None
+                                if _qt_valid(r()) else None
                             ),
                         )
                 except Exception:
@@ -379,11 +401,13 @@ class _FontScaleEventFilter:
 
 def apply_font_size(app: Any, size: Any) -> int:
     """Applicerar textstorlek omedelbart på appen, befintliga vyer och tabeller."""
-    from PySide6.QtCore import Qt
     from PySide6.QtGui import QFont
-    from PySide6.QtWidgets import QTableView, QWidget
+    from PySide6.QtWidgets import QWidget
 
+    prev_pref = current_font_size()
     preference = set_current_font_size(size)
+    if not _qt_valid(app):
+        return preference
 
     try:
         meta = _meta(app)
@@ -400,23 +424,24 @@ def apply_font_size(app: Any, size: Any) -> int:
             app.setFont(scaled)
         meta["app_base_font"] = QFont(base)
         meta["applied_font"] = QFont(scaled)
+        app_scaled_pref = int(meta.get("app_scaled_pref", DEFAULT_FONT_SIZE))
+        meta["app_scaled_pref"] = preference
     except Exception:
-        pass
+        app_scaled_pref = prev_pref
 
     _set_scaled_stylesheet(app, preference)
-    try:
-        for widget in list(app.allWidgets()):
-            if not isinstance(widget, QWidget):
-                continue
-            _meta(widget)["scaled_pref"] = preference
-            if widget.testAttribute(Qt.WidgetAttribute.WA_SetFont):
-                _set_scaled_font(widget, preference)
-            _set_scaled_stylesheet(widget, preference)
-            _scale_widget_height_limits(widget, preference)
-            if isinstance(widget, QTableView):
-                _scale_table(widget, preference)
-    except Exception:
-        pass
+    needs_tree_walk = (
+        preference != DEFAULT_FONT_SIZE
+        or prev_pref != preference
+        or app_scaled_pref != preference
+    )
+    if needs_tree_walk:
+        try:
+            for top in list(app.topLevelWidgets()):
+                if _qt_valid(top) and isinstance(top, QWidget):
+                    _scale_widget_tree(top, preference)
+        except Exception:
+            pass
 
     try:
         key = id(app)

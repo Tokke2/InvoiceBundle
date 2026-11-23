@@ -18,6 +18,7 @@ from typing import Any
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -267,16 +268,22 @@ class DashboardView(QWidget):
         head.addWidget(self._btn_open_invoices)
         root.addLayout(head)
 
-        cards = QHBoxLayout()
-        cards.setSpacing(12)
+        cards_grid = QGridLayout()
+        cards_grid.setSpacing(12)
+        self._cards_grid = cards_grid
+        self._cards_cols = 0
         self._card_pay = _StatCard(GOLD, "#0f2140")
         self._card_overdue = _StatCard("#e5534b", "#b3261e")
         self._card_week = _StatCard("#58a6ff", "#0b5cab")
         self._card_suppliers = _StatCard("#3fb950", "#146c2e")
-        for card in (self._card_pay, self._card_overdue,
-                     self._card_week, self._card_suppliers):
-            cards.addWidget(card, stretch=1)
-        root.addLayout(cards)
+        self._cards = (
+            self._card_pay,
+            self._card_overdue,
+            self._card_week,
+            self._card_suppliers,
+        )
+        self._relayout_cards(4)
+        root.addLayout(cards_grid)
 
         self._lbl_credit_warn = QLabel()
         self._lbl_credit_warn.setWordWrap(True)
@@ -315,6 +322,24 @@ class DashboardView(QWidget):
         self._lbl_hint = QLabel()
         root.addWidget(self._lbl_hint)
         self.retranslate()
+
+    def _relayout_cards(self, cols: int) -> None:
+        if cols == getattr(self, "_cards_cols", 0):
+            return
+        self._cards_cols = cols
+        grid = self._cards_grid
+        while grid.count():
+            grid.takeAt(0)
+        for idx, card in enumerate(self._cards):
+            grid.addWidget(card, idx // cols, idx % cols)
+        for c in range(4):
+            grid.setColumnStretch(c, 1 if c < cols else 0)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        w = self.width()
+        cols = 4 if (w <= 0 or w >= 920) else 2
+        self._relayout_cards(cols)
 
     # ── Data ──────────────────────────────────────────────────────────
 

@@ -20,14 +20,16 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
+    QBoxLayout,
     QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -160,24 +162,31 @@ class HistoryView(QWidget):
             head.addWidget(mark)
         self._lbl_title = QLabel(tr("history.title"))
         self._lbl_title.setFont(header_font())
-        head.addWidget(self._lbl_title)
-        head.addStretch(1)
+        self._lbl_title.setWordWrap(True)
+        self._lbl_title.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        head.addWidget(self._lbl_title, stretch=1)
         self._lbl_count = QLabel("")
         self._lbl_count.setObjectName("CountChip")
         self._lbl_count.setFont(make_tabular_font(11, bold=True))
         head.addWidget(self._lbl_count)
         root.addLayout(head)
 
-        row = QHBoxLayout()
+        row = QBoxLayout(QBoxLayout.Direction.LeftToRight)
         row.setSpacing(8)
+        self._filter_bar = row
         self._search = QLineEdit()
         self._search.setPlaceholderText(tr("history.search"))
         self._search.setMinimumHeight(36)
+        self._search.setMinimumWidth(220)
         self._search.setClearButtonEnabled(True)
         attach_search_icon(self._search, size=14)
         self._search.textChanged.connect(lambda _t: self.refresh())
         row.addWidget(self._search, stretch=1)
 
+        controls_row = QHBoxLayout()
+        controls_row.setSpacing(8)
         self._supplier_filter = QComboBox()
         self._supplier_filter.setMinimumHeight(36)
         self._supplier_filter.setMinimumWidth(180)
@@ -185,13 +194,14 @@ class HistoryView(QWidget):
         self._supplier_filter.currentIndexChanged.connect(
             lambda _i: self.refresh()
         )
-        row.addWidget(self._supplier_filter)
+        controls_row.addWidget(self._supplier_filter, stretch=1)
 
         self._btn_folder = QPushButton(tr("history.open_folder"))
         self._btn_folder.setMinimumHeight(36)
         bind_icon(self._btn_folder, "folder", size=15)
         self._btn_folder.clicked.connect(self._open_archive_folder)
-        row.addWidget(self._btn_folder)
+        controls_row.addWidget(self._btn_folder)
+        row.addLayout(controls_row)
         root.addLayout(row)
 
         self._table = QTableWidget(0, len(COLUMNS))
@@ -467,6 +477,18 @@ class HistoryView(QWidget):
         attach_search_icon(self._search, size=14, theme=t)
         refresh_bound_icons(t)
         self._table.viewport().update()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if hasattr(self, "_filter_bar"):
+            self._filter_bar.setDirection(
+                QBoxLayout.Direction.TopToBottom
+                if 0 < self.width() < 820
+                else QBoxLayout.Direction.LeftToRight
+            )
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, 220)
 
     def _apply_column_widths(self) -> None:
         from PySide6.QtGui import QFont, QFontMetrics

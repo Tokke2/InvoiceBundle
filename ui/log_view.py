@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -539,14 +540,21 @@ class LogView(QWidget):
         self._table.itemDoubleClicked.connect(
             lambda _i: self._copy_selected()
         )
-        root.addWidget(self._table, stretch=1)
 
-        # Detaljruta (full post + traceback)
+        # Detaljruta (full post + traceback) i justerbar vertikal delare
         self._detail = QPlainTextEdit()
         self._detail.setReadOnly(True)
-        self._detail.setMaximumHeight(130)
+        self._detail.setMinimumHeight(72)
         self._detail.setFont(make_mono_font(10))
-        root.addWidget(self._detail)
+
+        self._splitter = QSplitter(Qt.Orientation.Vertical)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.addWidget(self._table)
+        self._splitter.addWidget(self._detail)
+        self._splitter.setStretchFactor(0, 3)
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.setSizes([420, 130])
+        root.addWidget(self._splitter, stretch=1)
 
         row3 = QHBoxLayout()
         row3.setSpacing(10)

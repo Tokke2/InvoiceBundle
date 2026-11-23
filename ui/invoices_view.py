@@ -174,7 +174,7 @@ try:
         CONTROL_RADIUS_PX, FOCUS_RING_PX, FlowLayout, ICON_HEADER_PX,
         PANEL_RADIUS_PX, TABLE_CELL_PADDING_COMPACT_PX,
         TABLE_CELL_PADDING_COMFORTABLE_PX, TABLE_ROW_HEIGHT_COMPACT,
-        TABLE_ROW_HEIGHT_COMFORTABLE, app_icon_pixmap,
+        TABLE_ROW_HEIGHT_COMFORTABLE, app_icon_pixmap, fit_dialog_to_screen,
     )
 except Exception:  # pragma: no cover - fristående körning
     try:
@@ -182,11 +182,12 @@ except Exception:  # pragma: no cover - fristående körning
             CONTROL_RADIUS_PX, FOCUS_RING_PX, FlowLayout, ICON_HEADER_PX,
             PANEL_RADIUS_PX, TABLE_CELL_PADDING_COMPACT_PX,
             TABLE_CELL_PADDING_COMFORTABLE_PX, TABLE_ROW_HEIGHT_COMPACT,
-            TABLE_ROW_HEIGHT_COMFORTABLE, app_icon_pixmap,
+            TABLE_ROW_HEIGHT_COMFORTABLE, app_icon_pixmap, fit_dialog_to_screen,
         )
     except Exception:
         ICON_HEADER_PX = 28  # type: ignore[no-redef]
         FlowLayout = QHBoxLayout  # type: ignore[misc, assignment]
+        fit_dialog_to_screen = None  # type: ignore[assignment]
         CONTROL_RADIUS_PX = 7  # type: ignore[no-redef]
         PANEL_RADIUS_PX = 10  # type: ignore[no-redef]
         FOCUS_RING_PX = 2  # type: ignore[no-redef]
@@ -684,7 +685,8 @@ class InvoicesView(QWidget):
         )
         bind_icon(self._btn_more_actions, "list", size=14)
         self._more_actions_menu = QMenu(self._btn_more_actions)
-        self._more_actions_menu.setToolTipsVisible(True)
+        if hasattr(self._more_actions_menu, "setToolTipsVisible"):
+            self._more_actions_menu.setToolTipsVisible(True)
 
         self._btn_combine = QAction(tr("combine.button"), self)
         self._btn_combine.setToolTip(tr("combine.tip"))
@@ -2548,8 +2550,14 @@ class InvoicesView(QWidget):
 
             dlg = QDialog(self)
             dlg.setWindowTitle(tr("export.date_window_title"))
-            dlg.setMinimumWidth(430)
             dlg.setModal(True)
+            dlg.setSizeGripEnabled(True)
+            if callable(fit_dialog_to_screen):
+                fit_dialog_to_screen(
+                    dlg, 460, 340, minimum_width=360, minimum_height=260,
+                )
+            else:
+                dlg.setMinimumWidth(380)
 
             root = QVBoxLayout(dlg)
             root.setSpacing(12)
@@ -3110,7 +3118,13 @@ class InvoicesView(QWidget):
 
         dlg = QDialog(self)
         dlg.setWindowTitle(tr("combine.title", n=summary["count"]))
-        dlg.setMinimumWidth(560)
+        dlg.setSizeGripEnabled(True)
+        if callable(fit_dialog_to_screen):
+            fit_dialog_to_screen(
+                dlg, 580, 520, minimum_width=400, minimum_height=340,
+            )
+        else:
+            dlg.setMinimumWidth(420)
         lay = QVBoxLayout(dlg)
         lay.setSpacing(8)
 
@@ -3267,8 +3281,14 @@ class InvoicesView(QWidget):
 
         dlg = QDialog(self)
         dlg.setWindowTitle(tr("credit.link_title"))
-        dlg.setMinimumWidth(640)
-        dlg.setMinimumHeight(460)
+        dlg.setSizeGripEnabled(True)
+        if callable(fit_dialog_to_screen):
+            fit_dialog_to_screen(
+                dlg, 660, 500, minimum_width=400, minimum_height=340,
+            )
+        else:
+            dlg.setMinimumWidth(420)
+            dlg.setMinimumHeight(340)
         lay = QVBoxLayout(dlg)
         lay.setSpacing(10)
 

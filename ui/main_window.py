@@ -38,9 +38,9 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QTabWidget, QVBoxLayout,
+    QMainWindow, QWidget, QTabWidget, QVBoxLayout, QBoxLayout,
     QHBoxLayout, QLabel, QMenu, QSystemTrayIcon,
-    QApplication, QToolBar, QStatusBar,
+    QApplication, QToolBar, QToolButton, QStatusBar,
     QMessageBox, QScrollArea, QFrame, QPushButton, QDialog, QTextEdit, QGroupBox,
     QTableWidget, QTableWidgetItem, QKeySequenceEdit, QComboBox,
     QHeaderView, QAbstractItemView, QSizePolicy,
@@ -364,10 +364,20 @@ def build_stylesheet(t: dict) -> str:
     grid = "#243447" if is_dark else "#e2dbd0"
     font_css = _ui_font_css_stack()
     urls = qss_indicator_urls(t.get("text_strong", "#1c2128"), "#ffffff")
+    up_arrow_css = (
+        f'image: url("{urls["chevron_up"]}"); width: 10px; height: 10px;'
+        if urls.get("chevron_up")
+        else f"width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 5px solid {t['text_strong']};"
+    )
     down_arrow_css = (
         f'image: url("{urls["chevron_down"]}"); width: 12px; height: 12px;'
         if urls.get("chevron_down")
         else f"width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 6px solid {t['text_strong']};"
+    )
+    spin_down_arrow_css = (
+        f'image: url("{urls["chevron_down"]}"); width: 10px; height: 10px;'
+        if urls.get("chevron_down")
+        else f"width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid {t['text_strong']};"
     )
     right_arrow_css = (
         f'QMenu::right-arrow {{ image: url("{urls["chevron_right"]}"); width: 10px; height: 10px; margin-right: 6px; }}'
@@ -495,8 +505,15 @@ QToolButton#DonateButton {{
     border-color     : {t.get("gold", "#e8b030")};
     font-weight      : 700;
     border-radius    : 6px;
-    padding          : 4px 8px;
-    min-height       : 28px;
+    padding          : 4px 10px;
+    min-height       : 26px;
+}}
+QStatusBar QPushButton#DonateButton {{
+    min-height       : 20px;
+    padding          : 2px 10px;
+    margin           : 1px 0px;
+    font-size        : 12px;
+    border-radius    : 6px;
 }}
 QPushButton#DonateButton:hover,
 QToolButton#DonateButton:hover {{
@@ -643,6 +660,41 @@ QSpinBox, QDoubleSpinBox, QDateEdit {{
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus,
 QSpinBox:focus, QDoubleSpinBox:focus,
 QDateEdit:focus {{ border: 2px solid {t["accent"]}; }}
+QSpinBox, QDoubleSpinBox {{
+    padding-right : 26px;
+}}
+QSpinBox::up-button, QDoubleSpinBox::up-button,
+QDateEdit::up-button {{
+    subcontrol-origin   : border;
+    subcontrol-position : top right;
+    width               : 22px;
+    border-left         : 1px solid {t["border"]};
+    border-top-right-radius : 6px;
+    background          : {t["button_bg"]};
+}}
+QSpinBox::down-button, QDoubleSpinBox::down-button,
+QDateEdit::down-button {{
+    subcontrol-origin   : border;
+    subcontrol-position : bottom right;
+    width               : 22px;
+    border-left         : 1px solid {t["border"]};
+    border-top          : 1px solid {t["border"]};
+    border-bottom-right-radius : 6px;
+    background          : {t["button_bg"]};
+}}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover,
+QDateEdit::up-button:hover, QDateEdit::down-button:hover {{
+    background          : {t["button_hover"]};
+}}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow,
+QDateEdit::up-arrow {{
+    {up_arrow_css}
+}}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow,
+QDateEdit::down-arrow {{
+    {spin_down_arrow_css}
+}}
 
 /* ── COMBOBOX ────────────────────────────────────────────────── */
 
@@ -772,7 +824,18 @@ QToolBar QToolButton#DonateButton {{
     color            : {"#1c1400" if is_dark else "#ffffff"};
     border-color     : {t.get("gold", "#e8b030")};
     font-weight      : 700;
-    padding          : 4px 8px;
+    padding          : 4px 10px;
+}}
+QToolBar QToolButton#qt_toolbar_ext_button {{
+    background-color : {t["button_bg"]};
+    border           : 1px solid {t["border"]};
+    border-radius    : 6px;
+    padding          : 4px 6px;
+    margin           : 2px 3px;
+}}
+QToolBar QToolButton#qt_toolbar_ext_button:hover {{
+    background-color : {t["button_hover"]};
+    border-color     : {t["accent"]};
 }}
 QToolBar QToolButton#DonateButton:hover {{
     background-color : {t.get("gold_bg", "#f5d67a")};
@@ -803,7 +866,7 @@ QStatusBar {{
     font-size        : 12px;
     border-top       : 1px solid {t["border"]};
     padding          : 3px 10px;
-    min-height       : 28px;
+    min-height       : 30px;
 }}
 QStatusBar::item {{ border: none; }}
 
@@ -1005,10 +1068,12 @@ def apply_app_palette(theme: dict) -> None:
 
 
 def _font(size: int = 11, bold: bool = False) -> QFont:
-    """Typsnittsfabrik — konsekvent typografi i hela fönstret."""
+    """Typsnittsfabrik — konsekvent, skarp typografi i hela fönstret."""
     f = QFont(FONT_FAMILY, size)
     if bold:
         f.setBold(True)
+    f.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    f.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
     return f
 
 
@@ -2116,9 +2181,24 @@ class MainWindow(QMainWindow):
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.addToolBar(tb)
 
-        if self._custom_icon is not None:
+        self._tb_brand_actions: list[QAction] = []
+        self._tb_secondary_buttons: list[QToolButton] = []
+
+        _tb_pix = QPixmap()
+        try:
+            try:
+                from ui.design import app_icon_pixmap as _tb_app_pix
+            except ImportError:
+                from design import app_icon_pixmap as _tb_app_pix  # type: ignore[no-redef]
+            _tb_pix = _tb_app_pix(22)
+        except Exception:
+            pass
+        if _tb_pix.isNull() and self._custom_icon is not None:
+            _tb_pix = self._custom_icon.pixmap(22, 22)
+
+        if not _tb_pix.isNull():
             logo = QLabel()
-            logo.setPixmap(self._custom_icon.pixmap(22, 22))
+            logo.setPixmap(_tb_pix)
             logo.setStyleSheet("background:transparent; padding:0 3px 0 4px;")
             logo.setToolTip(APP_NAME)
             tb.addWidget(logo)
@@ -2126,16 +2206,32 @@ class MainWindow(QMainWindow):
             brand.setStyleSheet(
                 "background:transparent; font-weight:800; padding-right:4px;"
             )
-            tb.addWidget(brand)
-            tb.addSeparator()
+            act_brand = tb.addWidget(brand)
+            act_sep = tb.addSeparator()
+            if act_brand is not None:
+                self._tb_brand_actions.append(act_brand)
+            if act_sep is not None:
+                self._tb_brand_actions.append(act_sep)
 
-        def _add(label: str, tip: str, slot, icon_name: str = "") -> None:
+        def _add(
+            label: str,
+            tip: str,
+            slot,
+            icon_name: str = "",
+            *,
+            compact_secondary: bool = False,
+        ) -> QAction:
             act = QAction(strip_visual_prefix(label), self)
             act.setToolTip(tip)
             act.triggered.connect(slot)
             if icon_name:
                 bind_icon(act, icon_name, size=15)
             tb.addAction(act)
+            if compact_secondary:
+                w = tb.widgetForAction(act)
+                if isinstance(w, QToolButton):
+                    self._tb_secondary_buttons.append(w)
+            return act
 
         _add(tr("toolbar.new_supplier"),
              tr("main.toolbar_tip_new_supplier"),
@@ -2153,9 +2249,11 @@ class MainWindow(QMainWindow):
              self._open_export_folder, "folder")
         tb.addSeparator()
         _add(tr("toolbar.dark"), tr("main.toolbar_tip_dark"),
-             lambda: self._apply_theme("dark"), "dark")
+             lambda: self._apply_theme("dark"), "dark",
+             compact_secondary=True)
         _add(tr("toolbar.light"), tr("main.toolbar_tip_light"),
-             lambda: self._apply_theme("light"), "light")
+             lambda: self._apply_theme("light"), "light",
+             compact_secondary=True)
         tb.addSeparator()
         # 💖 Donation — alltid synlig guldknapp (frivillig, tyst).
         # Använder QAction + widgetForAction() så QToolBarLayout flyttar den
@@ -2175,11 +2273,34 @@ class MainWindow(QMainWindow):
             btn_donate.setToolButtonStyle(
                 Qt.ToolButtonStyle.ToolButtonTextBesideIcon
             )
+            btn_donate.setSizePolicy(
+                QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+            )
         tb.addSeparator()
         _add(tr("toolbar.minimize"), tr("main.toolbar_tip_minimize"),
-             self.hide, "minimize")
+             self.hide, "minimize", compact_secondary=True)
         _add(tr("toolbar.quit"), tr("main.toolbar_tip_quit"),
-             self._force_exit, "quit")
+             self._force_exit, "quit", compact_secondary=True)
+        self._update_responsive_toolbar()
+
+    def _update_responsive_toolbar(self, width: int | None = None) -> None:
+        """Anpassar verktygsfältets täthet så allt får plats även vid smal/skalad skärm."""
+        tb = getattr(self, "_toolbar", None)
+        if tb is None:
+            return
+        w = int(width if width is not None else self.width())
+        show_brand = w >= 1200 or w <= 0
+        for act in getattr(self, "_tb_brand_actions", []):
+            act.setVisible(show_brand)
+        secondary_style = (
+            Qt.ToolButtonStyle.ToolButtonIconOnly
+            if 0 < w < 1060
+            else Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        for btn in getattr(self, "_tb_secondary_buttons", []):
+            btn.setToolButtonStyle(secondary_style)
+        if hasattr(self, "_status_info_lbl"):
+            self._status_info_lbl.setVisible(w >= 1120 or w <= 0)
 
     # ══════════════════════════════════════════════════════════════════
     #  STATUSFÄLT
@@ -2193,9 +2314,20 @@ class MainWindow(QMainWindow):
         info_lay = QHBoxLayout(info_wrap)
         info_lay.setContentsMargins(6, 0, 6, 0)
         info_lay.setSpacing(6)
-        if self._custom_icon is not None:
+        _sb_pix = QPixmap()
+        try:
+            try:
+                from ui.design import app_icon_pixmap as _sb_app_pix
+            except ImportError:
+                from design import app_icon_pixmap as _sb_app_pix  # type: ignore[no-redef]
+            _sb_pix = _sb_app_pix(15)
+        except Exception:
+            pass
+        if _sb_pix.isNull() and self._custom_icon is not None:
+            _sb_pix = self._custom_icon.pixmap(15, 15)
+        if not _sb_pix.isNull():
             mark = QLabel(info_wrap)
-            mark.setPixmap(self._custom_icon.pixmap(15, 15))
+            mark.setPixmap(_sb_pix)
             mark.setStyleSheet("background:transparent;")
             info_lay.addWidget(mark)
         lbl = QLabel(
@@ -2698,6 +2830,8 @@ class MainWindow(QMainWindow):
         """Startar autoexport i bakgrunden om funktionen är på och
         ingen körning redan pågår. Tyst när inget behöver göras."""
         try:
+            if getattr(self, "_closing", False):
+                return
             if not bool(self._settings.get("auto_batch", False)):
                 return
             worker = self._auto_batch_worker
@@ -2824,6 +2958,8 @@ class MainWindow(QMainWindow):
         ingen av de två gångerna. Aldrig ett felmeddelande vid
         tyst fel; hittas en ny version erbjuds den som förut."""
         try:
+            if getattr(self, "_closing", False):
+                return
             from ui.update_dialog import UpdateWorker
             sys.path.insert(0, str(PROJECT_DIR / "plugins"))
             import updater as _updater
@@ -3573,7 +3709,34 @@ class MainWindow(QMainWindow):
                 # ska ändå ligga kvar i systemfältet.
                 log.debug("tray.showMessage: %s", exc)
         else:
+            self._closing = True
             self._save_geometry()
+            wd = getattr(self, "_watchdog", None)
+            if wd is not None:
+                try:
+                    wd.stop()
+                except Exception:
+                    pass
+            for tname in (
+                "_beat_timer", "_theme_timer", "_update_poll_timer",
+                "_auto_batch_debounce", "_att_betala_timer",
+                "_data_watch_timer", "_geometry_timer",
+            ):
+                t = getattr(self, tname, None)
+                if t is not None:
+                    try:
+                        t.stop()
+                    except Exception:
+                        pass
+            for wname in ("_update_worker", "_auto_batch_worker"):
+                w = getattr(self, wname, None)
+                if w is not None:
+                    try:
+                        if w.isRunning():
+                            w.quit()
+                            w.wait(1500)
+                    except Exception:
+                        pass
             has_tray = getattr(self, "tray", None)
             if has_tray is not None:
                 try:
@@ -3827,8 +3990,8 @@ class MainWindow(QMainWindow):
         cur_theme = self.current_theme_dict()
         panel = QWidget()
         root = QVBoxLayout(panel)
-        root.setContentsMargins(16, 14, 16, 14)
-        root.setSpacing(14)
+        root.setContentsMargins(16, 12, 16, 12)
+        root.setSpacing(10)
 
         head = QHBoxLayout()
         head.setSpacing(8)
@@ -3836,12 +3999,14 @@ class MainWindow(QMainWindow):
         try:
             try:
                 from ui.design import (
+                    FlowLayout as _Flow,
                     ICON_HEADER_PX as _HDR_PX,
                     app_icon_pixmap as _app_pix,
                     header_font as _hdr_fn,
                 )
             except ImportError:
                 from design import (  # type: ignore[no-redef]
+                    FlowLayout as _Flow,
                     ICON_HEADER_PX as _HDR_PX,
                     app_icon_pixmap as _app_pix,
                     header_font as _hdr_fn,
@@ -3854,14 +4019,18 @@ class MainWindow(QMainWindow):
                 _mark.setStyleSheet("background:transparent;")
                 head.addWidget(_mark)
         except Exception:
-            pass
+            _Flow = QHBoxLayout  # type: ignore[assignment]
         hdr = QLabel(tr("settings.title"))
         hdr.setFont(_hdr_font)
         head.addWidget(hdr)
         head.addStretch(1)
         root.addLayout(head)
 
-        # ── Språk ─────────────────────────────────────────────────────
+        # ── Språk + Textstorlek sida vid sida på bred/normalskärm ────
+        top_grid = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        top_grid.setSpacing(10)
+        self._settings_top_row = top_grid
+
         box_lang = QGroupBox(tr("settings.language"))
         v_lang = QHBoxLayout(box_lang)
         self._lang_combo = QComboBox()
@@ -3881,9 +4050,8 @@ class MainWindow(QMainWindow):
         lbl_lang_hint.setStyleSheet("background:transparent;")
         v_lang.addWidget(self._lang_combo)
         v_lang.addWidget(lbl_lang_hint, stretch=1)
-        root.addWidget(box_lang)
+        top_grid.addWidget(box_lang, 1)
 
-        # ── Textstorlek ───────────────────────────────────────────────
         box_text = QGroupBox(tr("settings.text_size"))
         v_text = QHBoxLayout(box_text)
         self._font_size_combo = QComboBox()
@@ -3909,17 +4077,16 @@ class MainWindow(QMainWindow):
         lbl_text_hint.setProperty("muted", True)
         lbl_text_hint.setStyleSheet("background:transparent;")
         v_text.addWidget(lbl_text_hint, stretch=1)
-        root.addWidget(box_text)
+        top_grid.addWidget(box_text, 1)
+        root.addLayout(top_grid)
 
         # ── Donation (frivilligt stöd) ────────────────────────────────
         box_donate = QGroupBox(tr("settings.donate_group"))
-        v_donate = QVBoxLayout(box_donate)
-        v_donate.setSpacing(8)
+        v_donate = QHBoxLayout(box_donate)
+        v_donate.setSpacing(12)
         lbl_donate = QLabel(tr("settings.donate_text"))
         lbl_donate.setWordWrap(True)
         lbl_donate.setStyleSheet("background:transparent;")
-        v_donate.addWidget(lbl_donate)
-        donate_btn_row = QHBoxLayout()
         btn_donate_settings = QPushButton(tr("settings.donate_open"))
         btn_donate_settings.setObjectName("DonateButton")
         btn_donate_settings.setCursor(
@@ -3932,9 +4099,8 @@ class MainWindow(QMainWindow):
         btn_donate_settings.clicked.connect(
             lambda: open_donate_dialog(self)
         )
-        donate_btn_row.addWidget(btn_donate_settings)
-        donate_btn_row.addStretch(1)
-        v_donate.addLayout(donate_btn_row)
+        v_donate.addWidget(lbl_donate, stretch=1)
+        v_donate.addWidget(btn_donate_settings)
         root.addWidget(box_donate)
 
         # ── Kortkommandon ─────────────────────────────────────────────
@@ -4013,11 +4179,11 @@ class MainWindow(QMainWindow):
             0, QHeaderView.ResizeMode.Stretch
         )
         tbl.setColumnWidth(1, max(195, tbl.columnWidth(1)))
-        tbl.setMinimumHeight(min(60 + 46 * len(rows), 480))
+        tbl.setMinimumHeight(min(54 + 46 * min(len(rows), 6), 280))
+        tbl.setMaximumHeight(min(54 + 46 * len(rows), 330))
         v_keys.addWidget(tbl)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
+        btn_row = _Flow(spacing=8)
         btn_save = QPushButton(tr("settings.save_shortcuts"))
         btn_save.setProperty("accent", True)
         bind_icon(btn_save, "check", role="on_accent", size=15, theme=cur_theme)
@@ -4031,7 +4197,6 @@ class MainWindow(QMainWindow):
         hint.setFont(_font(10))
         btn_row.addWidget(btn_save)
         btn_row.addWidget(btn_reset)
-        btn_row.addStretch(1)
         btn_row.addWidget(hint)
         v_keys.addLayout(btn_row)
         root.addWidget(box_keys)
@@ -4283,6 +4448,16 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._update_responsive_toolbar()
+        if hasattr(self, "_settings_top_row"):
+            try:
+                self._settings_top_row.setDirection(
+                    QBoxLayout.Direction.TopToBottom
+                    if self.width() < 880
+                    else QBoxLayout.Direction.LeftToRight
+                )
+            except Exception:
+                pass
         self._schedule_geometry_save()
 
     def moveEvent(self, event) -> None:
@@ -4355,8 +4530,27 @@ class MainWindow(QMainWindow):
         dlg.setWindowTitle(tr("about.title", app=APP_NAME))
         if self._custom_icon is not None:
             dlg.setWindowIcon(self._custom_icon)
-        dlg.setMinimumSize(640, 580)
         dlg.setSizeGripEnabled(True)
+        try:
+            try:
+                from ui.design import (
+                    FlowLayout as _AboutFlow,
+                    app_icon_pixmap as _about_app_pix,
+                    fit_dialog_to_screen as _fit_about,
+                )
+            except ImportError:
+                from design import (  # type: ignore[no-redef]
+                    FlowLayout as _AboutFlow,
+                    app_icon_pixmap as _about_app_pix,
+                    fit_dialog_to_screen as _fit_about,
+                )
+            _fit_about(
+                dlg, 720, 620, minimum_width=400, minimum_height=360,
+            )
+        except Exception:
+            _AboutFlow = QHBoxLayout  # type: ignore[assignment]
+            _about_app_pix = None
+            dlg.setMinimumSize(460, 400)
 
         root = QVBoxLayout(dlg)
         root.setSpacing(12)
@@ -4371,8 +4565,10 @@ class MainWindow(QMainWindow):
                 from ui.design import logotype_pixmap
             except ImportError:
                 from design import logotype_pixmap  # type: ignore[no-redef]
+            logo_w = min(440, max(280, dlg.width() - 80))
+            _cur_bg = self.current_theme_dict().get("bg", "#0c1218")
             logotype = logotype_pixmap(
-                440, dark_background=bool(self._dark)
+                logo_w, dark_background=(QColor(_cur_bg).lightness() < 128),
             )
         except Exception as exc:
             log.warning("Om-dialogens logotyp: %s", exc)
@@ -4384,17 +4580,22 @@ class MainWindow(QMainWindow):
             brand_lbl.setToolTip(tr("about.brand_note"))
             root.addWidget(brand_lbl)
         else:
-            icon = self.windowIcon()
-            if not icon.isNull():
+            fallback_pix = (
+                _about_app_pix(96) if callable(_about_app_pix) else QPixmap()
+            )
+            if fallback_pix.isNull():
+                icon = self.windowIcon()
+                if not icon.isNull():
+                    fallback_pix = icon.pixmap(96, 96)
+            if not fallback_pix.isNull():
                 icon_lbl = QLabel()
-                icon_lbl.setPixmap(icon.pixmap(96, 96))
+                icon_lbl.setPixmap(fallback_pix)
                 icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 icon_lbl.setStyleSheet("background:transparent;")
                 root.addWidget(icon_lbl)
 
         text = QTextEdit(dlg)
         text.setReadOnly(True)
-        text.setOpenExternalLinks(False)
         text.setHtml(tr(
             "about.body_html",
             app=APP_NAME, version=APP_VERSION, year=COPYRIGHT_YEAR,
@@ -4404,9 +4605,8 @@ class MainWindow(QMainWindow):
         ))
         root.addWidget(text, stretch=1)
 
-        # ── Donations- och infoknappar ────────────────────────────────
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
+        # ── Donations- och infoknappar (radbrytande för smala skärmar) ─
+        btn_row = _AboutFlow(spacing=8)
 
         btn_swish = QPushButton(tr("main.about_swish_btn"))
         btn_swish.setToolTip(tr("donate.swish_qr_tip"))
@@ -4435,10 +4635,18 @@ class MainWindow(QMainWindow):
         btn_donate = QPushButton(tr("about.donate_btn"))
         btn_donate.setObjectName("DonateButton")
         btn_donate.setToolTip(tr("toolbar.donate_tip"))
+        bind_icon(btn_donate, "donate", role="on_gold", size=14, theme=self.current_theme_dict())
         btn_donate.clicked.connect(lambda: open_donate_dialog(dlg))
 
-        btn_close = QPushButton(tr("about.close"))
+        btn_close = QPushButton(tr("common.close"))
+        bind_icon(btn_close, "clear", size=14, theme=self.current_theme_dict())
         btn_close.clicked.connect(dlg.accept)
+
+        bind_icon(btn_swish, "donate", size=14, theme=self.current_theme_dict())
+        bind_icon(btn_paypal, "external", size=14, theme=self.current_theme_dict())
+        bind_icon(btn_bmc, "external", size=14, theme=self.current_theme_dict())
+        bind_icon(btn_about, "info", size=14, theme=self.current_theme_dict())
+        bind_icon(btn_brand, "folder", size=14, theme=self.current_theme_dict())
 
         for b in (
             btn_donate, btn_swish, btn_paypal, btn_bmc,

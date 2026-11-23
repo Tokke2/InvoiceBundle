@@ -16,14 +16,23 @@ import weakref
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QByteArray, QRect, QSize, Qt
-from PySide6.QtGui import QAction, QIcon, QPainter, QPalette, QPixmap
+from PySide6.QtCore import QByteArray, QRect, QRectF, QSize, Qt
+from PySide6.QtGui import (
+    QAction,
+    QGuiApplication,
+    QIcon,
+    QIconEngine,
+    QPainter,
+    QPalette,
+    QPixmap,
+)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QLineEdit, QProxyStyle, QStyle
 
 #: Dekorativa emoji-/symbolprefix (och efterled) som döljs visuellt.
 #: Bevarar ★, ⚠, ⛔, ☑, ✓, ✔, ✖, pilar och matematiska tecken orörda.
 _ICON_CHAR_CLASS = (
+    r"\U0001F100-\U0001F1FF"
     r"\U0001F300-\U0001FAFF"
     r"\u231A-\u23FF"
     r"\u2600-\u2604\u260E\u2614-\u2615\u267B\u2699\u26A1"
@@ -309,34 +318,178 @@ _SVG_PATHS: dict[str, str] = {
         '<line x1="5" y1="12" x2="19" y2="12"/>'
         '<polyline points="12 5 19 12 12 19"/>'
     ),
+    "chevron_left": (
+        '<polyline points="15 18 9 12 15 6"/>'
+    ),
+    "chevron_right": (
+        '<polyline points="9 18 15 12 9 6"/>'
+    ),
+    "external": (
+        '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>'
+        '<polyline points="15 3 21 3 21 9"/>'
+        '<line x1="10" y1="14" x2="21" y2="3"/>'
+    ),
 }
 
 _ICON_CACHE: dict[tuple[str, str, str, int], QIcon] = {}
-_PIXMAP_CACHE: dict[tuple[str, str, int], QPixmap] = {}
+_PIXMAP_CACHE: dict[tuple[str, str, int, int], QPixmap] = {}
 
 
-def icon_pixmap(name: str, color: str = "#1c2128", size: int = 16) -> QPixmap:
-    """Renderar en vektorikon som krisp QPixmap i exakt given storlek/färg."""
-    key = (name, color.lower(), int(size))
-    cached = _PIXMAP_CACHE.get(key)
-    if cached is not None and not cached.isNull():
-        return cached
+def _effective_dpr(dpr: float | None = None) -> float:
+    """Returnerar effektiv enhetsskalning (>= 1.0) för skarp HiDPI-rendering."""
+    if dpr is not None:
+        try:
+            return max(1.0, float(dpr))
+        except (TypeError, ValueError):
+            return 1.0
+    try:
+        inst = QGuiApplication.instance()
+        if inst is not None:
+            scr = inst.primaryScreen()
+            if scr is not None:
+                return max(1.0, float(scr.devicePixelRatio()))
+    except Exception:
+        pass
+    return 1.0
+
+
+def _svg_markup(name: str, color: str) -> str:
     body = _SVG_PATHS.get(name) or _SVG_PATHS["info"]
     body = body.replace("currentColor", color)
-    svg = (
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="-1 -1 26 26" '
+        f'shape-rendering="geometricPrecision" '
         f'fill="none" stroke="{color}" stroke-width="2.0" '
         f'stroke-linecap="round" stroke-linejoin="round">{body}</svg>'
     )
-    pix = QPixmap(int(size), int(size))
+
+
+def _render_svg_pixmap(
+    name: str,
+    color: str,
+    width: int,
+    height: int,
+    dpr: float = 1.0,
+    opacity: float = 1.0,
+) -> QPixmap:
+    scale = max(1.0, float(dpr))
+    pw = max(1, int(round(max(1, int(width)) * scale)))
+    ph = max(1, int(round(max(1, int(height)) * scale)))
+    pix = QPixmap(pw, ph)
     pix.fill(Qt.GlobalColor.transparent)
-    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    renderer = QSvgRenderer(QByteArray(_svg_markup(name, color).encode("utf-8")))
     if renderer.isValid():
         painter = QPainter(pix)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        renderer.render(painter)
+        if opacity < 1.0:
+            painter.setOpacity(max(0.0, float(opacity)))
+        renderer.render(painter, QRectF(0, 0, pw, ph))
         painter.end()
+    if scale > 1.0:
+        pix.setDevicePixelRatio(scale)
+    return pix
+
+
+class _VectorIconEngine(QIconEngine):
+    """Äkta vektor-QIconEngine som ritar SVG skarpt vid alla DPR-skalningar."""
+
+    def __init__(
+        self,
+        name: str,
+        color: str,
+        disabled_color: str = "",
+        base_size: int = 16,
+    ) -> None:
+        super().__init__()
+        self._name = name
+        self._color = color
+        self._disabled_color = disabled_color
+        self._base_size = max(1, int(base_size))
+
+    def _color_for(self, mode: QIcon.Mode) -> str:
+        if mode == QIcon.Mode.Disabled and self._disabled_color:
+            return self._disabled_color
+        return self._color
+
+    def paint(  # noqa: N802
+        self,
+        painter: QPainter,
+        rect: QRect,
+        mode: QIcon.Mode,
+        state: QIcon.State,
+    ) -> None:
+        if rect.isEmpty():
+            return
+        col = self._color_for(mode)
+        renderer = QSvgRenderer(
+            QByteArray(_svg_markup(self._name, col).encode("utf-8"))
+        )
+        if not renderer.isValid():
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        if mode == QIcon.Mode.Disabled and not self._disabled_color:
+            painter.setOpacity(0.38)
+        side = float(min(rect.width(), rect.height()))
+        target = QRectF(
+            rect.x() + (rect.width() - side) / 2.0,
+            rect.y() + (rect.height() - side) / 2.0,
+            side,
+            side,
+        )
+        renderer.render(painter, target)
+        painter.restore()
+
+    def pixmap(  # noqa: N802
+        self, size: QSize, mode: QIcon.Mode, state: QIcon.State
+    ) -> QPixmap:
+        return self.scaledPixmap(size, mode, state, _effective_dpr())
+
+    def scaledPixmap(  # noqa: N802
+        self, size: QSize, mode: QIcon.Mode, state: QIcon.State, scale: float
+    ) -> QPixmap:
+        w = max(1, int(size.width()) or self._base_size)
+        h = max(1, int(size.height()) or self._base_size)
+        op = 0.38 if (mode == QIcon.Mode.Disabled and not self._disabled_color) else 1.0
+        return _render_svg_pixmap(
+            self._name,
+            self._color_for(mode),
+            w,
+            h,
+            dpr=max(1.0, float(scale)),
+            opacity=op,
+        )
+
+    def availableSizes(  # noqa: N802
+        self, mode: QIcon.Mode = QIcon.Mode.Normal, state: QIcon.State = QIcon.State.Off
+    ) -> list[QSize]:
+        return [QSize(self._base_size, self._base_size)]
+
+    def clone(self) -> "_VectorIconEngine":
+        return _VectorIconEngine(
+            self._name,
+            self._color,
+            self._disabled_color,
+            self._base_size,
+        )
+
+
+def icon_pixmap(
+    name: str,
+    color: str = "#1c2128",
+    size: int = 16,
+    dpr: float | None = None,
+) -> QPixmap:
+    """Renderar en vektorikon som skarp DPR-medveten QPixmap i exakt storlek/färg."""
+    eff_dpr = _effective_dpr(dpr)
+    dpr_key = int(round(eff_dpr * 100))
+    key = (name, color.lower(), int(size), dpr_key)
+    cached = _PIXMAP_CACHE.get(key)
+    if cached is not None and not cached.isNull():
+        return cached
+    pix = _render_svg_pixmap(name, color, int(size), int(size), dpr=eff_dpr)
     _PIXMAP_CACHE[key] = pix
     return pix
 
@@ -347,28 +500,13 @@ def vector_icon(
     size: int = 16,
     disabled_color: str | None = None,
 ) -> QIcon:
-    """Returnerar en QIcon med krisp 1x och HiDPI 2x vektorupplösning (+ Disabled-läge)."""
+    """Returnerar en vektor-QIcon som skalas knivskarpt på 100%–300% skärmar."""
     dis = (disabled_color or "").lower()
     key = (name, color.lower(), dis, int(size))
     cached = _ICON_CACHE.get(key)
     if cached is not None:
         return cached
-    ic = QIcon()
-    for scale in (1, 2):
-        px = int(size) * scale
-        pm = icon_pixmap(name, color=color, size=px)
-        if not pm.isNull():
-            if scale > 1:
-                pm = QPixmap(pm)
-                pm.setDevicePixelRatio(float(scale))
-            ic.addPixmap(pm, QIcon.Mode.Normal)
-        if dis:
-            pm_dis = icon_pixmap(name, color=disabled_color or dis, size=px)
-            if not pm_dis.isNull():
-                if scale > 1:
-                    pm_dis = QPixmap(pm_dis)
-                    pm_dis.setDevicePixelRatio(float(scale))
-                ic.addPixmap(pm_dis, QIcon.Mode.Disabled)
+    ic = QIcon(_VectorIconEngine(name, color, disabled_color or "", int(size)))
     _ICON_CACHE[key] = ic
     return ic
 
@@ -380,23 +518,33 @@ def _asset_dir() -> Path:
 
 
 def qss_indicator_urls(arrow_color: str, check_color: str = "#ffffff") -> dict[str, str]:
-    """Skriver minimala SVG-filer för QComboBox-pil och QCheckBox-bock i QSS."""
+    """Skriver minimala SVG-filer för pil- och kryssruteindikatorer i QSS."""
     out = _asset_dir()
     assets = {
+        "chevron_up": (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" '
+            f'shape-rendering="geometricPrecision" '
+            f'fill="none" stroke="{arrow_color}" stroke-width="2.1" '
+            f'stroke-linecap="round" stroke-linejoin="round">'
+            f'<polyline points="4 10 8 6 12 10"/></svg>'
+        ),
         "chevron_down": (
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" '
+            f'shape-rendering="geometricPrecision" '
             f'fill="none" stroke="{arrow_color}" stroke-width="2.1" '
             f'stroke-linecap="round" stroke-linejoin="round">'
             f'<polyline points="4 6 8 10 12 6"/></svg>'
         ),
         "chevron_right": (
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" '
+            f'shape-rendering="geometricPrecision" '
             f'fill="none" stroke="{arrow_color}" stroke-width="2.1" '
             f'stroke-linecap="round" stroke-linejoin="round">'
             f'<polyline points="6 4 10 8 6 12"/></svg>'
         ),
         "check": (
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" '
+            f'shape-rendering="geometricPrecision" '
             f'fill="none" stroke="{check_color}" stroke-width="2.4" '
             f'stroke-linecap="round" stroke-linejoin="round">'
             f'<polyline points="3.5 8.5 6.5 11.5 12.5 4.5"/></svg>'
@@ -610,6 +758,9 @@ class CleanIconProxyStyle(QProxyStyle):
         return super().sizeFromContents(contents_type, option, size, widget)
 
 
+_ACTIVE_CLEAN_STYLES: dict[int, CleanIconProxyStyle] = {}
+
+
 def install_clean_style(app: QApplication | None = None) -> None:
     """Aktiverar CleanIconProxyStyle('Fusion') på QApplication säkert."""
     inst = app or QApplication.instance()
@@ -621,6 +772,8 @@ def install_clean_style(app: QApplication | None = None) -> None:
     except Exception:
         pass
     try:
-        inst.setStyle(CleanIconProxyStyle("Fusion"))
+        style = CleanIconProxyStyle("Fusion")
+        _ACTIVE_CLEAN_STYLES[id(inst)] = style
+        inst.setStyle(style)
     except Exception:
         pass

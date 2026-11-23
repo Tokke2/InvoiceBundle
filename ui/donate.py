@@ -133,12 +133,13 @@ def paypal_donate_url(amount_sek: str | int | float | Decimal | None = None) -> 
     return f"{LOCKED_DONATION.paypal_url}/{amount_token}SEK"
 
 
-def make_qr_pixmap(payload: str, size: int = 188):
-    """Renderar högkontrast QR-pixmap (svart på vitt, quiet zone 4)."""
+def make_qr_pixmap(payload: str, size: int = 188, dpr: float = 1.0):
+    """Renderar högkontrast QR-pixmap (svart på vitt, quiet zone 4), skarp på HiDPI."""
     try:
         import qrcode
         from PySide6.QtGui import QImage, QPixmap
 
+        dpr_val = max(1.0, float(dpr or 1.0))
         qr = qrcode.QRCode(
             version=None,
             error_correction=qrcode.constants.ERROR_CORRECT_M,
@@ -148,7 +149,8 @@ def make_qr_pixmap(payload: str, size: int = 188):
         qr.make(fit=True)
         matrix = qr.get_matrix()
         modules = len(matrix)
-        scale = max(2, size // modules)
+        phys_target = max(modules * 2, int(round(size * dpr_val)))
+        scale = max(2, phys_target // modules)
         side = modules * scale
         buf = bytearray(side * side)
         pos = 0
@@ -167,15 +169,18 @@ def make_qr_pixmap(payload: str, size: int = 188):
             bytes(buf), side, side, side,
             QImage.Format.Format_Grayscale8,
         )
-        return QPixmap.fromImage(img.copy())
+        pm = QPixmap.fromImage(img.copy())
+        if dpr_val > 1.0:
+            pm.setDevicePixelRatio(dpr_val)
+        return pm
     except Exception as exc:  # qrcode ej installerat ännu / Qt saknas
         logger.info(f"{LOG_PREFIX} QR-kod ej tillgänglig: {exc}")
         return None
 
 
-def make_swish_qr_pixmap(payload: str, size: int = 188):
+def make_swish_qr_pixmap(payload: str, size: int = 188, dpr: float = 1.0):
     """Renderar högkontrast QR-pixmap (svart på vitt, quiet zone 4) enligt Swish-standard."""
-    return make_qr_pixmap(payload, size=size)
+    return make_qr_pixmap(payload, size=size, dpr=dpr)
 
 
 try:
@@ -188,17 +193,24 @@ except Exception:  # pragma: no cover - fristående körning
             return key
 
 try:
-    from ui.design import app_icon_path, app_icon_pixmap, fit_dialog_to_screen
+    from ui.design import (
+        app_icon_path,
+        app_icon_pixmap,
+        effective_dpr,
+        fit_dialog_to_screen,
+    )
 except Exception:  # pragma: no cover
     try:
         from design import (  # type: ignore[no-redef]
             app_icon_path,
             app_icon_pixmap,
+            effective_dpr,
             fit_dialog_to_screen,
         )
     except Exception:
         app_icon_path = None  # type: ignore[assignment]
         app_icon_pixmap = None  # type: ignore[assignment]
+        effective_dpr = None  # type: ignore[assignment]
         fit_dialog_to_screen = None  # type: ignore[assignment]
 
 try:
@@ -379,14 +391,14 @@ if _QT_AVAILABLE:
             content.setObjectName("DonateContent")
             root = QVBoxLayout(content)
             root.setContentsMargins(2, 2, 4, 2)
-            root.setSpacing(8)
+            root.setSpacing(6)
 
             # ── 1. Hero-kort ──────────────────────────────────────────
             hero = QFrame(content)
             hero.setObjectName("DonateHero")
             hero_lay = QVBoxLayout(hero)
-            hero_lay.setContentsMargins(14, 11, 14, 11)
-            hero_lay.setSpacing(6)
+            hero_lay.setContentsMargins(12, 8, 12, 8)
+            hero_lay.setSpacing(4)
 
             hero_top = QHBoxLayout()
             hero_top.setSpacing(10)
@@ -477,8 +489,8 @@ if _QT_AVAILABLE:
             msg_card = QFrame(content)
             msg_card.setObjectName("DonateMessageCard")
             msg_lay = QVBoxLayout(msg_card)
-            msg_lay.setContentsMargins(14, 10, 14, 10)
-            msg_lay.setSpacing(4)
+            msg_lay.setContentsMargins(12, 7, 12, 7)
+            msg_lay.setSpacing(3)
 
             msg_kicker = QLabel(tr("donate.story_kicker"), msg_card)
             msg_kicker.setObjectName("DonateKicker")
@@ -1415,7 +1427,10 @@ if _QT_AVAILABLE:
                 message=self._locked_config.swish_message,
                 lock_mask=6,
             )
-            pixmap = make_swish_qr_pixmap(self._swish_payload, size=164)
+            dpr = effective_dpr(self) if callable(effective_dpr) else 1.0
+            pixmap = make_swish_qr_pixmap(
+                self._swish_payload, size=132, dpr=dpr
+            )
             if pixmap is not None:
                 self._lbl_swish_qr.setPixmap(pixmap)
                 self._lbl_swish_qr.setText("")

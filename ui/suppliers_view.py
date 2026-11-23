@@ -92,12 +92,26 @@ except ImportError:
 COPYRIGHT_YEAR: int = datetime.date.today().year
 
 try:
-    from ui.design import ICON_HEADER_PX, app_icon_pixmap, header_font
+    from ui.design import (
+        FlowLayout,
+        ICON_HEADER_PX,
+        app_icon_pixmap,
+        fit_dialog_to_screen,
+        header_font,
+    )
 except Exception:  # pragma: no cover - fristående körning
     try:
-        from design import ICON_HEADER_PX, app_icon_pixmap, header_font  # type: ignore[no-redef]
+        from design import (  # type: ignore[no-redef]
+            FlowLayout,
+            ICON_HEADER_PX,
+            app_icon_pixmap,
+            fit_dialog_to_screen,
+            header_font,
+        )
     except Exception:
         ICON_HEADER_PX = 28  # type: ignore[no-redef]
+        FlowLayout = QHBoxLayout  # type: ignore[assignment,no-redef]
+        fit_dialog_to_screen = None  # type: ignore[assignment]
 
         def app_icon_pixmap(size: int = 28):  # type: ignore[no-redef]
             from PySide6.QtGui import QPixmap as _QP
@@ -314,10 +328,15 @@ class SupplierDialog(QDialog):
         self.setWindowTitle(
             tr("supplier.edit_title") if is_edit else tr("supplier.new_title")
         )
-        self.setMinimumWidth(580)
-        self.setMinimumHeight(400)
-        self.resize(580, 680)
         self.setSizeGripEnabled(True)
+        if callable(fit_dialog_to_screen):
+            fit_dialog_to_screen(
+                self, 620, 700, minimum_width=400, minimum_height=360,
+            )
+        else:
+            self.setMinimumWidth(420)
+            self.setMinimumHeight(360)
+            self.resize(620, 700)
 
         root = QVBoxLayout(self)
         root.setSpacing(12)
@@ -434,15 +453,18 @@ class SupplierDialog(QDialog):
         )
         save_btn = btn_box.button(QDialogButtonBox.StandardButton.Save)
         save_btn.setText(
-            f"💾  {tr('common.save')}"
+            tr("common.save")
             if is_edit
-            else f"➕  {tr('common.add')}"
+            else tr("common.add")
         )
+        save_btn.setProperty("accent", True)
         save_btn.setMinimumHeight(40)
         save_btn.setFont(_font(12, bold=True))
-        btn_box.button(QDialogButtonBox.StandardButton.Cancel).setText(
-            f"✖  {tr('common.cancel')}"
-        )
+        bind_icon(save_btn, "check" if is_edit else "add", role="on_accent", size=14)
+        cancel_btn = btn_box.button(QDialogButtonBox.StandardButton.Cancel)
+        cancel_btn.setText(tr("common.cancel"))
+        cancel_btn.setMinimumHeight(40)
+        bind_icon(cancel_btn, "clear", size=14)
         btn_box.accepted.connect(self._validate_and_accept)
         btn_box.rejected.connect(self.reject)
         root.addWidget(btn_box)
@@ -626,7 +648,7 @@ class SuppliersView(QWidget):
         root.addLayout(head)
         root.addWidget(_h_line())
 
-        # ── Sök + knappar ──────────────────────────────────────────────
+        # ── Sök + knappar (responsiv radbrytning på smalare skärmar) ──
         row1 = QHBoxLayout()
         row1.setSpacing(8)
 
@@ -634,7 +656,7 @@ class SuppliersView(QWidget):
         self._search.setPlaceholderText(tr("suppliers.search_ph"))
         self._search.setToolTip(tr("suppliers.search_tip"))
         self._search.setMinimumHeight(36)
-        self._search.setMinimumWidth(160)
+        self._search.setMinimumWidth(220)
         self._search.setFont(_font(11))
         self._search.setClearButtonEnabled(True)
         attach_search_icon(self._search, size=14)
@@ -683,20 +705,23 @@ class SuppliersView(QWidget):
         self._btn_columns.clicked.connect(self._open_columns_menu)
 
         self._btn_refresh = _make_btn(
-            "🔄", tr("suppliers.refresh_tip"), width=42
+            "", tr("suppliers.refresh_tip"), width=42
         )
         bind_icon(self._btn_refresh, "refresh", size=15)
         self._btn_refresh.clicked.connect(self._reload_from_disk)
 
         row1.addWidget(self._search, stretch=1)
-        row1.addWidget(self._btn_add)
-        row1.addWidget(self._btn_edit)
-        row1.addWidget(self._btn_duplicate)
-        row1.addWidget(self._btn_delete)
-        row1.addWidget(self._btn_export)
-        row1.addWidget(self._btn_columns)
         row1.addWidget(self._btn_refresh)
         root.addLayout(row1)
+
+        actions_row = FlowLayout(spacing=8)
+        actions_row.addWidget(self._btn_add)
+        actions_row.addWidget(self._btn_edit)
+        actions_row.addWidget(self._btn_duplicate)
+        actions_row.addWidget(self._btn_delete)
+        actions_row.addWidget(self._btn_export)
+        actions_row.addWidget(self._btn_columns)
+        root.addLayout(actions_row)
 
         # ── Tabell ─────────────────────────────────────────────────────
         self._table = QTableWidget()

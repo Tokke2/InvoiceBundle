@@ -101,12 +101,22 @@ except ImportError:
 log = logging.getLogger("InvoicesHelpers")
 
 try:
-    from ui.design import fit_dialog_to_screen
+    from ui.design import FlowLayout, fit_dialog_to_screen
 except Exception:
     try:
-        from design import fit_dialog_to_screen  # type: ignore[no-redef]
+        from design import FlowLayout, fit_dialog_to_screen  # type: ignore[no-redef]
     except Exception:
+        FlowLayout = QHBoxLayout  # type: ignore[assignment,misc]
         fit_dialog_to_screen = None  # type: ignore[assignment]
+
+try:
+    from ui.icons import bind_icon
+except Exception:
+    try:
+        from icons import bind_icon  # type: ignore[no-redef]
+    except Exception:
+        def bind_icon(target: Any, *_a: Any, **_kw: Any) -> Any:  # type: ignore[no-redef]
+            return target
 
 try:
     from ui.i18n import tr, tr_list, tr_status
@@ -2180,15 +2190,15 @@ class ExportHistoryDialog(QDialog):
 
     #: Tabellkolumner inkl Betaldatum.
     _HIST_COLS: list[tuple[str, int]] = [
-        ("Datum",          150),
-        ("Betaldatum",     120),   # betalningsdatum per export
-        ("Antal fakturor",  90),
-        ("Antal krediter",  90),
-        ("Fakturor (+)",   130),
-        ("Krediter (−)",   130),
-        ("Att betala",     135),
-        ("Leverantörer",   190),
-        ("Fil",            260),
+        ("Datum",          178),
+        ("Betaldatum",     144),   # betalningsdatum per export
+        ("Antal fakturor", 132),
+        ("Antal krediter", 132),
+        ("Fakturor (+)",   136),
+        ("Krediter (−)",   136),
+        ("Att betala",     140),
+        ("Leverantörer",   185),
+        ("Fil",            240),
     ]
 
     def __init__(
@@ -2199,8 +2209,14 @@ class ExportHistoryDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(tr("history_dlg.title"))
-        self.setMinimumSize(1060, 580)
         self.setSizeGripEnabled(True)
+        if callable(fit_dialog_to_screen):
+            fit_dialog_to_screen(
+                self, 1180, 620, minimum_width=460, minimum_height=380,
+            )
+        else:
+            self.setMinimumSize(460, 380)
+            self.resize(1120, 600)
         self._history = history
         self._theme = theme
 
@@ -2251,8 +2267,16 @@ class ExportHistoryDialog(QDialog):
         self._table.doubleClicked.connect(self._on_double_click)
         self._table.itemSelectionChanged.connect(self._on_selection)
 
-        for i, (_, w) in enumerate(self._HIST_COLS):
-            self._table.setColumnWidth(i, w)
+        hm = self._table.horizontalHeader().fontMetrics()
+        for i, (fallback_lbl, w) in enumerate(self._HIST_COLS):
+            lbl = (
+                _h_labels[i]
+                if len(_h_labels) == len(self._HIST_COLS)
+                else fallback_lbl
+            )
+            self._table.setColumnWidth(
+                i, max(w, hm.horizontalAdvance(lbl) + 32)
+            )
 
         # Mushjul-scroll direkt på tabellen
         self._table.wheelEvent = self._table_wheel  # type: ignore
@@ -2260,15 +2284,15 @@ class ExportHistoryDialog(QDialog):
         self._populate_table()
         root.addWidget(self._table, stretch=1)
 
-        # ── Knappar ────────────────────────────────────────────────────
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(10)
+        # ── Knappar (FlowLayout för smalare skärmar + okapade texter) ─
+        btn_row = FlowLayout(spacing=10)
 
         self._btn_restore = make_btn(
             tr("history_dlg.restore_btn"),
             tr("history_dlg.restore_tip"),
             danger=True,
         )
+        bind_icon(self._btn_restore, "undo", role="on_accent", size=14)
         self._btn_restore.clicked.connect(self._restore_export)
         self._btn_restore.setEnabled(False)
 
@@ -2276,16 +2300,17 @@ class ExportHistoryDialog(QDialog):
             tr("history_dlg.open_folder_btn"),
             tr("history_dlg.open_folder_tip"),
         )
+        bind_icon(self._btn_open, "folder", size=14)
         self._btn_open.clicked.connect(
             lambda: open_folder(get_export_base())
         )
 
-        self._btn_close = make_btn(f"✖  {tr('common.close')}")
+        self._btn_close = make_btn(tr("common.close"))
+        bind_icon(self._btn_close, "clear", size=14)
         self._btn_close.clicked.connect(self.accept)
 
         btn_row.addWidget(self._btn_restore)
         btn_row.addWidget(self._btn_open)
-        btn_row.addStretch()
         btn_row.addWidget(self._btn_close)
         root.addLayout(btn_row)
 
@@ -2402,6 +2427,12 @@ class ExportHistoryDialog(QDialog):
         self._btn_close.setStyleSheet(
             _btn_stylesheet(btn_bg, btn_hov, btn_text, accent, border)
         )
+        for _b in (self._btn_restore, self._btn_open, self._btn_close):
+            _b.setSizePolicy(
+                QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+            )
+            _b.ensurePolished()
+            _b.setMinimumWidth(max(110, _b.sizeHint().width() + 26))
 
         muted_ss = f"color:{muted};background:transparent;"
         self._info_lbl.setStyleSheet(muted_ss)
@@ -2964,12 +2995,12 @@ class InvoiceDialog(QDialog):
         self.f_inv_nr.setMinimumHeight(44)
         pf.addRow(tr("invdialog.invoice_number"), self.f_inv_nr)
 
-        # Teckenväljare ＋/−
+        # Teckenväljare +/−
         self.f_sign = QComboBox()
         self.f_sign.setMinimumHeight(44)
         self.f_sign.setFixedWidth(95)
         self.f_sign.setFont(make_font(20, True))
-        self.f_sign.addItem("＋", +1)
+        self.f_sign.addItem("+", +1)
         self.f_sign.addItem("−", -1)
         self.f_sign.setToolTip(tr("invdialog.sign_tip"))
         self.f_sign.currentIndexChanged.connect(self._on_sign_changed)
@@ -3110,12 +3141,18 @@ class InvoiceDialog(QDialog):
             if self._is_edit
             else tr("invdialog.register")
         )
+        save_btn.setProperty("accent", True)
         save_btn.setMinimumHeight(44)
         save_btn.setFont(make_font(13, True))
+        bind_icon(
+            save_btn, "check" if self._is_edit else "add",
+            role="on_accent", size=14,
+        )
         cancel_btn = bb.button(QDialogButtonBox.StandardButton.Cancel)
-        cancel_btn.setText(f"✖  {tr('common.cancel')}")
+        cancel_btn.setText(tr("common.cancel"))
         cancel_btn.setMinimumHeight(40)
         cancel_btn.setFont(make_font(12))
+        bind_icon(cancel_btn, "clear", size=14)
         bb.accepted.connect(self._validate_and_accept)
         bb.rejected.connect(self.reject)
         root.addWidget(bb)

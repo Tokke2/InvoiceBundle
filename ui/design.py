@@ -12,8 +12,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt
-from PySide6.QtGui import QFont, QIcon, QPixmap
+from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt
+from PySide6.QtGui import (
+    QFont,
+    QGuiApplication,
+    QIcon,
+    QIconEngine,
+    QPainter,
+    QPixmap,
+)
 from PySide6.QtWidgets import QApplication, QLayout, QLayoutItem, QWidget
 
 #: Appmappen (ui/ → projektroten).
@@ -256,11 +263,38 @@ def mono_font_family() -> str:
     )
 
 
+def effective_dpr(dpr: float | None = None, widget: Optional[QWidget] = None) -> float:
+    """Returnerar aktiv skärms DPI-skalfaktor (>= 1.0) för skarp grafik."""
+    if dpr is not None:
+        try:
+            return max(1.0, float(dpr))
+        except (TypeError, ValueError):
+            return 1.0
+    try:
+        if widget is not None:
+            scr = widget.screen()
+            if scr is not None:
+                return max(1.0, float(scr.devicePixelRatio()))
+    except Exception:
+        pass
+    try:
+        inst = QGuiApplication.instance()
+        if inst is not None:
+            scr = inst.primaryScreen()
+            if scr is not None:
+                return max(1.0, float(scr.devicePixelRatio()))
+    except Exception:
+        pass
+    return 1.0
+
+
 def ui_font(size: int = 11, weight: QFont.Weight | None = None) -> QFont:
-    """Appens typsnitt i given storlek — samma familj överallt."""
+    """Appens typsnitt i given storlek — samma familj överallt, skarp hinting."""
     font = QFont(ui_font_family(), int(size))
     if weight is not None:
         font.setWeight(weight)
+    font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
     return font
 
 
@@ -269,31 +303,140 @@ def app_icon_path() -> Path:
     return PROJECT_DIR / "app_icon.png"
 
 
+def app_icon_svg_path() -> Path:
+    """Huvudikonen i vektorformat (SVG)."""
+    return PROJECT_DIR / "app_icon.svg"
+
+
 def app_icon_ico_path() -> Path:
     """Windows-ikon med flera storlekar, för genvägar och HWND-ikoner."""
     return PROJECT_DIR / "app_icon.ico"
 
 
-def load_app_icon() -> QIcon | None:
-    """Laddar samma flerupplösta ikon till fönster, dialoger och tray.
+def _render_app_svg_pixmap(size: int, dpr: float = 1.0) -> QPixmap:
+    svg_path = app_icon_svg_path()
+    if not svg_path.is_file():
+        return QPixmap()
+    try:
+        from PySide6.QtSvg import QSvgRenderer
 
-    PNG är huvudkällan för Qt:s skalning. ICO och SVG följer med som
-    plattforms-/vektorreserv, så alla startvägar använder samma motiv.
-    """
+        renderer = QSvgRenderer(str(svg_path))
+        if not renderer.isValid():
+            return QPixmap()
+        scale = max(1.0, float(dpr))
+        px = max(1, int(round(max(1, int(size)) * scale)))
+        pix = QPixmap(px, px)
+        pix.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        renderer.render(painter, QRectF(0, 0, px, px))
+        painter.end()
+        if scale > 1.0:
+            pix.setDevicePixelRatio(scale)
+        return pix
+    except Exception:
+        return QPixmap()
+
+
+class _AppIconEngine(QIconEngine):
+    """Vektorskarp QIconEngine för appikonen (SVG först, PNG-reserv)."""
+
+    _SIZES: tuple[int, ...] = (16, 20, 24, 32, 48, 64, 128, 256)
+
+    def paint(  # noqa: N802
+        self,
+        painter: QPainter,
+        rect: QRect,
+        mode: QIcon.Mode,
+        state: QIcon.State,
+    ) -> None:
+        if rect.isEmpty():
+            return
+        svg_path = app_icon_svg_path()
+        if svg_path.is_file():
+            try:
+                from PySide6.QtSvg import QSvgRenderer
+
+                renderer = QSvgRenderer(str(svg_path))
+                if renderer.isValid():
+                    painter.save()
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                    painter.setRenderHint(
+                        QPainter.RenderHint.SmoothPixmapTransform, True
+                    )
+                    side = float(min(rect.width(), rect.height()))
+                    target = QRectF(
+                        rect.x() + (rect.width() - side) / 2.0,
+                        rect.y() + (rect.height() - side) / 2.0,
+                        side,
+                        side,
+                    )
+                    renderer.render(painter, target)
+                    painter.restore()
+                    return
+            except Exception:
+                pass
+        side = max(1, min(rect.width(), rect.height()))
+        dpr = 1.0
+        try:
+            dev = painter.device()
+            if dev is not None and hasattr(dev, "devicePixelRatioF"):
+                dpr = max(1.0, float(dev.devicePixelRatioF()))
+        except Exception:
+            pass
+        pm = app_icon_pixmap(side, dpr=dpr)
+        if not pm.isNull():
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.drawPixmap(rect, pm)
+            painter.restore()
+
+    def pixmap(  # noqa: N802
+        self, size: QSize, mode: QIcon.Mode, state: QIcon.State
+    ) -> QPixmap:
+        return self.scaledPixmap(size, mode, state, effective_dpr())
+
+    def scaledPixmap(  # noqa: N802
+        self, size: QSize, mode: QIcon.Mode, state: QIcon.State, scale: float
+    ) -> QPixmap:
+        side = max(1, min(int(size.width()) or 32, int(size.height()) or 32))
+        return app_icon_pixmap(side, dpr=max(1.0, float(scale)))
+
+    def availableSizes(  # noqa: N802
+        self,
+        mode: QIcon.Mode = QIcon.Mode.Normal,
+        state: QIcon.State = QIcon.State.Off,
+    ) -> list[QSize]:
+        return [QSize(s, s) for s in self._SIZES]
+
+    def clone(self) -> "_AppIconEngine":
+        return _AppIconEngine()
+
+
+def load_app_icon() -> QIcon | None:
+    """Laddar samma knivskarpa vektor-/flerupplösta ikon till fönster, dialoger och tray."""
+    if app_icon_svg_path().is_file():
+        icon = QIcon(_AppIconEngine())
+        if not icon.isNull():
+            return icon
     icon = QIcon()
     png = app_icon_path()
     if png.is_file():
         source = QPixmap(str(png))
         if not source.isNull():
             for size in (16, 20, 24, 32, 48, 64, 128, 256):
-                icon.addPixmap(
-                    source.scaled(
-                        size,
-                        size,
+                for scale in (1, 2):
+                    px = size * scale
+                    pm = source.scaled(
+                        px,
+                        px,
                         Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.SmoothTransformation,
                     )
-                )
+                    if scale > 1:
+                        pm.setDevicePixelRatio(float(scale))
+                    icon.addPixmap(pm)
     for name in ("app_icon.ico", "app_icon.svg"):
         path = PROJECT_DIR / name
         if path.is_file():
@@ -341,13 +484,12 @@ def logotype_path(dark_background: bool = False) -> Path:
     return PROJECT_DIR / "brand" / name
 
 
-def logotype_pixmap(width: int = 460, dark_background: bool = False) -> QPixmap:
-    """Logotypen som pixmap (vektorn ritas i valfri bredd).
-
-    SVG:en renderas med Qt:s SVG-motor; saknas den (eller filen)
-    returneras en tom pixmap och anroparen kan falla tillbaka på
-    appikonen i stället.
-    """
+def logotype_pixmap(
+    width: int = 460,
+    dark_background: bool = False,
+    dpr: float | None = None,
+) -> QPixmap:
+    """Logotypen som skarp DPR-medveten vektor-pixmap i valfri bredd."""
     path = logotype_path(dark_background)
     if not path.is_file():
         return QPixmap()
@@ -360,30 +502,48 @@ def logotype_pixmap(width: int = 460, dark_background: bool = False) -> QPixmap:
         size = renderer.defaultSize()
         if size.width() <= 0 or size.height() <= 0:
             return QPixmap()
-        height = max(1, round(int(width) * size.height() / size.width()))
-        pix = QPixmap(int(width), height)
+        scale = effective_dpr(dpr)
+        logical_w = max(1, int(width))
+        logical_h = max(1, round(logical_w * size.height() / size.width()))
+        pw = max(1, int(round(logical_w * scale)))
+        ph = max(1, int(round(logical_h * scale)))
+        pix = QPixmap(pw, ph)
         pix.fill(Qt.GlobalColor.transparent)
-        from PySide6.QtGui import QPainter
-
         painter = QPainter(pix)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        renderer.render(painter)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        renderer.render(painter, QRectF(0, 0, pw, ph))
         painter.end()
+        if scale > 1.0:
+            pix.setDevicePixelRatio(scale)
         return pix
     except Exception:
         return QPixmap()
 
 
-def app_icon_pixmap(size: int = ICON_HEADER_PX) -> QPixmap:
-    """Ikonen som pixmap i given storlek (tom pixmap om fil saknas)."""
+def app_icon_pixmap(
+    size: int = ICON_HEADER_PX,
+    dpr: float | None = None,
+) -> QPixmap:
+    """Ikonen som skarp DPR-medveten vektor-pixmap (PNG-reserv om SVG saknas)."""
+    scale = effective_dpr(dpr)
+    logical = max(1, int(size))
+    svg_pix = _render_app_svg_pixmap(logical, dpr=scale)
+    if not svg_pix.isNull():
+        return svg_pix
     pix = QPixmap(str(app_icon_path()))
     if pix.isNull():
         return pix
-    return pix.scaled(
-        size, size,
+    px = max(1, int(round(logical * scale)))
+    scaled = pix.scaled(
+        px, px,
         Qt.AspectRatioMode.KeepAspectRatio,
         Qt.TransformationMode.SmoothTransformation,
     )
+    if scale > 1.0:
+        scaled.setDevicePixelRatio(scale)
+    return scaled
 
 
 def header_font(pt: int = HEADER_PT) -> QFont:

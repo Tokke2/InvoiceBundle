@@ -59,16 +59,22 @@ except Exception:  # pragma: no cover - skrivarstöd saknas
 
 try:
     from ui.design import (
-        FlowLayout, ICON_HEADER_PX, app_icon_pixmap, header_font,
+        FlowLayout, ICON_HEADER_PX, app_icon_pixmap, effective_dpr,
+        fit_dialog_to_screen, header_font,
     )
 except Exception:  # pragma: no cover - fristående körning
     try:
         from design import (  # type: ignore[no-redef]
-            FlowLayout, ICON_HEADER_PX, app_icon_pixmap, header_font,
+            FlowLayout, ICON_HEADER_PX, app_icon_pixmap, effective_dpr,
+            fit_dialog_to_screen, header_font,
         )
     except Exception:
         ICON_HEADER_PX = 28  # type: ignore[no-redef]
         FlowLayout = QHBoxLayout  # type: ignore[misc, assignment]
+        fit_dialog_to_screen = None  # type: ignore[assignment]
+
+        def effective_dpr(widget: Any = None) -> float:  # type: ignore[no-redef]
+            return 1.0
 
         def app_icon_pixmap(size: int = 28):  # type: ignore[no-redef]
             from PySide6.QtGui import QPixmap as _QP
@@ -438,6 +444,11 @@ class _RegionImageView(QWidget):
     # ── Rita ──────────────────────────────────────────────────
     def paintEvent(self, _event) -> None:  # noqa: N802 (Qt-namn)
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setRenderHint(
+            QPainter.RenderHint.SmoothPixmapTransform, True
+        )
         painter.fillRect(self.rect(), QColor(self._canvas_bg))
         img = self._img_rect()
         if img is None:
@@ -792,7 +803,9 @@ class TemplateDialog(QDialog):
 
         left = QVBoxLayout()
         nav = QHBoxLayout()
-        self._btn_prev = QPushButton("◀")
+        self._btn_prev = QPushButton("")
+        self._btn_prev.setMinimumWidth(34)
+        bind_icon(self._btn_prev, "chevron_left", size=14)
         self._btn_prev.clicked.connect(
             lambda: self._goto_page(self._page - 1)
         )
@@ -800,7 +813,9 @@ class TemplateDialog(QDialog):
         self._lbl_page = QLabel()
         self._lbl_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
         nav.addWidget(self._lbl_page, stretch=1)
-        self._btn_next = QPushButton("▶")
+        self._btn_next = QPushButton("")
+        self._btn_next.setMinimumWidth(34)
+        bind_icon(self._btn_next, "chevron_right", size=14)
         self._btn_next.clicked.connect(
             lambda: self._goto_page(self._page + 1)
         )
@@ -822,6 +837,7 @@ class TemplateDialog(QDialog):
         nav.addWidget(self._btn_zoom_fit)
         left.addLayout(nav)
         self._view = _RegionImageView()
+        self._view.setMinimumHeight(240)
         self._view.region_drawn.connect(self._on_region_drawn)
         self._view.region_remove_requested.connect(self._remove_mark)
         self._view.page_clear_requested.connect(self._clear_page_marks)
@@ -865,8 +881,9 @@ class TemplateDialog(QDialog):
                 lambda _c=False, f=field: self._set_active(f)
             )
             row.addWidget(btn)
-            btn_rem = QPushButton(tr("tmpl.remove_mark"))
-            btn_rem.setMaximumWidth(34)
+            btn_rem = QPushButton("")
+            btn_rem.setFixedWidth(32)
+            bind_icon(btn_rem, "clear", size=12)
             btn_rem.setToolTip(tr(
                 "tmpl.remove_field_tip", field=tr(f"tmpl.field_{field}")
             ))
@@ -912,8 +929,9 @@ class TemplateDialog(QDialog):
             lambda _c=False: self._set_active("supplier_logo")
         )
         logo_row.addWidget(self._btn_mark_logo)
-        self._btn_remove_logo = QPushButton(tr("tmpl.remove_mark"))
-        self._btn_remove_logo.setMaximumWidth(34)
+        self._btn_remove_logo = QPushButton("")
+        self._btn_remove_logo.setFixedWidth(32)
+        bind_icon(self._btn_remove_logo, "clear", size=12)
         self._btn_remove_logo.setToolTip(tr("tmpl.remove_logo_tip"))
         self._btn_remove_logo.clicked.connect(
             lambda _c=False: self._clear_logo_marks()
@@ -1026,18 +1044,27 @@ class TemplateDialog(QDialog):
         margin = 16
         max_width = max(1, available.width() - margin * 2)
         max_height = max(1, available.height() - margin * 2)
-        min_width = min(980, max_width)
-        min_height = min(640, max_height)
-        self.setMinimumSize(min_width, min_height)
-        self.setMaximumSize(max_width, max_height)
-        self.resize(min(1280, max_width), min(820, max_height))
-        self._layout_template_footer(compact=max_width < 760)
+        if callable(fit_dialog_to_screen):
+            fit_dialog_to_screen(
+                self,
+                1240,
+                820,
+                minimum_width=min(480, max_width),
+                minimum_height=min(420, max_height),
+            )
+        else:
+            min_width = min(480, max_width)
+            min_height = min(420, max_height)
+            self.setMinimumSize(min_width, min_height)
+            self.setMaximumSize(max_width, max_height)
+            self.resize(min(1240, max_width), min(820, max_height))
+        self._layout_template_footer(compact=self.width() < 760)
 
         # På smala skärmar läggs bild och fält under varandra i scroll-ytan;
         # annars visas de sida vid sida som tidigare.
         self._middle_layout.setDirection(
             QBoxLayout.Direction.TopToBottom
-            if max_width < 900
+            if self.width() < 860
             else QBoxLayout.Direction.LeftToRight
         )
         frame = self.frameGeometry()
@@ -1056,8 +1083,10 @@ class TemplateDialog(QDialog):
         pixmap = self._pixmaps.get(self._page)
         if pixmap is None and self._path is not None:
             si = _scan_module()
+            dpr = effective_dpr(self)
+            render_dpi = min(320, max(200, int(round(200 * dpr))))
             data = si.render_page_image(
-                self._path, self._page, dpi=200
+                self._path, self._page, dpi=render_dpi
             )
             pixmap = QPixmap()
             if data:
@@ -1831,27 +1860,38 @@ class TemplatesManagerDialog(QDialog):
         self._on_edit = on_edit
         self._on_create = on_create
         self.setWindowTitle(tr("tmpl.manager_title"))
-        self.setMinimumSize(520, 360)
+        self.setSizeGripEnabled(True)
+        if callable(fit_dialog_to_screen):
+            fit_dialog_to_screen(
+                self, 620, 440, minimum_width=380, minimum_height=300,
+            )
+        else:
+            self.setMinimumSize(380, 300)
         root = QVBoxLayout(self)
         self._list = QListWidget()
         self._list.itemDoubleClicked.connect(
             lambda _item: self._edit_selected()
         )
         root.addWidget(self._list, stretch=1)
-        row = QHBoxLayout()
+        row = FlowLayout(spacing=8)
         if on_create is not None:
             btn_new = QPushButton(tr("tmpl.new"))
+            btn_new.setProperty("accent", True)
+            bind_icon(btn_new, "add", size=14, role="on_accent")
             btn_new.clicked.connect(self._create_new)
             row.addWidget(btn_new)
         if on_edit is not None:
             btn_edit = QPushButton(tr("tmpl.edit"))
+            bind_icon(btn_edit, "edit", size=14)
             btn_edit.clicked.connect(self._edit_selected)
             row.addWidget(btn_edit)
         btn_del = QPushButton(tr("tmpl.delete"))
+        btn_del.setProperty("danger", True)
+        bind_icon(btn_del, "delete", size=14, role="on_accent")
         btn_del.clicked.connect(self._delete_selected)
         row.addWidget(btn_del)
-        row.addStretch()
-        btn_close = QPushButton(f"✖  {tr('common.cancel')}")
+        btn_close = QPushButton(tr("common.cancel"))
+        bind_icon(btn_close, "clear", size=14)
         btn_close.clicked.connect(self.accept)
         row.addWidget(btn_close)
         root.addLayout(row)
@@ -1985,8 +2025,8 @@ class ScanImportView(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 14)
-        root.setSpacing(10)
+        root.setContentsMargins(16, 10, 16, 10)
+        root.setSpacing(6)
 
         hdr = QLabel(tr("scan.title"))
         self._hdr_label = hdr
@@ -2011,50 +2051,16 @@ class ScanImportView(QWidget):
         root.addWidget(info)
         root.addWidget(self._hline())
 
-        # ── 1. Välj filer ─────────────────────────────────────────────
-        box_files = QGroupBox(tr("scan.step1"))
-        self._box_files = box_files
-        bf = QVBoxLayout(box_files)
-        bf.setSpacing(8)
+        # ── 1. Bevakade mappar + Välj fakturafiler sida vid sida ──────
+        top_row = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        top_row.setSpacing(10)
+        self._top_cards_layout = top_row
 
-        row1 = QHBoxLayout()
-        row1.setSpacing(8)
-        btn_pick = QPushButton(tr("scan.pick"))
-        self._btn_pick = btn_pick
-        bind_icon(btn_pick, "folder", size=14)
-        btn_pick.clicked.connect(self._pick_files)
-        btn_clear = QPushButton(tr("scan.clear"))
-        self._btn_clear = btn_clear
-        bind_icon(btn_clear, "clear", size=14)
-        btn_clear.clicked.connect(self._clear_paths)
-        self._lbl_files = QLabel(tr("scan.no_files"))
-        self._lbl_files.setProperty("muted", True)
-        self._lbl_files.setStyleSheet("background:transparent;")
-        row1.addWidget(btn_pick)
-        row1.addWidget(btn_clear)
-        row1.addWidget(self._lbl_files, stretch=1)
-        bf.addLayout(row1)
-
-        self._txt_paths = QTextEdit()
-        self._txt_paths.setReadOnly(True)
-        self._txt_paths.setMaximumHeight(70)
-        self._txt_paths.setPlaceholderText(tr("scan.files_ph"))
-        bf.addWidget(self._txt_paths)
-
-        row2 = QHBoxLayout()
-        row2.setSpacing(8)
-        btn_scan = QPushButton(tr("scan.scan"))
-        self._btn_scan = btn_scan
-        btn_scan.setProperty("accent", True)
-        btn_scan.setMinimumHeight(42)
-        bind_icon(btn_scan, "import", size=15, role="on_accent")
-        btn_scan.clicked.connect(self._scan_files)
-        # ── Bevakade mappar: auto-import från leverantörsmappar ──
         box_watch = QGroupBox(tr("watch.title"))
         self._box_watch = box_watch
         bw = QVBoxLayout()
-        bw.setContentsMargins(10, 8, 10, 8)
-        bw.setSpacing(6)
+        bw.setContentsMargins(10, 6, 10, 6)
+        bw.setSpacing(4)
         lbl_winfo = QLabel(tr("watch.info"))
         self._lbl_watch_info = lbl_winfo
         lbl_winfo.setWordWrap(True)
@@ -2062,7 +2068,7 @@ class ScanImportView(QWidget):
         lbl_winfo.setStyleSheet("background:transparent;")
         bw.addWidget(lbl_winfo)
         self._lst_watch = QListWidget()
-        self._lst_watch.setMaximumHeight(96)
+        self._lst_watch.setMaximumHeight(46)
         bw.addWidget(self._lst_watch)
         wr = FlowLayout(spacing=6)
         self._btn_add_folder = QPushButton(tr("watch.add_folder"))
@@ -2080,10 +2086,12 @@ class ScanImportView(QWidget):
         bw.addLayout(wr)
         wr2 = FlowLayout(spacing=6)
         self._lbl_watch_parked = QLabel()
+        self._lbl_watch_parked.setProperty("muted", True)
+        self._lbl_watch_parked.setStyleSheet("background:transparent;")
+        self._lbl_watch_parked.setVisible(False)
         self._btn_review_parked = QPushButton(tr("watch.review"))
         bind_icon(self._btn_review_parked, "eye", size=14)
         self._btn_review_parked.clicked.connect(self._review_parked)
-        wr2.addWidget(self._lbl_watch_parked)
         wr2.addWidget(self._btn_review_parked)
         self._btn_teach_folder = QPushButton(tr("watch.learn"))
         bind_icon(self._btn_teach_folder, "learn", size=14)
@@ -2099,13 +2107,52 @@ class ScanImportView(QWidget):
         bind_icon(self._btn_control_scan, "check", size=14)
         self._btn_control_scan.clicked.connect(self._control_scan_now)
         wr2.addWidget(self._btn_control_scan)
+        wr2.addWidget(self._lbl_watch_parked)
         bw.addLayout(wr2)
         self._watch_progress = QProgressBar()
         self._watch_progress.setTextVisible(True)
         self._watch_progress.setVisible(False)
         bw.addWidget(self._watch_progress)
         box_watch.setLayout(bw)
-        root.addWidget(box_watch)
+        top_row.addWidget(box_watch, stretch=1)
+
+        box_files = QGroupBox(tr("scan.step1"))
+        self._box_files = box_files
+        bf = QVBoxLayout(box_files)
+        bf.setContentsMargins(10, 8, 10, 8)
+        bf.setSpacing(6)
+
+        row1 = FlowLayout(spacing=8)
+        btn_pick = QPushButton(tr("scan.pick"))
+        self._btn_pick = btn_pick
+        bind_icon(btn_pick, "folder", size=14)
+        btn_pick.clicked.connect(self._pick_files)
+        btn_clear = QPushButton(tr("scan.clear"))
+        self._btn_clear = btn_clear
+        bind_icon(btn_clear, "clear", size=14)
+        btn_clear.clicked.connect(self._clear_paths)
+        self._lbl_files = QLabel(tr("scan.no_files"))
+        self._lbl_files.setProperty("muted", True)
+        self._lbl_files.setStyleSheet("background:transparent;")
+        row1.addWidget(btn_pick)
+        row1.addWidget(btn_clear)
+        row1.addWidget(self._lbl_files)
+        bf.addLayout(row1)
+
+        self._txt_paths = QTextEdit()
+        self._txt_paths.setReadOnly(True)
+        self._txt_paths.setMaximumHeight(36)
+        self._txt_paths.setPlaceholderText(tr("scan.files_ph"))
+        bf.addWidget(self._txt_paths)
+
+        row2 = QHBoxLayout()
+        row2.setSpacing(8)
+        btn_scan = QPushButton(tr("scan.scan"))
+        self._btn_scan = btn_scan
+        btn_scan.setProperty("accent", True)
+        btn_scan.setMinimumHeight(38)
+        bind_icon(btn_scan, "import", size=15, role="on_accent")
+        btn_scan.clicked.connect(self._scan_files)
 
         self._lbl_status = QLabel(tr("scan.ready"))
         self._lbl_status.setProperty("muted", True)
@@ -2122,16 +2169,18 @@ class ScanImportView(QWidget):
         self._scan_progress.setTextVisible(True)
         self._scan_progress.setVisible(False)
         bf.addWidget(self._scan_progress)
-        root.addWidget(box_files)
+        top_row.addWidget(box_files, stretch=1)
+        root.addLayout(top_row)
 
-        # ── 2. Klistra in text (manuell fallback) ─────────────────────
+        # ── 2. Klistra in text (kompakt manuell fallback) ─────────────
         box_txt = QGroupBox(tr("scan.step2"))
         self._box_txt = box_txt
         bt = QVBoxLayout(box_txt)
-        bt.setSpacing(6)
+        bt.setContentsMargins(10, 4, 10, 5)
+        bt.setSpacing(4)
         self._txt_paste = QTextEdit()
         self._txt_paste.setPlaceholderText(tr("scan.paste_ph"))
-        self._txt_paste.setMaximumHeight(110)
+        self._txt_paste.setMaximumHeight(40)
         bt.addWidget(self._txt_paste)
 
         rowt = QHBoxLayout()
@@ -2446,16 +2495,28 @@ class ScanImportView(QWidget):
             return
         self._update_preview_panel(reset_page=True)
 
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if hasattr(self, "_top_cards_layout"):
+            self._top_cards_layout.setDirection(
+                QBoxLayout.Direction.TopToBottom
+                if 0 < self.width() < 960
+                else QBoxLayout.Direction.LeftToRight
+            )
+
     def _load_preview_pixmap(
         self, path: str, page_index: int
     ) -> QPixmap | None:
         p = Path(path or "")
         if not path or not p.exists():
             return None
+        dpr = effective_dpr(self)
+        render_dpi = min(320, max(200, int(round(160 * dpr))))
         try:
             st = p.stat()
             cache_key = (
-                str(p), int(st.st_size), int(st.st_mtime_ns), int(page_index)
+                str(p), int(st.st_size), int(st.st_mtime_ns),
+                int(page_index), render_dpi,
             )
         except OSError:
             return None
@@ -2466,7 +2527,7 @@ class ScanImportView(QWidget):
         pix = QPixmap()
         try:
             png_bytes = _scan_module().render_page_image(
-                str(p), page_index=int(page_index), dpi=135
+                str(p), page_index=int(page_index), dpi=render_dpi
             )
             if png_bytes:
                 pix.loadFromData(png_bytes)
@@ -3093,7 +3154,9 @@ class ScanImportView(QWidget):
             ))
         elif watch and getattr(watch, "folders", None):
             labels.append(tr("watch.waiting_first_scan"))
-        self._lbl_watch_parked.setText("  ·  ".join(labels))
+        txt = "  ·  ".join(labels)
+        self._lbl_watch_parked.setText(txt)
+        self._lbl_watch_parked.setVisible(bool(txt))
         self._btn_review_parked.setEnabled(bool(n))
 
     def _add_watch_folder(self) -> None:
