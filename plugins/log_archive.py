@@ -157,9 +157,25 @@ def archive_previous_day_logs(
         lambda day: f"autostart-{day.isoformat()}.log",
     )
     try:
-        from error_collect import resolve_stale_error_issues
+        from error_collect import (
+            auto_clean_resolved_errors,
+            resolve_stale_error_issues,
+        )
 
         resolve_stale_error_issues(root.parent)
+        auto_clean_on = True
+        settings_path = root.parent / "data" / "settings.json"
+        if settings_path.is_file():
+            try:
+                import json
+
+                cfg = json.loads(settings_path.read_text(encoding="utf-8"))
+                if isinstance(cfg, dict) and "auto_clean_resolved_errors" in cfg:
+                    auto_clean_on = bool(cfg.get("auto_clean_resolved_errors", True))
+            except Exception:
+                pass
+        if auto_clean_on:
+            auto_clean_resolved_errors(root.parent, enabled=True)
     except Exception:
         pass
     return moved

@@ -3780,7 +3780,13 @@ class MainWindow(QMainWindow):
                 summary = self._app.rescan_data()
         except Exception as exc:
             log.error("rescan_data: %s", exc)
-        self.theme_changed.emit(self.current_theme_dict())
+        # Emittera bara theme_changed när faktiskt upplöst tema ändrats
+        # (annars triggas WindowWatcher + onödig ommålning vid varje rescan).
+        cur_theme = self.current_theme_dict()
+        if cur_theme.get("name") != getattr(self, "_last_resolved_theme", None):
+            self._active_theme = dict(cur_theme)
+            self._last_resolved_theme = cur_theme.get("name")
+            self.theme_changed.emit(cur_theme)
         for key, (_, inner) in self._tab_map.items():
             for method in ("refresh", "_do_refresh"):
                 if hasattr(inner, method):

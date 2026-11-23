@@ -155,3 +155,77 @@ def test_advanced_logger_skips_tab_when_builtin_exists():
     fake = FakeWindow()
     al.register_ui(fake)
     assert fake.added_tabs == []
+
+
+def test_log_view_clean_resolved_errors_and_auto_clean_setting(tmp_path):
+    """Manuell rensning + inställningen 'Rensa åtgärdade automatiskt' i LogView."""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    import error_collect as ec
+    from ui import i18n
+    from ui.log_view import LogView, format_diagnostics
+
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True)
+    log_file = logs / "app.log"
+    log_file.write_text(SAMPLE, encoding="utf-8")
+
+    ec.error_log_path(tmp_path).write_text(
+        ec._HEADER
+        + "2026-10-01T10:00:00 | ERROR | Test | Åtgärdat gammalt fel\n"
+        + "2026-10-19T12:01:00 | CRITICAL | App | Andra kraschen\n",
+        encoding="utf-8",
+    )
+
+    saved: dict[str, object] = {"auto_clean_resolved_errors": True}
+
+    class FakeApp:
+        def get_setting(self, key, default=None):
+            return saved.get(key, default)
+
+        def set_setting(self, key, value):
+            saved[key] = value
+
+        def get_suppliers(self):
+            return []
+
+        def get_invoices(self):
+            return []
+
+    view = LogView(FakeApp(), log_file=log_file)
+    try:
+        assert view._chk_auto_clean.isChecked() is True
+        view._chk_auto_clean.setChecked(False)
+        assert saved["auto_clean_resolved_errors"] is False
+
+        # Både sv & en översättning för nya kontroller
+        i18n.set_language("en")
+        view.retranslate()
+        assert "Clean resolved" in view._btn_clean_errors.text()
+        assert "Auto-clean" in view._chk_auto_clean.text()
+        i18n.set_language("sv")
+        view.retranslate()
+        assert "Rensa åtgärdade" in view._btn_clean_errors.text()
+
+        # Före rensning visas felbannern
+        assert not view._banner_widget.isHidden()
+
+        # Rensa bort allt (inkl. aktuella markerade som åtgärdade)
+        result = view.clean_resolved_errors(
+            include_open=True, prompt_if_open=False
+        )
+        assert result["remaining"] == 0
+        assert "Andra kraschen" not in ec.error_log_path(tmp_path).read_text(encoding="utf-8")
+        # Bannern döljs direkt eftersom inga nyare fel skett efter rensningen
+        assert view._banner_widget.isHidden()
+
+        # Felsökningspaketet döljer redan rensade gamla fel
+        diag = format_diagnostics(
+            view._all_entries, view._diagnostics_meta()
+        )
+        assert "inga olösta fel sedan rensning" in diag
+    finally:
+        view._timer.stop()
+        view.close()
+

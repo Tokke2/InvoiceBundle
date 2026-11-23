@@ -465,3 +465,140 @@ def test_deleted_widget_error_blocks_are_merged_like_the_real_journal(
         assert text.count("already deleted.") == 4  # 2 i seed + 2 i speglingen
     finally:
         _drop_mirror_handlers()
+
+
+def test_purge_and_auto_clean_removes_resolved_and_legacy_blocks_without_reimport(
+    tmp_path,
+):
+    """Automatisk + manuell rensning tar bort åtgärdade fel utan återimport.
+
+    Verifierar:
+    1. Auto-rensning avstängd (enabled=False) lämnar allt orört.
+    2. Auto-rensning på (enabled=True) tar bort både auto-åtgärdade (FB-...)
+       och urgamla oregistrerade felblock (t.ex. 2026-11-09) samt lösa
+       traceback-rester — samtidigt som färska aktiva fel bevaras.
+    3. Efterföljande collect_errors() drar ALDRIG in de rensade felen
+       från logs/archive/*.jsonl igen.
+    4. Manuell purge_resolved_errors(..., include_open=True) rensar även
+       öppna fel + sätter cleared_before, och ett verkligt återfall
+       senare öppnar felet igen (ÅTERÖPPNAT).
+    """
+    import json
+    from datetime import datetime
+    import error_collect as ec
+
+    logs = tmp_path / "logs"
+    archive = logs / "archive"
+    archive.mkdir(parents=True)
+
+    # Samma gamla fel ligger även kvar i dagsarkivet!
+    old_msg = "UNCAUGHT EXCEPTION: UnboundLocalError: cannot access local variable 'supplier'"
+    (archive / "app-2026-11-18.jsonl").write_text(
+        json.dumps({
+            "ts": "2026-11-18T16:01:26",
+            "level": "CRITICAL",
+            "logger": "UncaughtException",
+            "msg": old_msg,
+            "exc": "UnboundLocalError: cannot access local variable 'supplier'",
+        }, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    # Fröa med användarens faktiska mönster + ett färskt aktivt fel
+    seed_lines = [
+        "RuntimeError: libshiboken: Internal C++ object (PySide6.QtWidgets.QLineEdit) already deleted.  (advanced_logger:447)",
+        "2026-11-09T16:42:33 | CRITICAL | UncaughtException | UNCAUGHT EXCEPTION: RuntimeError: libshiboken: Internal C++ object (PySide6.QtWidgets.QLineEdit) already deleted.  (advanced_logger:447)",
+        '  File "plugins\\advanced_logger.py", line 909, in _f',
+        "RuntimeError: libshiboken: Internal C++ object (PySide6.QtWidgets.QLineEdit) already deleted.  (advanced_logger:447)",
+        "2026-11-09T16:42:33 | CRITICAL | UncaughtException | UNCAUGHT EXCEPTION: RuntimeError: libshiboken: Internal C++ object (PySide6.QtWidgets.QLineEdit) already deleted.  (advanced_logger:447)",
+        '  File "plugins\\advanced_logger.py", line 909, in _f',
+        f"2026-11-18T16:01:26 | CRITICAL | UncaughtException | {old_msg}  (advanced_logger:494)",
+        "2026-11-18T16:01:26 | ÖPPNAT | FB-E262906A25 | UncaughtException",
+        "2026-11-19T09:22:33 | TROLIGEN ÅTGÄRDAT (72 h utan ny träff) | FB-05DA0529A5 | FakturaApp",
+        "2026-11-23T05:50:37 | TROLIGEN ÅTGÄRDAT (72 h utan ny träff) | FB-E262906A25 | UncaughtException",
+        "2026-11-23T11:20:00 | ERROR | ScanImport | Aktuellt öppet fel som ännu inte är åtgärdat",
+    ]
+    ec.error_log_path(tmp_path).write_text(
+        ec._HEADER + "\n".join(seed_lines) + "\n", encoding="utf-8"
+    )
+    ec._save_error_state(tmp_path, {
+        "version": 1,
+        "issues": {
+            "E262906A25ABCDEF": {
+                "code": "FB-E262906A25",
+                "fingerprint": "E262906A25ABCDEF",
+                "status": "likely_resolved",
+                "level": "CRITICAL",
+                "logger": "UncaughtException",
+                "message": old_msg,
+                "exception_type": "UnboundLocalError",
+                "first_seen": "2026-11-18T16:01:26",
+                "last_seen": "2026-11-18T16:01:26",
+                "resolved_at": "2026-11-23T05:50:37",
+                "occurrences": 1,
+            },
+            "ACTIVE0000000001": {
+                "code": "FB-ACTIVE0001",
+                "fingerprint": "ACTIVE0000000001",
+                "status": "open",
+                "level": "ERROR",
+                "logger": "ScanImport",
+                "message": "Aktuellt öppet fel som ännu inte är åtgärdat",
+                "exception_type": "",
+                "first_seen": "2026-11-23T11:20:00",
+                "last_seen": "2026-11-23T11:20:00",
+                "occurrences": 1,
+            },
+        },
+    })
+
+    now = datetime(2026, 11, 23, 12, 0, 0)
+
+    # 1. Avstängd auto-rensning tar inte bort något
+    disabled = ec.auto_clean_resolved_errors(tmp_path, enabled=False, now=now)
+    assert disabled["removed_blocks"] == 0
+    assert "QLineEdit" in _read(tmp_path)
+    assert "UnboundLocalError" in _read(tmp_path)
+
+    # 2. Påslagen auto-rensning tar bort 2026-11-09, 2026-11-18, TROLIGEN ÅTGÄRDAT
+    #    och löst fragment — men behåller det färska aktiva felet!
+    cleaned = ec.auto_clean_resolved_errors(tmp_path, enabled=True, now=now)
+    assert cleaned["removed_blocks"] >= 4
+    text_after = _read(tmp_path)
+    assert "QLineEdit" not in text_after
+    assert "UnboundLocalError" not in text_after
+    assert "FB-E262906A25" not in text_after
+    assert "FB-05DA0529A5" not in text_after
+    assert "Aktuellt öppet fel som ännu inte är åtgärdat" in text_after
+
+    # Arkivet fick kopia av de bortrensade raderna
+    arch_text = ec.resolved_error_log_path(tmp_path).read_text(encoding="utf-8")
+    assert "QLineEdit" in arch_text
+    assert "UnboundLocalError" in arch_text
+
+    # 3. Ny skörd av logs/archive/app-2026-11-18.jsonl får INTE återinföra felet
+    harvest = ec.collect_errors(tmp_path)
+    assert harvest["added"] == 0
+    assert "UnboundLocalError" not in _read(tmp_path)
+
+    # 4. Manuell full rensning ("markera aktuella som åtgärdade & rensa")
+    manual = ec.purge_resolved_errors(
+        tmp_path,
+        include_open=True,
+        now=datetime(2026, 11, 23, 12, 5, 0),
+    )
+    assert manual["remaining"] == 0
+    assert "Aktuellt öppet fel" not in _read(tmp_path)
+    assert ec.error_summary(tmp_path)["open"] == 0
+
+    # 5. Om ett riktigt återfall sker EFTER rensningen öppnas felet på nytt
+    ec.register_error_events(tmp_path, [{
+        "timestamp": "2026-11-23T13:00:00",
+        "level": "CRITICAL",
+        "logger": "UncaughtException",
+        "message": old_msg,
+        "exception_type": "UnboundLocalError",
+    }])
+    assert "ÅTERÖPPNAT | FB-" in _read(tmp_path)
+    assert ec.error_summary(tmp_path)["open"] >= 1
+

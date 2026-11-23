@@ -2049,14 +2049,20 @@ def _log_startup_info(app_core: Any) -> None:
 
 
 def _watch_theme(window: Any) -> None:
-    """Loggar alla temabyten."""
+    """Loggar faktiska temabyten (ignorerar no-op-omsignaler)."""
     watcher_log = logging.getLogger("WindowWatcher")
     try:
+        last_seen: list[tuple[str, str] | None] = [None]
+
         def _on_theme_changed(theme: dict) -> None:
+            sig = (str(theme.get("name", "?")), str(theme.get("bg", "?")))
+            if last_seen[0] == sig:
+                return
+            last_seen[0] = sig
             watcher_log.info(
                 "Tema bytt → %s (bg=%s)",
-                theme.get("name", "?"),
-                theme.get("bg", "?"),
+                sig[0],
+                sig[1],
             )
 
         window.theme_changed.connect(_on_theme_changed)
@@ -2653,11 +2659,20 @@ def main() -> None:
         _setup_window_watchers(window, app_core)
         _install_shortcuts(window)
         # Felsamling: skörda fel ur alla loggar till logs/felsamling.log
-        # vid varje start (nya fel speglas sedan dit direkt).
+        # vid varje start (nya fel speglas sedan dit direkt), och rensa
+        # bort gamla auto-åtgärdade fel om funktionen är aktiverad.
         try:
-            from error_collect import collect_errors
+            from error_collect import (
+                auto_clean_resolved_errors,
+                collect_errors,
+            )
 
             collect_errors(BASE_DIR)
+            auto_clean_on = bool(
+                app_core.settings.get("auto_clean_resolved_errors", True)
+            )
+            if auto_clean_on:
+                auto_clean_resolved_errors(BASE_DIR, enabled=True)
         except Exception:
             pass
         _start_minimized_or_show(window, app_core, AUTOSTART_LAUNCH)

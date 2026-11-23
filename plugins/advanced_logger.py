@@ -385,11 +385,20 @@ def setup_logging(trace_on: bool = True) -> MemoryHandler:
     _logger_ready = True
     set_trace_enabled(trace_on, log_change=False)
 
+    app_ver = os.environ.get("FBP_VERSION", "")
+    if not app_ver:
+        try:
+            app_mod = sys.modules.get("app")
+            if app_mod is not None:
+                app_ver = str(getattr(app_mod, "APP_VERSION", "") or "")
+        except Exception:
+            app_ver = ""
+
     alog(
         "SESSION_START",
         "Ny loggsession — JSONL med dagsarkiv; feljournalen bevaras",
         logger="AdvancedLogger",
-        version=os.environ.get("FBP_VERSION", ""),
+        version=app_ver,
         platform=platform.system(),
         python=sys.version.split()[0],
         pid=os.getpid(),
@@ -827,7 +836,7 @@ class QtEventBridge(QObject):
                     widget=cls, key=event.key(),
                 )
 
-            elif t == QEvent.Type.FocusIn:
+            elif t == QEvent.Type.FocusIn and isinstance(obj, QWidget):
                 alog(
                     "UI_FOCUS", f"Fokus → {cls}",
                     level=TRACE_LEVEL, logger="QtUI", widget=cls,

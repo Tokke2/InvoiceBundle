@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSplitter,
@@ -305,10 +306,12 @@ def format_diagnostics(
     else:
         scope = entries
 
+    cleared_before = str(meta.get("errors_cleared_before") or "")
     all_errors = [
         e for e in entries
         if LEVEL_ORDER.get(str(e.get("level", "")).upper(), 0)
         >= LEVEL_ORDER["ERROR"]
+        and (not cleared_before or str(e.get("ts", "")) > cleared_before)
     ]
     shown_errors = _collapse_errors(all_errors)[-15:]
     lines.append("")
@@ -319,7 +322,10 @@ def format_diagnostics(
             text += f"  (samma fel ×{times})"
         lines.append(text)
     if not shown_errors:
-        lines.append("(inga ERROR/CRITICAL i inläst logg)")
+        if cleared_before:
+            lines.append(f"(inga olösta fel sedan rensning {cleared_before})")
+        else:
+            lines.append("(inga ERROR/CRITICAL i inläst logg)")
 
     watch_lines = [
         str(x) for x in (meta.get("watch_lines") or [])
@@ -497,6 +503,9 @@ class LogView(QWidget):
         self._btn_errors = QPushButton()
         bind_icon(self._btn_errors, "alert", size=14)
         self._btn_errors.clicked.connect(self._collect_all_errors)
+        self._btn_clean_errors = QPushButton()
+        bind_icon(self._btn_clean_errors, "check", size=14)
+        self._btn_clean_errors.clicked.connect(self._on_clean_errors_clicked)
         self._btn_export = QPushButton()
         bind_icon(self._btn_export, "export", size=14)
         self._btn_export.clicked.connect(self._export_shown)
@@ -507,6 +516,7 @@ class LogView(QWidget):
                   self._btn_copy_marked, self._btn_copy_diag,
                   self._btn_copy_learning,
                   self._btn_open_dir, self._btn_errors,
+                  self._btn_clean_errors,
                   self._btn_export, self._btn_reset):
             b.setMinimumHeight(34)
             b.setMinimumWidth(0)
@@ -556,17 +566,27 @@ class LogView(QWidget):
         self._splitter.setSizes([420, 130])
         root.addWidget(self._splitter, stretch=1)
 
-        row3 = QHBoxLayout()
-        row3.setSpacing(10)
+        row3 = FlowLayout(spacing=10)
         self._btn_copy_row = QPushButton()
+        self._btn_copy_row.setMinimumHeight(30)
         bind_icon(self._btn_copy_row, "duplicate", size=14)
         self._btn_copy_row.clicked.connect(self._copy_selected)
         row3.addWidget(self._btn_copy_row)
         self._chk_scroll = QCheckBox()
         self._chk_scroll.setChecked(True)
         row3.addWidget(self._chk_scroll)
-        row3.addStretch()
+        self._chk_auto_clean = QCheckBox()
+        try:
+            _ac_val = bool(
+                self._app.get_setting("auto_clean_resolved_errors", True)
+            )
+        except Exception:
+            _ac_val = True
+        self._chk_auto_clean.setChecked(_ac_val)
+        self._chk_auto_clean.toggled.connect(self._on_auto_clean_toggled)
+        row3.addWidget(self._chk_auto_clean)
         self._lbl_info = QLabel()
+        self._lbl_info.setWordWrap(False)
         row3.addWidget(self._lbl_info)
         root.addLayout(row3)
 
@@ -665,11 +685,26 @@ class LogView(QWidget):
         if scroll_bottom and self._shown:
             tbl.scrollToBottom()
 
+    def _error_root(self) -> Path:
+        parent = self._log_file.parent
+        return parent.parent if parent.name == "logs" else parent
+
+    def _errors_cleared_before(self) -> str:
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins"))
+            from error_collect import error_summary
+
+            return str(error_summary(self._error_root()).get("cleared_before", "") or "")
+        except Exception:
+            return ""
+
     def _update_banner(self) -> None:
+        cleared_before = self._errors_cleared_before()
         errors = [
             e for e in self._all_entries
             if LEVEL_ORDER.get(str(e.get("level", "")).upper(), 0)
             >= LEVEL_ORDER["ERROR"]
+            and (not cleared_before or str(e.get("ts", "")) > cleared_before)
         ]
         if not errors:
             self._banner_widget.setVisible(False)
@@ -862,6 +897,9 @@ class LogView(QWidget):
         except Exception:
             pass
         meta["log_file"] = str(self._log_file)
+        cleared_before = self._errors_cleared_before()
+        if cleared_before:
+            meta["errors_cleared_before"] = cleared_before
         try:
             meta["log_size_kb"] = (
                 self._log_file.stat().st_size // 1024
@@ -937,7 +975,7 @@ class LogView(QWidget):
             sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins"))
             from error_collect import collect_errors, error_log_path
 
-            root = self._log_file.parent.parent
+            root = self._error_root()
             report = collect_errors(root)
             path = error_log_path(root)
             content = ""
@@ -958,6 +996,129 @@ class LogView(QWidget):
             )
         except Exception as exc:
             self._lbl_info.setText(f"⚠ {exc}")
+
+    def _on_auto_clean_toggled(self, checked: bool) -> None:
+        """Sparar om åtgärdade fel ska rensas automatiskt och kör direkt om PÅ."""
+        try:
+            if hasattr(self._app, "set_setting"):
+                self._app.set_setting("auto_clean_resolved_errors", bool(checked))
+        except Exception:
+            pass
+        if checked:
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins"))
+                from error_collect import auto_clean_resolved_errors
+
+                res = auto_clean_resolved_errors(self._error_root(), enabled=True)
+                if res.get("removed_blocks", 0) > 0:
+                    self._lbl_info.setText(
+                        tr(
+                            "log.clean_done",
+                            removed=res.get("removed_blocks", 0),
+                            remaining=res.get("remaining", 0),
+                        )
+                    )
+                    self._update_banner()
+            except Exception as exc:
+                log.debug("auto_clean toggle: %s", exc)
+
+    def _on_clean_errors_clicked(self) -> None:
+        """Klick på 'Rensa åtgärdade fel' — frågar vid aktiva/öppna fel."""
+        self.clean_resolved_errors(include_open=None, prompt_if_open=True)
+
+    def clean_resolved_errors(
+        self,
+        *,
+        include_open: bool | None = None,
+        prompt_if_open: bool = True,
+    ) -> dict[str, Any]:
+        """Rensar bort åtgärdade fel ur logs/felsamling.log och uppdaterar Logg-fliken."""
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins"))
+            from error_collect import (
+                collect_errors,
+                error_log_path,
+                error_summary,
+                purge_resolved_errors,
+            )
+
+            root = self._error_root()
+            collect_errors(root)
+            summary = error_summary(root)
+            cleared_before = str(summary.get("cleared_before", "") or "")
+            banner_open = sum(
+                1 for e in self._all_entries
+                if LEVEL_ORDER.get(str(e.get("level", "")).upper(), 0)
+                >= LEVEL_ORDER["ERROR"]
+                and (not cleared_before or str(e.get("ts", "")) > cleared_before)
+            )
+            open_count = max(int(summary.get("open", 0) or 0), banner_open)
+            resolved_count = int(summary.get("likely_resolved", 0) or 0)
+
+            chosen_include_open = include_open
+            if chosen_include_open is None:
+                if open_count > 0 and prompt_if_open:
+                    box = QMessageBox(self)
+                    box.setIcon(QMessageBox.Icon.Question)
+                    box.setWindowTitle(tr("log.clean_dialog_title"))
+                    box.setText(
+                        tr(
+                            "log.clean_dialog_body",
+                            open_n=open_count,
+                            resolved_n=resolved_count,
+                        )
+                    )
+                    btn_only = box.addButton(
+                        tr("log.clean_only_resolved"),
+                        QMessageBox.ButtonRole.ActionRole,
+                    )
+                    btn_all = box.addButton(
+                        tr("log.clean_mark_all"),
+                        QMessageBox.ButtonRole.AcceptRole,
+                    )
+                    btn_cancel = box.addButton(
+                        tr("log.clean_cancel"),
+                        QMessageBox.ButtonRole.RejectRole,
+                    )
+                    box.setDefaultButton(btn_only if resolved_count > 0 else btn_all)
+                    box.exec()
+                    clicked = box.clickedButton()
+                    if clicked is btn_cancel or clicked is None:
+                        return {"cancelled": True}
+                    chosen_include_open = clicked is btn_all
+                else:
+                    chosen_include_open = False
+
+            result = purge_resolved_errors(
+                root,
+                include_likely_resolved=True,
+                include_open=bool(chosen_include_open),
+                min_resolved_age=None,
+                archive_removed=True,
+            )
+            path = error_log_path(root)
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                content = ""
+            self._detail.setPlainText(content[-20000:])
+            removed = int(result.get("removed_blocks", 0) or 0)
+            remaining = int(result.get("remaining", 0) or 0)
+            if chosen_include_open and remaining == 0:
+                self._lbl_info.setText(
+                    tr("log.clean_done_empty", removed=removed)
+                )
+            elif removed > 0:
+                self._lbl_info.setText(
+                    tr("log.clean_done", removed=removed, remaining=remaining)
+                )
+            else:
+                self._lbl_info.setText(tr("log.clean_nothing"))
+            self._update_banner()
+            return result
+        except Exception as exc:
+            self._lbl_info.setText(f"⚠ {exc}")
+            return {"error": str(exc)}
 
     def _export_shown(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -1078,6 +1239,7 @@ class LogView(QWidget):
         self._chk_errors.setText(tr("log.only_errors"))
         self._chk_session.setText(tr("log.only_session"))
         self._chk_scroll.setText(tr("log.auto_scroll"))
+        self._chk_auto_clean.setText(tr("log.auto_clean_errors"))
         self._btn_goto_error.setText(tr("log.goto_error"))
         self._btn_refresh.setText(tr("log.refresh"))
         self._btn_pause.setText(
@@ -1089,6 +1251,7 @@ class LogView(QWidget):
         self._btn_copy_learning.setText(tr("log.copy_learning"))
         self._btn_open_dir.setText(tr("log.open_dir"))
         self._btn_errors.setText(tr("log.collect_errors"))
+        self._btn_clean_errors.setText(tr("log.clean_resolved_btn"))
         self._btn_export.setText(tr("log.export_shown"))
         self._btn_reset.setText(tr("log.reset_filters"))
         self._btn_copy_row.setText(tr("log.copy_row"))

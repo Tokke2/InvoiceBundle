@@ -82,3 +82,36 @@ def test_archive_active_log_as_numbered_size_segment(tmp_path: Path):
         app_log, archive, day=date(2026, 11, 4)
     )
     assert second == archive / "app-2026-11-04-part002.jsonl"
+
+
+def test_archive_runs_auto_clean_for_old_resolved_errors(tmp_path: Path):
+    import error_collect as ec
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    data = tmp_path / "data"
+    data.mkdir()
+    (logs / "app.log").write_text("", encoding="utf-8")
+    (logs / "autostart.log").write_text("", encoding="utf-8")
+    ec.error_log_path(tmp_path).write_text(
+        ec._HEADER
+        + "2026-01-01T10:00:00 | ERROR | Test | Gammalt åtgärdat fel\n",
+        encoding="utf-8",
+    )
+
+    # När auto_clean_resolved_errors = false behålls det gamla felet
+    (data / "settings.json").write_text(
+        json.dumps({"auto_clean_resolved_errors": False}),
+        encoding="utf-8",
+    )
+    archive_previous_day_logs(logs, today=date(2026, 11, 4))
+    assert "Gammalt åtgärdat fel" in ec.error_log_path(tmp_path).read_text(encoding="utf-8")
+
+    # När auto_clean_resolved_errors = true (standard) städas gamla fel ut
+    (data / "settings.json").write_text(
+        json.dumps({"auto_clean_resolved_errors": True}),
+        encoding="utf-8",
+    )
+    archive_previous_day_logs(logs, today=date(2026, 11, 4))
+    assert "Gammalt åtgärdat fel" not in ec.error_log_path(tmp_path).read_text(encoding="utf-8")
+

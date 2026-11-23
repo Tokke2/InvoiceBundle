@@ -48,7 +48,9 @@ log = logging.getLogger("invoice_bundle")
 #: Den samlade felloggens filnamn i logs/.
 ERROR_LOG_NAME = "felsamling.log"
 ERROR_STATE_NAME = "felstatus.json"
+ERROR_RESOLVED_ARCHIVE_NAME = "felsamling-atgardade.log"
 AUTO_RESOLVE_AFTER = datetime.timedelta(days=3)
+AUTO_CLEAN_GRACE = datetime.timedelta(hours=24)
 _STATE_LOCK = threading.RLock()
 _ROOT = Path(__file__).resolve().parent.parent
 
@@ -61,8 +63,8 @@ _HEADER = (
     "#  2) vid varje start (och via knappen i Logg-fliken)\n"
     "#     samlas fel från dagens loggar, dagsarkiv och äldre\n"
     "#     startup_crash.log — utan dubletter.\n"
-    "# Nyast längst ned. Historiken roteras/rensas inte automatiskt.\n"
-    "# Öppna fel markeras troligen åtgärdade efter 72 h utan ny träff.\n"
+    "# Nyast längst ned. Öppna fel markeras troligen åtgärdade efter 72 h\n"
+    "# utan ny träff och kan rensas bort (manuellt eller automatiskt).\n"
     "# Fingeravtryck och status finns i logs/felstatus.json (kod FB-...).\n"
 )
 
@@ -87,6 +89,11 @@ def error_state_path(root: Path | None = None) -> Path:
     return Path(root or _ROOT) / "logs" / ERROR_STATE_NAME
 
 
+def resolved_error_log_path(root: Path | None = None) -> Path:
+    """Sökvägen till arkivfilen för bortrensade åtgärdade fel."""
+    return Path(root or _ROOT) / "logs" / "archive" / ERROR_RESOLVED_ARCHIVE_NAME
+
+
 def _parse_timestamp(value: Any) -> datetime.datetime | None:
     try:
         result = datetime.datetime.fromisoformat(
@@ -105,7 +112,11 @@ def _load_error_state(root: Path) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
         issues = payload.get("issues") if isinstance(payload, dict) else None
         if isinstance(issues, dict):
-            return {"version": 1, "issues": issues}
+            state: dict[str, Any] = {"version": 1, "issues": issues}
+            cleared_before = str(payload.get("cleared_before", "") or "")
+            if cleared_before:
+                state["cleared_before"] = cleared_before
+            return state
     except (OSError, ValueError, TypeError):
         pass
     return {"version": 1, "issues": {}}
@@ -194,6 +205,7 @@ def register_error_events(
     with _STATE_LOCK:
         state = _load_error_state(root)
         issues: dict[str, Any] = state["issues"]
+        cleared_before_dt = _parse_timestamp(state.get("cleared_before"))
         for event in events:
             level = str(event.get("level", "ERROR") or "ERROR").upper()
             logger_name = str(event.get("logger", "-") or "-")
@@ -213,6 +225,12 @@ def register_error_events(
             loc = str(event.get("location", event.get("loc", "")) or "")[:300]
             issue = issues.get(fingerprint)
             if not isinstance(issue, dict):
+                if (
+                    replay
+                    and cleared_before_dt is not None
+                    and stamp_dt <= cleared_before_dt
+                ):
+                    continue
                 issue = {
                     "code": code,
                     "fingerprint": fingerprint,
@@ -237,7 +255,12 @@ def register_error_events(
 
             last_seen = _parse_timestamp(issue.get("last_seen"))
             first_seen = _parse_timestamp(issue.get("first_seen"))
-            if replay and last_seen is not None and stamp_dt <= last_seen:
+            cleared_at = _parse_timestamp(issue.get("cleared_at"))
+            cutoff_pts = [
+                dt for dt in (last_seen, cleared_at, cleared_before_dt)
+                if dt is not None
+            ]
+            if replay and cutoff_pts and stamp_dt <= max(cutoff_pts):
                 if first_seen is None or stamp_dt < first_seen:
                     issue["first_seen"] = stamp
                     changed += 1
@@ -248,6 +271,7 @@ def register_error_events(
                 issue["status"] = "open"
                 issue["reopen_count"] = int(issue.get("reopen_count", 0) or 0) + 1
                 issue.pop("resolved_at", None)
+                issue.pop("cleared_at", None)
                 issue.pop("resolution_reason", None)
                 transitions.append(
                     f"{stamp} | ÅTERÖPPNAT | {code} | {logger_name}"
@@ -702,13 +726,118 @@ def _source_logs(root: Path) -> list[tuple[Path, str]]:
     return sources
 
 
-def collect_errors(root: Path | None = None) -> dict[str, Any]:
+_CODE_RE = re.compile(r"\b(FB-[0-9A-F]{6,16})\b")
+
+
+def _parse_block_fields(
+    block: list[str],
+) -> tuple[datetime.datetime | None, str, str, str, str]:
+    """Extraherar (timestamp, level, logger, message, exception_type) ur ett block."""
+    if not block:
+        return None, "", "", "", ""
+    head = _strip_source(block[0]).strip()
+    head_clean = _LOC_SUFFIX_RE.sub("", head).strip()
+    parts = [p.strip() for p in head_clean.split(" | ", 3)]
+    stamp_dt = _parse_timestamp(parts[0]) if parts else None
+    if stamp_dt is None and len(head_clean) >= 19:
+        stamp_dt = _parse_timestamp(head_clean[:19])
+    level = parts[1].upper() if len(parts) >= 2 else ""
+    logger_name = parts[2] if len(parts) >= 3 else ""
+    message = parts[3] if len(parts) >= 4 else ""
+    if not message and len(parts) == 1 and stamp_dt is not None:
+        message = head_clean[19:].strip()
+    if not level and "CRITICAL" in head_clean.upper():
+        level = "CRITICAL"
+    elif not level and "ERROR" in head_clean.upper():
+        level = "ERROR"
+    exc_text = "\n".join(block[1:])
+    exc_type = _exception_type(exc_text) or _exception_type(message)
+    return stamp_dt, level, logger_name, message, exc_type
+
+
+def _match_issue_for_block(
+    block: list[str],
+    issues: dict[str, Any],
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Letar upp motsvarande issue-post i felstatus.json för ett block."""
+    if not block or not issues:
+        return None, None
+    first = block[0]
+    m_code = _CODE_RE.search(first)
+    if m_code:
+        code = m_code.group(1)
+        for fp, issue in issues.items():
+            if isinstance(issue, dict) and issue.get("code") == code:
+                return fp, issue
+        return code, None
+
+    stamp_dt, level, logger_name, message, exc_type = _parse_block_fields(block)
+    if level and message:
+        fp_exact = _error_fingerprint(level, logger_name, message, exc_type)
+        if fp_exact in issues and isinstance(issues[fp_exact], dict):
+            return fp_exact, issues[fp_exact]
+        fp_no_exc = _error_fingerprint(level, logger_name, message, "")
+        if fp_no_exc in issues and isinstance(issues[fp_no_exc], dict):
+            return fp_no_exc, issues[fp_no_exc]
+        norm_msg = " ".join(message.lower().split())
+        norm_logger = " ".join(logger_name.lower().split())
+        for fp, issue in issues.items():
+            if not isinstance(issue, dict):
+                continue
+            imsg = " ".join(str(issue.get("message", "")).lower().split())
+            ilog = " ".join(str(issue.get("logger", "")).lower().split())
+            if imsg and imsg == norm_msg and (not norm_logger or ilog == norm_logger):
+                return fp, issue
+    return None, None
+
+
+def _block_already_cleared(
+    block: list[str],
+    state: dict[str, Any],
+    *,
+    source_mtime: datetime.datetime | None = None,
+) -> bool:
+    """True om ett skördat block hör till en redan rensad/åtgärdad tidpunkt."""
+    issues = state.get("issues") or {}
+    stamp_dt, _lvl, _log, _msg, _exc = _parse_block_fields(block)
+    eff_dt = stamp_dt or source_mtime
+    cleared_before_dt = _parse_timestamp(state.get("cleared_before"))
+    if (
+        cleared_before_dt is not None
+        and eff_dt is not None
+        and eff_dt <= cleared_before_dt
+    ):
+        return True
+    _key, issue = _match_issue_for_block(block, issues)
+    if not isinstance(issue, dict):
+        return False
+    status = str(issue.get("status", "open"))
+    cleared_at = _parse_timestamp(issue.get("cleared_at"))
+    resolved_at = _parse_timestamp(issue.get("resolved_at"))
+    last_seen = _parse_timestamp(issue.get("last_seen"))
+    if status == "resolved" or (status == "likely_resolved" and cleared_at is not None):
+        bound = max(
+            [dt for dt in (cleared_at, resolved_at, last_seen) if dt is not None],
+            default=None,
+        )
+        if eff_dt is None or bound is None or eff_dt <= bound:
+            return True
+    return False
+
+
+def collect_errors(
+    root: Path | None = None,
+    *,
+    auto_clean: bool = False,
+) -> dict[str, Any]:
     """
     Samlar fel från alla loggar till logs/felsamling.log.
 
     Dubblett (exakt samma rad) läggs aldrig in två gånger —
     speglade fel som redan står i filen hoppas därför över när
-    app.log skördas. Returnerar {added, total, file}.
+    app.log skördas. Redan åtgärdade/rensade poster återinförs inte
+    från gamla arkiv om de inte inträffat på nytt efter rensningen.
+    Returnerar {added, total, file}.
     """
     root = Path(root or _ROOT)
     path = error_log_path(root)
@@ -722,6 +851,8 @@ def collect_errors(root: Path | None = None) -> dict[str, Any]:
                 ).splitlines()
                 if not ln.startswith("#")
             ]
+        with _STATE_LOCK:
+            state = _load_error_state(root)
         seen: set[str] = set()
         for _key, block in _iter_error_blocks(existing):
             seen.add(_key)
@@ -730,6 +861,10 @@ def collect_errors(root: Path | None = None) -> dict[str, Any]:
         for src, kind in _source_logs(root):
             if not src.is_file():
                 continue
+            try:
+                src_mtime = datetime.datetime.fromtimestamp(src.stat().st_mtime)
+            except OSError:
+                src_mtime = None
             if kind == "jsonl":
                 error_events.extend(_read_app_error_events(src))
                 scanned = _scan_app_log(src)
@@ -741,6 +876,8 @@ def collect_errors(root: Path | None = None) -> dict[str, Any]:
             for key, block in _iter_error_blocks(scanned):
                 if not key or key in seen:
                     continue
+                if _block_already_cleared(block, state, source_mtime=src_mtime):
+                    continue
                 seen.add(key)
                 fresh.extend(block)
         lines = existing + fresh
@@ -750,6 +887,8 @@ def collect_errors(root: Path | None = None) -> dict[str, Any]:
         )
         register_error_events(root, error_events, replay=True)
         resolve_stale_error_issues(root)
+        if auto_clean:
+            auto_clean_resolved_errors(root, enabled=True)
         try:
             final_lines = path.read_text(
                 encoding="utf-8", errors="replace"
@@ -768,3 +907,354 @@ def collect_errors(root: Path | None = None) -> dict[str, Any]:
     except Exception as exc:
         log.warning("collect_errors: %s", exc)
         return {"added": 0, "total": 0, "file": str(path)}
+
+
+def error_summary(root: Path | None = None) -> dict[str, Any]:
+    """Returnerar statusöversikt för feljournalen och logs/felsamling.log."""
+    root = Path(root or _ROOT)
+    with _STATE_LOCK:
+        state = _load_error_state(root)
+    issues = state.get("issues") or {}
+    open_cnt = sum(
+        1 for it in issues.values()
+        if isinstance(it, dict) and it.get("status", "open") == "open"
+    )
+    likely_cnt = sum(
+        1 for it in issues.values()
+        if isinstance(it, dict) and it.get("status") == "likely_resolved"
+    )
+    resolved_cnt = sum(
+        1 for it in issues.values()
+        if isinstance(it, dict) and it.get("status") == "resolved"
+    )
+    path = error_log_path(root)
+    log_blocks = 0
+    if path.exists():
+        try:
+            lines = [
+                ln for ln in path.read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines()
+                if ln.strip() and not ln.startswith("#")
+            ]
+            for _k, blk in _iter_error_blocks(lines):
+                if blk and not _is_status_line(blk[0]):
+                    log_blocks += 1
+        except OSError:
+            pass
+    return {
+        "open": open_cnt,
+        "likely_resolved": likely_cnt,
+        "resolved": resolved_cnt,
+        "log_blocks": log_blocks,
+        "cleared_before": str(state.get("cleared_before", "") or ""),
+    }
+
+
+def purge_resolved_errors(
+    root: Path | None = None,
+    *,
+    include_likely_resolved: bool = True,
+    include_open: bool = False,
+    min_resolved_age: datetime.timedelta | None = None,
+    archive_removed: bool = True,
+    now: datetime.datetime | None = None,
+) -> dict[str, Any]:
+    """Rensar bort åtgärdade fel från logs/felsamling.log och arkiverar dem.
+
+    * `include_likely_resolved=True`: tar bort fel som redan markerats som
+      troligen åtgärdade (72 h) eller manuellt markerats som åtgärdade, samt
+      äldre daterade historikblock utan nya träffar.
+    * `include_open=True`: markerar även alla nuvarande öppna fel som
+      åtgärdade (resolved), rensar hela felloggen och sätter `cleared_before`
+      så Logg-flikens varningsbanner börjar om rent från nu. Om ett fel
+      sedan uppstår på nytt öppnas det automatiskt igen.
+    """
+    root = Path(root or _ROOT)
+    now = now or datetime.datetime.now()
+    now_iso = now.isoformat(timespec="seconds")
+    resolve_stale_error_issues(root, now=now)
+
+    path = error_log_path(root)
+    archive_file = resolved_error_log_path(root)
+    removed_lines: list[str] = []
+    removed_blocks = 0
+    removed_issues = 0
+
+    with _STATE_LOCK:
+        state = _load_error_state(root)
+        issues: dict[str, Any] = state["issues"]
+
+        if include_open:
+            state["cleared_before"] = now_iso
+            for issue in issues.values():
+                if not isinstance(issue, dict):
+                    continue
+                if issue.get("status") != "resolved":
+                    issue["status"] = "resolved"
+                    issue.setdefault("resolved_at", now_iso)
+                    issue["resolution_reason"] = (
+                        issue.get("resolution_reason")
+                        or "markerad som åtgärdad av användaren"
+                    )
+                    issue["cleared_at"] = now_iso
+                    removed_issues += 1
+
+        # Avgör vilka kända issues som ska få sina block rensade
+        purge_fps: set[str] = set()
+        purge_codes: set[str] = set()
+        for fp, issue in issues.items():
+            if not isinstance(issue, dict):
+                continue
+            status = str(issue.get("status", "open"))
+            if status == "resolved":
+                purge_fps.add(fp)
+                if issue.get("code"):
+                    purge_codes.add(str(issue["code"]))
+                if not issue.get("cleared_at"):
+                    issue["cleared_at"] = now_iso
+            elif status == "likely_resolved" and include_likely_resolved:
+                resolved_at = _parse_timestamp(issue.get("resolved_at")) or _parse_timestamp(issue.get("last_seen"))
+                last_seen = _parse_timestamp(issue.get("last_seen"))
+                silent_long_enough = (
+                    min_resolved_age is None
+                    or resolved_at is None
+                    or (now - resolved_at) >= min_resolved_age
+                    or (
+                        last_seen is not None
+                        and (now - last_seen) >= (AUTO_RESOLVE_AFTER + min_resolved_age)
+                    )
+                )
+                if silent_long_enough:
+                    purge_fps.add(fp)
+                    if issue.get("code"):
+                        purge_codes.add(str(issue["code"]))
+                    issue["status"] = "resolved"
+                    issue["cleared_at"] = now_iso
+                    removed_issues += 1
+
+        existing_lines: list[str] = []
+        if path.exists():
+            try:
+                existing_lines = [
+                    ln for ln in path.read_text(
+                        encoding="utf-8", errors="replace"
+                    ).splitlines()
+                    if not ln.startswith("#")
+                ]
+            except OSError:
+                existing_lines = []
+
+        blocks = list(_iter_error_blocks(existing_lines))
+        kept_lines: list[str] = []
+        seen_kept: set[str] = set()
+        stale_cutoff = now - (
+            AUTO_RESOLVE_AFTER + (min_resolved_age or datetime.timedelta(0))
+        )
+
+        # Fånga även koder från ev. fristående "TROLIGEN ÅTGÄRDAT"-rader som uppfyller ålderskravet
+        if include_likely_resolved:
+            for _k, blk in blocks:
+                if blk and _is_status_line(blk[0]) and "TROLIGEN ÅTGÄRDAT" in blk[0]:
+                    st_dt = _parse_timestamp(blk[0][:19])
+                    m_code = _CODE_RE.search(blk[0])
+                    if m_code and st_dt is not None and (
+                        min_resolved_age is None or (now - st_dt) >= min_resolved_age
+                    ):
+                        purge_codes.add(m_code.group(1))
+
+        # Samla max-tidsstämpel per normaliserat blockmeddelande så ett äldre
+        # meddelande utan felstatus.json-post inte rensas om samma fel just skett.
+        latest_stamp_by_sig: dict[tuple[str, str], datetime.datetime] = {}
+        for _k, blk in blocks:
+            if not blk or _is_status_line(blk[0]):
+                continue
+            ts, lvl, log_name, msg, _exc = _parse_block_fields(blk)
+            if ts is not None and msg:
+                sig = (lvl, " ".join(msg.lower().split()))
+                prev_ts = latest_stamp_by_sig.get(sig)
+                if prev_ts is None or ts > prev_ts:
+                    latest_stamp_by_sig[sig] = ts
+
+        purged_fragments: list[str] = []
+        for idx, (blk_key, blk) in enumerate(blocks):
+            if not blk or not any(ln.strip() for ln in blk):
+                continue
+            first = blk[0]
+            should_purge = False
+
+            if _is_status_line(first):
+                m_code = _CODE_RE.search(first)
+                code = m_code.group(1) if m_code else ""
+                if include_open or (code and code in purge_codes):
+                    should_purge = True
+                elif include_likely_resolved and "TROLIGEN ÅTGÄRDAT" in first:
+                    st_dt = _parse_timestamp(first[:19])
+                    if (
+                        st_dt is not None
+                        and (min_resolved_age is None or (now - st_dt) >= min_resolved_age)
+                    ):
+                        should_purge = True
+                        if code:
+                            purge_codes.add(code)
+            else:
+                fp, issue = _match_issue_for_block(blk, issues)
+                if include_open:
+                    should_purge = True
+                    if isinstance(issue, dict) and fp not in purge_fps:
+                        issue["status"] = "resolved"
+                        issue["cleared_at"] = now_iso
+                        removed_issues += 1
+                elif fp in purge_fps or (
+                    isinstance(issue, dict) and issue.get("status") == "resolved"
+                ):
+                    should_purge = True
+                elif include_likely_resolved:
+                    ts, lvl, log_name, msg, exc_type = _parse_block_fields(blk)
+                    if ts is not None:
+                        sig = (lvl, " ".join(msg.lower().split()))
+                        latest_ts = latest_stamp_by_sig.get(sig, ts)
+                        is_stale_untracked = (
+                            issue is None
+                            and latest_ts <= stale_cutoff
+                        )
+                        if is_stale_untracked:
+                            should_purge = True
+                            new_fp = _error_fingerprint(
+                                lvl or "ERROR", log_name or "-", msg, exc_type
+                            )
+                            purge_fps.add(new_fp)
+                            if new_fp not in issues:
+                                issues[new_fp] = {
+                                    "code": f"FB-{new_fp[:10]}",
+                                    "fingerprint": new_fp,
+                                    "status": "resolved",
+                                    "level": lvl or "ERROR",
+                                    "logger": log_name or "-",
+                                    "message": msg[:500],
+                                    "exception_type": exc_type,
+                                    "location": "",
+                                    "first_seen": ts.isoformat(timespec="seconds"),
+                                    "last_seen": latest_ts.isoformat(timespec="seconds"),
+                                    "occurrences": 1,
+                                    "reopen_count": 0,
+                                    "resolved_at": now_iso,
+                                    "cleared_at": now_iso,
+                                    "resolution_reason": "auto-rensad som åtgärdad",
+                                }
+                                removed_issues += 1
+
+            # Om första raden före första daterade rubriken är ett löst traceback-fragment
+            # som matchar något som nyss rensades (t.ex. avklippt Error-rad) -> rensa bort den.
+            if (
+                not should_purge
+                and idx == 0
+                and not _STAMP_RE.match(_strip_source(first))
+                and not first.startswith("[")
+                and (
+                    include_open
+                    or (
+                        _looks_like_exception_line(_LOC_SUFFIX_RE.sub("", first).strip())
+                        and _LOC_SUFFIX_RE.sub("", first).strip()
+                    )
+                )
+            ):
+                frag = _LOC_SUFFIX_RE.sub("", first).strip().lower()
+                if include_open or any(frag in pf for pf in purged_fragments):
+                    should_purge = True
+
+            if should_purge:
+                removed_lines.extend(blk)
+                removed_blocks += 1
+                purged_fragments.append(" ".join(first.lower().split()))
+            else:
+                if blk_key in seen_kept:
+                    # Deduplicera eventuella gamla dubletter av kvarvarande fel
+                    removed_lines.extend(blk)
+                    removed_blocks += 1
+                    continue
+                seen_kept.add(blk_key)
+                kept_lines.extend(blk)
+
+        # Om föräldralösa inledande fragment-rader råkade ligga precis före rensade block:
+        while (
+            kept_lines
+            and not _STAMP_RE.match(_strip_source(kept_lines[0]))
+            and not kept_lines[0].startswith("[")
+            and purged_fragments
+        ):
+            head_frag = _LOC_SUFFIX_RE.sub("", kept_lines[0]).strip().lower()
+            if head_frag and any(head_frag in pf for pf in purged_fragments):
+                removed_lines.append(kept_lines.pop(0))
+                removed_blocks += 1
+            else:
+                break
+
+        if removed_lines and archive_removed:
+            try:
+                archive_file.parent.mkdir(parents=True, exist_ok=True)
+                stamp_hdr = f"\n# === Rensade som åtgärdade {now_iso} ===\n"
+                with archive_file.open("a", encoding="utf-8") as afh:
+                    afh.write(stamp_hdr + "\n".join(removed_lines) + "\n")
+            except OSError:
+                pass
+
+        if removed_blocks > 0 or include_open or not path.exists():
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                content = _HEADER + (
+                    "\n".join(kept_lines) + "\n" if kept_lines else ""
+                )
+                path.write_text(content, encoding="utf-8")
+            except OSError:
+                pass
+
+        if removed_issues > 0 or include_open or removed_blocks > 0:
+            _save_error_state(root, state)
+
+    remaining_blocks = sum(
+        1 for _k, blk in _iter_error_blocks(kept_lines)
+        if blk and not _is_status_line(blk[0])
+    )
+    return {
+        "removed_blocks": removed_blocks,
+        "removed_lines": len(removed_lines),
+        "removed_issues": removed_issues,
+        "remaining": remaining_blocks,
+        "cleared_before": str(state.get("cleared_before", "") or ""),
+        "archive_file": str(archive_file) if (removed_lines and archive_removed) else "",
+        "file": str(path),
+    }
+
+
+def auto_clean_resolved_errors(
+    root: Path | None = None,
+    *,
+    enabled: bool = True,
+    grace_hours: int = 24,
+    now: datetime.datetime | None = None,
+) -> dict[str, Any]:
+    """Automatisk rensning av fel som markerats troligen åtgärdade (72 h + grace)."""
+    root = Path(root or _ROOT)
+    now = now or datetime.datetime.now()
+    resolve_stale_error_issues(root, now=now)
+    if not enabled:
+        summary = error_summary(root)
+        return {
+            "removed_blocks": 0,
+            "removed_lines": 0,
+            "removed_issues": 0,
+            "remaining": summary["log_blocks"],
+            "cleared_before": summary["cleared_before"],
+            "archive_file": "",
+            "file": str(error_log_path(root)),
+        }
+    return purge_resolved_errors(
+        root,
+        include_likely_resolved=True,
+        include_open=False,
+        min_resolved_age=datetime.timedelta(hours=max(0, int(grace_hours))),
+        archive_removed=True,
+        now=now,
+    )
+

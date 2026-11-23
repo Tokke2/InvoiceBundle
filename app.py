@@ -186,6 +186,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "pdf_rounding": "exact",
     # Schema-version för settings.json (auto-reparation vid uppgradering).
     "schema_version": 1,
+    # Automatisk rensning av åtgärdade fel ur logs/felsamling.log efter
+    # 72h-markering + eftertid (manuellt går det alltid direkt).
+    "auto_clean_resolved_errors": True,
     # TRACE-loggning: logga VARJE musklick/tangenttryck/fokus/scroll.
     # PÅ = standard ("logga precis allt"). Kan slås av i
     # Inställningar-menyn utan omstart.
