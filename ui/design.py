@@ -144,8 +144,8 @@ def fit_dialog_to_screen(
         available = screen.availableGeometry() if screen is not None else None
         if available is None:
             return int(preferred_width), int(preferred_height)
-        max_width = max(1, available.width() - margin)
-        max_height = max(1, available.height() - margin)
+        max_width = max(240, available.width() - margin)
+        max_height = max(200, available.height() - margin)
         width = min(max_width, max(1, int(preferred_width)))
         height = min(max_height, max(1, int(preferred_height)))
         dialog.setMinimumSize(
@@ -153,6 +153,26 @@ def fit_dialog_to_screen(
             min(height, max(1, int(minimum_height))),
         )
         dialog.resize(width, height)
+        # Håll dialogen inom skärmens arbetsområde även på små bärbara skärmar
+        try:
+            if (
+                hasattr(dialog, "frameGeometry")
+                and hasattr(available, "contains")
+                and hasattr(dialog, "move")
+            ):
+                frame = dialog.frameGeometry()
+                if not available.contains(frame):
+                    x = max(
+                        available.left() + 8,
+                        min(frame.left(), available.right() - width - 8),
+                    )
+                    y = max(
+                        available.top() + 8,
+                        min(frame.top(), available.bottom() - height - 8),
+                    )
+                    dialog.move(x, y)
+        except Exception:
+            pass
         return width, height
     except Exception:
         return int(preferred_width), int(preferred_height)
@@ -263,8 +283,14 @@ def mono_font_family() -> str:
     )
 
 
-def effective_dpr(dpr: float | None = None, widget: Optional[QWidget] = None) -> float:
-    """Returnerar aktiv skärms DPI-skalfaktor (>= 1.0) för skarp grafik."""
+def effective_dpr(dpr: Any = None, widget: Optional[QWidget] = None) -> float:
+    """Returnerar aktiv skärms DPI-skalfaktor (>= 1.0) för skarp grafik.
+
+    Accepterar både ``effective_dpr(widget=self)`` och ``effective_dpr(self)``.
+    """
+    if widget is None and dpr is not None and not isinstance(dpr, (int, float)):
+        widget = dpr
+        dpr = None
     if dpr is not None:
         try:
             return max(1.0, float(dpr))
@@ -288,13 +314,30 @@ def effective_dpr(dpr: float | None = None, widget: Optional[QWidget] = None) ->
     return 1.0
 
 
+def crisp_hinting_preference(
+    dpr: Any = None, widget: Optional[QWidget] = None,
+) -> QFont.HintingPreference:
+    """Väljer optimal font-hinting för skärmens faktiska DPI-skalning.
+
+    På bråkdelsskalade skärmar (t.ex. 125 % / 150 % / 175 % i Windows) ger
+    ``PreferDefaultHinting`` (DirectWrite ClearType) skarpare och jämnare
+    glyfer än tvungen heltalssnapping (``PreferFullHinting``), som används
+    vid heltalsskalning (100 % / 200 %).
+    """
+    ratio = effective_dpr(dpr, widget=widget)
+    frac = ratio - float(int(ratio))
+    if 0.02 < frac < 0.98:
+        return QFont.HintingPreference.PreferDefaultHinting
+    return QFont.HintingPreference.PreferFullHinting
+
+
 def ui_font(size: int = 11, weight: QFont.Weight | None = None) -> QFont:
     """Appens typsnitt i given storlek — samma familj överallt, skarp hinting."""
     font = QFont(ui_font_family(), int(size))
     if weight is not None:
         font.setWeight(weight)
     font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
-    font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
+    font.setHintingPreference(crisp_hinting_preference())
     return font
 
 

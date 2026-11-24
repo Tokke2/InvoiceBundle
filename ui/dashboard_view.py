@@ -338,8 +338,19 @@ class DashboardView(QWidget):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         w = self.width()
+        h = self.height()
         cols = 4 if (w <= 0 or w >= 920) else 2
         self._relayout_cards(cols)
+        lay = self.layout()
+        if lay is not None:
+            compact_v = 0 < h < 660
+            lay.setContentsMargins(
+                16 if w <= 0 or w >= 900 else 10,
+                10 if compact_v else 16,
+                16 if w <= 0 or w >= 900 else 10,
+                10 if compact_v else 14,
+            )
+            lay.setSpacing(8 if compact_v else 12)
 
     # ── Data ──────────────────────────────────────────────────────────
 

@@ -1073,7 +1073,12 @@ def _font(size: int = 11, bold: bool = False) -> QFont:
     if bold:
         f.setBold(True)
     f.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
-    f.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
+    try:
+        from ui.design import crisp_hinting_preference
+
+        f.setHintingPreference(crisp_hinting_preference())
+    except Exception:
+        f.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
     return f
 
 
@@ -1539,11 +1544,11 @@ class MainWindow(QMainWindow):
         try:
             available = QApplication.primaryScreen().availableGeometry()
             self.setMinimumSize(
-                max(320, min(860, available.width())),
-                max(240, min(560, available.height())),
+                max(320, min(780, available.width())),
+                max(240, min(500, available.height())),
             )
         except Exception:
-            self.setMinimumSize(860, 560)
+            self.setMinimumSize(780, 500)
 
         # Egen app-ikon (app_icon.*) med QPainter-fallback
         self._custom_icon = _load_app_icon()
@@ -1610,6 +1615,7 @@ class MainWindow(QMainWindow):
             from app import FreezeWatchdog
             self._watchdog = FreezeWatchdog(interval=5.0, limit=30.0)
             self._beat_timer = QTimer(self)
+            self._beat_timer.setTimerType(Qt.TimerType.VeryCoarseTimer)
             self._beat_timer.setInterval(5_000)
             self._beat_timer.timeout.connect(self._watchdog.beat)
             self._beat_timer.start()
@@ -1619,9 +1625,10 @@ class MainWindow(QMainWindow):
 
         # ── Tema-timer (auto/system uppdateras var 60:e sekund) ──────
         self._theme_timer = QTimer(self)
+        self._theme_timer.setTimerType(Qt.TimerType.VeryCoarseTimer)
         self._theme_timer.setInterval(60_000)
         self._theme_timer.timeout.connect(self._refresh_auto_theme)
-        self._theme_timer.start()
+        self._sync_theme_timer()
 
         self._watch_data_folder()
         ready = f"✅  {tr('main.ready_default')}"
@@ -1643,6 +1650,7 @@ class MainWindow(QMainWindow):
         # Versionen står kvar på v1.0.0, så ändrade filer i releasen
         # (ny commit under samma tagg) upptäcks ändå utan omstart.
         self._update_poll_timer = QTimer(self)
+        self._update_poll_timer.setTimerType(Qt.TimerType.VeryCoarseTimer)
         self._update_poll_timer.setInterval(3600 * 1000)
         self._update_poll_timer.timeout.connect(
             self._maybe_auto_update_check)
@@ -3319,11 +3327,118 @@ class MainWindow(QMainWindow):
         refresh_bound_icons(theme)
         self._refresh_placeholder_icons(theme)
         self.theme_changed.emit(theme)
+        if hasattr(self, "_theme_timer"):
+            self._sync_theme_timer()
         if inst is not None:
             apply_font_size(
                 inst, self._settings.get("font_size", 13)
             )
         log.info("Tema → %s", name)
+
+    def _sync_theme_timer(self) -> None:
+        """Kör bara tema-polltimern när temat står på auto/system."""
+        timer = getattr(self, "_theme_timer", None)
+        if timer is None:
+            return
+        try:
+            mode = self._settings.get("theme", "dark")
+            if mode in ("auto", "system") and self.isVisible():
+                if not timer.isActive():
+                    timer.start()
+            elif timer.isActive():
+                timer.stop()
+        except Exception:
+            pass
+
+    def _connect_screen_signals(self) -> None:
+        """Kopplar skärmbytes- och DPI-händelser när fönstret får en WindowHandle."""
+        if getattr(self, "_screen_signals_connected", False):
+            return
+        try:
+            wh = self.windowHandle()
+            if wh is None:
+                return
+            wh.screenChanged.connect(self._on_screen_changed)
+            self._screen_signals_connected = True
+        except Exception:
+            pass
+
+    def _on_screen_changed(self, _screen=None) -> None:
+        """Anpassar fönsterstorlek, HiDPI-ikoner och kolumner till ny skärm."""
+        try:
+            if not self.isMaximized():
+                scr = self.screen() or QApplication.primaryScreen()
+                if scr is not None:
+                    avail = scr.availableGeometry()
+                    nw = min(self.width(), max(320, avail.width() - 24))
+                    nh = min(self.height(), max(240, avail.height() - 24))
+                    if nw != self.width() or nh != self.height():
+                        self.resize(nw, nh)
+            ensure_window_on_screen(self)
+            theme = self.current_theme_dict()
+            self._refresh_tab_icons(theme)
+            refresh_bound_icons(theme)
+            self._update_responsive_toolbar()
+            cur = self.tabs.currentWidget() if hasattr(self, "tabs") else None
+            if cur is not None:
+                for inner in (cur, *cur.findChildren(QWidget)):
+                    for fn_name in ("_fit_columns", "_apply_column_widths"):
+                        fn = getattr(inner, fn_name, None)
+                        if callable(fn):
+                            fn()
+                            break
+        except Exception:
+            pass
+
+    def _trim_idle_caches(self) -> None:
+        """Frigör bild- och ikoncacher när fönstret göms till systemfältet."""
+        try:
+            from PySide6.QtGui import QPixmapCache
+
+            QPixmapCache.clear()
+        except Exception:
+            pass
+        try:
+            from ui.icons import clear_icon_caches
+
+            clear_icon_caches()
+        except Exception:
+            pass
+        try:
+            for attr in ("_scan_import_view",):
+                v = getattr(self, attr, None)
+                if v is not None and hasattr(v, "trim_memory"):
+                    v.trim_memory()
+            for _k, (_s, inner) in getattr(self, "_tab_map", {}).items():
+                if hasattr(inner, "trim_memory"):
+                    inner.trim_memory()
+        except Exception:
+            pass
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._connect_screen_signals()
+        try:
+            bt = getattr(self, "_beat_timer", None)
+            if bt is not None and not bt.isActive():
+                bt.start()
+            self._sync_theme_timer()
+            self._update_responsive_toolbar()
+        except Exception:
+            pass
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        try:
+            tt = getattr(self, "_theme_timer", None)
+            if tt is not None and tt.isActive():
+                tt.stop()
+            bt = getattr(self, "_beat_timer", None)
+            if bt is not None and bt.isActive():
+                bt.stop()
+            self._trim_idle_caches()
+        except Exception:
+            pass
 
     def _refresh_placeholder_icons(self, theme: dict) -> None:
         col = str(theme.get("accent", "#3d8bfd"))

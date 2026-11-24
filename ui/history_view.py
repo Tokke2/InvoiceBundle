@@ -291,30 +291,36 @@ class HistoryView(QWidget):
         self._supplier_filter.blockSignals(False)
 
     def _populate(self, rows: list[dict]) -> None:
-        self._table.setRowCount(len(rows))
-        for row_idx, rec in enumerate(rows):
-            for col_idx, (_label, key, _width, align) in enumerate(
-                COLUMNS
-            ):
-                value = rec.get(key, "")
-                if key == "total_amount":
-                    try:
-                        text = fmt_amount(float(value or 0))
-                    except (TypeError, ValueError):
+        self._table.setUpdatesEnabled(False)
+        try:
+            self._table.setRowCount(len(rows))
+            tab_normal = make_tabular_font(11, bold=False)
+            tab_bold = make_tabular_font(11, bold=True)
+            for row_idx, rec in enumerate(rows):
+                for col_idx, (_label, key, _width, align) in enumerate(
+                    COLUMNS
+                ):
+                    value = rec.get(key, "")
+                    if key == "total_amount":
+                        try:
+                            text = fmt_amount(float(value or 0))
+                        except (TypeError, ValueError):
+                            text = str(value or "")
+                    else:
                         text = str(value or "")
-                else:
-                    text = str(value or "")
-                item = QTableWidgetItem(text)
-                item.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
-                if key in {
-                    "invoice_number", "ocr", "date", "due_date",
-                    "payment_date", "total_amount",
-                }:
-                    set_item_font(
-                        item,
-                        make_tabular_font(11, bold=(key == "total_amount")),
-                    )
-                self._table.setItem(row_idx, col_idx, item)
+                    item = QTableWidgetItem(text)
+                    item.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
+                    if key in {
+                        "invoice_number", "ocr", "date", "due_date",
+                        "payment_date", "total_amount",
+                    }:
+                        set_item_font(
+                            item,
+                            tab_bold if key == "total_amount" else tab_normal,
+                        )
+                    self._table.setItem(row_idx, col_idx, item)
+        finally:
+            self._table.setUpdatesEnabled(True)
 
     # ── Tema / språk ───────────────────────────────────────────────
 
@@ -486,6 +492,11 @@ class HistoryView(QWidget):
                 if 0 < self.width() < 820
                 else QBoxLayout.Direction.LeftToRight
             )
+        self._apply_column_widths()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._apply_column_widths()
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
         return QSize(0, 220)
@@ -500,16 +511,25 @@ class HistoryView(QWidget):
             hf.setPointSize(max(12, hf.pointSize()))
         hm = QFontMetrics(hf)
         dw = date_column_width()
+        mins: list[int] = []
+        weights: list[int] = []
         for idx, (default_lbl, key, width, _align) in enumerate(COLUMNS):
             item = self._table.horizontalHeaderItem(idx)
             lbl = item.text() if item is not None else default_lbl
             w = max(width, hm.horizontalAdvance(lbl) + 28)
             if key in DATE_COLUMN_KEYS:
                 w = max(w, dw)
-            header.resizeSection(idx, w)
-        header.setSectionResizeMode(
-            len(COLUMNS) - 1, QHeaderView.ResizeMode.Stretch
-        )
+            mins.append(w)
+            weights.append(w)
+        vp = self._table.viewport().width()
+        if vp >= sum(mins):
+            fit_table_columns(self._table, weights, mins)
+        else:
+            header.blockSignals(True)
+            header.setStretchLastSection(False)
+            for idx, w in enumerate(mins):
+                self._table.setColumnWidth(idx, w)
+            header.blockSignals(False)
 
     def retranslate(self) -> None:
         """Uppdaterar texter efter språkbyte."""

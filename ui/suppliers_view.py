@@ -1009,60 +1009,64 @@ class SuppliersView(QWidget):
 
     def _populate_table(self, data: list[dict]) -> None:
         """Ritar tabellen. Senast ändrad leverantör sist (från app)."""
+        self._table.setUpdatesEnabled(False)
         self._table.setSortingEnabled(False)
-        self._table.setRowCount(len(data))
-        dark = self._is_dark()
-        body = "#f7f4ea" if dark else "#1a1d22"
-        even = "#173044" if dark else "#f7fbff"
-        odd = "#2a5a7a" if dark else "#9bb8dc"
-        accent = self._current_theme.get(
-            "accent", "#8ec0ff" if dark else "#0b5cab"
-        )
-        if getattr(self, "_row_delegate", None) is not None:
-            self._row_delegate.set_theme(dark=dark, select_bg="#0b5cab")
+        try:
+            self._table.setRowCount(len(data))
+            dark = self._is_dark()
+            body = "#f7f4ea" if dark else "#1a1d22"
+            even = "#173044" if dark else "#f7fbff"
+            odd = "#2a5a7a" if dark else "#9bb8dc"
+            accent = self._current_theme.get(
+                "accent", "#8ec0ff" if dark else "#0b5cab"
+            )
+            if getattr(self, "_row_delegate", None) is not None:
+                self._row_delegate.set_theme(dark=dark, select_bg="#0b5cab")
 
-        for row, supplier in enumerate(data):
-            fav = bool(supplier.get("favorite"))
-            stripe = "#f0c14a" if fav else accent
-            for col, (key, align) in enumerate(
-                zip(COL_KEYS, COL_ALIGN)
-            ):
-                val = supplier.get(key, "")
-                if key == "ocr_same_as_invoice_number":
-                    # Kryssrutan visas som en kort markering.
-                    txt = tr("suppliers.ocr_same_mark") if val else ""
-                else:
-                    txt = str(val) if val != "" else ""
-                if col == 0 and fav:
-                    txt = f"★ {txt}"
-                preferred = accent if col == 0 else ""
-                fg = fg_on_row(even, preferred, body, dark)
-                item = _cell(
-                    txt,
-                    align,
-                    bold=True,
-                    fg=fg,
-                    numeric=key in NUMERIC_KEYS,
-                    tabular=key in {
-                        "org_number", "bg", "pg", "iban", "bic",
-                        "payment_terms", "phone",
-                    },
-                )
-                item.setData(Qt.ItemDataRole.UserRole, supplier.get("id", ""))
-                item.setData(ROLE_ROW_BG, even)
-                item.setData(ROLE_ROW_BG_ODD, odd)
-                item.setData(ROLE_ROW_FG, fg)
-                item.setData(ROLE_STRIPE, stripe if col == 0 else "")
-                if txt:
+            for row, supplier in enumerate(data):
+                fav = bool(supplier.get("favorite"))
+                stripe = "#f0c14a" if fav else accent
+                for col, (key, align) in enumerate(
+                    zip(COL_KEYS, COL_ALIGN)
+                ):
+                    val = supplier.get(key, "")
                     if key == "ocr_same_as_invoice_number":
-                        item.setToolTip(tr("supplierdlg.ocr_rule_tip"))
+                        # Kryssrutan visas som en kort markering.
+                        txt = tr("suppliers.ocr_same_mark") if val else ""
                     else:
-                        item.setToolTip(txt)
-                self._table.setItem(row, col, item)
+                        txt = str(val) if val != "" else ""
+                    if col == 0 and fav:
+                        txt = f"★ {txt}"
+                    preferred = accent if col == 0 else ""
+                    fg = fg_on_row(even, preferred, body, dark)
+                    item = _cell(
+                        txt,
+                        align,
+                        bold=True,
+                        fg=fg,
+                        numeric=key in NUMERIC_KEYS,
+                        tabular=key in {
+                            "org_number", "bg", "pg", "iban", "bic",
+                            "payment_terms", "phone",
+                        },
+                    )
+                    item.setData(Qt.ItemDataRole.UserRole, supplier.get("id", ""))
+                    item.setData(ROLE_ROW_BG, even)
+                    item.setData(ROLE_ROW_BG_ODD, odd)
+                    item.setData(ROLE_ROW_FG, fg)
+                    item.setData(ROLE_STRIPE, stripe if col == 0 else "")
+                    if txt:
+                        if key == "ocr_same_as_invoice_number":
+                            item.setToolTip(tr("supplierdlg.ocr_rule_tip"))
+                        else:
+                            item.setToolTip(txt)
+                    self._table.setItem(row, col, item)
 
-        self._table.setSortingEnabled(True)
-        self._table.resizeRowsToContents()
-        ensure_row_height(self._table, 40)
+            self._table.setSortingEnabled(True)
+            self._table.resizeRowsToContents()
+            ensure_row_height(self._table, 40)
+        finally:
+            self._table.setUpdatesEnabled(True)
         self._update_buttons()
 
     # ══════════════════════════════════════════════════════════════════

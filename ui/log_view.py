@@ -62,13 +62,22 @@ except Exception:  # pragma: no cover
         return QFont("Segoe UI", 17, QFont.Weight.Bold)
 
 try:
-    from ui.typography import make_mono_font
+    from ui.typography import make_mono_font, make_tabular_font, set_item_font
 except Exception:  # pragma: no cover
     def make_mono_font(size: int = 10, bold: bool = False) -> QFont:  # type: ignore[no-redef]
         f = QFont("Consolas", size)
         if bold:
             f.setBold(True)
         return f
+
+    def make_tabular_font(size: int = 11, bold: bool = False) -> QFont:  # type: ignore[no-redef]
+        f = QFont("Segoe UI", size)
+        if bold:
+            f.setBold(True)
+        return f
+
+    def set_item_font(item: Any, font: Any) -> None:  # type: ignore[no-redef]
+        item.setFont(font)
 
 try:
     from ui.icons import attach_search_icon, bind_icon, refresh_bound_icons
@@ -95,6 +104,8 @@ log = logging.getLogger("LogView")
 
 #: Max antal rader som läses in från loggfilens slut.
 MAX_LINES = 4000
+#: Max antal byte som läses vid svansläsning (sparar RAM på stora loggfiler).
+MAX_TAIL_BYTES = 768 * 1024
 
 LEVEL_ORDER: dict[str, int] = {
     "TRACE": 5, "DEBUG": 10, "PERF": 10, "INFO": 20,
@@ -403,6 +414,7 @@ class LogView(QWidget):
         self.retranslate()
 
         self._timer = QTimer(self)
+        self._timer.setTimerType(Qt.TimerType.VeryCoarseTimer)
         self._timer.setInterval(1500)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
@@ -592,25 +604,98 @@ class LogView(QWidget):
 
     # ── Data ──────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _read_tail_text(path: Path, max_bytes: int = MAX_TAIL_BYTES) -> str:
+        """Läser högst *max_bytes* från filens slut för snabb och snål laddning."""
+        size = path.stat().st_size
+        if size <= max_bytes:
+            return path.read_text(encoding="utf-8", errors="replace")
+        with path.open("rb") as fh:
+            fh.seek(max(0, size - max_bytes))
+            raw = fh.read()
+        # Hoppa över ev. avhuggen första rad mitt i en UTF-8-sekvens
+        nl = raw.find(b"\n")
+        if nl >= 0:
+            raw = raw[nl + 1:]
+        return raw.decode("utf-8", errors="replace")
+
     def _reload_from_file(self, scroll_bottom: bool = False) -> None:
         try:
             if self._log_file.exists():
                 stat = self._log_file.stat()
+                prev_size = self._last_size
+                if (
+                    0 < prev_size < stat.st_size
+                    and (stat.st_size - prev_size) <= MAX_TAIL_BYTES
+                    and self._all_entries
+                ):
+                    # Inkrementell tilläggsläsning: parsa bara nya rader!
+                    with self._log_file.open("rb") as fh:
+                        fh.seek(prev_size)
+                        delta = fh.read().decode("utf-8", errors="replace")
+                    new_entries = parse_log_text(delta)
+                    if new_entries:
+                        self._all_entries = (
+                            self._all_entries + new_entries
+                        )[-MAX_LINES:]
+                else:
+                    text = self._read_tail_text(self._log_file)
+                    self._all_entries = parse_log_text(
+                        "\n".join(text.splitlines()[-MAX_LINES:])
+                    )
                 self._last_size = stat.st_size
                 self._last_mtime = stat.st_mtime
-                text = self._log_file.read_text(
-                    encoding="utf-8", errors="replace"
-                )
-                self._all_entries = parse_log_text(
-                    "\n".join(text.splitlines()[-MAX_LINES:])
-                )
             else:
                 self._all_entries = []
+                self._last_size = -1
+                self._last_mtime = 0.0
         except Exception as exc:
             log.warning("LogView: kunde inte läsa loggfil: %s", exc)
             self._all_entries = []
         self._refresh_table(scroll_bottom=scroll_bottom)
         self._update_banner()
+
+    def _fit_columns(self) -> None:
+        """Anpassar loggkolumnerna efter aktiv fontstorlek och bredd."""
+        try:
+            from PySide6.QtGui import QFontMetrics
+
+            tbl = self._table
+            vp = tbl.viewport().width()
+            if vp < 120:
+                return
+            fm = QFontMetrics(make_tabular_font(11))
+            w_time = max(125, fm.horizontalAdvance("11-23 11:19:42") + 22)
+            w_lvl = max(84, fm.horizontalAdvance("CRITICAL") + 24)
+            rem = max(240, vp - w_time - w_lvl)
+            w_logger = min(180, max(110, int(rem * 0.20)))
+            w_action = min(170, max(100, int(rem * 0.18)))
+            hdr = tbl.horizontalHeader()
+            hdr.blockSignals(True)
+            tbl.setColumnWidth(0, w_time)
+            tbl.setColumnWidth(1, w_lvl)
+            tbl.setColumnWidth(2, w_logger)
+            tbl.setColumnWidth(3, w_action)
+            hdr.blockSignals(False)
+        except Exception:
+            pass
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._fit_columns()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._fit_columns()
+        if hasattr(self, "_timer") and not self._paused:
+            self._tick()
+            if not self._timer.isActive():
+                self._timer.start()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        if hasattr(self, "_timer") and self._timer.isActive():
+            self._timer.stop()
 
     def _tick(self) -> None:
         if self._paused:
@@ -643,33 +728,41 @@ class LogView(QWidget):
     def _refresh_table(self, scroll_bottom: bool = False) -> None:
         self._shown = self._current_filter_result()
         tbl = self._table
-        tbl.setRowCount(len(self._shown))
-        for r, e in enumerate(self._shown):
-            lvl = str(e.get("level", "INFO"))
-            values = [
-                str(e.get("ts", ""))[5:19].replace("T", " "),
-                lvl,
-                str(e.get("logger", "-")),
-                str(e.get("action", "")),
-                str(e.get("msg", "")),
-            ]
-            for c, val in enumerate(values):
-                item = QTableWidgetItem(val)
-                if c == 1:
-                    if self._dark:
-                        bg = LEVEL_BG.get(lvl.upper())
-                        if bg:
-                            item.setBackground(QColor(bg))
-                            item.setForeground(QColor("#ffffff"))
-                    else:
-                        badge = LEVEL_BADGE_LIGHT.get(lvl.upper())
-                        if badge:
-                            item.setBackground(QColor(badge[0]))
-                            item.setForeground(QColor(badge[1]))
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if c == 4 and e.get("exc"):
-                    item.setToolTip(str(e["exc"])[:800])
-                tbl.setItem(r, c, item)
+        tab_font = make_tabular_font(11)
+        tbl.setUpdatesEnabled(False)
+        try:
+            tbl.setRowCount(len(self._shown))
+            for r, e in enumerate(self._shown):
+                lvl = str(e.get("level", "INFO"))
+                values = [
+                    str(e.get("ts", ""))[5:19].replace("T", " "),
+                    lvl,
+                    str(e.get("logger", "-")),
+                    str(e.get("action", "")),
+                    str(e.get("msg", "")),
+                ]
+                for c, val in enumerate(values):
+                    item = QTableWidgetItem(val)
+                    if c == 0:
+                        set_item_font(item, tab_font)
+                    elif c == 1:
+                        if self._dark:
+                            bg = LEVEL_BG.get(lvl.upper())
+                            if bg:
+                                item.setBackground(QColor(bg))
+                                item.setForeground(QColor("#ffffff"))
+                        else:
+                            badge = LEVEL_BADGE_LIGHT.get(lvl.upper())
+                            if badge:
+                                item.setBackground(QColor(badge[0]))
+                                item.setForeground(QColor(badge[1]))
+                        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    if c == 4 and e.get("exc"):
+                        item.setToolTip(str(e["exc"])[:800])
+                    tbl.setItem(r, c, item)
+        finally:
+            tbl.setUpdatesEnabled(True)
+        self._fit_columns()
         errors, warnings = count_levels(self._all_entries)
         size_kb = 0
         try:

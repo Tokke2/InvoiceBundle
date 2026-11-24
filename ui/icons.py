@@ -9,6 +9,7 @@ som döljer råa emoji-prefix vid målning utan att ändra .text()-strängar.
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 import hashlib
 import re
 import tempfile
@@ -331,12 +332,28 @@ _SVG_PATHS: dict[str, str] = {
     ),
 }
 
-_ICON_CACHE: dict[tuple[str, str, str, int], QIcon] = {}
-_PIXMAP_CACHE: dict[tuple[str, str, int, int], QPixmap] = {}
+_MAX_ICON_CACHE = 256
+_MAX_PIXMAP_CACHE = 384
+_ICON_CACHE: "OrderedDict[tuple[str, str, str, int], QIcon]" = OrderedDict()
+_PIXMAP_CACHE: "OrderedDict[tuple[str, str, int, int], QPixmap]" = OrderedDict()
 
 
-def _effective_dpr(dpr: float | None = None) -> float:
+def clear_icon_caches() -> None:
+    """Frigör cachade ikon-pixmaps och SVG-ikoner för lägre minnesanvändning."""
+    _PIXMAP_CACHE.clear()
+    _ICON_CACHE.clear()
+
+
+def _effective_dpr(dpr: Any = None) -> float:
     """Returnerar effektiv enhetsskalning (>= 1.0) för skarp HiDPI-rendering."""
+    if dpr is not None and not isinstance(dpr, (int, float)):
+        try:
+            scr = dpr.screen()
+            if scr is not None:
+                return max(1.0, float(scr.devicePixelRatio()))
+        except Exception:
+            pass
+        dpr = None
     if dpr is not None:
         try:
             return max(1.0, float(dpr))
@@ -488,9 +505,12 @@ def icon_pixmap(
     key = (name, color.lower(), int(size), dpr_key)
     cached = _PIXMAP_CACHE.get(key)
     if cached is not None and not cached.isNull():
+        _PIXMAP_CACHE.move_to_end(key)
         return cached
     pix = _render_svg_pixmap(name, color, int(size), int(size), dpr=eff_dpr)
     _PIXMAP_CACHE[key] = pix
+    while len(_PIXMAP_CACHE) > _MAX_PIXMAP_CACHE:
+        _PIXMAP_CACHE.popitem(last=False)
     return pix
 
 
@@ -505,9 +525,12 @@ def vector_icon(
     key = (name, color.lower(), dis, int(size))
     cached = _ICON_CACHE.get(key)
     if cached is not None:
+        _ICON_CACHE.move_to_end(key)
         return cached
     ic = QIcon(_VectorIconEngine(name, color, disabled_color or "", int(size)))
     _ICON_CACHE[key] = ic
+    while len(_ICON_CACHE) > _MAX_ICON_CACHE:
+        _ICON_CACHE.popitem(last=False)
     return ic
 
 

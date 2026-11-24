@@ -1427,7 +1427,7 @@ if _QT_AVAILABLE:
                 message=self._locked_config.swish_message,
                 lock_mask=6,
             )
-            dpr = effective_dpr(self) if callable(effective_dpr) else 1.0
+            dpr = effective_dpr(widget=self) if callable(effective_dpr) else 1.0
             pixmap = make_swish_qr_pixmap(
                 self._swish_payload, size=132, dpr=dpr
             )

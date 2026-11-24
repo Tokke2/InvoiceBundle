@@ -459,7 +459,11 @@ class _RegionImageView(QWidget):
             )
             return
         painter.fillRect(img, QColor("white"))
-        painter.drawPixmap(img.toRect(), self._pixmap)
+        painter.drawPixmap(
+            img,
+            self._pixmap,
+            QRectF(0.0, 0.0, float(self._pixmap.width()), float(self._pixmap.height())),
+        )
         painter.setPen(QPen(QColor("#8a939e"), 1))
         painter.drawRect(img)
         font = QFont()
@@ -1083,15 +1087,26 @@ class TemplateDialog(QDialog):
         pixmap = self._pixmaps.get(self._page)
         if pixmap is None and self._path is not None:
             si = _scan_module()
-            dpr = effective_dpr(self)
-            render_dpi = min(320, max(200, int(round(200 * dpr))))
+            dpr = effective_dpr(widget=self)
+            render_dpi = min(320, max(200, int(round(180 * dpr))))
             data = si.render_page_image(
                 self._path, self._page, dpi=render_dpi
             )
             pixmap = QPixmap()
             if data:
                 pixmap.loadFromData(data)
+                if not pixmap.isNull() and dpr > 1.0:
+                    pixmap.setDevicePixelRatio(dpr)
             self._pixmaps[self._page] = pixmap
+            # Begränsa sidcachen för lägre minnesförbrukning på stora PDF:er
+            while len(self._pixmaps) > 6:
+                oldest = next(
+                    (k for k in self._pixmaps if k != self._page),
+                    None,
+                )
+                if oldest is None:
+                    break
+                self._pixmaps.pop(oldest, None)
         self._view.set_page(pixmap, self._page)
         self._lbl_page.setText(
             tr(
@@ -2510,8 +2525,8 @@ class ScanImportView(QWidget):
         p = Path(path or "")
         if not path or not p.exists():
             return None
-        dpr = effective_dpr(self)
-        render_dpi = min(320, max(200, int(round(160 * dpr))))
+        dpr = effective_dpr(widget=self)
+        render_dpi = min(300, max(160, int(round(160 * dpr))))
         try:
             st = p.stat()
             cache_key = (
@@ -2539,11 +2554,26 @@ class ScanImportView(QWidget):
             pix = QPixmap(str(p))
         if pix.isNull():
             return None
-        if len(self._preview_cache) >= 24:
+        if dpr > 1.0:
+            pix.setDevicePixelRatio(dpr)
+        while len(self._preview_cache) >= 8:
             oldest = next(iter(self._preview_cache))
             self._preview_cache.pop(oldest, None)
         self._preview_cache[cache_key] = pix
         return pix
+
+    def trim_memory(self) -> None:
+        """Frigör cachade förhandsvisningsbilder för lägre minnesanvändning."""
+        cache = getattr(self, "_preview_cache", None)
+        if isinstance(cache, dict) and len(cache) > 1:
+            last_k = next(reversed(cache))
+            last_v = cache[last_k]
+            cache.clear()
+            cache[last_k] = last_v
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        self.trim_memory()
 
     def _preview_prev_page(self) -> None:
         if self._preview_page_index > 0:

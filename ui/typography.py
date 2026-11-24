@@ -130,20 +130,26 @@ def make_tabular_font(size: int = 12, bold: bool = False) -> Any:
     from PySide6.QtGui import QFont
 
     try:
-        from ui.design import ui_font_family
+        from ui.design import crisp_hinting_preference, ui_font_family
     except ImportError:
         try:
-            from design import ui_font_family  # type: ignore[no-redef]
+            from design import (  # type: ignore[no-redef]
+                crisp_hinting_preference,
+                ui_font_family,
+            )
         except ImportError:
             def ui_font_family() -> str:  # type: ignore[no-redef]
                 return "Segoe UI"
+
+            def crisp_hinting_preference():  # type: ignore[no-redef]
+                return QFont.HintingPreference.PreferDefaultHinting
 
     font = QFont(ui_font_family(), max(6, int(size)))
     font.setWeight(
         QFont.Weight.Bold if bold else QFont.Weight.Medium
     )
     font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
-    font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
+    font.setHintingPreference(crisp_hinting_preference())
     tag_cls = getattr(QFont, "Tag", None)
     if tag_cls is not None and hasattr(font, "setFeature"):
         try:
@@ -172,6 +178,12 @@ def make_mono_font(size: int = 10, bold: bool = False) -> Any:
             family = "Consolas"
     font = QFont(family, max(6, int(size)))
     font.setStyleHint(QFont.StyleHint.Monospace)
+    font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    try:
+        from ui.design import crisp_hinting_preference
+        font.setHintingPreference(crisp_hinting_preference())
+    except Exception:
+        pass
     font.setBold(bool(bold))
     return font
 

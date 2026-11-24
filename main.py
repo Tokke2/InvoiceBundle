@@ -2523,6 +2523,12 @@ def main() -> None:
     app_qt.setOrganizationName(APP_ORGANIZATION)
     app_qt.setStyle("Fusion")
     app_qt.setQuitOnLastWindowClosed(False)
+    try:
+        from PySide6.QtGui import QPixmapCache
+
+        QPixmapCache.setCacheLimit(32 * 1024)
+    except Exception:
+        pass
     # Plattformsanpassad identitet:
     #  • Linux  → desktop-filnamnet matchar autostart-postens
     #    StartupWMClass, så aktivitetsfältet kopplar fönstret till rätt

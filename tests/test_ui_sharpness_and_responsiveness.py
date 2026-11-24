@@ -309,3 +309,159 @@ def test_views_responsive_layouts_and_log_splitter(tmp_path):
             w.close()
             w.deleteLater()
         app_qt.processEvents()
+
+
+def test_effective_dpr_hinting_icon_cache_bounds_and_idle_power(tmp_path):
+    """Verifierar skarp DPR-skalning, adaptiv hinting, cache-gränser och viloläge."""
+    app_qt = _qapp()
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QFont
+    from PySide6.QtWidgets import QWidget
+
+    from ui.design import crisp_hinting_preference, effective_dpr
+    from ui.icons import (
+        _ICON_CACHE,
+        _MAX_ICON_CACHE,
+        _MAX_PIXMAP_CACHE,
+        _PIXMAP_CACHE,
+        clear_icon_caches,
+        icon_pixmap,
+        vector_icon,
+    )
+    from ui.log_view import LogView
+    from ui.main_window import MainWindow
+    from ui.scan_import_view import ScanImportView
+
+    w = QWidget()
+    try:
+        # effective_dpr ska kunna ta emot QWidget både positionellt och som keyword
+        assert effective_dpr(w) >= 1.0
+        assert effective_dpr(widget=w) >= 1.0
+        assert effective_dpr(2.0) == 2.0
+    finally:
+        w.deleteLater()
+
+    # Bråkdelsskalning (125 % / 150 %) → PreferDefaultHinting (ClearType-skärpa)
+    # Heltalsskalning (100 % / 200 %) → PreferFullHinting
+    assert crisp_hinting_preference(1.25) == QFont.HintingPreference.PreferDefaultHinting
+    assert crisp_hinting_preference(1.5) == QFont.HintingPreference.PreferDefaultHinting
+    assert crisp_hinting_preference(1.0) == QFont.HintingPreference.PreferFullHinting
+    assert crisp_hinting_preference(2.0) == QFont.HintingPreference.PreferFullHinting
+
+    # Ikoncacher har övre gräns och kan frigöras via riktiga cache-anrop
+    clear_icon_caches()
+    for sz in range(10, 420):
+        icon_pixmap("check", "#ffffff", 16, dpr=1.0 + sz / 100.0)
+    assert len(_PIXMAP_CACHE) <= _MAX_PIXMAP_CACHE
+    ic = vector_icon("check", "#ffffff", 16)
+    assert not ic.isNull()
+    assert len(_ICON_CACHE) <= _MAX_ICON_CACHE
+    clear_icon_caches()
+    assert len(_PIXMAP_CACHE) == 0
+    assert len(_ICON_CACHE) == 0
+
+    # LogView: svansläsning, inkrementell uppdatering, VeryCoarseTimer & paus vid hideEvent
+    log_path = tmp_path / "app.log"
+    log_path.write_text(
+        '{"ts":"2026-10-13T10:00:00","level":"INFO","logger":"app","action":"start","msg":"Hej"}\n',
+        encoding="utf-8",
+    )
+    lv = LogView(None, log_file=log_path)
+    try:
+        assert lv._timer.timerType() == Qt.TimerType.VeryCoarseTimer
+        lv.show()
+        app_qt.processEvents()
+        assert lv._timer.isActive()
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                '{"ts":"2026-10-13T10:00:05","level":"WARNING","logger":"ui","action":"tick","msg":"Ny rad"}\n'
+            )
+        lv._tick()
+        assert len(lv._all_entries) == 2
+        lv.hide()
+        app_qt.processEvents()
+        assert not lv._timer.isActive()
+        lv.show()
+        app_qt.processEvents()
+        assert lv._timer.isActive()
+    finally:
+        lv.close()
+        lv.deleteLater()
+
+    # ScanImportView: begränsad preview-cache och trim_memory()
+    siv = ScanImportView(None, templates_path=tmp_path / "tpl.json")
+    try:
+        from PySide6.QtGui import QPixmap
+        for i in range(12):
+            siv._preview_cache[(f"f{i}", 1, 1, 0, 160)] = QPixmap(10, 10)
+        siv.trim_memory()
+        assert len(siv._preview_cache) <= 1
+    finally:
+        siv.close()
+        siv.deleteLater()
+
+    # MainWindow: tematimer stannar för statiskt tema & viloläge vid hideEvent
+    class _Store:
+        def __init__(self):
+            self._file = tmp_path / "store.json"
+
+        def on_change(self, _cb):
+            pass
+
+        def all(self):
+            return []
+
+    class _FakeApp:
+        _data_dir = tmp_path
+        settings = {
+            "theme": "dark",
+            "language": "sv",
+            "font_size": 13,
+            "db_path": str(tmp_path),
+            "autostart": False,
+            "update_auto_check": False,
+        }
+        invoices_store = _Store()
+        suppliers_store = _Store()
+        session_due_date = None
+        session_due_date_str = ""
+
+        def get_setting(self, k, d=None):
+            return self.settings.get(k, d)
+
+        def set_setting(self, k, v):
+            self.settings[k] = v
+
+        def get_invoices(self):
+            return []
+
+        def get_suppliers(self):
+            return []
+
+        def get_archived_invoices(self):
+            return []
+
+        def data_load_summary(self):
+            return "Redo"
+
+    win = MainWindow(_FakeApp())
+    try:
+        assert win._beat_timer.timerType() == Qt.TimerType.VeryCoarseTimer
+        assert win._theme_timer.timerType() == Qt.TimerType.VeryCoarseTimer
+        assert not win._theme_timer.isActive()
+        win.show()
+        app_qt.processEvents()
+        assert win._beat_timer.isActive()
+        win.hide()
+        app_qt.processEvents()
+        assert not win._beat_timer.isActive()
+        assert not win._theme_timer.isActive()
+    finally:
+        if getattr(win, "_watchdog", None) is not None:
+            try:
+                win._watchdog.stop()
+            except Exception:
+                pass
+        win.close()
+        win.deleteLater()
+        app_qt.processEvents()
