@@ -37,3 +37,13 @@ Dessa regler gäller alltid för alla som utvecklar Fakturabunten
 * `py_compile` på alla ändrade Python-filer.
 * CHANGELOG.md uppdateras (svenska + engelska) för varje användbar
   ändring.
+
+## 5. Förslagssystemet — varje 10:e chattbesked ger 10 nya förslag
+
+* Räknaren står i `docs/forslag_status.json` och ökas vid varje
+  nytt användarbesked.
+* Vid besked 10, 20, 30 … levereras **10 nya förslag i chatten**,
+  sparade i `docs/FORSLAG-BATCH-<n>.md`, med **nya ID:n som aldrig
+  återbrukar** tidigare levererade förslag (register: `used_proposal_ids`).
+* Batch 1 (ID 1–25) finns i `docs/25-NYA-FORSLAG.md` och är låst.
+  Fullständiga driftinstruktioner: `docs/FORSLAG-SYSTEM.md`.
