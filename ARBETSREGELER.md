@@ -63,3 +63,12 @@ Dessa regler gäller alltid för alla som utvecklar Fakturabunten
   taggtriggern godtar bara `v*` (ingen publikationsloop).
 * Bygg-paketet verifieras (CRC, build-sha, manifest) **före**
   publicering — en underkänd build får aldrig markeras som latest.
+
+## 7. Aldrig merga — hård regel
+
+* Inga merge-commits, ingen sammanslagning av brancher eller PR:er —
+  varken mot `main`, från `main` eller mellan arbetsbrancher.
+* Ändringar landar **endast** som vanliga commits på den aktiva
+  arbetsbranchen.
+* Behövs en basomläggning görs den inte som merge; vid osäkerhet
+  frågar agenten först.
