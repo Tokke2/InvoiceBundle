@@ -785,6 +785,11 @@ def build_export_path(suppliers: list[str]) -> tuple[Path, str]:
 #: betyder aldrig att fakturor slås ihop till en gemensam rad.
 MAX_PER_EXPORT_FILE = 10
 
+#: Max antal rader som kan MARKERAS för export samtidigt
+#: (användarkrav, besked 19): "Markera valda" och radkryssrutorna
+#: fyller högst upp till denna gräns.
+EXPORT_MARK_LIMIT = 10
+
 
 def chunk_export_rows(
     rows: list[dict], size: int = MAX_PER_EXPORT_FILE

@@ -3,6 +3,9 @@
 ## Ej släppt / Unreleased
 
 ### Svenska
+- **Exportmarkering med tak 10 + "med original" som standard (besked 19)**:
+  - **Högst 10 rader kan markeras för export samtidigt** (`EXPORT_MARK_LIMIT = 10` i `ui/invoices_helpers.py`): både radkryssrutorna och "Markera valda" fyller bara upp till taket; vid överflöd visas "Högst 10 rader kan markeras för export i taget — avmarkera först om du vill byta urval" i statusraden. Exportfilerna delas redan i högst 10 rader (`MAX_PER_EXPORT_FILE = 10`) — nu låst av guard-tester.
+  - **"Export med original" är standardvalet:** utan sparad inställning gäller `export_include_originals=True` → "Alla sidor" (`all_pages`), och komboboxen väljer alltid den beräknade/sparade moden vid start. 119 passed i relevanta sviter.
 - **Importen pausar vid 10 inlästa och fyller på allt eftersom (besked 18)**:
   - Nytt rullande fönster i Import: taket är 10 fakturor i vyn (`_top_up_scan_batch`); för varje hanterad rad (matchad/bekräftad, skapad via "Skapa fakturor" eller raderad) hämtas nästa fil ur kön tills vyn är fylld till 10 igen. Pågående skanning pausar påfyllnaden (den rundan fyller i sin tur). Port-knappen "Hämta nästa 10" är nu aktiv när vyn är under taket (fyller deficit). Bevakade mappar har redan egen pause/fyll (batch à 10, påfyll först när batchen tömts) — låst av guard-test. 113 passed i relevanta sviter.
 - **Ingen flikväxling efter enkelmatchning i Import (besked 17)**:
@@ -139,6 +142,9 @@
 - **Bättre leverantörsmatchning via fakturalogotyp** — sparade logotyper kan hittas även när de flyttats på PDF-sidan. Matchningsdialogen visar verkliga, beskurna logotyper från originalfakturan (inga monogram) och rankar den starkaste träffen först. Manuell matchning kan också öppna originalet för att markera logotypen; osäkra träffar kräver fortfarande användarens val.
 
 ### English
+- **Export marking capped at 10 + "with originals" as the default (message 19)**:
+  - **At most 10 rows can be marked for export at a time** (`EXPORT_MARK_LIMIT = 10` in `ui/invoices_helpers.py`): both row checkboxes and "Mark shown" only fill up to the cap; when exceeded the status bar shows "At most 10 rows can be marked for export at a time — unmark first to change the selection". Export files are already split into max 10 rows (`MAX_PER_EXPORT_FILE = 10`) — now locked by guard tests.
+  - **"Export with originals" is the default choice:** without a saved setting `export_include_originals=True` → "All pages" (`all_pages`), and the combo box always selects the computed/saved mode at start-up. 119 passed in relevant suites.
 - **The import pauses at 10 loaded and tops up as you go (message 18)**:
   - New rolling window in Import: the cap is 10 invoices in the view (`_top_up_scan_batch`); for every handled row (matched/confirmed, created via "Create invoices" or deleted) the next file from the queue is fetched until the view is filled to 10 again. A running scan pauses the top-up (that round fills in turn). The "Fetch next 10" gate button is now active whenever the view is below the cap (fills the deficit). Watched folders already have their own pause/refill (batches of 10, refill only once the batch is emptied) — locked by guard tests. 113 passed in relevant suites.
 - **No tab switch after a single match in Import (message 17)**:

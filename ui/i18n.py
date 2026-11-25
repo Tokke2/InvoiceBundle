@@ -285,6 +285,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "invoices.export_originals_all_pages": {"sv": "Bifoga alla sidor", "en": "Attach all pages"},
     "invoices.export_originals_first_page": {"sv": "Bara första sidan", "en": "First page only"},
     "invoices.export_originals_none": {"sv": "Utan original", "en": "No originals"},
+    "invoices.export_mark_limit": {"sv": "Högst {n} rader kan markeras för export i taget — avmarkera först om du vill byta urval", "en": "At most {n} rows can be marked for export at a time — unmark first to change the selection"},
     "invoices.export_originals_tip": {"sv": "Välj om originalfakturor ska läggas efter betal-PDF:en. För flersidiga PDF-original kan bara sida 1 tas med. Valet sparas.", "en": "Choose whether source invoices are appended after the payment PDF. For multi-page PDF originals, you can append only page 1. This choice is saved."},
     "invoices.marked_label": {"sv": "Markerade:", "en": "Selected:"},
     "invoices.export_check_tip": {"sv": "Kryssa i för att ta med fakturan i exporten", "en": "Tick to include this invoice in the export"},

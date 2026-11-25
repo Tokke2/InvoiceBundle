@@ -127,6 +127,7 @@ try:
         build_export_path,
         chunk_export_rows,
         get_export_base,
+        EXPORT_MARK_LIMIT,
         open_file,
         open_folder,
         attachment_page_count,
@@ -162,6 +163,7 @@ except ImportError:
         build_export_path,
         chunk_export_rows,
         get_export_base,
+        EXPORT_MARK_LIMIT,
         open_file,
         open_folder,
         attachment_page_count,
@@ -1330,16 +1332,32 @@ class InvoicesView(QWidget):
         if getattr(self, "_populating_table", False) or not rid:
             return
         if checked:
+            if (
+                rid not in self._marked_export_ids
+                and len(self._marked_export_ids) >= EXPORT_MARK_LIMIT
+            ):
+                # Tak (användarkrav): högst 10 rader markerade samtidigt.
+                self._apply_table_selection()
+                self._status(tr(
+                    "invoices.export_mark_limit", n=EXPORT_MARK_LIMIT,
+                ))
+                return
             self._marked_export_ids.add(str(rid))
         else:
             self._marked_export_ids.discard(str(rid))
         self._update_export_buttons()
 
     def _mark_all_shown(self) -> None:
-        """Markerar alla rader som visas just nu för export."""
-        self._marked_export_ids |= {
-            i for i in self._displayed_ids if i
-        }
+        """Markerar rader som visas just nu för export — högst 10."""
+        shown = [i for i in self._displayed_ids if i]
+        room = max(0, EXPORT_MARK_LIMIT - len(self._marked_export_ids))
+        picked = shown[:room]
+        self._marked_export_ids |= set(picked)
+        if len(shown) > len(picked):
+            # Fler synliga än taket tillåter — säg det tydligt.
+            self._status(tr(
+                "invoices.export_mark_limit", n=EXPORT_MARK_LIMIT,
+            ))
         self._apply_table_selection()
 
     def _clear_export_selection(self) -> None:
