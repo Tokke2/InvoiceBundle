@@ -74,3 +74,35 @@ def test_arbetsregler_contains_never_merge_rule():
 def test_agents_md_and_arbetsregler_agree_on_branch_name():
     for rel in ("AGENTS.md", "ARBETSREGELER.md"):
         assert "arena/be184218-invoicebundle" in _read(rel), rel
+
+
+def test_agents_md_defines_req_k4_adapted_to_this_app():
+    """REQ-K4 (anpassad till Fakturabunten) ska vara definierad i AGENTS.md."""
+    t = _read("AGENTS.md")
+    assert "REQ-K4 (layout — anpassad till denna app):" in t
+    assert "max höjd" in t
+    assert "test_ui_sharpness_and_responsiveness.py" in t
+
+
+def test_proposal_docs_carry_no_stale_version_rows():
+    """Städad anpassad till denna app: förslagsdokumenten bär aldrig
+    gamla versionbundna rader (t.ex. v1.0.0)."""
+    for rel in ("docs/25-NYA-FORSLAG.md", "docs/FORSLAG-BATCH-2.md",
+                "docs/FORSLAG-SYSTEM.md"):
+        assert "v1.0.0" not in _read(rel), rel
+
+
+def test_forslag_batch_2_delivered_with_fresh_ids():
+    """10-meddelanderegeln: batch 2 (ID 26–35) levererad, aldrig återbruk."""
+    import json
+
+    batch = _read("docs/FORSLAG-BATCH-2.md")
+    for pid in range(26, 36):
+        assert f"## {pid}." in batch, pid
+    status = json.loads(_read("docs/forslag_status.json"))
+    assert status["next_milestone"] == 20
+    assert status["next_proposal_id"] == 36
+    assert status["next_batch_id"] == 3
+    assert len(status["used_proposal_ids"]) == 35
+    assert len(set(status["used_proposal_ids"])) == 35
+    assert status["batches_delivered"][-1]["batch"] == 2

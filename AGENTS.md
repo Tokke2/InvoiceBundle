@@ -62,6 +62,13 @@ Reglerna är inte förhandlingsbara. Detaljer och bakgrund:
 * Skärmanpassning: fönstret startar i **max höjd läge** beroende på
   skärm, bredden anpassas; bättre layout, allt synligt, minimera
   scroll.
+* **REQ-K4 (layout — anpassad till denna app):** varje huvudyta ska
+  rymmas utan överflödig scroll — fönstret startar i max höjd
+  (beroende på skärm), bredden anpassas efter innehåll, alla
+  funktioner synliga/nåbara, scroll minimeras via responsiva
+  brytpunkter. Verifieras av testerna i
+  `tests/test_ui_sharpness_and_responsiveness.py` (KPI 2×2 ≤ 920 px,
+  HistoryView-stack < 820 px, responsiv verktygsrad ≤ 1024 px).
 * Bättre ikoner (vektorbiblioteket `ui/icons.py`) och design.
 * Skärpa: skarp HiDPI-rendering (DPR-medveten), tydlig text/font/
   bild/kolumn — aldrig grumlig.
