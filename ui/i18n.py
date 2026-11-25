@@ -761,6 +761,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     "scan.next_batch": {"sv": "Hämta nästa 10", "en": "Fetch next 10"},
     "scan.batch_wait": {"sv": "Matcha och markera alla rader i batchen klara först — flytta dem till Fakturor och klicka sedan \"Hämta nästa 10\".", "en": "Match and mark all rows in this batch done first — move them to Invoices and then click \"Fetch next 10\"."},
     "scan.batch_next_loaded": {"sv": "Nästa batch (max 10) läses in.", "en": "Loading the next batch (max 10)."},
+    "scan.multipage_progress": {"sv": "Flersidiga för {supplier}: {n} av {needed} bekräftelser — en till så släpper vakten automatiskt", "en": "Multi-page for {supplier}: {n} of {needed} confirmations — one more and the guard passes automatically"},
+    "scan.multipage_graduated": {"sv": "Flersidiga för {supplier}: vakten släpper nu avstämda totaler automatiskt", "en": "Multi-page for {supplier}: the guard now accepts reconciled totals automatically"},
     "scan.auto_edit_learned": {"sv": "🧠 Självlärande uppdaterat från ändring av {file}", "en": "🧠 Self-learning updated from edits to {file}"},
 
     "scan.no_text": {"sv": "ingen text hittad", "en": "no text found"},

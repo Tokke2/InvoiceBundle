@@ -5077,6 +5077,28 @@ class ScanImportView(QWidget):
                     )
             except Exception:
                 pass
+            pages = self._row_pages(row)
+            if pages >= 2 and isinstance(entry, dict):
+                # Flersidig-vakten släpper först efter N bekräftelser —
+                # säg VAR användaren är i inlärningen i stället för att
+                # de fortsätter bekräfta i blindo.
+                try:
+                    mp_conf = int(
+                        entry.get("multipage_confirmed", 0) or 0
+                    )
+                except (TypeError, ValueError):
+                    mp_conf = 0
+                if mp_conf:
+                    if si.learning_graduated(learning, supplier):
+                        notes.append(tr(
+                            "scan.multipage_graduated", supplier=supplier,
+                        ))
+                    else:
+                        notes.append(tr(
+                            "scan.multipage_progress", n=mp_conf,
+                            needed=si.MULTIPAGE_CONFIRMATIONS_TO_GRADUATE,
+                            supplier=supplier,
+                        ))
             template_entry = si.template_confirmation_entry(
                 learning, supplier, template
             )

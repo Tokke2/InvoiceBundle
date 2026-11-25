@@ -3,6 +3,8 @@
 ## Ej släppt / Unreleased
 
 ### Svenska
+- **Bättre flersidig-inlärning: användaren ser var i inlärningen hen är (besked 16)**:
+  - Ny statusnotis vid bekräftelse av flersidig faktura: "Flersidiga för {leverantör}: N av 2 bekräftelser — en till så släpper vakten automatiskt" (`scan.multipage_progress`) och whenoavträdande meddelande när vakten släppt (`scan.multipage_graduated`). Tröskeln läses från `MULTIPAGE_CONFIRMATIONS_TO_GRADUATE` (ingen hårdkodning). Logotypflödet (markera → dhash → matcha) och kreditbärningen (remaining_amount mellan omgångar) bedömda slutna — förbättringar kommer som nya förslag vid milstolpe 20.
 - **Lärande, logotyper och kreditsaldo verifierade + låsta med tester (besked 15)**:
   - **Flersidiga mallar sparas redan vid varje bekräftelse:** mallvariant härleds från den bekräftade raden (`derive_template_from_confirmation` → `store_supplier_template`, max 15 varianter/leverantör, även flersidiga) till `data/invoice_templates.json`; flersidiga bekräftelser räknas separat (`multipage_confirmed`) och leverantören gradueras efter 2 bekräftelser så vakten släpper igenom avstämda flersidiga totaler. Låst av `tests/test_multipage_logo_credit_contracts.py`.
   - **Logotypmarkering finns redan:** "Markera logotyp" i mallvyn sparar dhash-signaturer (`dhash128-v1`) som logotypvarianter; varje bekräftelse observerar och sparar logotypen automatiskt (`observe_confirmed_supplier_logo`) och matchningen pekar ut `learned_logo` som skäl — appen känner igen leverantören på logotypen.
@@ -133,6 +135,8 @@
 - **Bättre leverantörsmatchning via fakturalogotyp** — sparade logotyper kan hittas även när de flyttats på PDF-sidan. Matchningsdialogen visar verkliga, beskurna logotyper från originalfakturan (inga monogram) och rankar den starkaste träffen först. Manuell matchning kan också öppna originalet för att markera logotypen; osäkra träffar kräver fortfarande användarens val.
 
 ### English
+- **Better multi-page learning: the user sees where they are in the learning curve (message 16)**:
+  - New status note when confirming a multi-page invoice: "Multi-page for {supplier}: N of 2 confirmations — one more and the guard passes automatically" (`scan.multipage_progress`) plus a distinct message once the guard has graduated (`scan.multipage_graduated`). The threshold is read from `MULTIPAGE_CONFIRMATIONS_TO_GRADUATE` (no hard-coding). The logo flow (mark → dhash → match) and the credit carryover (remaining_amount between rounds) judged complete — further improvements arrive as new proposals at milestone 20.
 - **Learning, logos and credit balance verified + locked with tests (message 15)**:
   - **Multi-page templates are already saved on every confirmation:** a template variant is derived from the confirmed row (`derive_template_from_confirmation` → `store_supplier_template`, max 15 variants/supplier, multi-page included) into `data/invoice_templates.json`; multi-page confirmations are counted separately (`multipage_confirmed`) and the supplier graduates after 2 confirmations so the guard accepts reconciled multi-page totals. Locked by `tests/test_multipage_logo_credit_contracts.py`.
   - **Logo marking already exists:** "Mark logo" in the template view saves dhash signatures (`dhash128-v1`) as logo variants; every confirmation observes and saves the logo automatically (`observe_confirmed_supplier_logo`) and matching reports `learned_logo` as the reason — the app recognises the supplier by its logo.

@@ -114,3 +114,32 @@ def test_credit_carryover_qt_tests_cover_the_scenario():
     assert "test_plan_and_chunk_settlement_132k_against_10_invoices" in t
     assert "test_export_partial_credit_keeps_78450_then_exhausts_and_restores" in t
     assert "test_auto_batch_preserves_remaining_credit" in t
+
+
+def test_multipage_learning_progress_is_surfaced_to_the_user():
+    """Förbättring (besked 16): användaren ser var i flersidig-inlärningen
+    hen är — N av M bekräftelser — och när vakten släpper."""
+    view = _src(VIEW)
+    assert '"scan.multipage_progress"' in view
+    assert '"scan.multipage_graduated"' in view
+    # Tröskeln läses från en enda källa (ingen hårdkodad 2 i vyn)
+    assert "MULTIPAGE_CONFIRMATIONS_TO_GRADUATE" in view
+    assert "learning_graduated(learning, supplier)" in view
+    # Notisen når statusraden via notes-mekanismen (join till notis)
+    assert 'return " ".join(notes)' in view
+
+
+@pytest.mark.parametrize("key", ["scan.multipage_progress",
+                                 "scan.multipage_graduated"])
+def test_multipage_progress_i18n_sv_en(key):
+    import importlib
+
+    i18n = importlib.import_module("ui.i18n")
+    entry = i18n._STRINGS[key]
+    assert entry.get("sv") and entry.get("en"), key
+    assert "{supplier}" in entry["sv"]
+
+
+def test_changed_files_still_compile():
+    compile(_src(VIEW), str(VIEW), "exec")
+    compile(_src(I18N), str(I18N), "exec")
