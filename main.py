@@ -2529,6 +2529,17 @@ def main() -> None:
         QPixmapCache.setCacheLimit(32 * 1024)
     except Exception:
         pass
+    try:
+        # Hård minnesgräns för avkodade bilder (Qt ≥ 6.8): en
+        # degenererad eller gigantisk skanning får aldrig äta
+        # gigabytes RAM vid inläsning — misslyckad avkodning är
+        # bättre än byteswap.
+        from PySide6.QtGui import QImageReader
+
+        if hasattr(QImageReader, "setAllocationLimit"):
+            QImageReader.setAllocationLimit(256)  # MB per bild
+    except Exception:
+        pass
     # Plattformsanpassad identitet:
     #  • Linux  → desktop-filnamnet matchar autostart-postens
     #    StartupWMClass, så aktivitetsfältet kopplar fönstret till rätt

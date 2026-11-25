@@ -3359,13 +3359,48 @@ class MainWindow(QMainWindow):
             if wh is None:
                 return
             wh.screenChanged.connect(self._on_screen_changed)
+            self._connect_dpi_signals()
             self._screen_signals_connected = True
+        except Exception:
+            pass
+
+    def _connect_dpi_signals(self) -> None:
+        """Följer skalfaktorändringar i den aktiva skärmen.
+
+        Windows tillåter "Ändra skalning" (100 % → 125 % …) i flygande
+        utan att fönstret byter skärm — då levereras ingen
+        ``screenChanged`` utan bara skärmens
+        ``logicalDotsPerInchChanged``. Utan den här kopplingen blir
+        ikoner, kolumner och fonthinging omskalade slarvigt tills
+        nästa omstart.
+        """
+        try:
+            app_qt = QApplication.instance()
+            if app_qt is None:
+                return
+            scr = self.screen() or app_qt.primaryScreen()
+            if scr is None:
+                return
+            if getattr(self, "_dpi_signal_screen", None) is scr:
+                return
+            old = getattr(self, "_dpi_signal_screen", None)
+            if old is not None:
+                try:
+                    old.logicalDotsPerInchChanged.disconnect(
+                        self._on_screen_changed
+                    )
+                except (RuntimeError, TypeError):
+                    pass
+            scr.logicalDotsPerInchChanged.connect(self._on_screen_changed)
+            self._dpi_signal_screen = scr
         except Exception:
             pass
 
     def _on_screen_changed(self, _screen=None) -> None:
         """Anpassar fönsterstorlek, HiDPI-ikoner och kolumner till ny skärm."""
         try:
+            # Flytt mellan skärmar → bind DPI-signalerna till den nya.
+            self._connect_dpi_signals()
             if not self.isMaximized():
                 scr = self.screen() or QApplication.primaryScreen()
                 if scr is not None:
@@ -3379,6 +3414,20 @@ class MainWindow(QMainWindow):
             self._refresh_tab_icons(theme)
             refresh_bound_icons(theme)
             self._update_responsive_toolbar()
+            # Skalfaktorn ändrades (bråkdel ↔ heltal) → typsnittets
+            # hinting-preferens är inte längre optimal; applicera om.
+            try:
+                from ui.design import effective_dpr
+            except ImportError:
+                from design import effective_dpr  # type: ignore[no-redef]
+            dpr_now = effective_dpr(widget=self)
+            if getattr(self, "_last_screen_dpr", None) != dpr_now:
+                self._last_screen_dpr = dpr_now
+                app_qt = QApplication.instance()
+                if app_qt is not None:
+                    apply_font_size(
+                        app_qt, self._settings.get("font_size", 13)
+                    )
             cur = self.tabs.currentWidget() if hasattr(self, "tabs") else None
             if cur is not None:
                 for inner in (cur, *cur.findChildren(QWidget)):
