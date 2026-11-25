@@ -757,7 +757,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "scan.match_secure_tip": {"sv": "✔ säker matchning — leverantören/mallen är säkert identifierad", "en": "✔ confident match — the supplier/template is identified with confidence"},
     "scan.match_unresolved": {"sv": "Följande rader har fortfarande osäker leverantörs-/mallmatchning och registrerades inte:\n\n{files}\n\nVälj leverantör/mall för dem först (appen gissar aldrig).", "en": "The following rows still have an uncertain supplier/template match and were not registered:\n\n{files}\n\nChoose a supplier/template for them first (the app never guesses)."},
     "scan.pages_status": {"sv": "📄 {n} sidor", "en": "📄 {n} pages"},
-    "scan.batch_queued": {"sv": "{n} väntar i kö (nästa {next_n} läses in när dessa flyttats till Fakturor)", "en": "{n} queued (next {next_n} load once these move to Invoices)"},
+    "scan.batch_queued": {"sv": "{n} väntar i kö — klicka \"Hämta nästa 10\" när denna batch är matchad, markerad klar och flyttad", "en": "{n} queued — click \"Fetch next 10\" once this batch is matched, marked done and moved"},
+    "scan.next_batch": {"sv": "Hämta nästa 10", "en": "Fetch next 10"},
+    "scan.batch_wait": {"sv": "Matcha och markera alla rader i batchen klara först — flytta dem till Fakturor och klicka sedan \"Hämta nästa 10\".", "en": "Match and mark all rows in this batch done first — move them to Invoices and then click \"Fetch next 10\"."},
+    "scan.batch_next_loaded": {"sv": "Nästa batch (max 10) läses in.", "en": "Loading the next batch (max 10)."},
     "scan.auto_edit_learned": {"sv": "🧠 Självlärande uppdaterat från ändring av {file}", "en": "🧠 Self-learning updated from edits to {file}"},
 
     "scan.no_text": {"sv": "ingen text hittad", "en": "no text found"},

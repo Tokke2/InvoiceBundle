@@ -3,6 +3,8 @@
 ## Ej släppt / Unreleased
 
 ### Svenska
+- **Importens batch-port: max 10 fakturor åt gången — matcha + markera klar innan mer importeras (besked 14)**:
+  - Import-vyn har redan batchar à 10 (`SCAN_INITIAL_BATCH_SIZE`/`SCAN_REFILL_BATCH_SIZE`); **porten läckte dock** — efter auto-registrering av kompletta rader kunde nästa batch läsas in utan användarens matchning/klar-markering. Nu stängd: **alla sju automatiska refill-vägar är borttagna** utom två styrsa — port-knappen **"Hämta nästa 10"** (`scan.next_batch`, ny knapp i Steg 1) som bara blir aktiv när aktuell batch är helt matchad/markerad klar/flyttad (tabellen tom, ingen skanning pågår), samt efter **"Skapa fakturor"** (där har användaren redan matchat + markerat klart). Vid port-block visas `scan.batch_wait`; statusraden visar köad batch (ny text: klicka "Hämta nästa 10"). `_refresh_table` uppdaterar knappen vid varje radändring. 14 nya Qt-fria tester (`tests/test_import_batch_gate.py`: AST-konstanter, ingen auto-refill kvar, port-logik, i18n-kontrakt sv/en).
 - **UI-regel förfinad (besked 13): profil-underflik endast för appar med profiler**:
   - AGENTS.md §5: appar som använder profiler ska ha en egen underflik i Inställningar för att skapa/hantera dem — appar utan profiler ska inte få en tom profilsida. Projektskaparens rulval (från ttk-versionen) ska finnas i appar med projektskapare. Guard-test tillagt.
 - **Hård regel: förslaglistor ska alltid skrivas i chatten (besked 12)**:
@@ -127,6 +129,8 @@
 - **Bättre leverantörsmatchning via fakturalogotyp** — sparade logotyper kan hittas även när de flyttats på PDF-sidan. Matchningsdialogen visar verkliga, beskurna logotyper från originalfakturan (inga monogram) och rankar den starkaste träffen först. Manuell matchning kan också öppna originalet för att markera logotypen; osäkra träffar kräver fortfarande användarens val.
 
 ### English
+- **Import batch gate: max 10 invoices at a time — match + mark done before more are imported (message 14)**:
+  - The import view already had batches of 10 (`SCAN_INITIAL_BATCH_SIZE`/`SCAN_REFILL_BATCH_SIZE`); **the gate leaked, however** — after auto-registering complete rows the next batch could load without the user matching/marking it done. Now closed: **all seven automatic refill paths removed** except two controlled ones — the **"Fetch next 10"** button (`scan.next_batch`, new button in Step 1) that only becomes active once the current batch is fully matched/marked done/moved (table empty, no scan running), and after **"Create invoices"** (where the user has already matched + marked done). When the gate blocks, `scan.batch_wait` is shown; the status row shows the queued batch (new wording: click "Fetch next 10"). `_refresh_table` updates the button on every row change. 14 new Qt-free tests (`tests/test_import_batch_gate.py`: AST constants, no auto-refill left, gate logic, i18n contract sv/en).
 - **UI rule refined (message 13): profile sub-tab only for apps using profiles**:
   - AGENTS.md §5: apps that use profiles must have a dedicated settings sub-tab for creating/managing them — apps without profiles must not get an empty profile page. The project creator's box choice (from the ttk version) belongs in apps that have a project creator. Guard test added.
 - **Hard rule: proposal lists must always be written in chat (message 12)**:
