@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -337,3 +338,165 @@ def test_same_version_new_files_are_an_update(tmp_path):
     result = up.check_for_update(
         tmp_path, fetch=_fake_fetch(release_sha="nya-filer"))
     assert result["status"] == "current"
+
+
+# ── Säkerhetshärdning: https, tak, atomik, integritet, pre-flight ──
+
+
+def test_https_is_enforced_everywhere():
+    import pytest
+
+    assert up._https_url("https://api.github.com/x") == \
+        "https://api.github.com/x"
+    for bad in ("http://api.github.com/x", "ftp://x/y", "", "/relative"):
+        with pytest.raises(ValueError):
+            up._https_url(bad)
+    with pytest.raises(ValueError):
+        up._fetch_json("http://api.github.com/repos/x/releases/latest")
+
+
+def test_fetch_json_caps_insane_response(monkeypatch):
+    import io
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    # Svar > MAX_JSON_BYTES ska avbrytas i stället för att läsas in.
+    huge = up.MAX_JSON_BYTES + 10
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda req, timeout=None: _Resp(b"x" * huge),
+    )
+    import pytest
+
+    with pytest.raises(ValueError):
+        up._fetch_json("https://api.github.com/x")
+
+
+def test_download_file_enforces_https_before_any_request(tmp_path):
+    import pytest
+
+    dest = tmp_path / "dl.zip"
+    with pytest.raises(ValueError):
+        up.download_file("http://example.com/x.zip", dest)
+    assert not dest.exists()
+
+
+def test_download_file_refuses_over_sized_content_length(tmp_path, monkeypatch):
+    import io
+    import pytest
+
+    class _Resp(io.BytesIO):
+        headers = {"Content-Length": str(up.MAX_DOWNLOAD_BYTES + 1)}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda req, timeout=None: _Resp(b""),
+    )
+    dest = tmp_path / "dl.zip"
+    with pytest.raises(ValueError):
+        up.download_file("https://example.com/x.zip", dest, retries=0)
+    assert not dest.exists()
+    assert not dest.with_name(dest.name + ".part").exists()
+
+
+def test_download_file_is_atomic_and_retries(tmp_path, monkeypatch):
+    """Halvfärdigt svar → ingen .part kvar, ingen destination, retry funkar."""
+    import io
+
+    state = {"calls": 0}
+
+    class _Resp(io.BytesIO):
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    payload = b"ZIPDATA" * 4
+
+    def _fake_urlopen(req, timeout=None):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise OSError("nätet ryckte")
+        return _Resp(payload)
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    dest = tmp_path / "dl.zip"
+    out = up.download_file(
+        "https://example.com/x.zip", dest, retries=2)
+    assert out == dest
+    assert dest.read_bytes() == payload
+    assert not dest.with_name(dest.name + ".part").exists()
+    assert state["calls"] == 2
+
+
+def test_verify_release_zip_crc_and_sha(tmp_path):
+    good = _zip(tmp_path / "good.zip", {
+        "build_info.json": json.dumps({"sha": "abc123"}),
+        "app.py": "kod",
+    })
+    ok, why = up.verify_release_zip(good, "abc123")
+    assert ok and why == ""
+    ok, why = up.verify_release_zip(good, "annan-sha")
+    assert not ok and "build-sha" in why
+    ok, why = up.verify_release_zip(good)   # utan förväntad sha: bara CRC
+    assert ok
+
+    garbage = tmp_path / "garbage.zip"
+    garbage.write_bytes(b"PK\x03\x04 inte en riktig zip")
+    ok, why = up.verify_release_zip(garbage)
+    assert not ok
+
+
+def test_apply_update_aborts_on_unusable_zip(tmp_path):
+    """Trasig/igenkänningslös zip → RuntimeError INNAN något rörs."""
+    import pytest
+
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / "app.py").write_text("GAMMAL", encoding="utf-8")
+
+    garbage = tmp_path / "garbage.zip"
+    garbage.write_bytes("det här är ingen zip".encode("utf-8"))
+    with pytest.raises(RuntimeError):
+        up.apply_update(garbage, root, sha="x")
+    assert (root / "app.py").read_text(encoding="utf-8") == "GAMMAL"
+    assert not (root / "bak").exists()
+
+    # Zip utan någon av appens startfiler får inte heller starta koppling.
+    stranger = _zip(tmp_path / "stranger.zip", {"readme.txt": "hej"})
+    with pytest.raises(RuntimeError):
+        up.apply_update(stranger, root, sha="x")
+    assert (root / "app.py").read_text(encoding="utf-8") == "GAMMAL"
+    assert not (root / "bak").exists()
+
+
+def test_prune_backups_keeps_newest_only(tmp_path):
+    root = tmp_path / "app"
+    bak = root / "bak"
+    bak.mkdir(parents=True)
+    stamps = ["20260101-000001", "20260102-000001", "20260103-000001",
+              "20260104-000001", "20260105-000001", "20260106-000001",
+              "20260107-000001"]
+    for s in stamps:
+        (bak / f"update-{s}").mkdir()
+        (bak / f"update-{s}" / "app.py").write_text(s, encoding="utf-8")
+    removed = up.prune_backups(root, keep=5)
+    assert removed == 2
+    left = {d.name for d in bak.glob("update-*")}
+    assert len(left) == 5
+    assert "update-20260107-000001" in left   # nyaste bevaras
+    assert "update-20260101-000001" not in left  # äldstast bort

@@ -1,21 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1106 300" width="1106" height="300" role="img" aria-label="Fakturabunten">
   <title>Fakturabunten — logotyp</title>
   <g transform="translate(28 30) scale(0.46875)">
-  <rect x="10" y="10" width="492" height="492" rx="112" fill="#24467c"/>
-  <g transform="rotate(-8 244 268)">
-    <rect x="118" y="166" width="216" height="262" rx="20" fill="#c6d8ee"/>
-  </g>
-  <rect x="140" y="142" width="216" height="266" rx="20" fill="#e4eefb" transform="rotate(-4 248 275)"/>
-  <path d="M180 104H336L396 164V392A26 26 0 0 1 370 418H180A26 26 0 0 1 154 392V130A26 26 0 0 1 180 104Z" fill="#ffffff"/>
-  <path d="M336 104L396 164H336Z" fill="#cbdcef"/>
-  <g fill="#24467c">
-    <rect x="196" y="160" width="40" height="150"/>
-    <rect x="196" y="160" width="128" height="38"/>
-    <rect x="196" y="228" width="100" height="36"/>
-  </g>
-  <path d="M112 336L400 298V352L112 390Z" fill="#f0c24a"/>
-  <circle cx="368" cy="368" r="48" fill="#ffffff"/>
-  <path d="M342 368l19 20 33-38" fill="none" stroke="#12284b" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="10" y="10" width="492" height="492" rx="116" fill="#24467c"/><g transform="rotate(-7 230 282)"><rect x="124" y="148" width="212" height="268" rx="18" fill="#c6d8ee"/></g><g transform="rotate(-3 244 270)"><rect x="138" y="134" width="212" height="272" rx="18" fill="#e4eefb"/></g><path d="M176 100H314L384 170V396A28 28 0 0 1 356 424H176A28 28 0 0 1 148 396V128A28 28 0 0 1 176 100Z" fill="#ffffff"/><path d="M314 100L384 170H314Z" fill="#cbdcef"/><g fill="#16305a"><rect x="182" y="138" width="112" height="32" rx="9"/><rect x="182" y="190" width="150" height="24" rx="8"/><rect x="182" y="228" width="118" height="24" rx="8"/></g><rect x="182" y="282" width="168" height="36" rx="9" fill="#e0a526"/><circle cx="362" cy="372" r="50" fill="#ffffff" stroke="#f0c24a" stroke-width="12"/><path d="M334 372l20 22 36-42" fill="none" stroke="#16305a" stroke-width="17" stroke-linecap="round" stroke-linejoin="round"/>
   </g>
   <g fill="#ffffff" transform="translate(312.00 176.00)">
         <path d="M50.00 -69.80V-58.50H20.90V-40.60H43.20V-29.50H20.90V0.00H6.90V-69.80Z"/>

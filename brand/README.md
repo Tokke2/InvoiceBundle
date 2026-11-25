@@ -28,10 +28,25 @@ Appens egna filer i roten (`app_icon.svg`, `app_icon.png`, `app_icon.ico`,
 | --- | --- | --- |
 | Marinblå (primär) | `#16305a` | Ikonens platta, ordbildens färg i appen |
 | Marinblå djup | `#12284b` | Ordtext på ljus bakgrund |
-| Guld (accent) | `#e0a526` | Bandet runt fakturabunten |
-| Guld ljus | `#f0c24a` | Underrad på mörk bakgrund |
+| Marinblå mörk bakgrund | `#24467c` | Ikonens platta när logotypen står på mörk bakgrund |
+| Guld (accent) | `#e0a526` | Totalstreck på fakturarket och bockseglens ring |
+| Guld ljus | `#f0c24a` | Underrad och bockseglens ring på mörk bakgrund |
 | Papper | `#ffffff` | Fakturaarket |
 | Pappersskugga | `#c6d8ee` / `#e4eefb` / `#cbdcef` | Bakre ark, mittenark, vikt hörn |
+
+## Märket (v2)
+
+Märket är en **städad faktura-stack**: tre ark i jämn, nästan lodrät visp
+(‑3°/‑7° i stället för de gamla kraftiga vinklarna), ett blått innehålls­-
+block längst upp, ett **guldfält** som "totalstreck" och längst ned till
+höger ett **bocksegl** i en guldring — kvitto på att fakturan är klar och
+betald. Kontrollen är omdesignad för att läsas redan vid 16 px: tjockare
+linjedrag, rundade hörn och starkare kontrast mellan papper, blått och guld.
+
+Rastervarianterna (`app_icon.png`, `app_icon.ico`, `app_icon_tray.png`)
+renderas ur vektorerna med `brand/build_brand_assets.py` (PyMuPDF + Pillow) —
+redigera alltid SVG:erna först och kör sedan skriptet så hålls alla filer
+och alla upplösningar i synk.
 
 ## Typografi
 

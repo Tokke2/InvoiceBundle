@@ -31,6 +31,8 @@ import logging
 import os
 import shutil
 import tempfile
+import time
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -41,6 +43,15 @@ log = logging.getLogger("invoice_bundle")
 REPO = "Tokke2/InvoiceBundle"
 API_BASE = f"https://api.github.com/repos/{REPO}"
 USER_AGENT = "Fakturabunten-Updater/1.0"
+
+#: Högsta tillåten nedladdning (releaser är normalt 10–30 MB).
+MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
+#: Högsta JSON-svar från GitHub-API:t (ett komprometterat svar ska
+#: inte kunna fylla disken innan json-tolkningen ens börjar).
+MAX_JSON_BYTES = 8 * 1024 * 1024
+#: Antal uppdateringsbackuper i bak/ som bevaras (nyaste vinner).
+KEEP_BACKUPS = 5
+
 
 #: Mappar i approten som ALDRIG skrivs över vid uppdatering.
 PRESERVED_DIRS = {"data", "js", "logs", "exports", "bak", "__pycache__"}
@@ -78,13 +89,32 @@ def is_preserved(rel: str | Path) -> bool:
 
 # ── GitHub API ─────────────────────────────────────────────────────────
 
+def _https_url(url: str) -> str:
+    """Kastar ValueError om URL:en inte är https.
+
+    Uppdateraren talar ALDRIG http — en stulen/omböjd länk ska inte
+    kunna trylla ned koden i klartext eller via en okrypterad droppe.
+    """
+    u = str(url or "")
+    parsed = urllib.parse.urlparse(u)
+    if parsed.scheme.lower() != "https" or not parsed.netloc:
+        raise ValueError(
+            f"Updateraren tillåter bara https-URL:er: {u[:120]!r}"
+        )
+    return u
+
+
 def _fetch_json(url: str, timeout: int = 25) -> Any:
+    _https_url(url)
     req = urllib.request.Request(
         url, headers={"User-Agent": USER_AGENT,
                       "Accept": "application/vnd.github+json"}
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        data = resp.read(MAX_JSON_BYTES + 1)
+        if len(data) > MAX_JSON_BYTES:
+            raise ValueError("GitHub-svaret är onödigt stort — avbryter.")
+        return json.loads(data.decode("utf-8"))
 
 
 def pick_zip_asset(release: dict) -> dict | None:
@@ -220,23 +250,105 @@ def check_for_update(root: Path,
 
 def download_file(url: str, dest: Path,
                   progress: ProgressFn = None,
-                  timeout: int = 120) -> Path:
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+                  timeout: int = 120,
+                  retries: int = 1) -> Path:
+    """Hämtar `url` till `dest` atomiskt, med storlekstak och retry.
+
+    * Bara https (komprometterad länk kan inte falla tillbaka till http).
+    * Skrivs alltid till en ``.part``-fil och byter namn först när
+      hela svaret lästs — en halvfärdig zip kan aldrig se ut som en
+      färdig nedladdning.
+    * Hård storleksgräns både via Content-Length och löpande count —
+      en fientlig server kan inte fylla disken.
+    * `retries`: antal extra försök vid nätverksfel (2 s backoff).
+    """
+    _https_url(url)
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        total = int(resp.headers.get("Content-Length") or 0)
-        done = 0
-        with open(dest, "wb") as fh:
-            while True:
-                chunk = resp.read(65536)
-                if not chunk:
-                    break
-                fh.write(chunk)
-                done += len(chunk)
-                if progress:
-                    progress(done, total)
-    return dest
+    part = dest.with_name(dest.name + ".part")
+    attempts = max(1, int(retries) + 1)
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": USER_AGENT}
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                total = int(resp.headers.get("Content-Length") or 0)
+                if total > MAX_DOWNLOAD_BYTES:
+                    raise ValueError(
+                        f"Release-zip för stor ({total} bytes) — avbryter."
+                    )
+                done = 0
+                with open(part, "wb") as fh:
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        done += len(chunk)
+                        if done > MAX_DOWNLOAD_BYTES:
+                            raise ValueError(
+                                "Nedladdningen överstiger säkerhetsgränsen "
+                                f"({MAX_DOWNLOAD_BYTES} bytes) — avbryter."
+                            )
+                        fh.write(chunk)
+                        if progress:
+                            progress(done, total or done)
+                if total and done != total:
+                    raise OSError(
+                        f"Ofullständig nedladdning: {done}/{total} bytes"
+                    )
+            os.replace(part, dest)  # atomisk — ser alltid komplett ut
+            return dest
+        except Exception as exc:  # nätfel/trasigt svar → städa och retry:a
+            last_exc = exc
+            try:
+                part.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if attempt + 1 < attempts:
+                time.sleep(2.0)
+    assert last_exc is not None
+    raise last_exc
+
+
+def verify_release_zip(zip_path: Path, expected_sha: str = "") -> tuple[bool, str]:
+    """Snabb integritetskontroll av en nedladdad release-zip.
+
+    Kontrollerar att filen är en giltig zip, att varje posts CRC
+    stämmer (``testzip``) och — när både zipens ``build_info.json``
+    och releasens commit-sha är kända — att de matchar. Returnerar
+    (True, "") när allt är bra, annars (False, skäl).
+    """
+    try:
+        with zipfile.ZipFile(Path(zip_path)) as zf:
+            bad = zf.testzip()
+            if bad is not None:
+                return False, f"trasig zip-post: {bad}"
+            if expected_sha:
+                for name in zf.namelist():
+                    if (name == BUILD_INFO_NAME
+                            or name.endswith("/" + BUILD_INFO_NAME)):
+                        try:
+                            zsha = str(json.loads(
+                                zf.read(name).decode("utf-8")
+                            ).get("sha", "") or "")
+                        except Exception:
+                            zsha = ""
+                        if zsha and (
+                            zsha.strip().lower()
+                            != str(expected_sha).strip().lower()
+                        ):
+                            return False, (
+                                f"build-sha {zsha} != release "
+                                f"{expected_sha}"
+                            )
+                        break
+    except zipfile.BadZipFile:
+        return False, "filen är ingen giltig zip"
+    except OSError as exc:
+        return False, f"oläslig fil: {exc}"
+    return True, ""
 
 
 def zip_build_sha(zip_path: Path) -> str:
@@ -291,12 +403,13 @@ def download_release_zip(release: dict, dest: Path,
         except Exception as exc:
             last_exc = exc
             continue
-        zsha = zip_build_sha(path).strip().lower()
-        if zsha and sha and zsha != sha:
+        ok, reason = verify_release_zip(path, sha)
+        if not ok:
             log.warning(
-                "UPDATE zipens build-sha %s != releasens %s — "
-                "hämtar taggarkivet i stället", zsha, sha)
-            continue  # föråldrat asset → nästa kandidat (taggarkivet)
+                "UPDATE nedladdad zip underkänd integritet (%s) — "
+                "prövar nästa kandidat", reason)
+            last_exc = RuntimeError(f"Zip underkänd: {reason}")
+            continue
         return Path(path)
     if last_exc is not None:
         raise last_exc
@@ -362,6 +475,41 @@ def find_backups(root: Path) -> list[Path]:
     return sorted(dirs, reverse=True)
 
 
+def prune_backups(root: Path, keep: int = KEEP_BACKUPS) -> int:
+    """Tar bort äldre uppdateringsbackuper utöver de `keep` nyaste."""
+    removed = 0
+    for d in find_backups(root)[max(0, int(keep)):]:
+        try:
+            shutil.rmtree(d)
+            removed += 1
+        except OSError as exc:
+            log.warning("UPDATE prune %s: %s", d, exc)
+    return removed
+
+
+#: Filnamn som bevisar att ett uppackat paket verkligen är appen.
+_CORE_STAGE_FILES = {"main.py", "app.py", "main.pyw"}
+
+
+def _validate_stage(stage: Path) -> None:
+    """Förhandskontroll — INGET skrivs före paketet bevisats vara en build.
+
+    En avbruten/otrogen nedladdning som ändå gått genom sha-kontrollen
+    (eller en zip saknad startfiler) får aldrig riva halva program­
+    mappen och sedan fastna halvvägs.
+    """
+    files = [p for p in stage.rglob("*") if p.is_file()]
+    if not files:
+        raise RuntimeError(
+            "Uppdateringspaketet är tomt — avbryter utan att röra appen."
+        )
+    if not any(p.name in _CORE_STAGE_FILES for p in files):
+        raise RuntimeError(
+            "Uppdateringspaketet saknar programmets startfiler "
+            "(main.py/app.py) — avbryter utan att röra appen."
+        )
+
+
 def restore_backup(backup_dir: Path, root: Path) -> dict:
     """Kopierar tillbaka en updateringsbackup (bara programfiler)."""
     backup_dir, root = Path(backup_dir), Path(root)
@@ -395,6 +543,11 @@ def apply_update(zip_path: Path, root: Path, *,
     längre finns i den nya builden. Returnerar rapport-dict.
     """
     root = Path(root)
+    # Integritet först: ingen CRC-skadad/otrogen zip får starta
+    # backup-/kopieringsfasen.
+    ok, reason = verify_release_zip(zip_path)
+    if not ok:
+        raise RuntimeError(f"Uppdateringszip underkänd: {reason}")
     old = read_local_build(root)
     old_files = [str(f) for f in old.get("files", [])]
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -406,6 +559,22 @@ def apply_update(zip_path: Path, root: Path, *,
 
     with tempfile.TemporaryDirectory(prefix="fb-update-") as tmp:
         stage = _safe_extract(Path(zip_path), Path(tmp) / "stage")
+        # Förhandsvalidering + diskutrymme INNAN något skrivs: ett
+        # paket utan startfiler eller en disk nära fullt ska aldrig
+        # kunna lämna appen halvvägs uppdaterad.
+        _validate_stage(stage)
+        try:
+            _needed = sum(
+                s.stat().st_size for s in stage.rglob("*") if s.is_file()
+            ) + 64 * 1024 * 1024
+            _free = shutil.disk_usage(root).free
+        except OSError:
+            _needed, _free = 0, 0
+        if _free and _needed and _free < _needed:
+            raise RuntimeError(
+                f"För lite ledigt diskutrymme ({_free} < {_needed} bytes) "
+                "— uppdateringen avbryts utan att röra appen."
+            )
         # Samla arbetet först så förloppet kan visa fil X av Y
         work: list[tuple[Path, str]] = []
         new_files: list[str] = []
@@ -470,4 +639,5 @@ def apply_update(zip_path: Path, root: Path, *,
         report["replaced"], report["added"], report["removed"],
         report["skipped"], report["backup"],
     )
+    report["pruned_backups"] = prune_backups(root)
     return report
