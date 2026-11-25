@@ -45,6 +45,11 @@ def test_agents_md_codifies_ten_message_rule():
     assert "Aldrig återbruk" in t
     assert "docs/forslag_status.json" in t
     assert "docs/25-NYA-FORSLAG.md" in t
+    # Hård regel: förslaglistor ska ALLTID skrivas i chatten
+    assert "alltid skrivas i chatten" in t
+    assert "Filen\n  är bara arkiv" in t
+    arb = _read("ARBETSREGELER.md")
+    assert "alltid skrivas i chatten" in arb
 
 
 def test_agents_md_codifies_test_and_interface_rules():

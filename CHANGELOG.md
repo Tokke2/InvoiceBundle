@@ -3,6 +3,8 @@
 ## Ej släppt / Unreleased
 
 ### Svenska
+- **Hård regel: förslaglistor ska alltid skrivas i chatten (besked 12)**:
+  - AGENTS.md §3 + ARBETSREGELER.md regel 5: en förslagsleverans utan full chattvisning bryter regeln — filen (`docs/FORSLAG-BATCH-<n>.md`) är bara arkiv. Gäller även listan "25 nya förslag som konkurrenterna saknar". Guard-test uppdaterat.
 - **Nya regler + UI-kolumnflytt (besked 11)**:
   - **Hård regel 8 (AGENTS.md + ARBETSREGELER.md): nya regler till GitHub direkt** — när användaren skriver `- hård regel` eller `regel` kodifieras regeln omedelbart i regelfilerna och pushas i samma vända, aldrig bara chatttext.
   - **AGENTS.md anpassas efter varje app:** §1–8 universella regler + **App-profil** (app, branch, UI-mål, kodkällor, förslagssystem, release, start) som byts vid ny app.
@@ -123,6 +125,8 @@
 - **Bättre leverantörsmatchning via fakturalogotyp** — sparade logotyper kan hittas även när de flyttats på PDF-sidan. Matchningsdialogen visar verkliga, beskurna logotyper från originalfakturan (inga monogram) och rankar den starkaste träffen först. Manuell matchning kan också öppna originalet för att markera logotypen; osäkra träffar kräver fortfarande användarens val.
 
 ### English
+- **Hard rule: proposal lists must always be written in chat (message 12)**:
+  - AGENTS.md §3 + ARBETSREGELER.md rule 5: a proposal delivery without full chat display breaks the rule — the file (`docs/FORSLAG-BATCH-<n>.md`) is archive only. Also applies to the "25 proposals competitors lack" list. Guard test updated.
 - **New rules + UI column reordering (message 11)**:
   - **Hard rule 8 (AGENTS.md + ARBETSREGELER.md): new rules to GitHub immediately** — when the user writes `- hård regel` or `regel`, the rule is codified in the rules files right away and pushed in the same turn, never chat text only.
   - **AGENTS.md adaptable per app:** §1–8 universal rules + an **App profile** (app, branch, UI goals, code sources, proposal system, release, start) swapped when starting a new app.

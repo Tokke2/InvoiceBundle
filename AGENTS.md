@@ -42,6 +42,10 @@ detta repo. Vid ny app: byt bara profilen.
 
 * Varje **10:e användarbesked** (10, 20, 30 …) levereras **10 helt
   nya förslag i chatten** + sparas i `docs/FORSLAG-BATCH-<n>.md`.
+* **Hård regel: förslaglistor ska alltid skrivas i chatten.** Filen
+  är bara arkiv — en leverans utan full chattvisning bryter regeln.
+  Gäller även listan "25 nya förslag som konkurrenterna saknar och
+  användare efterfrågar": den visas alltid direkt i chatten.
 * **Aldrig återbruk eller omformulering** av levererade ID:n.
   Räknare + ID-register: `docs/forslag_status.json` — ökas vid varje
   användarbesked och kontrolleras mot `next_milestone`.

@@ -47,6 +47,9 @@ Dessa regler gäller alltid för alla som utvecklar Fakturabunten
   återbrukar** tidigare levererade förslag (register: `used_proposal_ids`).
 * Batch 1 (ID 1–25) finns i `docs/25-NYA-FORSLAG.md` och är låst.
   Fullständiga driftinstruktioner: `docs/FORSLAG-SYSTEM.md`.
+* **Förslaglistor ska alltid skrivas i chatten** — filerna är bara
+  arkiv. En leverans utan full chattvisning bryter regeln (hård
+  regel, gäller även "25 nya förslag som konkurrenterna saknar").
 
 ## 6. Releasen är alltid aktuell — uppdateras vid varje kodförändring
 
