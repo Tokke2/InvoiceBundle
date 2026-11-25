@@ -536,3 +536,50 @@ def test_backup_kept_when_a_file_fails_to_replace(tmp_path):
     assert report["backup_kept"] is True
     assert list((root / "bak").glob("update-*")), \
         "vid fel ska backupen finnas kvar som återställningspunkt"
+
+
+# ── Rullande latest-release: appen jämför alltid via updater ────────
+
+
+def test_rolling_latest_release_is_accepted_end_to_end(tmp_path):
+    """Taggen 'latest' (rullande release) fungerar genom hela updaterflödet.
+
+    Arbetsflödet publicerar varje kodändring som release med taggen
+    'latest' (markerad latest). Appen ska då: se 'update' mot en
+    äldre sha, godta både asset-URL och taggarkiv som release-bundna,
+    och hämta right zip.
+    """
+    latest_zip = _zip(tmp_path / "latest.zip", {
+        "build_info.json": json.dumps({"version": "1.0.0",
+                                       "sha": "nycommit"}),
+        "app.py": "SENASTE KOD",
+    })
+
+    def fake_download(url, dest, progress=None):
+        Path(dest).write_bytes(latest_zip.read_bytes())
+        return Path(dest)
+
+    release = {
+        "tag": "latest", "sha": "nycommit",
+        "asset": {"name": "InvoiceBundle-latest.zip",
+                  "url": ("https://github.com/Tokke2/InvoiceBundle/"
+                          "releases/download/latest/"
+                          "InvoiceBundle-latest.zip"),
+                  "size": latest_zip.stat().st_size},
+        "zipball_url": up.release_archive_url("latest"),
+    }
+    # Asset-URL och arkiv är bundna till taggen latest (aldrig main)
+    assert up.is_release_bound_url(release["asset"]["url"], "latest")
+    assert up.is_release_bound_url(release["zipball_url"], "latest")
+    assert not up.is_release_bound_url(
+        "https://github.com/x/InvoiceBundle/archive/refs/heads/main.zip",
+        "latest",
+    )
+
+    out = up.download_release_zip(
+        release, tmp_path / "dl.zip", download=fake_download)
+    assert up.zip_build_sha(out) == "nycommit"
+
+    # Appens jämförelse: äldre lokal sha → update; samma → current
+    assert up.should_update("gammalcommit", "nycommit") is True
+    assert up.should_update("nycommit", "nycommit") is False

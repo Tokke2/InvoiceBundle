@@ -683,3 +683,37 @@ def test_release_workflow_verifies_release_job_on_every_push():
     assert "verify-release-build:" in workflow
     assert "actions/workflows/release-integrity.yml/runs" in workflow
     assert "python build_release.py \\\n            --verify" in workflow or "--verify" in workflow
+
+
+def test_workflow_publishes_rolling_latest_release_on_every_push():
+    """HÅRD REGEL: varje kodförändring uppdaterar releasen + markerar latest.
+
+    Jobbet 'publish-latest-release' körs på branchpush, flyttar taggen
+    latest till nya commiten, laddar upp paketet (--clobber) och
+    markerar releasen som latest — så appens uppdaterare (sha-jämförelse
+    mot build_info.json) alltid hittar senaste koden.
+    """
+    workflow = (
+        PROJECT_DIR / ".github" / "workflows" / "release-integrity.yml"
+    ).read_text(encoding="utf-8")
+    assert "publish-latest-release:" in workflow
+    # Kör bara på branchpush, aldrig på v*-taggar (ingen dubblering)
+    assert "github.event_name == 'push'" in workflow
+    assert "!startsWith(github.ref, 'refs/tags/v')" in workflow
+    # Taggen latest pekas om till nya commiten
+    assert "git tag -f latest" in workflow
+    assert "git push -f origin refs/tags/latest" in workflow
+    # Paketet laddas upp och releasen markeras som latest
+    assert "gh release upload latest" in workflow
+    assert "--clobber" in workflow
+    assert "gh release edit latest --latest" in workflow
+    assert "gh release create latest" in workflow
+    # Verifiering: latest -> exakt denna commit, releases/latest = latest
+    assert "git/ref/tags/latest" in workflow
+    assert "releases/latest" in workflow
+    assert "InvoiceBundle-latest.zip" in workflow
+    # Bygget verifieras mot exakt commit-sha innan publicering
+    assert "--sha \"$GITHUB_SHA\"" in workflow
+    # Ingen oändlig loop: taggtriggern godtar bara v*
+    assert '- "v*"' in workflow
+    assert '- "latest"' not in workflow

@@ -509,3 +509,97 @@ jobs:
                       sys.exit(1)
                   print(f"Live release {tag}: {expected_asset} ({assets[0]['size']} bytes)")
           PY
+
+  publish-latest-release:
+    name: Publish rolling latest release
+    # HÅRD REGEL: varje kodförändring (push till arbetsbranch/main)
+    # uppdaterar releasen och markerar den som "latest" så att appens
+    # uppdaterare (sha-jämförelse mot build_info.json) alltid hittar
+    # den senaste koden. Rör aldrig v*-taggarna; taggen "latest" pekar
+    # alltid på den nya commiten. Ingen loop: on.push.tags godtar bara v*.
+    if: >-
+      github.event_name == 'push' &&
+      !startsWith(github.ref, 'refs/tags/v')
+    needs: [updater-guard, windows-autostart, autostart-ui, unix-startup]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build the rolling latest package
+        run: |
+          PACKAGE_PATH="${RUNNER_TEMP}/InvoiceBundle-latest.zip"
+          python build_release.py \
+            --root . \
+            --out "$PACKAGE_PATH" \
+            --version "1.0.0" \
+            --sha "$GITHUB_SHA"
+          python build_release.py \
+            --verify "$PACKAGE_PATH" \
+            --version "1.0.0" \
+            --sha "$GITHUB_SHA"
+      - name: Point the latest tag at this commit
+        run: |
+          git tag -f latest "$GITHUB_SHA"
+          git push -f origin refs/tags/latest
+      - name: Publish & mark the release as latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view latest > /dev/null 2>&1; then
+            gh release edit latest --latest \
+              --title "Fakturabunten — senaste build (latest)" \
+              --notes "Automatisk rullande release av commit ${GITHUB_SHA}. Appen hittar den via Sök ny version — sha jämförs mot build_info.json."
+          else
+            gh release create latest \
+              "$RUNNER_TEMP/InvoiceBundle-latest.zip#InvoiceBundle-latest.zip" \
+              --latest \
+              --title "Fakturabunten — senaste build (latest)" \
+              --notes "Automatisk rullande release av commit ${GITHUB_SHA}. Appen hittar den via Sök ny version — sha jämförs mot build_info.json."
+          fi
+          gh release upload latest \
+            "$RUNNER_TEMP/InvoiceBundle-latest.zip" --clobber
+          gh release edit latest --latest
+      - name: Verify latest points at this commit with this package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/latest")
+          python - "$TAG_JSON" "$GITHUB_SHA" "$GITHUB_REPOSITORY" <<'PY'
+          import json, subprocess, sys
+
+          obj = json.loads(sys.argv[1])["object"]
+          expected = sys.argv[2]
+          repo = sys.argv[3]
+          resolved = obj["sha"]
+          if obj.get("type") == "tag":
+              out = subprocess.check_output(
+                  ["gh", "api", f"repos/{repo}/git/tags/{resolved}"],
+                  text=True,
+              )
+              resolved = json.loads(out)["object"]["sha"]
+          assert resolved == expected, f"{resolved} != {expected}"
+          print(f"latest -> {resolved} (OK)")
+          PY
+          LATEST=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" \
+            --jq .tag_name)
+          if [ "$LATEST" != "latest" ]; then
+            echo "::error::releases/latest pekar på $LATEST, inte latest"
+            exit 1
+          fi
+          ASSET_SIZE=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/latest" \
+            --jq '.assets[] | select(.name=="InvoiceBundle-latest.zip") | .size')
+          if [ "${ASSET_SIZE:-0}" -le 0 ]; then
+            echo "::error::Asset InvoiceBundle-latest.zip saknas/tom"
+            exit 1
+          fi
+          echo "### Rolling latest published" >> "$GITHUB_STEP_SUMMARY"
+          echo "- latest -> ${GITHUB_SHA}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Asset: InvoiceBundle-latest.zip (${ASSET_SIZE} bytes)" >> "$GITHUB_STEP_SUMMARY"

@@ -47,3 +47,19 @@ Dessa regler gäller alltid för alla som utvecklar Fakturabunten
   återbrukar** tidigare levererade förslag (register: `used_proposal_ids`).
 * Batch 1 (ID 1–25) finns i `docs/25-NYA-FORSLAG.md` och är låst.
   Fullständiga driftinstruktioner: `docs/FORSLAG-SYSTEM.md`.
+
+## 6. Releasen är alltid aktuell — uppdateras vid varje kodförändring
+
+* Varje push med kodförändring till arbetsbranchen (eller `main`)
+  **måste** resultera i en uppdaterad release: workflow-jobbet
+  `publish-latest-release` bygger paketet, pekar taggen `latest`
+  på nya commiten, laddar upp `InvoiceBundle-latest.zip`
+  (`--clobber`) och **markerar releasen som latest**.
+* Appen jämför **alltid via updatern**: `check_for_update()`
+  hämtar `releases/latest`, jämför taggens commit-sha mot lokal
+  `build_info.json` och erbjuder uppdateringen. Versionnumret är
+  kosmetiskt — **filändringar upptäcks via sha**, aldrig versionsnummer.
+* v*-taggade releases rörs aldrig av den rullande releasen;
+  taggtriggern godtar bara `v*` (ingen publikationsloop).
+* Bygg-paketet verifieras (CRC, build-sha, manifest) **före**
+  publicering — en underkänd build får aldrig markeras som latest.
