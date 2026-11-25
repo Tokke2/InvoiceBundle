@@ -120,12 +120,10 @@ def test_apply_update_replaces_only_program_files(tmp_path):
         (root / "build_info.json").read_text(encoding="utf-8"))
     assert info["sha"] == "nyasha"
     assert "ui/main_window.py" in info["files"]
-    # Backup av det som byttes/togs bort finns i bak/, även när en
-    # spårad programfil har redigerats av användaren.
-    backups = list((root / "bak").rglob("app.py"))
-    assert backups and backups[0].read_text(encoding="utf-8") == "GAMMAL"
-    stale_backups = list((root / "bak").rglob("stale.py"))
-    assert stale_backups and stale_backups[0].read_text(encoding="utf-8") == "borta i nya"
+    # UPPDATERINGEN LYCKADES HELT → backupen städas bort direkt
+    # (användarens regel: om upd lyckas, ta bort backup).
+    assert report["backup_kept"] is False
+    assert not list((root / "bak").glob("update-*"))
 
 
 def test_apply_update_strips_zipball_root(tmp_path):
@@ -160,10 +158,12 @@ def test_restore_backup_roundtrip(tmp_path):
     (root / "app.py").write_text("STABIL GAMMAL", encoding="utf-8")
     (root / "data").mkdir()
     (root / "data" / "invoices.json").write_text("[]", encoding="utf-8")
-    # Uppdatering: app.py ersätts (backup får gamla innehållet)
+    # Uppdatering: app.py ersätts (backup får gamla innehållet).
+    # keep_backup_on_success=True behövs eftersom en HELT lyckad
+    # uppdatering annars städar bort backupen direkt.
     up.apply_update(
         _zip(tmp_path / "v2.zip", {"app.py": "NY MEN TRASIG"}),
-        root, sha="v2",
+        root, sha="v2", keep_backup_on_success=True,
     )
     assert (root / "app.py").read_text(encoding="utf-8") == "NY MEN TRASIG"
     backups = up.find_backups(root)
@@ -500,3 +500,39 @@ def test_prune_backups_keeps_newest_only(tmp_path):
     assert len(left) == 5
     assert "update-20260107-000001" in left   # nyaste bevaras
     assert "update-20260101-000001" not in left  # äldstast bort
+
+
+# ── Backup-policy: lyckad upd → backup bort; fel → backup kvar ──────
+
+
+def test_backup_removed_on_success_kept_on_request(tmp_path):
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / "app.py").write_text("GAMMAL", encoding="utf-8")
+    zipp = _zip(tmp_path / "ny.zip", {"app.py": "NY"})
+
+    report = up.apply_update(zipp, root, sha="s")
+    assert report["skipped"] == 0
+    assert report["backup_kept"] is False
+    assert not list((root / "bak").glob("update-*"))
+
+    # escape-luckan: forcerad backup behålls (t.ex. för återställningstest)
+    report = up.apply_update(
+        zipp, root, sha="s2", keep_backup_on_success=True)
+    assert report["backup_kept"] is True
+    assert list((root / "bak").glob("update-*"))
+
+
+def test_backup_kept_when_a_file_fails_to_replace(tmp_path):
+    root = tmp_path / "app"
+    root.mkdir()
+    # app.py är en KATALOG i stället för fil → ersättningen misslyckas
+    (root / "app.py").mkdir()
+    (root / "app.py" / "innehall.txt").write_text("x", encoding="utf-8")
+
+    report = up.apply_update(
+        _zip(tmp_path / "ny.zip", {"app.py": "NY"}), root, sha="s")
+    assert report["skipped"] >= 1
+    assert report["backup_kept"] is True
+    assert list((root / "bak").glob("update-*")), \
+        "vid fel ska backupen finnas kvar som återställningspunkt"

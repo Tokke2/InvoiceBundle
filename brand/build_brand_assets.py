@@ -42,19 +42,35 @@ CONTENT = (
 TOTAL = '<rect x="182" y="282" width="168" height="36" rx="9" fill="#e0a526"/>'
 
 
-def mark_body(plate: str = "#16305a", gold: str = "#e0a526") -> str:
-    """Färgade märket (512×512-ruta), delad av app-/brand-ikon."""
+def mark_body(plate: str = "#16305a", gold: str = "#e0a526",
+              layer_attrs: str = "") -> str:
+    """Färgade märket (512×512-ruta), delad av app-/brand-ikon.
+
+    Gruppen är namngiven (id + ev. Inkscape-lagerattribut) så att
+    tryckfilen kan redigeras blockvis: Platta, Ark bakre, Ark mitt,
+    Ark framre, Innehåll, Guldfält och Bocksegl.
+    """
+    def g(gid: str, body: str) -> str:
+        extra = (
+            f' inkscape:groupmode="layer" inkscape:label="{gid}"'
+            if layer_attrs else ""
+        )
+        return f'<g id="{gid}"{extra}>{body}</g>'
+
     return (
-        f'<rect x="10" y="10" width="492" height="492" rx="116" fill="{plate}"/>'
-        + BACK.format(c="#c6d8ee")
-        + MID.format(c="#e4eefb")
-        + f'<path d="{FRONT}" fill="#ffffff"/>'
-        + f'<path d="{FOLD}" fill="#cbdcef"/>'
-        + CONTENT
-        + TOTAL
-        + f'<circle cx="362" cy="372" r="50" fill="#ffffff" stroke="{gold}" stroke-width="12"/>'
-        + f'<path d="{CHECK}" fill="none" stroke="#16305a" stroke-width="17" '
-        'stroke-linecap="round" stroke-linejoin="round"/>'
+        g("Platta",
+          f'<rect x="10" y="10" width="492" height="492" rx="116" fill="{plate}"/>')
+        + g("Ark_bakre", BACK.format(c="#c6d8ee"))
+        + g("Ark_mitt", MID.format(c="#e4eefb"))
+        + g("Ark_framre",
+            f'<path d="{FRONT}" fill="#ffffff"/>'
+            + f'<path d="{FOLD}" fill="#cbdcef"/>')
+        + g("Innehall", CONTENT)
+        + g("Guldfalt", TOTAL.format(gold=gold))
+        + g("Bocksegl",
+            f'<circle cx="362" cy="372" r="50" fill="#ffffff" stroke="{gold}" stroke-width="12"/>'
+            + f'<path d="{CHECK}" fill="none" stroke="#16305a" stroke-width="17" '
+            'stroke-linecap="round" stroke-linejoin="round"/>')
     )
 
 
@@ -124,13 +140,17 @@ mono_svg = svg(
 bleed_inner = (
     '<rect x="0" y="0" width="604" height="604" fill="#16305a"/>\n'
     '<g transform="translate(46 46)">\n'
-    + mark_body() + "\n"
+    + mark_body(layer_attrs="inkscape") + "\n"
     + "</g>"
 )
 bleed_svg = svg(
     604, bleed_inner,
     "Fakturabunten — ikon för tryck (5 mm bleed)",
     "Fakturabunten — tryckfil med bleed",
+).replace(
+    '<svg xmlns="http://www.w3.org/2000/svg"',
+    '<svg xmlns="http://www.w3.org/2000/svg" '
+    'xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"',
 )
 
 with open(f"{PROJECT}/app_icon.svg", "w", encoding="utf-8") as fh:

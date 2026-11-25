@@ -16,12 +16,17 @@ Qt-free and defensive: a logging failure must never interrupt the app.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 from typing import Callable
+
+import logging
+
+log = logging.getLogger("invoice_bundle")
 
 
 def _json_line_date(line: str) -> date | None:
@@ -134,6 +139,64 @@ def _archive_older_entries(
     return sum(len(by_day[day]) for day in archived_days)
 
 
+#: Daterade dagsarkiv (app-*.jsonl / autostart-*.log) äldre än så
+#: många dagar raderas ur logs/archive/ vid arkivering/start.
+ARCHIVE_RETENTION_DAYS = 7
+
+_ARCHIVE_DATED_NAME_RE = re.compile(
+    r"^(?:app|autostart)-(\d{4}-\d{2}-\d{2})(?:-part\d{3})?\.(?:jsonl|log)$"
+)
+
+
+def prune_archive_logs(
+    log_dir: Path,
+    days: int = ARCHIVE_RETENTION_DAYS,
+    now: date | None = None,
+) -> int:
+    """Raderar daterade dagsarkiv äldre än `days` dagar ur logs/archive/.
+
+    Gäller bara arkivfiler med dagstämpel i namnet (app-*.jsonl,
+    autostart-*.log, inklusive -partNNN-segment). Övriga filer — t.ex.
+    feljournalens åtgärdade-arkiv (felsamling-atgardade.log) som har en
+    egen, långsammare livscykel — rörs aldrig. Returnerar antal
+    borttagna filer.
+    """
+    root = Path(log_dir)
+    archive_dir = root / "archive"
+    today = now or date.today()
+    cutoff = today - timedelta(days=max(0, int(days)))
+    removed = 0
+    try:
+        entries = list(archive_dir.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        if not entry.is_file():
+            continue
+        m = _ARCHIVE_DATED_NAME_RE.match(entry.name)
+        if m is None:
+            continue
+        try:
+            file_day = date.fromisoformat(m.group(1))
+        except ValueError:
+            continue
+        if file_day < cutoff:
+            try:
+                entry.unlink()
+                removed += 1
+            except OSError:
+                pass
+    if removed:
+        try:
+            log.debug(
+                "ARCHIVE_PRUNE: %d dagsarkiv äldre än %d dagar borttagna",
+                removed, days,
+            )
+        except Exception:
+            pass
+    return removed
+
+
 def archive_previous_day_logs(
     log_dir: Path, today: date | None = None,
 ) -> int:
@@ -141,7 +204,8 @@ def archive_previous_day_logs(
 
     Although the normal trigger is a date change, any older days are also
     archived on startup so a machine that was off yesterday catches up.
-    Returns the number of source lines moved.
+    Dated archive files older than ``ARCHIVE_RETENTION_DAYS`` days are
+    pruned afterwards. Returns the number of source lines moved.
     """
     root = Path(log_dir)
     cutoff = today or date.today()
@@ -156,6 +220,10 @@ def archive_previous_day_logs(
         _text_line_date,
         lambda day: f"autostart-{day.isoformat()}.log",
     )
+    try:
+        prune_archive_logs(root, ARCHIVE_RETENTION_DAYS, now=cutoff)
+    except Exception:
+        pass
     try:
         from error_collect import (
             auto_clean_resolved_errors,

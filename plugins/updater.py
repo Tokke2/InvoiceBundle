@@ -534,13 +534,18 @@ def restore_backup(backup_dir: Path, root: Path) -> dict:
 def apply_update(zip_path: Path, root: Path, *,
                  version: str = "",
                  sha: str = "",
-                 progress: ProgressFn = None) -> dict:
+                 progress: ProgressFn = None,
+                 keep_backup_on_success: bool = False) -> dict:
     """
     Ersätter programfiler i `root` med zipens innehåll.
 
     Bevarar user-data (is_preserved), tar backup till
     bak/update-<tid>/ och tar bort spårade programfiler som inte
-    längre finns i den nya builden. Returnerar rapport-dict.
+    längre finns i den nya builden. När ALLT kopierats utan fel
+    tas backupen bort direkt — den behövs bara när något gick
+    fel (eller när `keep_backup_on_success=True` satts för att
+    t.ex. kunna testa återställningen). Returnerar rapport-dict
+    med `backup_kept`.
     """
     root = Path(root)
     # Integritet först: ingen CRC-skadad/otrogen zip får starta
@@ -554,7 +559,9 @@ def apply_update(zip_path: Path, root: Path, *,
     backup_dir = root / "bak" / f"update-{stamp}"
     report: dict[str, Any] = {
         "replaced": 0, "added": 0, "removed": 0, "skipped": 0,
+        "failed": 0,
         "backup": str(backup_dir), "files": [],
+        "backup_kept": True,
     }
 
     with tempfile.TemporaryDirectory(prefix="fb-update-") as tmp:
@@ -601,6 +608,7 @@ def apply_update(zip_path: Path, root: Path, *,
                 _copy_file(src, dst, executable=rel in EXECUTABLE_STARTERS)
             except Exception as exc:
                 log.warning("UPDATE %s misslyckades: %s", rel, exc)
+                report["failed"] += 1
                 report["skipped"] += 1
             if progress:
                 progress(done_files, total_files)
@@ -621,6 +629,7 @@ def apply_update(zip_path: Path, root: Path, *,
                     report["removed"] += 1
             except Exception as exc:
                 log.warning("UPDATE stale %s: %s", rel, exc)
+                report["failed"] += 1
 
         info = {
             "version": version or str(old.get("version", "")),
@@ -640,4 +649,22 @@ def apply_update(zip_path: Path, root: Path, *,
         report["skipped"], report["backup"],
     )
     report["pruned_backups"] = prune_backups(root)
+    # Uppdatering lyckades (alla filer kopierade utan fel) → backupen
+    # behövs inte: ta bort den så bak/ inte växer oändligt. Misslyckades
+    # någon fil finns backupen kvar som återställningspunkt.
+    if not keep_backup_on_success and report["failed"] == 0:
+        try:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+            report["backup_kept"] = False
+            log.info(
+                "UPDATE lyckades helt — backup %s borttagen", backup_dir,
+            )
+        except OSError as exc:
+            log.warning("UPDATE backup radering: %s", exc)
+    elif report["failed"]:
+        log.warning(
+            "UPDATE %d fil(er) kunde inte ersättas — backup %s behålls "
+            "som återställningspunkt",
+            report["failed"], report["backup"],
+        )
     return report

@@ -48,6 +48,11 @@ renderas ur vektorerna med `brand/build_brand_assets.py` (PyMuPDF + Pillow) —
 redigera alltid SVG:erna först och kör sedan skriptet så hålls alla filer
 och alla upplösningar i synk.
 
+Tryckfilen har **namngivna lager** (`Platta`, `Ark_bakre`, `Ark_mitt`,
+`Ark_framre`, `Innehåll`, `Guldfält`, `Bocksegl`) — i Inkscape/Illustrator
+döljs/redigeras blocken var för sig. Kör skriptet med appens Python-venv:
+`python brand/build_brand_assets.py`.
+
 ## Typografi
 
 Ordbilden är ritad ur **Poppins SemiBold** (600) med +0,4 % spärrning, och

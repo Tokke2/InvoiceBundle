@@ -37,6 +37,9 @@ NEW_ICONS = (
     "send", "mail", "users", "gauge", "trending_up", "trending_down",
     "pie", "hash", "percent", "lock", "cpu", "package",
     "calendar_check", "calendar_x", "x_circle",
+    # v3: vy, markering, arkiv, dialog
+    "zoom_in", "zoom_out", "rotate_ccw", "flag", "star", "pin",
+    "book_open", "message", "archive",
 )
 
 
@@ -74,7 +77,7 @@ def test_new_icon_names_exist_in_library():
 
 
 def test_library_is_large_after_expansion():
-    assert len(_icon_paths()) >= 75
+    assert len(_icon_paths()) >= 85
 
 
 def test_new_icons_are_24_viewbox_line_art():

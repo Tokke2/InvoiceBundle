@@ -2,9 +2,19 @@ from __future__ import annotations
 
 from datetime import date
 import json
+import sys
 from pathlib import Path
 
-from log_archive import archive_active_app_log, archive_previous_day_logs
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+for _d in (str(PROJECT_DIR), str(PROJECT_DIR / "plugins")):
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
+
+from log_archive import (  # noqa: E402
+    archive_active_app_log,
+    archive_previous_day_logs,
+    prune_archive_logs,
+)
 
 
 def _entry(stamp: str, message: str) -> str:
@@ -115,3 +125,56 @@ def test_archive_runs_auto_clean_for_old_resolved_errors(tmp_path: Path):
     archive_previous_day_logs(logs, today=date(2026, 11, 4))
     assert "Gammalt åtgärdat fel" not in ec.error_log_path(tmp_path).read_text(encoding="utf-8")
 
+
+
+# ── Arkiv-pruning: dagsarkiv äldre än 7 dagar rensas ────────────────
+
+
+def test_prune_archive_logs_removes_only_old_dated_files(tmp_path: Path):
+    import datetime as dt
+
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    today = dt.date(2026, 11, 25)
+
+    old_app = archive / "app-2026-11-10.jsonl"          # 15 dagar → bort
+    old_autostart = archive / "autostart-2026-11-12.log"  # 13 dagar → bort
+    old_part = archive / "app-2026-11-13-part001.jsonl"   # 12 dagar → bort
+    fresh_app = archive / "app-2026-11-22.jsonl"          # 3 dagar → kvar
+    edge = archive / "app-2026-11-18.jsonl"               # exakt 7 dagar → kvar
+    reserved = archive / "felsamling-atgardade.log"       # odaterad → kvar
+    other = archive / "app_annan_mapp_2026-11-01.log"     # annat mönster → kvar
+    for f in (old_app, old_autostart, old_part, fresh_app, edge,
+              reserved, other):
+        f.write_text("rad\n", encoding="utf-8")
+
+    removed = prune_archive_logs(tmp_path, days=7, now=today)
+    assert removed == 3
+    assert not old_app.exists()
+    assert not old_autostart.exists()
+    assert not old_part.exists()
+    assert fresh_app.exists()
+    assert edge.exists()   # 7 dagar gammal är fortfarande inom gränsen
+    assert reserved.exists()
+    assert other.exists()
+
+
+def test_prune_runs_with_previous_day_archiving(tmp_path: Path):
+    """archive_previous_day_logs rensar samtidigt gamla dagsarkiv."""
+    import datetime as dt
+
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "app-2026-11-05.jsonl").write_text(
+        '{"ts":"2026-11-05T10:00:00","level":"INFO","msg":"x"}\n',
+        encoding="utf-8",
+    )
+    (archive / "autostart-2026-11-05.log").write_text(
+        "2026-11-05 rad\n", encoding="utf-8"
+    )
+
+    today = dt.date(2026, 11, 25)
+    # (Ingen app.log i log_dir → inget flyttas, men pruning körs.)
+    archive_previous_day_logs(tmp_path, today=today)
+    assert not (archive / "app-2026-11-05.jsonl").exists()
+    assert not (archive / "autostart-2026-11-05.log").exists()
