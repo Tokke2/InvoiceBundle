@@ -3,6 +3,11 @@
 ## Ej släppt / Unreleased
 
 ### Svenska
+- **Nya regler + UI-kolumnflytt (besked 11)**:
+  - **Hård regel 8 (AGENTS.md + ARBETSREGELER.md): nya regler till GitHub direkt** — när användaren skriver `- hård regel` eller `regel` kodifieras regeln omedelbart i regelfilerna och pushas i samma vända, aldrig bara chatttext.
+  - **AGENTS.md anpassas efter varje app:** §1–8 universella regler + **App-profil** (app, branch, UI-mål, kodkällor, förslagssystem, release, start) som byts vid ny app.
+  - **Fakturatabellen: kolumner kan nu flyttas** (`horizontalHeader().setSectionsMovable(True)` i `ui/invoices_view.py`) — sorteringen fanns redan (`setSortingEnabled` + proxy `SORT_ROLE`).
+  - **Guard-tester** (`tests/test_agents_rules.py`): ny-regel-arbetsgång, App-profil, sortering+flytt av kolumner, fönsterlös minimerad start (pythonw/`--minimized`/`CREATE_NO_WINDOW`, skanning utan terminal) samt felloggskontraktet (aktiva fel i felloggen, åtgärdade → `felsamling-atgardade.log`, arkiv rensas efter 7 dagar).
 - **Förslag batch 2 levererat vid besked 10 (10-meddelanderegeln) — ID 26–35, aldrig återbrukade**:
   - 10 nya funktioner i batch-1-andan (lokal-först, automatisering, svenska nischregler): ROT/RUT-vakt med gränsräkning (26), kvittoterminal 58/80 mm (27), SIE4-export ett klick (28), hyresavi & periodiserade fakturor (29), lokala e-postutkast .eml (30), Fakturahälsa före utskick (31), auto-kategorisering av kostnader (32), PIN-lås & tidslåsning (33), tryckklar kvartals-/årssammanställning (34), USB-speglar & flytta-dator-wizard (35). Visa i chatten + `docs/FORSLAG-BATCH-2.md`; räknare uppdaterad (`next_milestone = 20`, `next_proposal_id = 36`).
 - **REQ-K4 definierad för denna app (AGENTS.md §5):** layout utan överflödig scroll — max-höjd-start, bredd efter innehåll, alla funktioner synliga/nåbara, responsiva brytpunkter (verifieras av `tests/test_ui_sharpness_and_responsiveness.py`). Guard-tester: `tests/test_agents_rules.py` låser även att förslagsdokumenten aldrig bär gamla v1.0.0-rader och att batch 2 är levererad med ID 26–35.
@@ -118,6 +123,11 @@
 - **Bättre leverantörsmatchning via fakturalogotyp** — sparade logotyper kan hittas även när de flyttats på PDF-sidan. Matchningsdialogen visar verkliga, beskurna logotyper från originalfakturan (inga monogram) och rankar den starkaste träffen först. Manuell matchning kan också öppna originalet för att markera logotypen; osäkra träffar kräver fortfarande användarens val.
 
 ### English
+- **New rules + UI column reordering (message 11)**:
+  - **Hard rule 8 (AGENTS.md + ARBETSREGELER.md): new rules to GitHub immediately** — when the user writes `- hård regel` or `regel`, the rule is codified in the rules files right away and pushed in the same turn, never chat text only.
+  - **AGENTS.md adaptable per app:** §1–8 universal rules + an **App profile** (app, branch, UI goals, code sources, proposal system, release, start) swapped when starting a new app.
+  - **Invoice table: columns can now be moved** (`horizontalHeader().setSectionsMovable(True)` in `ui/invoices_view.py`) — sorting already existed (`setSortingEnabled` + proxy `SORT_ROLE`).
+  - **Guard tests** (`tests/test_agents_rules.py`): new-rule workflow, app profile, column sorting+moving, windowless minimized start (pythonw/`--minimized`/`CREATE_NO_WINDOW`, scanning without a terminal) and the error-log contract (active errors in the error log, resolved → `felsamling-atgardade.log`, archives pruned after 7 days).
 - **Proposal batch 2 delivered at message 10 (the 10-message rule) — IDs 26–35, never reused**:
   - 10 new functions in the batch-1 spirit (local-first, automation, Swedish niche rules): ROT/RUT guard with threshold calculation (26), receipt terminal 58/80 mm (27), one-click SIE4 export (28), rent aviso & periodic invoices (29), local .eml e-mail drafts (30), invoice health check before sending (31), auto-categorisation of expenses (32), PIN lock & time lock (33), print-ready quarterly/annual summary (34), USB mirrors & move-computer wizard (35). Shown in chat + `docs/FORSLAG-BATCH-2.md`; counter updated (`next_milestone = 20`, `next_proposal_id = 36`).
 - **REQ-K4 defined for this app (AGENTS.md §5):** layout without unnecessary scrolling — max-height start, width follows content, all functions visible/reachable, responsive breakpoints (verified by `tests/test_ui_sharpness_and_responsiveness.py`). Guard tests: `tests/test_agents_rules.py` also locks that the proposal documents never carry old v1.0.0 rows and that batch 2 is delivered with IDs 26–35.

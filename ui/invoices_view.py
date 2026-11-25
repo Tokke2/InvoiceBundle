@@ -1096,6 +1096,9 @@ class InvoicesView(QWidget):
         self._table = QTableView()
         self._table.setModel(self._invoice_proxy)
         self._table.setSortingEnabled(True)
+        # Kolumner ska gå att flytta (dra i rubriken); sorteringen
+        # sker via proxy-modellen med SORT_ROLE ovan.
+        self._table.horizontalHeader().setSectionsMovable(True)
         self._table.setAlternatingRowColors(True)
         self._table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows

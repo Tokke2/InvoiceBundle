@@ -1,9 +1,13 @@
-# AGENTS.md — Fakturabunten (läs mig först)
+# AGENTS.md — läs mig först (anpassas efter varje app)
 
 Denna fil samlar **alla hårda regler på ett ställe**. Varje agent (och
 människa) som arbetar i detta repo läser den först och följer den.
 Reglerna är inte förhandlingsbara. Detaljer och bakgrund:
 `ARBETSREGELER.md` + `docs/FORSLAG-SYSTEM.md`.
+
+**Anpassa efter varje app:** §1–8 är **universella regler** som gäller
+i alla appar; **App-profilen** (sist i filen) anpassar dem till just
+detta repo. Vid ny app: byt bara profilen.
 
 ## 1. Branch & merges — hård regel
 
@@ -89,3 +93,23 @@ Reglerna är inte förhandlingsbara. Detaljer och bakgrund:
 4. Commita + pusha — CI:n uppdaterar releasen och markerar latest (§2).
 5. Öka `user_messages_so_far` i `docs/forslag_status.json` vid varje
    användarbesked; leverera förslag vid milstolpar (§3).
+
+## 8. Nya regler till GitHub direkt — hård regel
+
+* När användaren skriver `- hård regel` eller `regel` kodifieras den
+  nya regeln **omedelbart** hit (och vid behov till
+  `ARBETSREGELER.md`) och **pushas till GitHub i samma vända** —
+  den får aldrig bara förbli chatttext.
+* Låsregler kontrolleras av `tests/test_agents_rules.py`.
+
+## App-profil — Fakturabunten (anpassas efter varje app)
+
+| Fält | Värde |
+|---|---|
+| App | Fakturabunten — lokal-först faktura-/bokföringsapp (PySide6) |
+| Arbetsbranch | `arena/be184218-invoicebundle` |
+| UI-mål | REQ-K4-layout (§5), HiDPI-skärpa, minne/energi |
+| Kodkällor | `brand/build_brand_assets.py`, `ui/icons.py` (§6) |
+| Förslagssystem | `docs/forslag_status.json` (10-meddelanderegeln, §3) |
+| Release & updater | `publish-latest-release` → taggen `latest` (§2) |
+| Start | pythonw + `--minimized`, aldrig terminalfönster |

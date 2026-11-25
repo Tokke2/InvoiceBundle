@@ -72,3 +72,12 @@ Dessa regler gäller alltid för alla som utvecklar Fakturabunten
   arbetsbranchen.
 * Behövs en basomläggning görs den inte som merge; vid osäkerhet
   frågar agenten först.
+
+## 8. Nya regler till GitHub direkt — hård regel
+
+* När användaren skriver `- hård regel` eller `regel` ska den nya
+  regeln **omedelbart** kodifieras i `AGENTS.md` (och vid behov i
+  den här filen) och **pushas till GitHub i samma vända**.
+* Gäller även när regeln kommer som en del av ett större besked —
+  den får aldrig bara förbli chatttext.
+* Låsregler kontrolleras av `tests/test_agents_rules.py`.
