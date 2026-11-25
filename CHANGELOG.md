@@ -3,6 +3,8 @@
 ## Ej släppt / Unreleased
 
 ### Svenska
+- **Importen pausar vid 10 inlästa och fyller på allt eftersom (besked 18)**:
+  - Nytt rullande fönster i Import: taket är 10 fakturor i vyn (`_top_up_scan_batch`); för varje hanterad rad (matchad/bekräftad, skapad via "Skapa fakturor" eller raderad) hämtas nästa fil ur kön tills vyn är fylld till 10 igen. Pågående skanning pausar påfyllnaden (den rundan fyller i sin tur). Port-knappen "Hämta nästa 10" är nu aktiv när vyn är under taket (fyller deficit). Bevakade mappar har redan egen pause/fyll (batch à 10, påfyll först när batchen tömts) — låst av guard-test. 113 passed i relevanta sviter.
 - **Ingen flikväxling efter enkelmatchning i Import (besked 17)**:
   - Efter matchning/bekräftelse av EN faktura i Import byter appen inte längre automatiskt till Fakturor — endast Fakturors data uppdateras i bakgrunden (`_refresh_invoices_view_only`). Flikväxling sker **endast när en hel batch (10 fakturor) bunts ihop** i en "Skapa fakturor"-vända (`created >= SCAN_REFILL_BATCH_SIZE`); delbatcher stannar i Import. Guard-tester i `tests/test_import_batch_gate.py` (110 passed i relevanta sviter).
 - **Bättre flersidig-inlärning: användaren ser var i inlärningen hen är (besked 16)**:
@@ -137,6 +139,8 @@
 - **Bättre leverantörsmatchning via fakturalogotyp** — sparade logotyper kan hittas även när de flyttats på PDF-sidan. Matchningsdialogen visar verkliga, beskurna logotyper från originalfakturan (inga monogram) och rankar den starkaste träffen först. Manuell matchning kan också öppna originalet för att markera logotypen; osäkra träffar kräver fortfarande användarens val.
 
 ### English
+- **The import pauses at 10 loaded and tops up as you go (message 18)**:
+  - New rolling window in Import: the cap is 10 invoices in the view (`_top_up_scan_batch`); for every handled row (matched/confirmed, created via "Create invoices" or deleted) the next file from the queue is fetched until the view is filled to 10 again. A running scan pauses the top-up (that round fills in turn). The "Fetch next 10" gate button is now active whenever the view is below the cap (fills the deficit). Watched folders already have their own pause/refill (batches of 10, refill only once the batch is emptied) — locked by guard tests. 113 passed in relevant suites.
 - **No tab switch after a single match in Import (message 17)**:
   - After matching/confirming ONE invoice in Import, the app no longer switches to Invoices automatically — only Invoices' data is refreshed in the background (`_refresh_invoices_view_only`). Tab switching happens **only when a full batch (10 invoices) is bundled** in one "Create invoices" action (`created >= SCAN_REFILL_BATCH_SIZE`); partial batches stay in Import. Guard tests in `tests/test_import_batch_gate.py` (110 passed in relevant suites).
 - **Better multi-page learning: the user sees where they are in the learning curve (message 16)**:

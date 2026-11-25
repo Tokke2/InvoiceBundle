@@ -70,9 +70,9 @@ def test_auto_refill_is_removed_everywhere():
         "not self._rows and self._pending_scan_queue and not cancelled:\n"
         "            self._maybe_load_next_scan_batch()"
     ) not in src
-    # Tidigare fanns sju automatiska anrop — nu två: port-klikket
-    # och efter "Skapa fakturor" (användaren har markerat klart).
-    assert src.count("self._maybe_load_next_scan_batch()") == 2
+    # Tidigare fanns sju automatiska anrop — nu ett: tom-vyn-fetchet
+    # i port-klikket. All annan påfyllnad går via _top_up_scan_batch.
+    assert src.count("self._maybe_load_next_scan_batch()") == 1
     assert "def _load_next_scan_batch_clicked(self) -> None:" in src
     # _refresh_table uppdaterar porten (chokepoint)
     assert (
@@ -142,3 +142,36 @@ def test_tab_switch_only_when_full_batch_of_ten_is_bundled():
     assert "self._show_invoices_tab()" in src
     assert src.count("self._show_invoices_tab()") == 1
     assert "def _refresh_invoices_view_only" in src
+
+
+def test_import_pauses_at_ten_and_tops_up_as_you_go():
+    """Användarkrav (besked 18): importen avstannar när 10 lästs in
+    och fyller på allt eftersom raderna hanteras (rullande fönster)."""
+    src = _view_source()
+    assert "def _top_up_scan_batch" in src
+    # Deficit mot taket 10 — inget läses in när 10 ligger i vyn
+    assert "SCAN_REFILL_BATCH_SIZE - len(self._rows)" in src
+    assert "if deficit <= 0:" in src
+    # Paus under pågående skanning
+    assert (
+        'if getattr(self, "_scanning_files", False):\n'
+        "            return" in src
+    )
+    # Påfyllnadsspår: dialogbekräftelse, Skapa fakturor, radering + klick
+    assert src.count("self._top_up_scan_batch()") == 4
+    # Port-knappen aktiv när vyn är UNDER taket — inte bara när den är tom
+    assert "len(self._rows) < SCAN_REFILL_BATCH_SIZE" in src
+
+
+def test_watch_folders_keep_their_pause_and_refill():
+    """Bevakade mappar: batch à 10, påfyll först när batchen tömts."""
+    wf = (PROJECT_DIR / "ui" / "watch_folders.py").read_text(
+        encoding="utf-8"
+    )
+    assert "WATCH_INITIAL_BATCH_SIZE = 10" in wf
+    assert "WATCH_REFILL_BATCH_SIZE = 10" in wf
+    assert "fyll inte på nya köade filer förrän pågående batch tömts" in wf
+
+
+def test_changed_files_still_compile():
+    compile(_view_source(), str(VIEW), "exec")

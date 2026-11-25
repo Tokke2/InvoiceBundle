@@ -7202,6 +7202,55 @@ class ScanImportView(QWidget):
             return bool(req())
         return False
 
+    def _top_up_scan_batch(self) -> None:
+        """Påfyllnad allt eftersom: håller ≤ 10 fakturor i Import.
+
+        Importen avstannar när 10 lästs in (tak); för varje rad som
+        hanteras (matchad/skapad/raderad) hämtas nästa fil ur kön,
+        tills vyn är fylld till 10 igen. Pågår redan en skanning
+        görs inget — den rundan fyller på i sin tur. Tom kö med tom
+        vyn delegas till bevakade mappar som har egen pause/fyll.
+        """
+        if getattr(self, "_scanning_files", False):
+            return
+        queue = getattr(self, "_pending_scan_queue", None)
+        if not queue:
+            if not self._rows:
+                watch = getattr(self, "_watch", None)
+                req = getattr(watch, "request_next_batch", None)
+                if callable(req):
+                    req()
+            return
+        deficit = SCAN_REFILL_BATCH_SIZE - len(self._rows)
+        if deficit <= 0:
+            # Paus: 10 fakturor ligger redan i vyn.
+            return
+        batch = queue[:deficit]
+        del queue[:deficit]
+        try:
+            si = _scan_module()
+            ll = (
+                si._learning_logger()
+                if hasattr(si, "_learning_logger") else None
+            )
+            if ll is not None:
+                ll.log_batch_scan(
+                    mode="manual_files",
+                    batch_limit=SCAN_REFILL_BATCH_SIZE,
+                    scanned=len(batch),
+                    queued_remaining=len(queue),
+                    trigger="topup_as_you_go",
+                )
+        except Exception:
+            pass
+        if QApplication.instance() is not None:
+            QTimer.singleShot(
+                50,
+                lambda b=batch: self._run_scan_batch(b, trigger="topup"),
+            )
+        else:
+            self._run_scan_batch(batch, trigger="topup")
+
     def _update_next_batch_button(self) -> None:
         """Visar/aktiverar 'Hämta nästa 10' enligt batch-porten.
 
@@ -7217,7 +7266,7 @@ class ScanImportView(QWidget):
         visible = bool(queue)
         ready = (
             visible
-            and not self._rows
+            and len(self._rows) < SCAN_REFILL_BATCH_SIZE
             and not getattr(self, "_scanning_files", False)
         )
         btn.setVisible(visible)
@@ -7226,15 +7275,19 @@ class ScanImportView(QWidget):
     def _load_next_scan_batch_clicked(self) -> None:
         """Explicit port-klick: hämta nästa batch (max 10).
 
-        Blockeras så länge aktuella rader inte är matchade/markerade
-        klara och flyttade till Fakturor — statusraden talar om vad
-        som väntar.
+        Blockeras så länge vyn redan innehåller 10 fakturor (tak) —
+        annars fylls vyn på till 10 igen.
         """
-        if self._rows or getattr(self, "_scanning_files", False):
+        if getattr(self, "_scanning_files", False) or len(
+            self._rows
+        ) >= SCAN_REFILL_BATCH_SIZE:
             self._lbl_status.setText(tr("scan.batch_wait"))
             return
-        if self._maybe_load_next_scan_batch():
-            self._lbl_status.setText(tr("scan.batch_next_loaded"))
+        if not self._rows:
+            if self._maybe_load_next_scan_batch():
+                self._lbl_status.setText(tr("scan.batch_next_loaded"))
+        else:
+            self._top_up_scan_batch()
         self._update_next_batch_button()
 
     def _run_scan_batch(
@@ -8348,8 +8401,8 @@ class ScanImportView(QWidget):
             self._unpark_row(self._rows[i])
             self._rows.pop(i)
         self._refresh_table()
-        # Hård port: radering räknas inte som "klar" — nästa batch
-        # hämtas via "Hämta nästa 10".
+        # Raderad rad är hanterad — påfyllnad allt eftersom (≤ 10).
+        self._top_up_scan_batch()
 
     # ══════════════════════════════════════════════════════════════════
     #  RÄTTA I FAKTURADIALOGEN
@@ -8472,6 +8525,8 @@ class ScanImportView(QWidget):
                     # användaren arbetar vidare i Import tills batchen
                     # är hel (10) — bara Fakturors data uppdateras.
                     self._refresh_invoices_view_only()
+                    # Påfyllnad allt eftersom (≤ 10 i vyn).
+                    self._top_up_scan_batch()
         except Exception as exc:
             log.error("SCAN_OPEN_DIALOG: %s", exc, exc_info=True)
             QMessageBox.warning(
@@ -8805,9 +8860,9 @@ class ScanImportView(QWidget):
                 tr("scan.created_body", n=created, extra=""),
             )
             # Porten är nu uppfylld: användaren har matchat och
-            # markerat raderna klara och skapat fakturor — nästa
-            # batch (max 10) får flöda på automatiskt.
-            self._maybe_load_next_scan_batch()
+            # markerat raderna klara och skapat fakturor — påfyllnad
+            # allt eftersom, vyn hålls ≤ 10 (tak).
+            self._top_up_scan_batch()
             # Flikväxling bara när en hel batch (10 fakturor) bunts
             # ihop (användarkrav); annars stanna i Import — men
             # håll Fakturors data uppdaterad.
