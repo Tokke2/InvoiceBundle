@@ -837,7 +837,15 @@ def collect_errors(
     speglade fel som redan står i filen hoppas därför över när
     app.log skördas. Redan åtgärdade/rensade poster återinförs inte
     från gamla arkiv om de inte inträffat på nytt efter rensningen.
-    Returnerar {added, total, file}.
+
+    Själväkning: filen läses in som block och block med samma
+    normaliserade nyckel (samma tidsstämpel + rubrik oavsett om de
+    kommer från speglingen med ``(modul:rad)``-svans eller från en
+    skördad textlogg) räknas som samma händelse — bara första
+    förekomsten behålls. En fil som en äldre version svällt upp med
+    upprepade kopior städas därför vid nästa skörd, även om
+    auto-clean är avstängt. Returnerar {added, total, file,
+    removed_duplicates}.
     """
     root = Path(root or _ROOT)
     path = error_log_path(root)
@@ -854,8 +862,17 @@ def collect_errors(
         with _STATE_LOCK:
             state = _load_error_state(root)
         seen: set[str] = set()
-        for _key, block in _iter_error_blocks(existing):
-            seen.add(_key)
+        removed_duplicates = 0
+        deduped_existing: list[str] = []
+        for key, block in _iter_error_blocks(existing):
+            if key in seen:
+                # Samma händelse står redan i filen — äldre versioner
+                # kunde skriva både speglingsrad och skördad kopia.
+                removed_duplicates += 1
+                continue
+            seen.add(key)
+            deduped_existing.extend(block)
+        existing = deduped_existing
         fresh: list[str] = []
         error_events: list[dict[str, Any]] = []
         for src, kind in _source_logs(root):
@@ -903,10 +920,16 @@ def collect_errors(
             "added": len(fresh),
             "total": total,
             "file": str(path),
+            "removed_duplicates": removed_duplicates,
         }
     except Exception as exc:
         log.warning("collect_errors: %s", exc)
-        return {"added": 0, "total": 0, "file": str(path)}
+        return {
+            "added": 0,
+            "total": 0,
+            "file": str(path),
+            "removed_duplicates": 0,
+        }
 
 
 def error_summary(root: Path | None = None) -> dict[str, Any]:

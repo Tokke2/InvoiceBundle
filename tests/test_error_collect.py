@@ -602,3 +602,151 @@ def test_purge_and_auto_clean_removes_resolved_and_legacy_blocks_without_reimpor
     assert "ÅTERÖPPNAT | FB-" in _read(tmp_path)
     assert ec.error_summary(tmp_path)["open"] >= 1
 
+
+
+# ── Själväkning: gamla utsvämda felsamlingar städas vid skörd ───────
+
+
+def _legacy_components() -> tuple[str, str, str, str, str]:
+    """(speglad, skördad, statusrader, leverantörsfel, autostartfel).
+
+    Användarens felsamling från nov 2026: äldre versioner skrev både
+    speglingsraden (med ``(advanced_logger:447)``-svans och indenterad
+    traceback) och en skördad kopia (oindenterad traceback) vid varje
+    start — samma händelse flera gånger per tillfälle.
+    """
+    msg = (
+        "UNCAUGHT EXCEPTION: RuntimeError: libshiboken: Internal C++ "
+        "object (PySide6.QtWidgets.QLineEdit) already deleted."
+    )
+    tb_indented = (
+        "    Traceback (most recent call last):\n"
+        '      File "D:\\Program\\FakturaRäknaren\\plugins\\'
+        'advanced_logger.py", line 909, in _f\n'
+        "        f\"({len(e.text() or '')} tecken)\",\n"
+        "                ~~~~~~^^\n"
+        "    RuntimeError: libshiboken: Internal C++ object "
+        "(PySide6.QtWidgets.QLineEdit) already deleted."
+    )
+    tb_plain = (
+        "Traceback (most recent call last):\n"
+        '  File "D:\\Program\\FakturaRäknaren\\plugins\\'
+        'advanced_logger.py", line 909, in _f\n'
+        "    f\"({len(e.text() or '')} tecken)\",\n"
+        "            ~~~~~~^^\n"
+        "RuntimeError: libshiboken: Internal C++ object "
+        "(PySide6.QtWidgets.QLineEdit) already deleted."
+        "  (advanced_logger:447)"
+    )
+    mirror = (
+        f"2026-11-09T16:42:33 | CRITICAL | UncaughtException | {msg}"
+        "  (advanced_logger:447)\n" + tb_indented
+    )
+    harvested = (
+        f"2026-11-09T16:42:33 | CRITICAL | UncaughtException | {msg}\n"
+        + tb_plain
+    )
+    status = (
+        "2026-11-09T16:42:33 | ÖPPNAT | FB-5373629F8D | UncaughtException\n"
+        "2026-11-12T17:20:43 | TROLIGEN ÅTGÄRDAT (72 h utan ny träff) | "
+        "FB-5373629F8D | UncaughtException\n"
+        "2026-11-13T15:25:08 | TROLIGEN ÅTGÄRDAT (72 h utan ny träff) | "
+        "FB-7426487B70 | UncaughtException"
+    )
+    supplier_err = (
+        "2026-11-18T16:01:26 | CRITICAL | UncaughtException | UNCAUGHT "
+        "EXCEPTION: UnboundLocalError: cannot access local variable "
+        "'supplier' where it is not associated with a value"
+        "  (advanced_logger:494)\n"
+        "    Traceback (most recent call last):\n"
+        '      File "D:\\Program\\FakturaRäknaren\\ui\\scan_import_view.py",'
+        " line 5816, in _open_template_dialog\n"
+        "        if existing_name and existing_name != supplier:\n"
+        "                                              ^^^^^^^^\n"
+        "    UnboundLocalError: cannot access local variable 'supplier' "
+        "where it is not associated with a value"
+    )
+    autostart_err = (
+        "2026-11-16T08:06:35 | ERROR | FakturaApp | Windows autostart "
+        "nekad: genväg med appikon kunde inte skapas; ingen "
+        "Python/Run-post skrivs.  (app:1894)"
+    )
+    return mirror, harvested, status, supplier_err, autostart_err
+
+
+def _legacy_bloat_lines() -> list[str]:
+    """Samma fem block upprepat 12 gånger, som användarens fil."""
+    mirror, harvested, status, supplier_err, autostart_err = (
+        _legacy_components()
+    )
+    lines: list[str] = []
+    for _copy in range(12):
+        lines.extend((mirror, harvested, status, supplier_err,
+                      autostart_err))
+    return lines
+
+
+def test_collect_repairs_legacy_duplicated_journal(tmp_path):
+    """En utsvämd felsamling från en äldre version städas vid skörd.
+
+    Samma händelse (samma tidsstämpel + rubrik, oavsett om raden har
+    spegelns ``(modul:rad)``-svans eller skördens oindenterade
+    traceback) behålls bara EN gång — utan att auto-clean behöver vara
+    påslaget, och utan att historiken för olika tillfällen tappas.
+    """
+    import error_collect as ec
+
+    seed = _legacy_bloat_lines()
+    path = ec.error_log_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        ec._HEADER + "\n".join(seed) + "\n", encoding="utf-8"
+    )
+
+    report = ec.collect_errors(tmp_path)
+    assert report["added"] == 0
+    # 12 kopior × 7 block = 84, varav 6 unika (speglingsraden och den
+    # skörda kopian är samma händelse, statusraderna är 3 block) → 78.
+    assert report["removed_duplicates"] == 84 - 6
+
+    text = _read(tmp_path)
+    # En speglingsrad + en skördad kopia av samma händelse → en blockrad
+    assert text.count(
+        "| CRITICAL | UncaughtException | UNCAUGHT EXCEPTION: RuntimeError:"
+    ) == 1
+    assert text.count(
+        "Windows autostart nekad"
+    ) == 1
+    assert text.count(
+        "UnboundLocalError: cannot access local variable 'supplier'"
+    ) == 2  # rubrik + sista tracebackrad
+    for code, expected in (
+        ("FB-5373629F8D", 2),   # ÖPPNAT + TROLIGEN ÅTGÄRDAT
+        ("FB-7426487B70", 1),  # bara TROLIGEN ÅTGÄRDAT
+    ):
+        assert text.count(f"| {code} |") == expected
+
+    # Andra skörden är en ren no-op — filen växer aldrig igen
+    report2 = ec.collect_errors(tmp_path)
+    assert report2["added"] == 0
+    assert report2["removed_duplicates"] == 0
+    assert _read(tmp_path) == text
+
+
+def test_collect_leaves_clean_journal_untouched(tmp_path):
+    """En frisk felsamling utan dubbletter ändras inte av skörden."""
+    import error_collect as ec
+
+    mirror, _harvested, status, supplier_err, autostart_err = (
+        _legacy_components()
+    )
+    clean = [mirror, status, supplier_err, autostart_err]
+    path = ec.error_log_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = ec._HEADER + "\n".join(clean) + "\n"
+    path.write_text(original, encoding="utf-8")
+
+    report = ec.collect_errors(tmp_path)
+    assert report["added"] == 0
+    assert report["removed_duplicates"] == 0
+    assert _read(tmp_path) == original
