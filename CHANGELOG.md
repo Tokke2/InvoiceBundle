@@ -3,6 +3,8 @@
 ## Ej släppt / Unreleased
 
 ### Svenska
+- **Ingen flikväxling efter enkelmatchning i Import (besked 17)**:
+  - Efter matchning/bekräftelse av EN faktura i Import byter appen inte längre automatiskt till Fakturor — endast Fakturors data uppdateras i bakgrunden (`_refresh_invoices_view_only`). Flikväxling sker **endast när en hel batch (10 fakturor) bunts ihop** i en "Skapa fakturor"-vända (`created >= SCAN_REFILL_BATCH_SIZE`); delbatcher stannar i Import. Guard-tester i `tests/test_import_batch_gate.py` (110 passed i relevanta sviter).
 - **Bättre flersidig-inlärning: användaren ser var i inlärningen hen är (besked 16)**:
   - Ny statusnotis vid bekräftelse av flersidig faktura: "Flersidiga för {leverantör}: N av 2 bekräftelser — en till så släpper vakten automatiskt" (`scan.multipage_progress`) och whenoavträdande meddelande när vakten släppt (`scan.multipage_graduated`). Tröskeln läses från `MULTIPAGE_CONFIRMATIONS_TO_GRADUATE` (ingen hårdkodning). Logotypflödet (markera → dhash → matcha) och kreditbärningen (remaining_amount mellan omgångar) bedömda slutna — förbättringar kommer som nya förslag vid milstolpe 20.
 - **Lärande, logotyper och kreditsaldo verifierade + låsta med tester (besked 15)**:
@@ -135,6 +137,8 @@
 - **Bättre leverantörsmatchning via fakturalogotyp** — sparade logotyper kan hittas även när de flyttats på PDF-sidan. Matchningsdialogen visar verkliga, beskurna logotyper från originalfakturan (inga monogram) och rankar den starkaste träffen först. Manuell matchning kan också öppna originalet för att markera logotypen; osäkra träffar kräver fortfarande användarens val.
 
 ### English
+- **No tab switch after a single match in Import (message 17)**:
+  - After matching/confirming ONE invoice in Import, the app no longer switches to Invoices automatically — only Invoices' data is refreshed in the background (`_refresh_invoices_view_only`). Tab switching happens **only when a full batch (10 invoices) is bundled** in one "Create invoices" action (`created >= SCAN_REFILL_BATCH_SIZE`); partial batches stay in Import. Guard tests in `tests/test_import_batch_gate.py` (110 passed in relevant suites).
 - **Better multi-page learning: the user sees where they are in the learning curve (message 16)**:
   - New status note when confirming a multi-page invoice: "Multi-page for {supplier}: N of 2 confirmations — one more and the guard passes automatically" (`scan.multipage_progress`) plus a distinct message once the guard has graduated (`scan.multipage_graduated`). The threshold is read from `MULTIPAGE_CONFIRMATIONS_TO_GRADUATE` (no hard-coding). The logo flow (mark → dhash → match) and the credit carryover (remaining_amount between rounds) judged complete — further improvements arrive as new proposals at milestone 20.
 - **Learning, logos and credit balance verified + locked with tests (message 15)**:

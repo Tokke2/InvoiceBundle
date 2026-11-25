@@ -8468,7 +8468,10 @@ class ScanImportView(QWidget):
                     # Hård port: dialogbekräftelse av EN rad öppnar
                     # inte porten — "Hämta nästa 10" styr.
                     self._update_next_batch_button()
-                    self._show_invoices_tab()
+                    # Ingen automatisk flikväxling (användarkrav):
+                    # användaren arbetar vidare i Import tills batchen
+                    # är hel (10) — bara Fakturors data uppdateras.
+                    self._refresh_invoices_view_only()
         except Exception as exc:
             log.error("SCAN_OPEN_DIALOG: %s", exc, exc_info=True)
             QMessageBox.warning(
@@ -8805,7 +8808,13 @@ class ScanImportView(QWidget):
             # markerat raderna klara och skapat fakturor — nästa
             # batch (max 10) får flöda på automatiskt.
             self._maybe_load_next_scan_batch()
-            self._show_invoices_tab()
+            # Flikväxling bara när en hel batch (10 fakturor) bunts
+            # ihop (användarkrav); annars stanna i Import — men
+            # håll Fakturors data uppdaterad.
+            if created >= SCAN_REFILL_BATCH_SIZE:
+                self._show_invoices_tab()
+            else:
+                self._refresh_invoices_view_only()
 
     def _invoice_data_from_row(
         self, row: dict, attachment: str | None = None

@@ -112,3 +112,33 @@ def test_i18n_batch_messages_mention_the_explicit_button():
 def test_view_module_compiles():
     compile(_view_source(), str(VIEW), "exec")
     compile(I18N.read_text(encoding="utf-8"), str(I18N), "exec")
+
+
+def test_no_tab_switch_after_single_match():
+    """Användarkrav (besked 17): efter matchning av EN faktura i Import
+    byter appen INTE till Fakturor — bara datan uppdateras."""
+    src = _view_source()
+    # Enkelradsvägen (dialogbekräftelse): uppdatera utan att byta flik
+    assert (
+        "self._update_next_batch_button()\n"
+        "                    # Ingen automatisk flikväxling (användarkrav):\n"
+        "                    # användaren arbetar vidare i Import tills batchen\n"
+        "                    # är hel (10) — bara Fakturors data uppdateras.\n"
+        "                    self._refresh_invoices_view_only()" in src
+    )
+
+
+def test_tab_switch_only_when_full_batch_of_ten_is_bundled():
+    """Flikväxling sker bara när en hel batch (10) skapats i en vända —
+    'dags att bunta ihop dom'; delbatcher stannar i Import."""
+    src = _view_source()
+    assert (
+        "if created >= SCAN_REFILL_BATCH_SIZE:\n"
+        "                self._show_invoices_tab()\n"
+        "            else:\n"
+        "                self._refresh_invoices_view_only()" in src
+    )
+    # Endast ETT anrop återstår — det villkorade (hel batch bunts ihop)
+    assert "self._show_invoices_tab()" in src
+    assert src.count("self._show_invoices_tab()") == 1
+    assert "def _refresh_invoices_view_only" in src
