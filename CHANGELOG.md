@@ -3,6 +3,8 @@
 ## Ej släppt / Unreleased
 
 ### Svenska
+- **UI-regel förfinad (besked 13): profil-underflik endast för appar med profiler**:
+  - AGENTS.md §5: appar som använder profiler ska ha en egen underflik i Inställningar för att skapa/hantera dem — appar utan profiler ska inte få en tom profilsida. Projektskaparens rulval (från ttk-versionen) ska finnas i appar med projektskapare. Guard-test tillagt.
 - **Hård regel: förslaglistor ska alltid skrivas i chatten (besked 12)**:
   - AGENTS.md §3 + ARBETSREGELER.md regel 5: en förslagsleverans utan full chattvisning bryter regeln — filen (`docs/FORSLAG-BATCH-<n>.md`) är bara arkiv. Gäller även listan "25 nya förslag som konkurrenterna saknar". Guard-test uppdaterat.
 - **Nya regler + UI-kolumnflytt (besked 11)**:
@@ -125,6 +127,8 @@
 - **Bättre leverantörsmatchning via fakturalogotyp** — sparade logotyper kan hittas även när de flyttats på PDF-sidan. Matchningsdialogen visar verkliga, beskurna logotyper från originalfakturan (inga monogram) och rankar den starkaste träffen först. Manuell matchning kan också öppna originalet för att markera logotypen; osäkra träffar kräver fortfarande användarens val.
 
 ### English
+- **UI rule refined (message 13): profile sub-tab only for apps using profiles**:
+  - AGENTS.md §5: apps that use profiles must have a dedicated settings sub-tab for creating/managing them — apps without profiles must not get an empty profile page. The project creator's box choice (from the ttk version) belongs in apps that have a project creator. Guard test added.
 - **Hard rule: proposal lists must always be written in chat (message 12)**:
   - AGENTS.md §3 + ARBETSREGELER.md rule 5: a proposal delivery without full chat display breaks the rule — the file (`docs/FORSLAG-BATCH-<n>.md`) is archive only. Also applies to the "25 proposals competitors lack" list. Guard test updated.
 - **New rules + UI column reordering (message 11)**:

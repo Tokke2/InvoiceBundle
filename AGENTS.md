@@ -78,6 +78,11 @@ detta repo. Vid ny app: byt bara profilen.
   `tests/test_ui_sharpness_and_responsiveness.py` (KPI 2×2 ≤ 920 px,
   HistoryView-stack < 820 px, responsiv verktygsrad ≤ 1024 px).
 * Bättre ikoner (vektorbiblioteket `ui/icons.py`) och design.
+* **Profiler:** appar som använder profiler ska ha en **egen
+  underflik i Inställningar** för att skapa/hantera dem — appar
+  utan profiler ska inte få en tom profilsida.
+* **Projektskaparen:** val av **ruta** (det val som fanns i
+  ttk-versionen) ska finnas i appar som har en projektskapare.
 * Skärpa: skarp HiDPI-rendering (DPR-medveten), tydlig text/font/
   bild/kolumn — aldrig grumlig.
 * Bättre minneshantering, snabbare, energisnålare.

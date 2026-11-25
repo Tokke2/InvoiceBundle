@@ -162,3 +162,15 @@ def test_error_log_holds_active_errors_and_archives_resolved():
     la = _read("plugins/log_archive.py")
     assert "ARCHIVE_RETENTION_DAYS = 7" in la
     assert "def prune_archive_logs(" in la
+
+
+def test_profile_subtab_only_for_profile_using_apps():
+    """Profil-underflik i Inställningar endast för appar med profiler;
+    rulvalet i projektskaparen (från ttk-versionen) ska finnas där
+    en projektskapare finns."""
+    t = _read("AGENTS.md")
+    assert "Profiler:" in t
+    assert "egen\n  underflik i Inställningar" in t
+    assert "utan profiler" in t
+    assert "Projektskaparen:" in t
+    assert "ttk-versionen" in t
