@@ -4526,6 +4526,20 @@ class ScanImportView(QWidget):
 
         btn_use.clicked.connect(_accept)
         buttons.addStretch()
+        # Användarkrav (besked 22): matchningen ska kunna binda
+        # till en MALL direkt — "Skapa mall…" öppnar mallredigeraren
+        # för den här raden; när mallen sparats matchar framtida
+        # flersidiga fakturor automatiskt utan den här frågan.
+        if str(row.get("_path", "") or "").strip():
+            btn_tmpl = QPushButton(tr("scan.match_create_template"))
+            bind_icon(btn_tmpl, "mark", size=14)
+
+            def _open_template_for_row() -> None:
+                dlg.reject()
+                self._open_template_dialog(row)
+
+            btn_tmpl.clicked.connect(_open_template_for_row)
+            buttons.addWidget(btn_tmpl)
         buttons.addWidget(btn_cancel)
         buttons.addWidget(btn_use)
         layout.addLayout(buttons)

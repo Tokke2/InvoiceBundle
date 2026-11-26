@@ -76,3 +76,27 @@ def test_i18n_keys_sv_en():
 def test_changed_files_still_compile():
     for path in (VIEW, I18N):
         compile(_src(path), str(path), "exec")
+
+
+def test_match_dialog_offers_template_creation():
+    """Användarkrav (besked 22): 'behöver matcha mot mall då' — dialogen
+    ska erbjuda 'Skapa mall för den här fakturan…' som öppnar mall-
+    redigeraren för raden; sparad mall → framtida auto-matchning."""
+    v = _src(VIEW)
+    assert '"scan.match_create_template"' in v
+    # Knappen öppnar mallredigeraren för just den raden
+    assert "self._open_template_dialog(row)" in v
+    # Endast när raden har en originalfil (mallmarkering kräver bild)
+    assert 'if str(row.get("_path", "") or "").strip():' in v
+    # Mallkedjan finns redan: bekräftelse → mallvariant sparas
+    assert "def _open_template_dialog(self, row: dict | None = None)" in v
+    assert "_ensure_verified_template_from_row" in v
+
+
+def test_template_create_i18n_sv_en():
+    import importlib
+
+    i18n = importlib.import_module("ui.i18n")
+    entry = i18n._STRINGS["scan.match_create_template"]
+    assert "Skapa mall" in entry["sv"]
+    assert "Create a template" in entry["en"]
