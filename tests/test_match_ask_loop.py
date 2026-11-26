@@ -100,3 +100,34 @@ def test_template_create_i18n_sv_en():
     entry = i18n._STRINGS["scan.match_create_template"]
     assert "Skapa mall" in entry["sv"]
     assert "Create a template" in entry["en"]
+
+
+def test_asks_try_all_saved_templates_first():
+    """Användarkrav (besked 23): matchningsfrågan testar ALLA sparade
+    mallar FÖRST — träff (exakt fakturanummer + belopp) löser raden
+    utan fråga; ingen träff → dialogen som vanligt."""
+    v = _src(VIEW)
+    assert "def _try_match_saved_templates(self, row: dict) -> bool:" in v
+    # Anropas i _ask_user_for_match före dialogen
+    assert (
+        "if self._try_match_saved_templates(row):\n"
+        "            self._lbl_status.setText(tr(" in v
+    )
+    # Går igenom ALLA mallar (hela dicten), inte bara radens leverantör
+    assert "for tname, tentry in templates.items():" in v
+    # Ankaret: exakt fakturanummer + belopp läses tillbaka
+    assert "found_nr != inv_nr or abs(want - got) > 0.005" in v
+    # Träff rensar osäkerheten (raden är användarens egen mall)
+    assert 'row.pop("match_uncertain", None)' in v
+    assert 'row["saved_template_resolved"] = True' in v
+    assert '"scan.saved_template_matched"' in v
+    assert "self._try_match_saved_templates(row)" in v
+
+
+def test_saved_template_matched_i18n_sv_en():
+    import importlib
+
+    i18n = importlib.import_module("ui.i18n")
+    entry = i18n._STRINGS["scan.saved_template_matched"]
+    assert "sparad mall" in entry["sv"]
+    assert "saved template" in entry["en"]

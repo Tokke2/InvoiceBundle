@@ -3,6 +3,8 @@
 ## Ej släppt / Unreleased
 
 ### Svenska
+- **Matchningsfrågan testar ALLA sparade mallar först (besked 23)**:
+  - Ny `_try_match_saved_templates` i Import-vyn: innan "Vilken leverantör/mall gäller?" visas prövas radens text mot **alla** sparade mallar; en variant som läser tillbaka **exakt fakturanummer + belopp** vinner (bäst antal fält), uppdaterar raden (leverantör/mall/fält ur etikettläsningen), rensar osäkerheten och frågan behövs inte — status: "Matchad av sparad mall '{template}' — ingen fråga behövdes". Ingen träff → dialogen som vanligt (med mallknappen från besked 22). Säkerheten: träffen är användarens egna mallar — aldrig en gissning; ofullständiga rader fortsätter att frågas/kompletteras. 2 nya tester (`tests/test_match_ask_loop.py`, 138 passed i relevanta sviter).
 - **Matchningsdialogen binder direkt till en mall (besked 22)**:
   - Ny knapp **"Skapa mall för den här fakturan…"** i dialogen "Vilken leverantör/mall gäller?" (för rader med originalbild): öppnar mallredigeraren för just den raden; när mallen sparats läses raden om med mallen → framtida fakturor från leverantören matchar **automatiskt mot mallen** utan frågan. Kedjan är komplett: bekräftelse → mallvariant sparas (`_ensure_verified_template_from_row`, max 15/leverantör) → mallträff gör flersidiga säkra + graduering. 2 nya tester (`tests/test_match_ask_loop.py`, 136 passed i relevanta sviter).
 - **Dubbletter arkiveras i `dubbletter/` + matchningsdialogen frågar inte om och om igen (besked 20–21)**:
@@ -148,6 +150,8 @@
 - **Bättre leverantörsmatchning via fakturalogotyp** — sparade logotyper kan hittas även när de flyttats på PDF-sidan. Matchningsdialogen visar verkliga, beskurna logotyper från originalfakturan (inga monogram) och rankar den starkaste träffen först. Manuell matchning kan också öppna originalet för att markera logotypen; osäkra träffar kräver fortfarande användarens val.
 
 ### English
+- **The match question tests ALL saved templates first (message 23)**:
+  - New `_try_match_saved_templates` in the Import view: before "Which supplier/template?" is shown, the row's text is tried against **all** saved templates; a variant that reads back **exactly invoice number + amount** wins (most fields read), updates the row (supplier/template/fields from label reading), clears the uncertainty and the question is unnecessary — status: "Matched by saved template '{template}' — no question needed". No hit → the dialog as usual (with the template button from message 22). Safety: the hit comes from the user's own templates — never a guess; incomplete rows still ask/complete. 2 new tests (`tests/test_match_ask_loop.py`, 138 passed in relevant suites).
 - **The match dialog binds directly to a template (message 22)**:
   - New button **"Create a template for this invoice…"** in the "Which supplier/template?" dialog (for rows with an original image): opens the template editor for that row; once the template is saved the row is re-read with it → future invoices from the supplier match **the template automatically** without the question. The chain is complete: confirmation → template variant saved (`_ensure_verified_template_from_row`, max 15/supplier) → template hit makes multi-page safe + graduation. 2 new tests (`tests/test_match_ask_loop.py`, 136 passed in relevant suites).
 - **Duplicates archived in `dubbletter/` + the match dialog no longer asked over and over (messages 20–21)**:

@@ -168,6 +168,14 @@ ROW_FG_MATCH_UNCERTAIN = ("#ffd9d6", "#8a1a12")
 ROW_FG_MATCH_SECURE = ("#d9f4e2", "#14532d")
 
 
+def _tentry_supplier(tname: str, templates: dict) -> str:
+    """Leverantörsnamnet för en sparad mall (fältet 'supplier')."""
+    entry = templates.get(tname) if isinstance(templates, dict) else None
+    if isinstance(entry, dict):
+        return str(entry.get("supplier", "") or "").strip()
+    return ""
+
+
 def _fmt_amount(value: float) -> str:
     """45546.0 → '45 546,00' (svenskt format)."""
     try:
@@ -4373,6 +4381,100 @@ class ScanImportView(QWidget):
         )
         return True
 
+    def _try_match_saved_templates(self, row: dict) -> bool:
+        """Testar mot ALLA sparade mallar FÖRE matchningsfrågan.
+
+        Användarkrav (besked 23): en osäker rad (t.ex. flersidig)
+        kan ofta läsas ändå av en redan sparad mall. Varje mall
+        prövas; en variant som läser tillbaka EXAKT fakturanummer
+        och belopp som raden visar vinner — det är användarens egna
+        mallar som talar, inte en gissning. Vid träff uppdateras
+        raden (leverantör, mall, fält ur etikettläsningen),
+        osäkerhetsflaggorna rensas och frågan behövs inte.
+        """
+        text = str(row.get("_text", "") or "")
+        inv_nr = str(row.get("invoice_number", "") or "").strip()
+        try:
+            want = abs(float(row.get("total_amount") or 0))
+        except (TypeError, ValueError):
+            want = 0.0
+        if not text or not inv_nr or want <= 0:
+            return False
+        si = _scan_module()
+        templates = self._get_templates()
+        learning = self._get_match_learning()
+        suppliers = self._suppliers()
+        path = str(row.get("_path", "") or "").strip()
+        best = None
+        best_score = -1
+        for tname, tentry in templates.items():
+            if not isinstance(tentry, dict):
+                continue
+            if not (
+                si.template_variants(tentry)
+                or si._template_has_core_fields(tentry)
+            ):
+                continue
+            try:
+                sel = si.select_supplier_template(
+                    text, tentry, path=path or None,
+                    match_learning=learning, supplier=str(tname),
+                )
+            except Exception:
+                continue
+            if sel.get("ambiguous") or not isinstance(
+                sel.get("variant"), dict
+            ):
+                continue
+            found = sel.get("found") or {}
+            found_nr = str(
+                found.get("invoice_number", "") or ""
+            ).strip()
+            try:
+                got = abs(float(found.get("total_amount") or 0))
+            except (TypeError, ValueError):
+                got = 0.0
+            if found_nr != inv_nr or abs(want - got) > 0.005:
+                continue
+            score = len(
+                [
+                    key for key in
+                    ("date", "due_date", "ocr", "total_amount")
+                    if str(found.get(key, "") or "").strip()
+                ]
+            )
+            if score > best_score:
+                best = (str(tname), sel["variant"], dict(found))
+                best_score = score
+        if best is None:
+            return False
+        tname, variant, found = best
+        supplier = str(
+            variant.get("supplier") or _tentry_supplier(tname, templates)
+            or tname
+        ).strip()
+        row["supplier"] = supplier or row.get("supplier") or tname
+        row["template"] = tname
+        for key in ("invoice_number", "total_amount", "date",
+                    "due_date", "ocr"):
+            value = found.get(key)
+            if value not in (None, ""):
+                row[key] = value
+        row["template_match"] = {
+            "status": "template", "template": tname,
+            "confirmed": True,
+            "reason": "saved_template_before_ask",
+        }
+        row.pop("match_uncertain", None)
+        row.pop("match_kind", None)
+        row.pop("match_reason", None)
+        row["saved_template_resolved"] = True
+        log.info(
+            "SCAN_IMPORT: %s matchad av sparad mall '%s' före "
+            "frågan", row.get("file", ""), tname,
+        )
+        return True
+
     def _ask_user_for_match(self, row: dict) -> bool:
         """Frågar användaren vilken leverantör/mall som gäller.
 
@@ -4384,6 +4486,15 @@ class ScanImportView(QWidget):
         if row.get("_scan_error"):
             return False
         if not row.get("match_uncertain"):
+            return True
+        # Användarkrav (besked 23): testa ALLA sparade mallar FÖRE
+        # frågan — en träff som läser tillbaka exakt fakturanummer +
+        # belopp är användarens egna mallar, inte en gissning.
+        if self._try_match_saved_templates(row):
+            self._lbl_status.setText(tr(
+                "scan.saved_template_matched",
+                template=str(row.get("template", "") or ""),
+            ))
             return True
         kind = str(row.get("match_kind") or "supplier").strip()
         candidates = self._match_candidate_names(row)
