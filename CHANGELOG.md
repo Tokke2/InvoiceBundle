@@ -3,6 +3,11 @@
 ## Ej släppt / Unreleased
 
 ### Svenska
+- **Dubbletter: EN mappnivå med årsundermappar — kapslingen dubbletter/dubbletter/… borttagen (besked 25)**:
+  - **Root-orsaken:** den strömmande skanningsuppräkningen rensade `arkiv` men inte `dubbletter/` → arkiverade filer lästes igen varje skanningsrunda och flyttades **ett steg djupare** varje gång (`dubbletter/dubbletter/dubbletter/…`, exakt som hittats på nätverksdisken). Nu rensar **alla tre** uppräkningarna (mappskanning, strömning, watcher-katalogvandring) `dubbletter/` som `Arkiv/`.
+  - **Ny struktur enligt önskan:** dubbletter arkiveras i **`dubbletter/<årsarkiv>/`** (fakturadatumets år, fallback mtime; "okänt-år" som sista utväg) — `archive_duplicate_copy(path, invoice_date)`.
+  - **Kapslingsvakt:** en fil som redan ligger under en `dubbletter/`-mapp flyttas **aldrig djupare** (vägen returneras oförändrad) — upprepade rundor kan aldrig bygga nya nivåer, även om något annat läser filerna.
+  - **`processed`-vägen uppdateras** efter arkiveringen i "redan bearbetat"-grenen (+`_save()`), så posten inte pekar på den gamla vägen. Exakt-dup-grenen skickar med fakturadatumet. 6 nya/uppdaterade funktionella tester (`tests/test_duplicate_archive.py`, 148 passed i relevanta sviter).
 - **Betalda fakturors original årssorterats efter fakturadatumets år (besked 24)**:
   - Ny Qt-fri hjälpfunktion `sort_paid_original_into_year_folder` (`ui/duplicate_archive.py`): originalet flyttas till **`Arkiv/<fakturadatumets år>/`** bredvid filen (fallback-år: filens ändringstid; namnkrockar → " (2)", " (3)" …). `app.py`: **`mark_paid`** (Markera betalda) och **`mark_exported_paid`** (efter lyckad export, även redan arkiverade poster) flyttar originalet + uppdaterar bilagevägen i registret/arkivet — med **återställning** av flytten om bilagevägen inte kan sparas; fel stoppar aldrig markeringen. Bevakningsmapparnas befintliga årsarkiv vid registrering (`<mapp>/<ÅÅÅÅ>/`) oförändrat. 6 funktionella tester i `tests/test_duplicate_archive.py` (143 passed i relevanta sviter).
 - **Matchningsfrågan testar ALLA sparade mallar först (besked 23)**:
@@ -152,6 +157,11 @@
 - **Bättre leverantörsmatchning via fakturalogotyp** — sparade logotyper kan hittas även när de flyttats på PDF-sidan. Matchningsdialogen visar verkliga, beskurna logotyper från originalfakturan (inga monogram) och rankar den starkaste träffen först. Manuell matchning kan också öppna originalet för att markera logotypen; osäkra träffar kräver fortfarande användarens val.
 
 ### English
+- **Duplicates: ONE folder level with year subfolders — the dubbletter/dubbletter/… nesting removed (message 25)**:
+  - **Root cause:** the streaming scan enumeration pruned `arkiv` but not `dubbletter/` → archived files were re-read every scan round and moved **one level deeper** each time (`dubbletter/dubbletter/dubbletter/…`, exactly as found on the network drive). Now **all three** enumerations (folder scan, streaming, watcher directory walk) prune `dubbletter/` like `Arkiv/`.
+  - **New structure as requested:** duplicates are archived in **`dubbletter/<year archive>/`** (the invoice date's year, fallback mtime; "okänt-år" as a last resort) — `archive_duplicate_copy(path, invoice_date)`.
+  - **Nesting guard:** a file already under a `dubbletter/` folder is **never moved deeper** (its path is returned unchanged) — repeated rounds can never build new levels, even if something else reads the files.
+  - **The `processed` path is updated** after archiving in the "already processed" branch (+`_save()`), so the record no longer points at the old path. The exact-dup branch passes the invoice date. 6 new/updated functional tests (`tests/test_duplicate_archive.py`, 148 passed in relevant suites).
 - **Paid invoices' originals sorted into year folders by the invoice date's year (message 24)**:
   - New Qt-free helper `sort_paid_original_into_year_folder` (`ui/duplicate_archive.py`): the original is moved to **`Arkiv/<invoice date's year>/`** next to the file (fallback year: file mtime; name collisions → " (2)", " (3)" …). `app.py`: **`mark_paid`** (Mark paid) and **`mark_exported_paid`** (after a successful export, incl. already-archived records) move the original + update the attachment path in the registry/archive — with **rollback** of the move if the path cannot be persisted; errors never stop the marking. Watched folders' existing year-archive at registration (`<folder>/<YYYY>/`) unchanged. 6 functional tests in `tests/test_duplicate_archive.py` (143 passed in relevant suites).
 - **The match question tests ALL saved templates first (message 23)**:

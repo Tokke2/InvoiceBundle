@@ -2,7 +2,7 @@
   "version": 1,
   "rule": "Varje 10:e användarbesked i sessionen utlöser en förslagslista med 10 nya förslag som ALDRIG återbrukar tidigare levererade förslag.",
   "milestone_every": 10,
-  "user_messages_so_far": 24,
+  "user_messages_so_far": 25,
   "next_milestone": 30,
   "next_batch_id": 4,
   "next_proposal_id": 46,

@@ -37,8 +37,10 @@ def test_duplicate_moves_into_own_subfolder(tmp_path):
     dest = archive_duplicate_copy(original)
     assert dest, "flytten misslyckades"
     dest_path = Path(dest)
-    assert dest_path.parent.name == DUPLICATE_FOLDER_NAME == "dubbletter"
-    assert dest_path.parent.parent == tmp_path
+    # dubbletter/<årsarkiv>/ (besked 25) — årsfallet: filens mtime
+    assert dest_path.parent.parent.name == DUPLICATE_FOLDER_NAME
+    assert dest_path.parent.name.isdigit()
+    assert dest_path.parent.parent.parent == tmp_path
     assert not original.exists()
     assert dest_path.read_bytes() == b"duplikatinnehall"
 
@@ -69,7 +71,7 @@ def test_folder_is_created_when_missing(tmp_path):
     src.parent.mkdir(parents=True)
     src.write_text("x")
     dest = Path(archive_duplicate_copy(src))
-    assert dest.parent == src.parent / "dubbletter"
+    assert dest.parent.parent == src.parent / "dubbletter"
     assert dest.exists()
 
 
@@ -78,15 +80,15 @@ def test_folder_is_created_when_missing(tmp_path):
 
 def test_watch_flow_archives_both_duplicate_paths():
     t = _src(WATCH)
-    # Hash-dubblett ("redan bearbetad") → arkiveras
-    assert (
-        "self._archive_duplicate_copy(path)\n"
-        "                self._scan_stats[\"already\"] += 1" in t
-    )
+    # Hash-dubblett ("redan bearbetad") → arkiveras, processed-
+    # vägen uppdateras (besked 25)
+    assert 'info["path"] = dest' in t
+    assert 'self._scan_stats["already"] += 1' in t
     # Exakt faktura-dubblett: registrerat original → Arkiv-backsort,
     # KOPIA → dubbletter/
     assert "if exact_attachment:" in t
-    assert "self._archive_duplicate_copy(path) or str(path)" in t
+    assert 'str(parsed.get("date", "") or "")' in t
+    assert ") or str(path)" in t
 
 
 def test_duplicate_subfolder_is_never_rescanned():
@@ -167,3 +169,64 @@ def test_mark_paid_flows_sort_the_original_by_year():
     mod = _src(PROJECT_DIR / "ui" / "duplicate_archive.py")
     assert "PAID_ARCHIVE_FOLDER_NAME = \"Arkiv\"" in mod
     assert "def sort_paid_original_into_year_folder(" in mod
+
+
+# ── Ingen kapsling + årsundermapp (användarkrav, besked 25) ─────────
+
+
+def test_duplicates_go_to_year_subfolder_not_nested(tmp_path):
+    f = tmp_path / "kopia.pdf"
+    f.write_bytes(b"dup")
+    dest = Path(archive_duplicate_copy(f, "2021-05-01"))
+    # EN dubbletter/-nivå med årsundermapp — aldrig dubbletter/dubbletter
+    assert dest.parent == tmp_path / "dubbletter" / "2021"
+
+
+def test_duplicate_already_in_folder_is_never_moved_deeper(tmp_path):
+    deep = tmp_path / "dubbletter" / "dubbletter" / "dubbletter"
+    deep.mkdir(parents=True)
+    f = deep / "kopia.pdf"
+    f.write_bytes(b"redan arkiverad")
+    dest = archive_duplicate_copy(f)
+    # Vakten: filen ligger redan under dubbletter/ → ingen ny flytt,
+    # ingen ny nivå — exakt den kapsling användaren hittade.
+    assert Path(dest) == f
+    assert f.exists()
+    assert not (tmp_path / "dubbletter" / "dubbletter" / "dubbletter"
+                / "dubbletter").exists()
+
+
+def test_duplicate_year_falls_back_to_mtime(tmp_path):
+    f = tmp_path / "k.pdf"
+    f.write_bytes(b"x")
+    dest = Path(archive_duplicate_copy(f))
+    assert dest.parent.name in {
+        str(datetime.date.today().year),
+        str(datetime.date.today().year - 1),
+    }
+
+
+def test_scan_enumerations_skip_the_duplicate_folder():
+    """Root-oraken: båda skanningsuppräkningarna ska rensa
+    dubbletter/ (som Arkiv/) — annars läses arkiverade filer igen
+    varje runda och flyttas djupare."""
+    wf = _src(WATCH)
+    assert wf.count(
+        'not in ("arkiv", DUPLICATE_FOLDER_NAME)'
+    ) == 3  # mappskanning, strömning, watcher-vandring
+
+
+def test_already_branch_updates_processed_path_after_move():
+    """Efter arkiveringen uppdateras processed[hash]['path'] — annars
+    pekar posten på den gamla vägen och filen behandlas om och om."""
+    wf = _src(WATCH)
+    assert (
+        'info["path"] = dest\n'
+        "                        info[\"file\"] = Path(dest).name" in wf
+    )
+    assert "self._save()" in wf
+    # Exakt-dup-grenen skickar med fakturadatumet
+    assert (
+        "self._archive_duplicate_copy(\n"
+        "                        path, str(parsed.get(\"date\", \"\") or \"\")"
+    ) in wf

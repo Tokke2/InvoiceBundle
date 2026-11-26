@@ -78,17 +78,41 @@ def sort_paid_original_into_year_folder(
         return ""
 
 
-def archive_duplicate_copy(path: Path | str) -> str:
-    """Flyttar en dubblettkopia till undermappen ``dubbletter/``.
+def _inside_duplicate_folder(src: Path) -> bool:
+    """Sant när filen redan ligger under en dubbletter/-mapp."""
+    return any(
+        part.lower() == DUPLICATE_FOLDER_NAME for part in src.parts[:-1]
+    )
 
-    Filen flyttas till en undermapp bredvid sig själv (skapas vid
-    behov). Namnkrockar löses med `` (2)``, `` (3)`` … så ingen fil
-    någonsin skrivs över. Vid fel stannar filen kvar och returneras
-    "" (uppringaren behåller då tidigare beteende: hoppa över, logga).
+
+def archive_duplicate_copy(
+    path: Path | str, invoice_date: str = "",
+) -> str:
+    """Flyttar en dubblettkopia till ``dubbletter/<årsarkiv>/``.
+
+    Användarkrav (besked 25): EN dubbletter/-mapp per nivå, med
+    årsundermappar (``dubbletter/<fakturadatumets år>/``) — aldrig
+    kapslade ``dubbletter/dubbletter/…``. Ligger filen redan under
+    en dubbletter/-mapp görs INGEN ny flytt (den är redan arkiverad;
+    vägen returneras oförändrad) — därmed kan upprepade skannings-
+    rundor aldrig flytta den djupare. Året = fakturadatumets år
+    (fallback: filens ändringstid). Namnkrockar löses med
+    `` (2)``, `` (3)`` … så ingen fil någonsin skrivs över. Vid fel
+    stannar filen kvar och returneras "".
     """
     src = Path(path)
+    if _inside_duplicate_folder(src):
+        # Redan arkiverad — flytta ALDRIG djupare (besked 25).
+        logger.debug(
+            "Dubbletten %s är redan arkiverad — lämnas oförändrad",
+            src,
+        )
+        return str(src)
     try:
-        dest_dir = src.parent / DUPLICATE_FOLDER_NAME
+        year = paid_archive_year(invoice_date, src)
+        if not year.isdigit() or not 1900 <= int(year) <= 9999:
+            year = "okänt-år"
+        dest_dir = src.parent / DUPLICATE_FOLDER_NAME / year
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / src.name
         counter = 2
