@@ -8,6 +8,7 @@ sig själv. Funktionella tester (Qt-fri modul ui/duplicate_archive.py)
 
 from __future__ import annotations
 
+import datetime
 import sys
 from pathlib import Path
 
@@ -16,6 +17,7 @@ sys.path.insert(0, str(PROJECT_DIR))
 
 from ui.duplicate_archive import (  # noqa: E402
     DUPLICATE_FOLDER_NAME,
+    sort_paid_original_into_year_folder,
     archive_duplicate_copy,
 )
 
@@ -101,3 +103,67 @@ def test_watch_flow_imports_the_qt_free_helper():
     t = _src(WATCH)
     assert "from ui.duplicate_archive import" in t
     assert "from duplicate_archive import" in t
+
+
+# ── Betalda original i årsmappar (användarkrav, besked 24) ──────────
+
+
+def test_paid_original_lands_in_year_folder_by_invoice_date(tmp_path):
+    original = tmp_path / "faktura2794.pdf"
+    original.write_bytes(b"betalad")
+    dest = sort_paid_original_into_year_folder(
+        original, "2021-03-17"
+    )
+    assert dest, "flytten misslyckades"
+    dest_path = Path(dest)
+    assert dest_path.parent == tmp_path / "Arkiv" / "2021"
+    assert not original.exists()
+    assert dest_path.read_bytes() == b"betalad"
+
+
+def test_paid_original_year_falls_back_to_mtime(tmp_path):
+    original = tmp_path / "f.pdf"
+    original.write_bytes(b"x")
+    dest = sort_paid_original_into_year_folder(original, "")
+    assert Path(dest).parent.name in {
+        str(datetime.date.today().year),
+        str(datetime.date.today().year - 1),
+    }
+
+
+def test_paid_original_bad_date_and_missing_file_are_noops(tmp_path):
+    src = tmp_path / "g.pdf"
+    assert sort_paid_original_into_year_folder(src, "2021-03-17") == ""
+    src.write_bytes(b"x")
+    # Ogiltigt datum + oläsbar mtime-fallback är osannolikt, men
+    # ogiltigt datum med läsbart datum → mtime-år; filen som saknas
+    # ska aldrig krascha:
+    assert sort_paid_original_into_year_folder(
+        tmp_path / "saknas.pdf", "2021-03-17"
+    ) == ""
+
+
+def test_paid_original_collisions_never_overwrite(tmp_path):
+    paths = []
+    for i in range(2):
+        f = tmp_path / "samma.pdf"
+        f.write_bytes(bytes([i]))
+        paths.append(sort_paid_original_into_year_folder(f, "2020-01-01"))
+    folder = tmp_path / "Arkiv" / "2020"
+    assert sorted(p.name for p in folder.iterdir()) == [
+        "samma (2).pdf", "samma.pdf",
+    ]
+
+
+def test_mark_paid_flows_sort_the_original_by_year():
+    app_src = _src(PROJECT_DIR / "app.py")
+    assert "def _sort_paid_original(" in app_src
+    assert "_sort_paid_fn is None or not isinstance(rec, dict)" in app_src
+    # Båda betalda-flödena: mark_paid (1) + mark_exported_paid (2)
+    assert app_src.count("self._sort_paid_original(") == 3
+    assert "self._archive.update(rid, data)" in app_src
+    # Återställning om bilagevägen inte kan sparas
+    assert "os.replace(new_path, str(src))" in app_src
+    mod = _src(PROJECT_DIR / "ui" / "duplicate_archive.py")
+    assert "PAID_ARCHIVE_FOLDER_NAME = \"Arkiv\"" in mod
+    assert "def sort_paid_original_into_year_folder(" in mod

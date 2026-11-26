@@ -50,6 +50,18 @@ import threading
 import time
 import uuid
 from pathlib import Path
+
+try:  # Arkiv-hjälp (Qt-fri): dubbletter/ + årsmappar för betalda original
+    from ui.duplicate_archive import (
+        sort_paid_original_into_year_folder as _sort_paid_fn,
+    )
+except ImportError:  # fristående körning utan ui-paketet
+    try:
+        from duplicate_archive import (
+            sort_paid_original_into_year_folder as _sort_paid_fn,
+        )
+    except ImportError:  # pragma: no cover
+        _sort_paid_fn = None
 from typing import Any, Callable
 
 # ═════════════════════════════════════════════════════════════════════
@@ -3404,18 +3416,77 @@ class InvoiceEngine:
 
     # ── Statusändringar ──────────────────────────────────────────────────
 
+    def _sort_paid_original(
+        self, rid: str, rec: dict, *, archived: bool = False,
+    ) -> None:
+        """Betalda fakturors original årssorteras efter
+        fakturadatumets år (användarkrav, besked 24):
+        Arkiv/<YYYY>/ bredvid filen. Fel får aldrig stoppa
+        markeringen — bilagevägen uppdateras i registret (med
+        återställning om den inte kan sparas)."""
+        if _sort_paid_fn is None or not isinstance(rec, dict):
+            return
+        att = str(rec.get("attachment", "") or "").strip()
+        if not att:
+            return
+        src = Path(att)
+        if not src.is_file():
+            return
+        new_path = _sort_paid_fn(
+            src, str(rec.get("date", "") or "")
+        )
+        if not new_path:
+            return
+        try:
+            if Path(new_path).resolve() == src.resolve():
+                return
+            data = {"attachment": new_path}
+            updated = (
+                self._archive.update(rid, data)
+                if archived
+                else self.update(rid, data)
+            )
+            if not updated:
+                raise RuntimeError(
+                    "attachment path was not persisted"
+                )
+            log.info(
+                "Betalda fakturans original årssorterat %s -> %s",
+                src, new_path,
+            )
+        except Exception as exc:
+            log.error(
+                "mark_paid: bilageväg kunde inte uppdateras %s: %s",
+                new_path, exc,
+            )
+            try:
+                os.replace(new_path, str(src))
+                log.info("Originalflytt rullad tillbaka: %s", src)
+            except Exception as exc2:
+                log.error(
+                    "Återställning av original misslyckades: %s", exc2,
+                )
+
     def mark_paid(self, ids: list[str], payment_date: str = "") -> int:
         """Markerar betalda + sätter betalningsdatum. Posten
         STANNAR i huvudfilen tills den exporteras — flytten till
         leverantörsfilen (data/betalda/) sker först vid export
         (då med status Betald via mark_exported_paid). Markera
         betald ensam flyttar alltså aldrig posten ur
-        huvudregistret."""
+        huvudregistret. Originalbilagan årssorteras dock direkt
+        (Arkiv/<fakturadatumets år>/) enligt användarkrav."""
         date = payment_date or datetime.date.today().isoformat()
         count = 0
         for rid in ids:
-            if self.update(rid, {"status": "Betald", "payment_date": date}):
-                count += 1
+            rec = self._store.get(rid)
+            if rec is None:
+                continue
+            if not self.update(
+                rid, {"status": "Betald", "payment_date": date}
+            ):
+                continue
+            count += 1
+            self._sort_paid_original(rid, rec)
         return count
 
     def mark_archived(self, ids: list[str]) -> int:
@@ -3447,12 +3518,16 @@ class InvoiceEngine:
         for rid in ids:
             rec = self._store.get(rid)
             if rec is None:
-                if self._archive.get(rid) is not None:
+                arch_rec = self._archive.get(rid)
+                if arch_rec is not None:
                     self._archive.update(
                         rid,
                         {"status": "Betald", "payment_date": date},
                     )
                     count += 1
+                    self._sort_paid_original(
+                        rid, dict(arch_rec), archived=True
+                    )
                 continue
             moved = dict(rec)
             moved["status"] = "Betald"
@@ -3461,6 +3536,7 @@ class InvoiceEngine:
             self._archive.move_in(moved)
             self._store.delete(rid)
             count += 1
+            self._sort_paid_original(rid, moved, archived=True)
         return count
 
     def restore_from_archive(self, ids: list[str]) -> int:
