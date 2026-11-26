@@ -4625,6 +4625,19 @@ class FakturaApp:
     def update_invoice(self, record_id: str, data: dict) -> dict | None:
         return self.invoices.update(record_id, data)
 
+    def relocate_invoice_attachment(
+        self, record_id: str, new_path: str,
+    ) -> bool:
+        """Uppdaterar bilagevägen för en faktura i huvudfilen ELLER
+        arkivet (besked 27: självhelning före export). Retunerar
+        True när någon post uppdaterades med den nya vägen."""
+        data = {"attachment": str(new_path or "")}
+        if self.invoices.update(record_id, data):
+            return True
+        if self._archive.get(record_id) is not None:
+            return bool(self._archive.update(record_id, data))
+        return False
+
     def delete_invoice(self, record_id: str) -> bool:
         return self.invoices.delete(record_id)
 

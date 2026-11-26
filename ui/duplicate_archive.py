@@ -44,6 +44,55 @@ def paid_archive_year(invoice_date: str, path: Path) -> str:
         return ""
 
 
+def find_moved_original(
+    raw: str, extra_roots: "list[Path] | tuple[Path, ...]" = (),
+    max_dirs: int = 400,
+) -> str:
+    """Hittar ett original som flyttats (t.ex. till Arkiv/<år>/).
+
+    Användarkrav (besked 27): när "inkludera original" är valt ska
+    ALLA original följa med i exporten. Om den sparade bilagevägen
+    inte längre finns (filen årssorterad, omkopplad disk) söks
+    filnamnet upp under:
+      1. den sparade vägens mappträd (t.ex. .../Arkiv/2021/),
+      2. övriga medföljande raders bilagemappar (arkivrötterna),
+    i den ordningen, begränsat till ``max_dirs`` kataloger. Returnerar
+    den första träffen ("" om ingen) — uppringaren spårar vägen.
+    """
+    src = Path(str(raw or "").strip())
+    if not src.name or src.is_file():
+        return str(src) if src.is_file() else ""
+    search_roots: list[Path] = [src.parent]
+    search_roots.extend(Path(str(r)) for r in extra_roots)
+    seen_dirs: set[Path] = set()
+    checked = 0
+    for root in search_roots:
+        if not root.is_dir():
+            continue
+        stack = [root]
+        while stack and checked < max_dirs:
+            current = stack.pop(0)
+            try:
+                resolved = current.resolve()
+            except OSError:
+                continue
+            if resolved in seen_dirs:
+                continue
+            seen_dirs.add(resolved)
+            checked += 1
+            try:
+                for child in sorted(current.iterdir()):
+                    if child.is_file() and child.name == src.name:
+                        return str(child)
+                    if child.is_dir() and child.name.lower() not in (
+                        "dubbletter",
+                    ):
+                        stack.append(child)
+            except OSError:
+                continue
+    return ""
+
+
 def sort_paid_original_into_year_folder(
     path: Path | str, invoice_date: str = "",
 ) -> str:

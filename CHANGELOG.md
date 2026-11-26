@@ -3,6 +3,9 @@
 ## Ej släppt / Unreleased
 
 ### Svenska
+- **ALLA original följer exporten när 'inkludera original' är valt (besked 27)**:
+  - Ny Qt-fri återhämtnings-sökning `find_moved_original` (`ui/duplicate_archive.py`): sparad bilageväg som inte längre finns (filen årssorterad till `Arkiv/<år>/`, omkopplad disk) söks upp under den gamla mappen och övriga raders arkivmappar (begränsat till 400 kataloger; `dubbletter/`-träd hoppas över).
+  - **Självhelning:** vyns nya `_ensure_export_originals` körs före exporten när original ingår — återfunna filer bifogas **och** registret uppdateras via nya `app.relocate_invoice_attachment` (huvudfil ELLER arkiv), så nästa export hittar dem direkt. Status: "{n} original återfunna (filen flyttad) och registret uppdaterat". Saknas fortfarande original rapporteras antalet tydligt i status + resultatdialogen (befintligt beteende). 6 nya funktionella tester (`tests/test_duplicate_archive.py`, 156 passed i relevanta sviter).
 - **Exportmarkeringen ännu enklare: synlig räknare 'Markerade: n av 10' (besked 26)**:
   - Kryssmarkeringen i Fakturor (kryssruta per rad, ☑-kolumn, 'Markera visade'/'Avmarkera', live-summering med faktura-/kredit-/nettosummor, tak 10) fick nu en **synlig räknare** i summeringsrubriken: 'Markerade: {n} av {cap} — avmarkera för att byta urval' (fallback 'Markerade:' när inget är valt). Guard-tester uppdaterade (`tests/test_export_mark_limit.py`, 150 passed i relevanta sviter).
 - **Dubbletter: EN mappnivå med årsundermappar — kapslingen dubbletter/dubbletter/… borttagen (besked 25)**:
@@ -159,6 +162,9 @@
 - **Bättre leverantörsmatchning via fakturalogotyp** — sparade logotyper kan hittas även när de flyttats på PDF-sidan. Matchningsdialogen visar verkliga, beskurna logotyper från originalfakturan (inga monogram) och rankar den starkaste träffen först. Manuell matchning kan också öppna originalet för att markera logotypen; osäkra träffar kräver fortfarande användarens val.
 
 ### English
+- **ALL originals follow the export when 'include originals' is chosen (message 27)**:
+  - New Qt-free recovery search `find_moved_original` (`ui/duplicate_archive.py`): a saved attachment path that no longer exists (file year-archived to `Arkiv/<year>/`, changed drive) is searched under the old folder and the other rows' archive folders (bounded to 400 directories; `dubbletter/` trees skipped).
+  - **Self-healing:** the view's new `_ensure_export_originals` runs before the export when originals are included — relocated files are attached **and** the registry is updated via the new `app.relocate_invoice_attachment` (main store OR archive), so the next export finds them immediately. Status: "{n} originals relocated (file moved) and the registry updated". Originals still missing are reported clearly in the status + result dialog (existing behaviour). 6 new functional tests (`tests/test_duplicate_archive.py`, 156 passed in relevant suites).
 - **Export marking even easier: a visible 'Marked: n of 10' counter (message 26)**:
   - The checkbox marking in Invoices (per-row checkbox, ☑ column, 'Select shown'/'Clear', live summary with invoice/credit/net totals, cap 10) now got a **visible counter** in the summary header: 'Marked: {n} of {cap} — unmark to change the selection' (fallback 'Selected:' when nothing is chosen). Guard tests updated (`tests/test_export_mark_limit.py`, 150 passed in relevant suites).
 - **Duplicates: ONE folder level with year subfolders — the dubbletter/dubbletter/… nesting removed (message 25)**:

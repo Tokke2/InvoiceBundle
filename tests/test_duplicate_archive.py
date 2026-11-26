@@ -17,6 +17,7 @@ sys.path.insert(0, str(PROJECT_DIR))
 
 from ui.duplicate_archive import (  # noqa: E402
     DUPLICATE_FOLDER_NAME,
+    find_moved_original,
     sort_paid_original_into_year_folder,
     archive_duplicate_copy,
 )
@@ -230,3 +231,72 @@ def test_already_branch_updates_processed_path_after_move():
         "self._archive_duplicate_copy(\n"
         "                        path, str(parsed.get(\"date\", \"\") or \"\")"
     ) in wf
+
+
+# ── Återhämtnings-sökning: alla original följer exporten (besked 27) ─
+
+
+def test_find_moved_original_locates_year_archived_file(tmp_path):
+    src = tmp_path / "faktura2794.pdf"
+    src.write_bytes(b"original")
+    moved = Path(sort_paid_original_into_year_folder(src, "2021-03-17"))
+    assert moved.is_file()
+    # Den gamla vägen är borta — sökningen hittar filen i årsmappen
+    assert find_moved_original(str(src)) == str(moved)
+
+
+def test_find_moved_original_uses_extra_roots(tmp_path):
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    (root_b / "Arkiv" / "2019").mkdir(parents=True)
+    f = root_b / "Arkiv" / "2019" / "inv.pdf"
+    f.write_bytes(b"x")
+    src = root_a / "inv.pdf"
+    # Filen ligger INTE under src.parent — hittas via extra rot
+    assert find_moved_original(str(src), [root_b]) == str(f)
+
+
+def test_find_moved_original_skips_duplicate_folders(tmp_path):
+    nested = tmp_path / "dubbletter" / "f.pdf"
+    nested.parent.mkdir()
+    nested.write_bytes(b"x")
+    src = tmp_path / "f.pdf"
+    src.write_bytes(b"x")
+    # dubbletter/-träd hoppas över: endast originalet matchas
+    assert find_moved_original(str(src)) == str(src)
+
+
+def test_find_moved_original_is_bounded(tmp_path):
+    # Djup trä + många kataloger avslutas utan att hänga sig
+    deep = tmp_path / "d0"
+    cur = deep
+    for i in range(12):
+        cur = cur / f"n{i}"
+        cur.mkdir(parents=True, exist_ok=True)
+        for j in range(8):
+            (cur / f"m{j}").mkdir(exist_ok=True)
+    assert find_moved_original(str(tmp_path / "saknas.pdf"), [deep]) == ""
+
+
+def test_relocate_and_pre_pass_are_wired():
+    """app.relocate_invoice_attachment (huvudfil ELLER arkiv) + vyns
+    _ensure_export_originals anropas före export när original ingår."""
+    app_src = _src(PROJECT_DIR / "app.py")
+    assert "def relocate_invoice_attachment(" in app_src
+    assert "self.invoices.update(record_id, data)" in app_src
+    assert "self._archive.update(record_id, data)" in app_src
+    view = _src(PROJECT_DIR / "ui" / "invoices_view.py")
+    assert "def _ensure_export_originals(self, rows: list[dict]) -> int:" in view
+    assert "if self._include_originals():" in view
+    assert 'settlement["export_rows"]' in view
+    assert "relocate_invoice_attachment" in view
+    assert '"invoices.originals_relocated"' in view
+
+
+def test_originals_relocated_i18n_sv_en():
+    import importlib
+
+    i18n = importlib.import_module("ui.i18n")
+    entry = i18n._STRINGS["invoices.originals_relocated"]
+    assert "återfunna" in entry["sv"]
+    assert "relocated" in entry["en"]

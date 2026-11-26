@@ -172,6 +172,16 @@ except ImportError:
     )
 
 try:
+    from ui.duplicate_archive import find_moved_original
+except ImportError:  # fristående körning
+    try:
+        from duplicate_archive import (  # type: ignore[no-redef]
+            find_moved_original,
+        )
+    except ImportError:  # pragma: no cover
+        find_moved_original = None
+
+try:
     from ui.design import (
         CONTROL_RADIUS_PX, FOCUS_RING_PX, FlowLayout, ICON_HEADER_PX,
         PANEL_RADIUS_PX, TABLE_CELL_PADDING_COMPACT_PX,
@@ -4602,6 +4612,64 @@ class InvoicesView(QWidget):
             confirm_title=tr("invoices.export_selected_title"),
         )
 
+    def _ensure_export_originals(self, rows: list[dict]) -> int:
+        """Ser till att ALLA original följer med när "inkludera
+        original" är valt (användarkrav, besked 27).
+
+        En sparad bilageväg som inte längre finns (filen årssorterad
+        till Arkiv/<år>/, omkopplad disk) söks upp: först under den
+        gamla mappen, sedan under övriga raders arkivmappar. Hittas
+        filen uppdateras registret (självhelning) och raden, så
+        exporten bifogar den. Returnerar antalet återfunna.
+        """
+        if find_moved_original is None:
+            return 0
+        rel_ok = 0
+        search_roots: list[Path] = []
+        for row in rows:
+            raw = Path(str(row.get("attachment", "") or "").strip())
+            if raw.is_dir():
+                search_roots.append(raw)
+            elif raw.parent.is_dir():
+                search_roots.append(raw.parent)
+        seen_roots: set[Path] = set()
+        search_roots = [
+            r for r in search_roots
+            if not (r.resolve() in seen_roots or seen_roots.add(r.resolve()))
+        ]
+        for row in rows:
+            raw = str(row.get("attachment", "") or "").strip()
+            if not raw:
+                continue
+            candidate = Path(raw)
+            if not candidate.is_absolute():
+                candidate = Path(".") / candidate
+            if candidate.is_file():
+                continue
+            found = find_moved_original(raw, tuple(search_roots))
+            if not found or Path(found) == candidate:
+                continue
+            rid = str(row.get("id", "") or "")
+            relocated = False
+            relocate = getattr(self._app, "relocate_invoice_attachment", None)
+            if rid and callable(relocate):
+                try:
+                    relocated = bool(relocate(rid, found))
+                except Exception as exc:
+                    log.warning(
+                        "relocate_invoice_attachment %s: %s", rid, exc
+                    )
+            row["attachment"] = found
+            if relocated:
+                rel_ok += 1
+            log.info(
+                "EXPORT: original återfunnet för %s — %s%s",
+                row.get("invoice_number", "") or row.get("file", ""),
+                found,
+                " (registret uppdaterat)" if relocated else "",
+            )
+        return rel_ok
+
     def _export_invoices(
         self,
         exportable: list[dict],
@@ -4620,6 +4688,20 @@ class InvoicesView(QWidget):
 
         # ── Beräkna summor (inkl. delavräknade kreditfakturor) ────────
         settlement = plan_credit_settlement(exportable)
+        # Användarkrav (besked 27): när "inkludera original" är valt
+        # ska ALLA original följa med — leta upp filer som flyttats
+        # (årssortering/diskbyte) och självhela registret först.
+        if self._include_originals():
+            try:
+                healed = self._ensure_export_originals(
+                    settlement["export_rows"]
+                )
+                if healed:
+                    self._status(tr(
+                        "invoices.originals_relocated", n=healed,
+                    ))
+            except Exception as exc:
+                log.warning("ensure_export_originals: %s", exc)
         has_partial_credit = bool(settlement["has_partial_credit"])
         total_invoices = settlement["total_invoices"]
         total_credits = (
