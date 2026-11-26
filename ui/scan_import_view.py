@@ -4446,6 +4446,26 @@ class ScanImportView(QWidget):
         reason_lbl = QLabel(tr(reason_key))
         reason_lbl.setWordWrap(True)
         layout.addWidget(reason_lbl)
+        if reason == "multipage":
+            # Säg VAR användaren är i flersidig-inlärningen: efter
+            # N bekräftelser slutar frågan komma automatiskt för
+            # den här leverantörens flersidiga fakturor.
+            try:
+                si = _scan_module()
+                mp_entry = (self._get_match_learning() or {}).get(
+                    str((row.get("match_candidates") or [""])[0]), {}
+                )
+                mp_conf = int(mp_entry.get("multipage_confirmed", 0) or 0)
+                mp_needed = int(si.MULTIPAGE_CONFIRMATIONS_TO_GRADUATE)
+            except Exception:
+                mp_conf, mp_needed = 0, 2
+            mp_lbl = QLabel(tr(
+                "scan.match_multipage_progress",
+                n=mp_conf,
+                needed=mp_needed,
+            ))
+            mp_lbl.setWordWrap(True)
+            layout.addWidget(mp_lbl)
         template_match = row.get("template_match", {}) or {}
         template_unconfirmed = bool(
             isinstance(template_match, dict)
@@ -5577,6 +5597,15 @@ class ScanImportView(QWidget):
                 self._lbl_status.text() + "  ·  " + note
             )
 
+    @staticmethod
+    def _row_ask_key(row: dict) -> str:
+        """Stabil nyckel för "frågad och avbruten"-minnet."""
+        for field in ("_path", "file"):
+            value = str(row.get(field, "") or "").strip()
+            if value:
+                return value.casefold()
+        return ""
+
     def _ask_uncertain_rows(
         self, rows: list[dict], limit: int | None = None,
     ) -> int:
@@ -5599,6 +5628,20 @@ class ScanImportView(QWidget):
         ]
         if limit is None:
             limit = PARKED_ASK_LIMIT
+        # Användarkrav (besked 21): en rad användaren redan fått frågan
+        # om och svarat Avbryt på frågas INTE igen automatiskt — den
+        # ligger kvar synlig i Import och matchas manuellt (klick på
+        # raden / högerklick → matcha). Annars dyker samma dialog upp
+        # vid varje skanningsrunda ("hela tiden").
+        cancelled = self._cancelled_ask_keys
+        skipped_cancelled = [
+            row for row in uncertain
+            if self._row_ask_key(row) in cancelled
+        ]
+        uncertain = [
+            row for row in uncertain
+            if self._row_ask_key(row) not in cancelled
+        ]
         resolved_rows: list[dict] = []
         asked = 0
         for row in uncertain:
@@ -5607,7 +5650,14 @@ class ScanImportView(QWidget):
             asked += 1
             if self._ask_user_for_match(row):
                 resolved_rows.append(row)
+            else:
+                # Avbryt: kom ihåg filen — ingen automatisk omfrågan.
+                cancelled.add(self._row_ask_key(row))
         waiting = len(uncertain) - asked
+        if skipped_cancelled:
+            self._lbl_status.setText(tr(
+                "scan.uncertain_cancelled", n=len(skipped_cancelled),
+            ))
         if resolved_rows:
             self._refresh_table()
             self._auto_register_matched_rows(

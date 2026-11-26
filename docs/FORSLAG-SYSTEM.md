@@ -37,8 +37,9 @@ tidigare levererade förslag. Därefter upprepas det: besked 10, 20,
 |---|---|---|---|
 | 1 | 1–25 | 2 | `docs/25-NYA-FORSLAG.md` |
 | 2 | 26–35 | 10 | `docs/FORSLAG-BATCH-2.md` |
+| 3 | 36–45 | 20 | `docs/FORSLAG-BATCH-3.md` |
 
 ## Status just nu
 
-`user_messages_so_far = 10` → nästa lista vid **besked 20**
-(10 besked kvar), därefter besked 30, 40 …
+`user_messages_so_far = 21` → nästa lista vid **besked 30**
+(9 besked kvar), därefter besked 40, 50 …

@@ -98,19 +98,25 @@ def test_proposal_docs_carry_no_stale_version_rows():
 
 
 def test_forslag_batch_2_delivered_with_fresh_ids():
-    """10-meddelanderegeln: batch 2 (ID 26–35) levererad, aldrig återbruk."""
+    """10-meddelanderegeln: batch 2 (26–35) + batch 3 (36–45) levererade,
+    aldrig återbruk; nästa milstolpe 30."""
     import json
 
     batch = _read("docs/FORSLAG-BATCH-2.md")
     for pid in range(26, 36):
         assert f"## {pid}." in batch, pid
     status = json.loads(_read("docs/forslag_status.json"))
-    assert status["next_milestone"] == 20
-    assert status["next_proposal_id"] == 36
-    assert status["next_batch_id"] == 3
-    assert len(status["used_proposal_ids"]) == 35
-    assert len(set(status["used_proposal_ids"])) == 35
-    assert status["batches_delivered"][-1]["batch"] == 2
+
+    # Batch 3 (besked 20): ID 36–45, nästa milstolpe 30
+    b3 = _read("docs/FORSLAG-BATCH-3.md")
+    for pid in range(36, 46):
+        assert f"## {pid}." in b3, pid
+    assert status["next_milestone"] == 30
+    assert status["next_proposal_id"] == 46
+    assert status["next_batch_id"] == 4
+    assert len(status["used_proposal_ids"]) == 45
+    assert len(set(status["used_proposal_ids"])) == 45
+    assert status["batches_delivered"][-1]["batch"] == 3
 
 
 def test_new_rule_workflow_codified_in_rules_files():

@@ -2,10 +2,10 @@
   "version": 1,
   "rule": "Varje 10:e användarbesked i sessionen utlöser en förslagslista med 10 nya förslag som ALDRIG återbrukar tidigare levererade förslag.",
   "milestone_every": 10,
-  "user_messages_so_far": 19,
-  "next_milestone": 20,
-  "next_batch_id": 3,
-  "next_proposal_id": 36,
+  "user_messages_so_far": 21,
+  "next_milestone": 30,
+  "next_batch_id": 4,
+  "next_proposal_id": 46,
   "batches_delivered": [
     {
       "batch": 1,
@@ -55,6 +55,23 @@
       ],
       "delivered_at_user_message": 10,
       "file": "docs/FORSLAG-BATCH-2.md"
+    },
+    {
+      "batch": 3,
+      "proposal_ids": [
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45
+      ],
+      "delivered_at_user_message": 20,
+      "file": "docs/FORSLAG-BATCH-3.md"
     }
   ],
   "used_proposal_ids": [
@@ -92,6 +109,16 @@
     32,
     33,
     34,
-    35
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45
   ]
 }

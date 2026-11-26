@@ -85,6 +85,7 @@ RELEASE_FILES: tuple[str, ...] = (
     "ui/typography.py",
     "ui/update_dialog.py",
     "ui/watch_folders.py",
+    "ui/duplicate_archive.py",
 )
 
 #: Filer som aldrig får saknas — utan dem finns ingen autouppdatering.

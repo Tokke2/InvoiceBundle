@@ -65,6 +65,19 @@ except Exception:  # pragma: no cover
 log = logging.getLogger("WatchFolders")
 
 import os
+
+# Arkivering av dubblettkopior (användarkrav, besked 20): egna
+# undermappen dubbletter/ — Qt-fri hjälpmodul, se ui/duplicate_archive.py.
+try:
+    from ui.duplicate_archive import (
+        DUPLICATE_FOLDER_NAME,
+        archive_duplicate_copy,
+    )
+except ImportError:  # fristående körning
+    from duplicate_archive import (  # type: ignore[no-redef]
+        DUPLICATE_FOLDER_NAME,
+        archive_duplicate_copy,
+    )
 import re
 import time
 
@@ -105,8 +118,12 @@ def supported_invoice_files(folder) -> list[Path]:
         root = Path(str(folder))
         found = []
         for dirpath, dirs, names in os.walk(root):
-            # Arkiv/ = betalda original — plocka bort hela trädet
-            dirs[:] = [d for d in dirs if d.lower() != "arkiv"]
+            # Arkiv/ = betalda original — plocka bort hela trädet.
+            # dubbletter/ = arkiverade dubbletter — aldrig nya fakturor.
+            dirs[:] = [
+                d for d in dirs
+                if d.lower() not in ("arkiv", DUPLICATE_FOLDER_NAME)
+            ]
             for name in names:
                 cand = Path(dirpath) / name
                 if cand.is_file() and supported_file(cand):
@@ -1197,6 +1214,16 @@ class WatchManager(QObject):
             "SCAN_WATCH: original årsarkiverat %s → %s", source, target
         )
         return new_path
+
+    def _archive_duplicate_copy(self, path: Path) -> str:
+        """Dubblettkopia → undermappen dubbletter/ (aldrig import)."""
+        dest = archive_duplicate_copy(path)
+        if dest:
+            log.info(
+                "SCAN_WATCH: %s är en dubblett — arkiverad i %s",
+                path.name, dest,
+            )
+        return dest
 
     def _archive_existing_registered_original(
         self, path: Path, parsed: dict,
@@ -2614,6 +2641,9 @@ class WatchManager(QObject):
             else:
                 self._reported_file_errors.pop(str(path), None)
                 self.file_recovered.emit(str(path))
+                # Dubblett (identiskt innehåll, redan bearbetat):
+                # importeras aldrig igen — arkiveras i dubbletter/.
+                self._archive_duplicate_copy(path)
                 self._scan_stats["already"] += 1
                 return
         parked_entry = next(
@@ -2901,9 +2931,18 @@ class WatchManager(QObject):
                 parsed.get("invoice_number", ""),
             )
         ):
-            final_path = self._archive_existing_registered_original(
-                path, parsed
-            )
+            if exact_attachment:
+                # Filen ÄR den registrerade fakturans original —
+                # backsorteras till Arkiv/ (befintligt beteende).
+                final_path = self._archive_existing_registered_original(
+                    path, parsed
+                )
+            else:
+                # Dubblettkopia av en redan registrerad faktura:
+                # importeras inte — arkiveras i egen undermapp.
+                final_path = (
+                    self._archive_duplicate_copy(path) or str(path)
+                )
             self._config["processed"][digest] = {
                 **base_info,
                 "path": final_path,
