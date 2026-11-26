@@ -1434,6 +1434,18 @@ class InvoicesView(QWidget):
             )
         # Summering för bara de markerade (exportpanelen) — visas
         # kompakt när minst en rad är markerad + spegling till sticky.
+        if hasattr(self, "_lbl_marked_cap"):
+            # Räknare n/10 (besked 26): användaren ser direkt hur
+            # många som är ikryssade och hur nära exporttaket hen är.
+            self._lbl_marked_cap.setText(
+                tr(
+                    "invoices.marked_cap_count",
+                    n=len(selected),
+                    cap=EXPORT_MARK_LIMIT,
+                )
+                if selected
+                else tr("invoices.marked_label")
+            )
         if hasattr(self, "_lbl_marked_inv"):
             _amounts = [
                 _to_float(r.get("total_amount")) for r in selected

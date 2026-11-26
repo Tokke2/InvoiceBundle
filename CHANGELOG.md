@@ -3,6 +3,8 @@
 ## Ej släppt / Unreleased
 
 ### Svenska
+- **Exportmarkeringen ännu enklare: synlig räknare 'Markerade: n av 10' (besked 26)**:
+  - Kryssmarkeringen i Fakturor (kryssruta per rad, ☑-kolumn, 'Markera visade'/'Avmarkera', live-summering med faktura-/kredit-/nettosummor, tak 10) fick nu en **synlig räknare** i summeringsrubriken: 'Markerade: {n} av {cap} — avmarkera för att byta urval' (fallback 'Markerade:' när inget är valt). Guard-tester uppdaterade (`tests/test_export_mark_limit.py`, 150 passed i relevanta sviter).
 - **Dubbletter: EN mappnivå med årsundermappar — kapslingen dubbletter/dubbletter/… borttagen (besked 25)**:
   - **Root-orsaken:** den strömmande skanningsuppräkningen rensade `arkiv` men inte `dubbletter/` → arkiverade filer lästes igen varje skanningsrunda och flyttades **ett steg djupare** varje gång (`dubbletter/dubbletter/dubbletter/…`, exakt som hittats på nätverksdisken). Nu rensar **alla tre** uppräkningarna (mappskanning, strömning, watcher-katalogvandring) `dubbletter/` som `Arkiv/`.
   - **Ny struktur enligt önskan:** dubbletter arkiveras i **`dubbletter/<årsarkiv>/`** (fakturadatumets år, fallback mtime; "okänt-år" som sista utväg) — `archive_duplicate_copy(path, invoice_date)`.
@@ -157,6 +159,8 @@
 - **Bättre leverantörsmatchning via fakturalogotyp** — sparade logotyper kan hittas även när de flyttats på PDF-sidan. Matchningsdialogen visar verkliga, beskurna logotyper från originalfakturan (inga monogram) och rankar den starkaste träffen först. Manuell matchning kan också öppna originalet för att markera logotypen; osäkra träffar kräver fortfarande användarens val.
 
 ### English
+- **Export marking even easier: a visible 'Marked: n of 10' counter (message 26)**:
+  - The checkbox marking in Invoices (per-row checkbox, ☑ column, 'Select shown'/'Clear', live summary with invoice/credit/net totals, cap 10) now got a **visible counter** in the summary header: 'Marked: {n} of {cap} — unmark to change the selection' (fallback 'Selected:' when nothing is chosen). Guard tests updated (`tests/test_export_mark_limit.py`, 150 passed in relevant suites).
 - **Duplicates: ONE folder level with year subfolders — the dubbletter/dubbletter/… nesting removed (message 25)**:
   - **Root cause:** the streaming scan enumeration pruned `arkiv` but not `dubbletter/` → archived files were re-read every scan round and moved **one level deeper** each time (`dubbletter/dubbletter/dubbletter/…`, exactly as found on the network drive). Now **all three** enumerations (folder scan, streaming, watcher directory walk) prune `dubbletter/` like `Arkiv/`.
   - **New structure as requested:** duplicates are archived in **`dubbletter/<year archive>/`** (the invoice date's year, fallback mtime; "okänt-år" as a last resort) — `archive_duplicate_copy(path, invoice_date)`.

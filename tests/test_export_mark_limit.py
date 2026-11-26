@@ -76,3 +76,35 @@ def test_i18n_keys_exist_sv_en(key):
 def test_changed_files_still_compile():
     for path in (VIEW, HELPERS, I18N):
         compile(_src(path), str(path), "exec")
+
+
+def test_marking_ergonomics_counter_and_column():
+    """Besked 26: kryssa enkelt i Fakturor — kryssruta per rad
+    (☑-kolumn med hjälp-text), 'Markera visade'/'Avmarkera',
+    live-summering och räknare 'Markerade: n av 10'."""
+    view = _src(VIEW)
+    # Kryssruta per rad + tillgänglighetsnamn (modellen)
+    model = _src(PROJECT_DIR / "ui" / "invoice_table_model.py")
+    assert "CheckStateRole" in model
+    assert 'tr("invoices.export_check_accessible")' in model
+    assert "set_marked_export_ids" in model
+    # Markera/avmarkera-knappar + live-summering
+    assert "self._btn_mark_shown.clicked.connect(self._mark_all_shown)" in view
+    assert "self._btn_clear_marked.clicked.connect(" in view
+    assert "self._lbl_marked_inv" in view
+    # Räknaren n/10 i summeringsrubriken (besked 26)
+    assert '"invoices.marked_cap_count"' in view
+    assert "n=len(selected)," in view
+    assert "cap=EXPORT_MARK_LIMIT," in view
+    # Markeringen styr exporten (ej alla)
+    assert "in self._marked_export_ids" in view
+    assert "def _get_selected_exportable" in view
+
+
+def test_marked_cap_count_i18n_sv_en():
+    import importlib
+
+    i18n = importlib.import_module("ui.i18n")
+    entry = i18n._STRINGS["invoices.marked_cap_count"]
+    assert "{n} av {cap}" in entry["sv"]
+    assert "{n} of {cap}" in entry["en"]

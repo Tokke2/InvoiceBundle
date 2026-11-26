@@ -288,6 +288,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "invoices.export_mark_limit": {"sv": "Högst {n} rader kan markeras för export i taget — avmarkera först om du vill byta urval", "en": "At most {n} rows can be marked for export at a time — unmark first to change the selection"},
     "invoices.export_originals_tip": {"sv": "Välj om originalfakturor ska läggas efter betal-PDF:en. För flersidiga PDF-original kan bara sida 1 tas med. Valet sparas.", "en": "Choose whether source invoices are appended after the payment PDF. For multi-page PDF originals, you can append only page 1. This choice is saved."},
     "invoices.marked_label": {"sv": "Markerade:", "en": "Selected:"},
+    "invoices.marked_cap_count": {"sv": "Markerade: {n} av {cap} — avmarkera för att byta urval", "en": "Marked: {n} of {cap} — unmark to change the selection"},
     "invoices.export_check_tip": {"sv": "Kryssa i för att ta med fakturan i exporten", "en": "Tick to include this invoice in the export"},
     "invoices.export_selected_title": {"sv": "Exportera markerade fakturor", "en": "Export selected invoices"},
     "invoices.export_sel_none": {"sv": "Markera rader i tabellen (Ctrl/Shift-klick) för att välja vilka som exporteras — eller exportera alla.", "en": "Select rows in the table (Ctrl/Shift-click) to choose what gets exported — or export all."},
