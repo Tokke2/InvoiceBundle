@@ -71,8 +71,9 @@ def test_agents_md_codifies_ui_and_quality_goals():
 
 def test_arbetsregler_contains_never_merge_rule():
     t = _read("ARBETSREGELER.md")
-    assert "## 7. Aldrig merga — hård regel" in t
+    assert "## 7. Aldrig merga eller PR — hård regel" in t
     assert "Inga merge-commits" in t
+    assert "inga\n  PR:er skapas" in t or "inga PR:er skapas" in t
     assert "endast** som vanliga commits" in t
 
 
@@ -180,3 +181,21 @@ def test_profile_subtab_only_for_profile_using_apps():
     assert "utan profiler" in t
     assert "Projektskaparen:" in t
     assert "ttk-versionen" in t
+
+
+def test_standard_branch_even_after_chat_switch():
+    """Besked 28: EN branch gäller även efter byte av chatt —
+    arbetsbranchen är repots standardbranch."""
+    for rel in ("AGENTS.md", "ARBETSREGELER.md"):
+        t = _read(rel)
+        assert "byte av chatt" in t, rel
+        assert "standardbranch" in t, rel
+
+
+def test_never_merge_or_pull_request_worded():
+    """Besked 28: 'aldrig merga eller PR' — explicit PR-förbud."""
+    assert "Aldrig merga eller PR" in _read("AGENTS.md")
+    assert "## 7. Aldrig merga eller PR" in _read("ARBETSREGELER.md")
+    assert "inga PR:er skapas" in _read("AGENTS.md").replace(
+        "och inga PR:er skapas", "inga PR:er skapas"
+    )

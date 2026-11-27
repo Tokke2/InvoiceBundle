@@ -15,10 +15,12 @@ detta repo. Vid ny app: byt bara profilen.
   Allt commitas och pushas **endast** dit.
 * Jobba **aldrig** emot `main` — `main` är en frusen referens.
   Speciellt vid appuppdateringar.
-* **Aldrig merga** — inga merge-commits, ingen sammanslagning av
-  brancher eller PR:er, varken mot `main`, från `main` eller mellan
-  brancher. Ändringar landar endast som vanliga commits på
-  arbetsbranchen.
+* **Aldrig merga eller PR** — inga merge-commits, ingen
+  sammanslagning av brancher och inga PR:er skapas, varken mot
+  `main`, från `main` eller mellan brancher. Ändringar landar endast
+  som vanliga commits på arbetsbranchen.
+* **EN branch även efter byte av chatt** (hård regel): arbetsbranchen
+  är repots **standardbranch** — varje ny chatt fortsätter på den.
 * Updaterarens källor (`plugins/updater.py`,
   `.github/workflows/release-integrity.yml`) pekar alltid på GitHub
   Releases (taggar) — aldrig på ett utcheck av `main`.

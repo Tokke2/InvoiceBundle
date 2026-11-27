@@ -10,6 +10,9 @@ Dessa regler gäller alltid för alla som utvecklar Fakturabunten
   commitas och pushas **endast** till den branchen.
 * Inga nya arbetsbrancher skapas. Gamla arbetsbrancher raderas när
   deras innehåll finns i den aktiva branchen.
+* **Gäller även efter byte av chatt** (hård regel, besked 28):
+  arbetsbranchen är repots **standardbranch** — varje ny chatt
+  fortsätter på den, aldrig mot någon annan branch.
 
 ## 2. Jobba aldrig emot `main` — hård regel
 
@@ -67,10 +70,11 @@ Dessa regler gäller alltid för alla som utvecklar Fakturabunten
 * Bygg-paketet verifieras (CRC, build-sha, manifest) **före**
   publicering — en underkänd build får aldrig markeras som latest.
 
-## 7. Aldrig merga — hård regel
+## 7. Aldrig merga eller PR — hård regel
 
-* Inga merge-commits, ingen sammanslagning av brancher eller PR:er —
-  varken mot `main`, från `main` eller mellan arbetsbrancher.
+* Inga merge-commits, ingen sammanslagning av brancher och **inga
+  PR:er skapas eller hanteras** — varken mot `main`, från `main`
+  eller mellan arbetsbrancher.
 * Ändringar landar **endast** som vanliga commits på den aktiva
   arbetsbranchen.
 * Behövs en basomläggning görs den inte som merge; vid osäkerhet

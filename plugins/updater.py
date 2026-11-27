@@ -209,6 +209,32 @@ def read_local_build(root: Path) -> dict:
         return {}
 
 
+def daily_midnight_slot(now: datetime.datetime) -> datetime.datetime:
+    """Senaste lokala midnatt (00:00) på eller före ``now``."""
+    if now.tzinfo is not None:
+        now = now.astimezone().replace(tzinfo=None)
+    slot = datetime.datetime.combine(now.date(), datetime.time(0, 0))
+    return slot
+
+
+def daily_auto_update_due(
+    last_slot: str, now: datetime.datetime | None = None,
+) -> bool:
+    """True när dagens 00:00-slot ännu inte körts (användarkrav,
+    besked 28: autoupdatering 00:00 varje dag om det finns någon
+    uppdatering). ``last_slot`` är ISO-tidsstämpeln för senaste
+    förbrukade midnattsslot; ogiltig/saknad → förfaller direkt.
+    """
+    now = now or datetime.datetime.now()
+    try:
+        last = datetime.datetime.fromisoformat(str(last_slot))
+        if last.tzinfo is not None:
+            last = last.astimezone().replace(tzinfo=None)
+    except Exception:
+        return True
+    return daily_midnight_slot(now) > last
+
+
 def auto_check_due(last_check: str,
                    now: datetime.datetime | None = None) -> bool:
     """True om bakgrundskollen får köras (minst 12 h sedan sist).

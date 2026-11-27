@@ -159,7 +159,13 @@ def test_main_window_wires_update_everywhere():
     # + timtick medan appen körs; spärren (minst 12 h mellan
     # GENOMFÖRDA kollar) bor i updater.auto_check_due och stämpeln
     # sätts först när nätet svarat — offline förbrukar ingen gång.
-    assert "QTimer.singleShot(5_000, self._maybe_auto_update_check)" in s
+    # Besked 28: timtick kör både tyst koll och daglig 00:00-auto
+    assert "QTimer.singleShot(5_000, self._update_poll_tick)" in s
+    assert "def _update_poll_tick(self) -> None:" in s
+    assert "def _maybe_daily_auto_update(self) -> None:" in s
+    assert "daily_auto_update_due" in s
+    assert '"update_last_auto_slot"' in s
+    assert "schedule_restart(PROJECT_DIR, delay_seconds=3.0)" in s
     assert "_update_poll_timer" in s
     assert "setInterval(3600 * 1000)" in s
     assert "auto_check_due" in s

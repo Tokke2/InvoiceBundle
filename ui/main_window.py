@@ -1643,7 +1643,7 @@ class MainWindow(QMainWindow):
         # ── Bakgrundskoll av ny version (tyst om inget nytt) ───────
         self._pending_update: dict | None = None
         self._update_worker = None
-        QTimer.singleShot(5_000, self._maybe_auto_update_check)
+        QTimer.singleShot(5_000, self._update_poll_tick)
         # …och därefter en gång i timmen medan appen körs — men
         # själva kollen körs högst två gånger per dygn (minst
         # 12 h mellan genomförda kollar, se _maybe_auto_update_check).
@@ -1653,7 +1653,7 @@ class MainWindow(QMainWindow):
         self._update_poll_timer.setTimerType(Qt.TimerType.VeryCoarseTimer)
         self._update_poll_timer.setInterval(3600 * 1000)
         self._update_poll_timer.timeout.connect(
-            self._maybe_auto_update_check)
+            self._update_poll_tick)
         self._update_poll_timer.start()
 
         # ── Autoexport-triggers: vid start + när fakturor ändras ───
@@ -2952,6 +2952,127 @@ class MainWindow(QMainWindow):
             messages.append(msg)
         if messages:
             self.set_status("   ".join(messages), 12000)
+
+    def _update_poll_tick(self) -> None:
+        """Timtick: tyst koll (erbjud) + daglig auto-install (00:00)."""
+        self._maybe_auto_update_check()
+        self._maybe_daily_auto_update()
+
+    def _maybe_daily_auto_update(self) -> None:
+        """Autoupdatering 00:00 varje dag (användarkrav, besked 28).
+
+        Vid första poll på/efter midnatt kollas GitHub — finns en
+        uppdatering installeras den AUTOMATISKT (samma sha-verifierade
+        flöde som dialogen: release-asset eller taggarkiv, aldrig
+        main) och appen startas om. Ingen uppdatering → sloten
+        förbrukas tyst. Avstängbar via update_auto_check.
+        """
+        try:
+            if getattr(self, "_closing", False):
+                return
+            from ui.update_dialog import UpdateWorker
+            sys.path.insert(0, str(PROJECT_DIR / "plugins"))
+            import updater as _updater
+
+            if not bool(self._settings.get("update_auto_check", True)):
+                return
+            worker = getattr(self, "_daily_update_worker", None)
+            if worker is not None and worker.isRunning():
+                return
+            slot = _updater.daily_midnight_slot(
+                datetime.datetime.now()
+            )
+            if not _updater.daily_auto_update_due(
+                str(self._settings.get(
+                    "update_last_auto_slot", "") or "")
+            ):
+                return
+            self._daily_update_worker = UpdateWorker(
+                "check", PROJECT_DIR, parent=self
+            )
+            self._daily_update_worker.check_done.connect(
+                lambda result, slot=slot: self._on_daily_check_result(
+                    result, slot
+                )
+            )
+            self._daily_update_worker.failed.connect(
+                lambda _e: log.debug(
+                    "DAILYAUTO koll misslyckades (prövas igen vid "
+                    "nästa timtick): %s", _e
+                )
+            )
+            self._daily_update_worker.start()
+        except Exception as exc:
+            log.debug("_maybe_daily_auto_update: %s", exc)
+
+    def _on_daily_check_result(self, result: dict, slot) -> None:
+        try:
+            import datetime as _dt
+
+            self._settings.set(
+                "update_last_auto_slot",
+                slot.isoformat(timespec="seconds"),
+            )
+            # Förbrukar även den vanliga tysta kollens dygnskvot —
+            # dagens 00:00-koll RÄKNAS som koll.
+            self._settings.set(
+                "update_last_check",
+                _dt.datetime.now().isoformat(timespec="seconds"),
+            )
+        except Exception:
+            pass
+        if result.get("status") != "update":
+            return
+        release = dict(result)
+        try:
+            from ui.update_dialog import UpdateWorker, schedule_restart
+
+            worker = UpdateWorker(
+                "install", PROJECT_DIR, release=release, parent=self
+            )
+            self._daily_update_worker = worker
+            worker.apply_done.connect(
+                lambda report: self._on_daily_apply_done(report)
+            )
+            worker.failed.connect(
+                lambda err: log.warning(
+                    "DAILYAUTO installation misslyckades: %s", err
+                )
+            )
+            worker.start()
+            log.info(
+                "DAILYAUTO: uppdatering %s hittad — installerar "
+                "automatiskt (00:00-regeln)",
+                release.get("tag", ""),
+            )
+            self._status(
+                tr("update.daily_auto_started", tag=release.get("tag", ""))
+            )
+        except Exception as exc:
+            log.warning("DAILYAUTO start misslyckades: %s", exc)
+            self._pending_update = result
+
+    def _on_daily_apply_done(self, report: dict) -> None:
+        try:
+            from ui.update_dialog import schedule_restart
+
+            if report.get("failed"):
+                log.warning(
+                    "DAILYAUTO apply: %s filer misslyckades — "
+                    "manuell uppdatering erbjuds vid nästa koll",
+                    report.get("failed"),
+                )
+                self._status(tr("update.daily_auto_failed"))
+                return
+            log.info(
+                "DAILYAUTO: klar (backup kvar=%s) — startar om",
+                report.get("backup_kept"),
+            )
+            self._status(tr("update.daily_auto_done"))
+            schedule_restart(PROJECT_DIR, delay_seconds=3.0)
+            self.close()
+        except Exception as exc:
+            log.warning("DAILYAUTO omstart: %s", exc)
 
     def _maybe_auto_update_check(self) -> None:
         """Tyst bakgrundskoll — högst två gånger per dygn.
